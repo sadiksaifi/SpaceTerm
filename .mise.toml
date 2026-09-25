@@ -151,6 +151,26 @@ run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check -
 description = "Verify backdrop-filter pixels on a native Metal GPU"
 run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked backdrop::tests"
 
+[tasks."test:gpui:display-link:macos"]
+description = "Test native display-link subscription and ownership transitions"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked platform::mac::display_link::tests"
+
+[tasks."test:gpui:path-textures:macos"]
+description = "Verify lazy path target ownership and native Metal path pixels"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked path_texture_tests -- --test-threads=1"
+
+[tasks."bench:gpui:path-targets:macos"]
+description = "Measure native Metal allocation accounting and resize cost without path drawing"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --release --no-default-features --features test-support --locked path_target_allocation_resources -- --ignored --nocapture --test-threads=1"
+
+[tasks."test:gpui:display-link-native:macos"]
+description = "Exercise real CoreVideo and dispatch source start, stop, and close cycles"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo run --manifest-path third_party/gpui/Cargo.toml --example macos_display_link_lifecycle --no-default-features --features performance-probes --locked"
+
+[tasks."test:gpui:frame-demand:macos"]
+description = "Exercise native idle sleep and complete frame demand wake behavior"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo run --manifest-path third_party/gpui/Cargo.toml --example macos_frame_demand --no-default-features --features performance-probes --locked"
+
 [tasks."check:gpui:windows"]
 description = "Cross-check the vendored GPUI DirectX renderer for Windows"
 usage = '''
@@ -166,6 +186,8 @@ run = "python3 scripts/validate-gpui.py"
 description = "Validate Metal pixels and the alternate Blade renderer"
 run = [
   { task = "test:gpui:backdrop:macos" },
+  { task = "test:gpui:display-link:macos" },
+  { task = "test:gpui:path-textures:macos" },
   { task = "check:gpui:blade:macos" },
 ]
 
@@ -357,7 +379,7 @@ run = '''
 set -eu
 bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
 shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/measure-macos-application-resources.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/measure-macos-application-resources.py scripts/macos-benchmark-focus-owner.py scripts/terminal-resource-workload.py scripts/test-macos-application-resources.py scripts/test-terminal-resource-workload.py
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
@@ -370,6 +392,7 @@ run = [
   { task = "validate" },
   { task = "fmt:check:macos" },
   { task = "test:macos" },
+  { task = "test:macos:performance" },
   { task = "lint:macos:scripts" },
 ]
 
@@ -389,9 +412,27 @@ arg "<baseline>" help="Baseline source binary"
 arg "<candidate>" help="Candidate source binary"
 arg "[mode]" help="idle, partial, scroll, or history" default="idle"
 arg "[repetitions]" help="Fresh process pairs" default="2"
-arg "[state]" help="focused or hidden" default="focused"
+arg "[state]" help="focused, unfocused visible, or hidden" default="focused"
+flag "--profile-memory" help="Capture native footprint categories after the CPU sampling interval"
+flag "--frame-counters" help="Collect counters from a build with the performance-probes feature"
+flag "--float-owned-window" help="Use AeroSpace to float only each owned benchmark window"
 '''
-run = 'python3 scripts/measure-macos-application-resources.py "${usage_baseline?}" "${usage_candidate?}" --mode "${usage_mode}" --repetitions "${usage_repetitions}" --state "${usage_state}"'
+run = '''
+set -eu
+set -- python3 scripts/measure-macos-application-resources.py "${usage_baseline?}" "${usage_candidate?}" --mode "${usage_mode}" --repetitions "${usage_repetitions}" --state "${usage_state}"
+if [ "${usage_profile_memory:-false}" = "true" ]; then set -- "$@" --profile-memory; fi
+if [ "${usage_frame_counters:-false}" = "true" ]; then set -- "$@" --frame-counters; fi
+if [ "${usage_float_owned_window:-false}" = "true" ]; then set -- "$@" --float-owned-window; fi
+"$@"
+'''
+
+[tasks."test:macos:performance"]
+description = "Test native benchmark acceptance and content-free memory parsing"
+run = ["python3 scripts/test-macos-application-resources.py", "python3 scripts/test-terminal-resource-workload.py"]
+
+[tasks."build:performance"]
+description = "Build optimized source with explicitly enabled frame counters"
+run = "./scripts/cargo-artifacts.sh run -- cargo build --package spaceterm --bin spaceterm --release --features performance-probes --locked"
 
 [tasks."bench:macos:exit-observation"]
 description = "Compare native process exit observation with polling using owned local children"

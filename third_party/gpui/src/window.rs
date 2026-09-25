@@ -100,16 +100,18 @@ struct WindowInvalidatorInner {
 #[derive(Clone)]
 pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
+    request_frame: Rc<dyn Fn()>,
 }
 
 impl WindowInvalidator {
-    pub fn new() -> Self {
+    pub fn new(request_frame: Rc<dyn Fn()>) -> Self {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
             })),
+            request_frame,
         }
     }
 
@@ -118,6 +120,8 @@ impl WindowInvalidator {
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
+            drop(inner);
+            self.request_frame();
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
@@ -130,7 +134,14 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        self.inner.borrow_mut().dirty = dirty
+        self.inner.borrow_mut().dirty = dirty;
+        if dirty {
+            self.request_frame();
+        }
+    }
+
+    pub fn request_frame(&self) {
+        (self.request_frame)();
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -1000,7 +1011,7 @@ impl Window {
         let scale_factor = platform_window.scale_factor();
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
-        let invalidator = WindowInvalidator::new();
+        let invalidator = WindowInvalidator::new(platform_window.frame_requester());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
@@ -1037,10 +1048,25 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
             move |request_frame_options| {
+                #[cfg(feature = "performance-probes")]
+                crate::frame_performance::record(
+                    crate::frame_performance::Counter::LogicalFrame,
+                    1,
+                );
                 let next_frame_callbacks = next_frame_callbacks.take();
                 if !next_frame_callbacks.is_empty() {
+                    #[cfg(feature = "performance-probes")]
+                    crate::frame_performance::record(
+                        crate::frame_performance::Counter::FrameWithCallbacks,
+                        1,
+                    );
                     handle
                         .update(&mut cx, |_, window, cx| {
+                            #[cfg(feature = "performance-probes")]
+                            crate::frame_performance::record(
+                                crate::frame_performance::Counter::NextFrameCallback,
+                                next_frame_callbacks.len() as u64,
+                            );
                             for callback in next_frame_callbacks {
                                 callback(window, cx);
                             }
@@ -1050,6 +1076,33 @@ impl Window {
 
                 // Keep presenting the current scene for 1 extra second since the
                 // last input to prevent the display from underclocking the refresh rate.
+                #[cfg(feature = "performance-probes")]
+                {
+                    use crate::frame_performance::{Counter, record};
+                    record(
+                        Counter::FrameWithDirtyScene,
+                        u64::from(invalidator.is_dirty()),
+                    );
+                    record(
+                        Counter::FrameWithPendingPresentation,
+                        u64::from(needs_present.get()),
+                    );
+                    record(
+                        Counter::FrameWithInputGrace,
+                        u64::from(
+                            active.get()
+                                && last_input_timestamp.get().elapsed() < Duration::from_secs(1),
+                        ),
+                    );
+                    record(
+                        Counter::FrameRequiringPresentation,
+                        u64::from(request_frame_options.require_presentation),
+                    );
+                    record(
+                        Counter::FrameForcingRender,
+                        u64::from(request_frame_options.force_render),
+                    );
+                }
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || (active.get()
@@ -1070,6 +1123,12 @@ impl Window {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .log_err();
+                } else {
+                    #[cfg(feature = "performance-probes")]
+                    crate::frame_performance::record(
+                        crate::frame_performance::Counter::CleanFrame,
+                        1,
+                    );
                 }
 
                 handle
@@ -1755,6 +1814,7 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        self.invalidator.request_frame();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
@@ -2024,13 +2084,20 @@ impl Window {
     }
 
     fn complete_frame(&self) {
-        self.platform_window.completed_frame();
+        let needs_frame = self.invalidator.is_dirty()
+            || self.needs_present.get()
+            || !self.next_frame_callbacks.borrow().is_empty()
+            || (self.active.get()
+                && self.last_input_timestamp.get().elapsed() < Duration::from_secs(1));
+        self.platform_window.completed_frame(needs_frame);
     }
 
     /// Produces a new frame and assigns it to `rendered_frame`. To actually show
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        #[cfg(feature = "performance-probes")]
+        crate::frame_performance::record(crate::frame_performance::Counter::SceneDraw, 1);
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2095,6 +2162,7 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        self.invalidator.request_frame();
 
         ArenaClearNeeded
     }
@@ -2124,6 +2192,8 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
+        #[cfg(feature = "performance-probes")]
+        crate::frame_performance::record(crate::frame_performance::Counter::ScenePresent, 1);
         self.platform_window.draw(&self.rendered_frame.scene);
         self.needs_present.set(false);
         profiling::finish_frame!();
@@ -3964,6 +4034,7 @@ impl Window {
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         self.last_input_timestamp.set(Instant::now());
+        self.invalidator.request_frame();
         // Handlers may set this to false by calling `stop_propagation`.
         cx.propagate_event = true;
         // Handlers may set this to true by calling `prevent_default`.

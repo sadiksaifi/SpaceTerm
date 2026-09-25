@@ -101,7 +101,7 @@ mod macos {
             .allowlist_function("dispatch_source_create")
             .allowlist_function("dispatch_source_set_event_handler_f")
             .allowlist_function("dispatch_resume")
-            .allowlist_function("dispatch_suspend")
+            .allowlist_function("dispatch_release")
             .allowlist_function("dispatch_source_cancel")
             .allowlist_function("dispatch_set_context")
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

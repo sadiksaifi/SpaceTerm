@@ -110,6 +110,7 @@ fixture at a time:
 mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm idle 2
 mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm scroll 2
 mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm scroll 2 hidden
+mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm scroll 2 unfocused
 mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm history 2
 ```
 
@@ -121,16 +122,35 @@ launch's shell, and writes its process identifier and completed output counts
 to private files. Two ten-second captures begin after five seconds of warm-up.
 The task samples the application and workload process separately, records
 on-screen window bounds and frontmost status before and after capture, and
-alternates binary order across repetitions. The optional `hidden` state hides
-only the owned application, then verifies that it has no on-screen window.
-If macOS refuses the hide request, the trial fails without a hidden-state
-measurement. Window observations use a fresh AppKit helper process because
+alternates binary order across repetitions. The `hidden` state hides only the
+owned application and verifies that it has no on-screen window. If a native hide
+request fails and event posting is already available, the harness sends the Hide
+shortcut only to that PID. State verification remains mandatory. `unfocused`
+activates a small owned helper window and verifies that SpaceTerm stays visible
+and that the helper's bounds do not overlap it.
+Window observations use a fresh AppKit helper process because
 [NSRunningApplication properties](https://developer.apple.com/documentation/appkit/nsrunningapplication?language=objc)
 can remain cached until the next main-runloop turn.
 The `history` fixture emits exactly 10,000 fixed ASCII lines, reports readiness
 after output completes, and holds the terminal idle during warm-up and capture.
-The task terminates only processes it started. Compare output counts and elapsed
-times before interpreting resource
-differences. The reported shell-start interval is neither first-frame time nor
-shell-ready time for a normal login shell. Window bounds do not prove identical
-terminal grid dimensions. GPU residency and power remain unmeasured.
+The task terminates only processes it started. It checks matching output totals,
+terminal grids, and window geometry across trials. A fixed cursor-position query
+after completed output must receive a valid terminal reply, including while
+hidden. The query's four bytes are accounted separately from workload output.
+The reported shell-start interval is neither first-frame time nor shell-ready
+time for a normal login shell.
+
+On AeroSpace hosts, `--float-owned-window` excludes only the benchmark PID's sole
+window from changing tiled geometry. No window-manager configuration is changed.
+Geometry checks still apply. `--profile-memory` captures sanitized numeric native
+footprint categories after output and CPU sampling finish, while the synthetic
+shell remains alive. Logical Metal allocation sizes and physical footprint are
+different measures; neither establishes GPU power or execution time.
+
+`mise run build:performance` enables optional numeric frame and startup probes.
+Compare two such builds with `--frame-counters`. The sampler adds one wake per
+second to both processes; ordinary builds omit it. Native frame wake, lifecycle,
+and pixel checks are available through the `test:gpui:*:macos` tasks. The separate
+`bench:gpui:path-targets:macos` fixture measures allocation accounting and resize
+call cost without presenting drawables, so it does not measure resident RAM or
+complete application resize latency.

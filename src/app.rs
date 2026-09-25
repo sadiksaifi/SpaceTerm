@@ -883,7 +883,13 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let reopened_host = Rc::clone(&host);
     let application = gpui::Application::new().with_assets(spaceterm_ui::EmbeddedAssets);
     application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
+    #[cfg(feature = "performance-probes")]
+    crate::performance_probes::record_startup(crate::performance_probes::StartupStage::AppRunEnter);
     application.run(move |cx| {
+        #[cfg(feature = "performance-probes")]
+        crate::performance_probes::record_startup(
+            crate::performance_probes::StartupStage::AppRunCallbackEnter,
+        );
         if let Err(error) = start_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
@@ -919,12 +925,32 @@ fn start_application(
     )
     .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
+        #[cfg(feature = "performance-probes")]
+        crate::performance_probes::record_startup(
+            crate::performance_probes::StartupStage::SettingsLoadBegin,
+        );
         let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        #[cfg(feature = "performance-probes")]
+        crate::performance_probes::record_startup(
+            crate::performance_probes::StartupStage::SettingsLoaded,
+        );
         crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
     }
+    #[cfg(feature = "performance-probes")]
+    crate::performance_probes::record_startup(
+        crate::performance_probes::StartupStage::AppearanceInstalled,
+    );
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    #[cfg(feature = "performance-probes")]
+    crate::performance_probes::record_startup(
+        crate::performance_probes::StartupStage::InitialWindowOpenEnter,
+    );
     let workspace = open(cx, host)?;
+    #[cfg(feature = "performance-probes")]
+    crate::performance_probes::record_startup(
+        crate::performance_probes::StartupStage::InitialWindowOpened,
+    );
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
         .map_err(|_| RuntimeError::Initialization)?;

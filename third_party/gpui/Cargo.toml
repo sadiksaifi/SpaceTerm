@@ -42,6 +42,7 @@ default = [
     "windows-manifest",
 ]
 inspector = ["gpui_macros/inspector"]
+performance-probes = []
 leak-detection = ["backtrace"]
 macos-blade = [
     "blade-graphics",
@@ -171,6 +172,15 @@ path = "examples/paths_bench.rs"
 [[example]]
 name = "pattern"
 path = "examples/pattern.rs"
+
+[[example]]
+name = "macos_display_link_lifecycle"
+path = "examples/macos_display_link_lifecycle.rs"
+
+[[example]]
+name = "macos_frame_demand"
+path = "examples/macos_frame_demand.rs"
+required-features = ["performance-probes"]
 
 [[example]]
 name = "scrollable"

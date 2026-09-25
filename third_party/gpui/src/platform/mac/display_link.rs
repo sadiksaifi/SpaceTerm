@@ -1,19 +1,241 @@
+//! Shared macOS display pacing. Adapted from Zed's Apache-2.0 implementation:
+//! https://github.com/zed-industries/zed/blob/e91b82c106817f2419207ebf81f1da766698ac95/crates/gpui_macos/src/display_link.rs
+//!
+//! CoreVideo can deliver a final callback after stop returns. Keep one native link
+//! per display alive for the process lifetime, and give its callback only the display
+//! identifier. Window sources are removed from the registry before cancellation and
+//! release, so a late callback never dereferences a closed window's source.
+
 use crate::{
     dispatch_get_main_queue,
     dispatch_sys::{
-        _dispatch_source_type_data_add, dispatch_resume, dispatch_set_context,
-        dispatch_source_cancel, dispatch_source_create, dispatch_source_merge_data,
-        dispatch_source_set_event_handler_f, dispatch_source_t, dispatch_suspend,
+        _dispatch_source_type_data_add, dispatch_object_t, dispatch_release, dispatch_resume,
+        dispatch_set_context, dispatch_source_cancel, dispatch_source_create,
+        dispatch_source_merge_data, dispatch_source_set_event_handler_f, dispatch_source_t,
     },
 };
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
-use std::ffi::c_void;
+use std::{
+    collections::{BTreeMap, btree_map},
+    ffi::c_void,
+    marker::PhantomData,
+    rc::Rc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+};
 use util::ResultExt;
 
+#[cfg(feature = "performance-probes")]
+use crate::frame_performance::{Counter, record};
+
+static REGISTRY: Mutex<Registry<sys::DisplayLink, Arc<FrameRequestSource>>> =
+    Mutex::new(Registry::new());
+
+struct Registry<L, S> {
+    displays: BTreeMap<CGDirectDisplayID, DisplayEntry<L, S>>,
+    next_subscriber_id: u64,
+}
+
+struct DisplayEntry<L, S> {
+    link: L,
+    running: bool,
+    subscribers: Vec<(SubscriberId, S)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SubscriberId(u64);
+
+impl<L, S> Registry<L, S> {
+    const fn new() -> Self {
+        Self {
+            displays: BTreeMap::new(),
+            next_subscriber_id: 0,
+        }
+    }
+
+    fn has_display(&self, display_id: CGDirectDisplayID) -> bool {
+        self.displays.contains_key(&display_id)
+    }
+
+    fn for_each_subscriber(&self, display_id: CGDirectDisplayID, mut wake: impl FnMut(&S)) {
+        if let Some(entry) = self.displays.get(&display_id) {
+            for (_, source) in &entry.subscribers {
+                wake(source);
+            }
+        }
+    }
+
+    fn start_failed(&mut self, display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
+        if let Some(entry) = self.displays.get_mut(&display_id) {
+            entry.running = false;
+            entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+        }
+    }
+}
+
+impl<L: Clone, S> Registry<L, S> {
+    fn subscribe(
+        &mut self,
+        display_id: CGDirectDisplayID,
+        new_link: Option<L>,
+        source: S,
+    ) -> Result<(SubscriberId, Option<L>)> {
+        let next_subscriber_id = self
+            .next_subscriber_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("display subscriber identifiers exhausted"))?;
+        let entry = match (self.displays.entry(display_id), new_link) {
+            (btree_map::Entry::Occupied(entry), _) => entry.into_mut(),
+            (btree_map::Entry::Vacant(entry), Some(link)) => entry.insert(DisplayEntry {
+                link,
+                running: false,
+                subscribers: Vec::new(),
+            }),
+            (btree_map::Entry::Vacant(_), None) => {
+                anyhow::bail!("display link registry entry unavailable");
+            }
+        };
+        let subscriber_id = SubscriberId(self.next_subscriber_id);
+        self.next_subscriber_id = next_subscriber_id;
+        entry.subscribers.push((subscriber_id, source));
+        let link_to_start = if entry.running {
+            None
+        } else {
+            entry.running = true;
+            Some(entry.link.clone())
+        };
+        Ok((subscriber_id, link_to_start))
+    }
+
+    fn unsubscribe(
+        &mut self,
+        display_id: CGDirectDisplayID,
+        subscriber_id: SubscriberId,
+    ) -> Option<L> {
+        let entry = self.displays.get_mut(&display_id)?;
+        entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+        if entry.subscribers.is_empty() && entry.running {
+            entry.running = false;
+            Some(entry.link.clone())
+        } else {
+            None
+        }
+    }
+}
+
+// SAFETY: CoreVideo handles may be retained and used across threads. Registry
+// mutation and CoreVideo start/stop stay on the main thread; the output callback
+// only reads subscriber sources while holding the registry lock.
+unsafe impl Send for DisplayEntry<sys::DisplayLink, Arc<FrameRequestSource>> {}
+
+fn lock_registry() -> MutexGuard<'static, Registry<sys::DisplayLink, Arc<FrameRequestSource>>> {
+    REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn debug_assert_main_thread() {
+    #[cfg(debug_assertions)]
+    {
+        use objc::{class, msg_send, sel, sel_impl};
+        let is_main_thread: objc::runtime::BOOL =
+            unsafe { msg_send![class!(NSThread), isMainThread] };
+        debug_assert!(
+            is_main_thread == objc::runtime::YES,
+            "display link lifecycle must remain on the main thread"
+        );
+    }
+}
+
+unsafe extern "C" fn display_link_callback(
+    _display_link_out: *mut sys::CVDisplayLink,
+    _current_time: *const sys::CVTimeStamp,
+    _output_time: *const sys::CVTimeStamp,
+    _flags_in: i64,
+    _flags_out: *mut i64,
+    display_id: *mut c_void,
+) -> i32 {
+    #[cfg(feature = "performance-probes")]
+    record(Counter::NativeVsync, 1);
+    let display_id = display_id as usize as CGDirectDisplayID;
+    lock_registry().for_each_subscriber(display_id, |source| unsafe {
+        dispatch_source_merge_data(source.0, 1);
+    });
+    0
+}
+
+fn subscribe(
+    display_id: CGDirectDisplayID,
+    source: Arc<FrameRequestSource>,
+) -> Result<SubscriberId> {
+    debug_assert_main_thread();
+    let needs_link = !lock_registry().has_display(display_id);
+    // Never call CoreVideo under the registry lock: its output callback may hold
+    // CoreVideo's internal locks while waiting for this registry.
+    let new_link = if needs_link {
+        let link = unsafe {
+            sys::DisplayLink::new(
+                display_id,
+                display_link_callback,
+                display_id as usize as *mut c_void,
+            )?
+        };
+        #[cfg(feature = "performance-probes")]
+        record(Counter::NativeLinkCreated, 1);
+        Some(link)
+    } else {
+        None
+    };
+    let (subscriber_id, link_to_start) = lock_registry().subscribe(display_id, new_link, source)?;
+    if let Some(mut link) = link_to_start {
+        if let Err(error) = unsafe { link.start() } {
+            lock_registry().start_failed(display_id, subscriber_id);
+            #[cfg(feature = "performance-probes")]
+            record(Counter::NativeStartFailure, 1);
+            return Err(error);
+        }
+        #[cfg(feature = "performance-probes")]
+        record(Counter::NativeLinkStarted, 1);
+    }
+    #[cfg(feature = "performance-probes")]
+    record(Counter::WindowSourceSubscribed, 1);
+    Ok(subscriber_id)
+}
+
+fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) -> Result<()> {
+    debug_assert_main_thread();
+    let link_to_stop = lock_registry().unsubscribe(display_id, subscriber_id);
+    #[cfg(feature = "performance-probes")]
+    record(Counter::WindowSourceUnsubscribed, 1);
+    if let Some(mut link) = link_to_stop {
+        unsafe { link.stop()? };
+        #[cfg(feature = "performance-probes")]
+        record(Counter::NativeLinkStopped, 1);
+    }
+    Ok(())
+}
+
+struct FrameRequestSource(dispatch_source_t);
+
+// SAFETY: Dispatch sources are thread-safe refcounted objects. The registry's
+// output callback only merges data; handlers and lifecycle run on the main queue.
+unsafe impl Send for FrameRequestSource {}
+unsafe impl Sync for FrameRequestSource {}
+
+impl Drop for FrameRequestSource {
+    fn drop(&mut self) {
+        unsafe {
+            dispatch_source_cancel(self.0);
+            dispatch_release(dispatch_object_t { _ds: self.0 });
+        }
+        #[cfg(feature = "performance-probes")]
+        record(Counter::WindowSourceReleased, 1);
+    }
+}
+
 pub struct DisplayLink {
-    display_link: Option<sys::DisplayLink>,
-    frame_requests: dispatch_source_t,
+    display_id: CGDirectDisplayID,
+    frame_requests: Arc<FrameRequestSource>,
+    registration: Option<SubscriberId>,
+    _main_thread: PhantomData<Rc<()>>,
 }
 
 impl DisplayLink {
@@ -21,66 +243,49 @@ impl DisplayLink {
         display_id: CGDirectDisplayID,
         data: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void),
-    ) -> Result<DisplayLink> {
-        unsafe extern "C" fn display_link_callback(
-            _display_link_out: *mut sys::CVDisplayLink,
-            _current_time: *const sys::CVTimeStamp,
-            _output_time: *const sys::CVTimeStamp,
-            _flags_in: i64,
-            _flags_out: *mut i64,
-            frame_requests: *mut c_void,
-        ) -> i32 {
-            unsafe {
-                let frame_requests = frame_requests as dispatch_source_t;
-                dispatch_source_merge_data(frame_requests, 1);
-                0
-            }
-        }
-
-        unsafe {
-            let frame_requests = dispatch_source_create(
+    ) -> Result<Self> {
+        debug_assert_main_thread();
+        let frame_requests = unsafe {
+            let source = dispatch_source_create(
                 &_dispatch_source_type_data_add,
                 0,
                 0,
                 dispatch_get_main_queue(),
             );
-            dispatch_set_context(
-                crate::dispatch_sys::dispatch_object_t {
-                    _ds: frame_requests,
-                },
-                data,
-            );
-            dispatch_source_set_event_handler_f(frame_requests, Some(callback));
-
-            let display_link = sys::DisplayLink::new(
-                display_id,
-                display_link_callback,
-                frame_requests as *mut c_void,
-            )?;
-
-            Ok(Self {
-                display_link: Some(display_link),
-                frame_requests,
-            })
-        }
+            anyhow::ensure!(!source.is_null(), "could not create window frame source");
+            dispatch_set_context(dispatch_object_t { _ds: source }, data);
+            dispatch_source_set_event_handler_f(source, Some(callback));
+            // Resume once for its lifetime. Dropping a suspended source is unsafe,
+            // and source suspension is unnecessary when the registry unsubscribes it.
+            dispatch_resume(dispatch_object_t { _ds: source });
+            #[cfg(feature = "performance-probes")]
+            record(Counter::WindowSourceCreated, 1);
+            Arc::new(FrameRequestSource(source))
+        };
+        Ok(Self {
+            display_id,
+            frame_requests,
+            registration: None,
+            _main_thread: PhantomData,
+        })
     }
 
     pub fn start(&mut self) -> Result<()> {
-        unsafe {
-            dispatch_resume(crate::dispatch_sys::dispatch_object_t {
-                _ds: self.frame_requests,
-            });
-            self.display_link.as_mut().unwrap().start()?;
+        debug_assert_main_thread();
+        if self.registration.is_none() {
+            self.registration = Some(subscribe(self.display_id, self.frame_requests.clone())?);
+            // The first pending frame should not wait for CoreVideo to restart
+            // its refresh phase. Enqueue it on the same main-queue source;
+            // subsequent frames remain paced by the native display link.
+            unsafe { dispatch_source_merge_data(self.frame_requests.0, 1) };
         }
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        unsafe {
-            dispatch_suspend(crate::dispatch_sys::dispatch_object_t {
-                _ds: self.frame_requests,
-            });
-            self.display_link.as_mut().unwrap().stop()?;
+        debug_assert_main_thread();
+        if let Some(subscriber_id) = self.registration.take() {
+            unsubscribe(self.display_id, subscriber_id)?;
         }
         Ok(())
     }
@@ -89,17 +294,80 @@ impl DisplayLink {
 impl Drop for DisplayLink {
     fn drop(&mut self) {
         self.stop().log_err();
-        // We see occasional segfaults on the CVDisplayLink thread.
-        //
-        // It seems possible that this happens because CVDisplayLinkRelease releases the CVDisplayLink
-        // on the main thread immediately, but the background thread that CVDisplayLink uses for timers
-        // is still accessing it.
-        //
-        // We might also want to upgrade to CADisplayLink, but that requires dropping old macOS support.
-        std::mem::forget(self.display_link.take());
-        unsafe {
-            dispatch_source_cancel(self.frame_requests);
+        // Removal under the registry lock makes the source unreachable to late
+        // CoreVideo callbacks before the final Arc cancels and releases it.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_display_stops_only_after_its_last_window_unsubscribes() {
+        let mut registry = Registry::new();
+        let (first, start) = registry
+            .subscribe(1, Some("display one"), "window one")
+            .unwrap();
+        assert_eq!(start, Some("display one"));
+        let (second, start) = registry.subscribe(1, None, "window two").unwrap();
+        assert_eq!(start, None);
+        assert_eq!(registry.unsubscribe(1, first), None);
+        let mut awakened = Vec::new();
+        registry.for_each_subscriber(1, |source| awakened.push(*source));
+        assert_eq!(awakened, ["window two"]);
+        assert_eq!(registry.unsubscribe(1, second), Some("display one"));
+        assert_eq!(registry.unsubscribe(1, second), None);
+        registry.for_each_subscriber(1, |_| panic!("removed windows must not receive ticks"));
+    }
+
+    #[test]
+    fn display_changes_leave_other_windows_running_and_reuse_returning_display() {
+        let mut registry = Registry::new();
+        let (first, _) = registry
+            .subscribe(1, Some("display one"), "window one")
+            .unwrap();
+        let (second, _) = registry
+            .subscribe(2, Some("display two"), "window two")
+            .unwrap();
+        assert_eq!(registry.unsubscribe(1, first), Some("display one"));
+        let (moved, start) = registry.subscribe(2, None, "window one").unwrap();
+        assert_eq!(start, None);
+        assert_eq!(registry.unsubscribe(2, moved), None);
+        let (_, start) = registry.subscribe(1, None, "window one").unwrap();
+        assert_eq!(start, Some("display one"));
+        assert_eq!(registry.unsubscribe(2, second), Some("display two"));
+        assert_eq!(registry.displays.len(), 2);
+    }
+
+    #[test]
+    fn failed_start_releases_subscription_and_can_retry_the_retained_link() {
+        let mut registry = Registry::new();
+        let source = Arc::new(());
+        let weak = Arc::downgrade(&source);
+        let (first, _) = registry.subscribe(1, Some("display one"), source).unwrap();
+        registry.start_failed(1, first);
+        assert!(weak.upgrade().is_none());
+        registry.for_each_subscriber(1, |_| panic!("failed starts must not retain subscribers"));
+        let (_, start) = registry.subscribe(1, None, Arc::new(())).unwrap();
+        assert_eq!(start, Some("display one"));
+    }
+
+    #[test]
+    fn repeated_window_lifetimes_release_sources_without_accumulating_native_links() {
+        let mut registry = Registry::new();
+        for iteration in 0..10_000 {
+            let source = Arc::new(());
+            let weak = Arc::downgrade(&source);
+            let (subscriber, start) = registry
+                .subscribe(1, (iteration == 0).then_some("display one"), source)
+                .unwrap();
+            assert_eq!(start, Some("display one"));
+            assert_eq!(registry.unsubscribe(1, subscriber), Some("display one"));
+            assert!(weak.upgrade().is_none());
         }
+        assert_eq!(registry.displays.len(), 1);
+        registry.for_each_subscriber(1, |_| panic!("closed windows must not receive late ticks"));
     }
 }
 

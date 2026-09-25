@@ -1022,7 +1022,7 @@ impl PlatformWindow for WaylandWindow {
         state.renderer.draw(scene);
     }
 
-    fn completed_frame(&self) {
+    fn completed_frame(&self, _needs_frame: bool) {
         let state = self.borrow();
         state.surface.commit();
     }

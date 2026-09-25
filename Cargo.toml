@@ -45,6 +45,7 @@ default = []
 macos-native-tests = []
 appearance-exerciser = ["spaceterm-ui/appearance-exerciser"]
 development-app = []
+performance-probes = ["gpui/performance-probes"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
