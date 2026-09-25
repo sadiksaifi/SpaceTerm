@@ -124,7 +124,7 @@ fn metrics(width: f32, typography: &ChromeTypography, icons: &ChromeIcons) -> Me
     MenuMetrics::new(px(width), px(26.0))
         .trigger_height(px(28.0))
         .horizontal_padding(px(6.0))
-        .indicator_width(px(16.0))
+        .leading_columns(px(16.0), px(18.0), px(4.0))
         .gap(px(6.0))
         .trigger_corner_radius(RadiusRole::Control.pixels())
         .font_sizes(body.size, shortcut.size)

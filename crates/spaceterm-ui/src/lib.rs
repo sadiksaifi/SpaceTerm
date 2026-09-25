@@ -18,6 +18,7 @@ mod floating_surface;
 mod floating_surface_tests;
 mod fuzzy;
 mod icon;
+mod leading_columns;
 mod list_row;
 mod menu;
 mod middle_truncated_text;
