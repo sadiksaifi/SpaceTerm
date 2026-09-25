@@ -771,6 +771,7 @@ enum Command {
     SetPresentable(bool),
     AppearanceChanged,
     ReaderReady,
+    CompressScrollback,
     Shutdown,
     PollHiddenInput,
 }
@@ -820,6 +821,7 @@ impl fmt::Debug for Command {
             Self::SetPresentable(..) => "SetPresentable",
             Self::AppearanceChanged => "AppearanceChanged",
             Self::ReaderReady => "ReaderReady",
+            Self::CompressScrollback => "CompressScrollback",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
         };
@@ -1047,15 +1049,41 @@ impl TerminalWorker {
         if !self.publish_screen() {
             return;
         }
+        self.prime_compression_activity();
 
         loop {
             let Some(command) = self.receive_next_command() else {
                 break;
             };
-
+            let postpone_compression = matches!(
+                &command,
+                Command::Key(..)
+                    | Command::ReaderReady
+                    | Command::RequestPaste(..)
+                    | Command::ResolvePaste(..)
+                    | Command::Focus(..)
+            );
+            let compression_step = matches!(&command, Command::CompressScrollback);
             if !self.process_command(command) {
                 break;
             }
+            if !compression_step {
+                self.observe_compression_activity(Instant::now(), postpone_compression);
+            }
+        }
+    }
+
+    fn prime_compression_activity(&mut self) {
+        match self.emulator.compression_activity() {
+            Ok(activity) => self.schedules.prime_compression(activity),
+            Err(_) => self.schedules.disable_compression(),
+        }
+    }
+
+    fn observe_compression_activity(&mut self, now: Instant, postpone: bool) {
+        match self.emulator.compression_activity() {
+            Ok(activity) => self.schedules.observe_compression(now, activity, postpone),
+            Err(_) => self.schedules.disable_compression(),
         }
     }
 
@@ -1085,6 +1113,16 @@ impl TerminalWorker {
                 Err(mpsc::TryRecvError::Empty) => self.take_accessibility_continuation(),
                 Err(mpsc::TryRecvError::Disconnected) => None,
             };
+        }
+        if self.schedules.compression_due(now) {
+            match self.commands.try_recv() {
+                Ok(command) => return Some(self.note_normal_command(command)),
+                Err(mpsc::TryRecvError::Disconnected) => return None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if self.schedules.take_compression_due(now) {
+                return Some(Command::CompressScrollback);
+            }
         }
 
         loop {
@@ -1119,6 +1157,14 @@ impl TerminalWorker {
                         && !self.release_synchronized_output_if_due(now)
                     {
                         return None;
+                    }
+                    match self.commands.try_recv() {
+                        Ok(command) => return Some(self.note_normal_command(command)),
+                        Err(mpsc::TryRecvError::Disconnected) => return None,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    if self.schedules.take_compression_due(now) {
+                        return Some(Command::CompressScrollback);
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
@@ -1161,6 +1207,13 @@ impl TerminalWorker {
             }
             Command::Focus(focused) => self.process_focus(focused),
             Command::ReaderReady => self.process_reader_events(),
+            Command::CompressScrollback => {
+                match self.emulator.compress_scrollback() {
+                    Ok(result) => self.schedules.complete_compression(Instant::now(), result),
+                    Err(_) => self.schedules.disable_compression(),
+                }
+                true
+            }
             Command::Resize => {
                 let Some(geometry) = self.schedules.take_resize() else {
                     return true;

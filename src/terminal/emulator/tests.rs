@@ -68,6 +68,42 @@ fn terminal_find_matches_across_soft_wraps() {
 }
 
 #[test]
+fn snapshot_preserves_full_graphemes_and_empty_cells() {
+    let mut emulator = emulator(12, 2);
+    let cluster = format!("e{}", "\u{301}".repeat(20));
+    emulator.feed(format!("A{cluster}界😀").as_bytes());
+    let screen = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(
+        screen.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "A",
+            cluster.as_str(),
+            "界",
+            " ",
+            "😀",
+            " ",
+            " ",
+            " ",
+            " ",
+            " ",
+            " ",
+            " "
+        ],
+    );
+    assert!(screen.rows[0][3].spacer_tail);
+    assert!(screen.rows[0][5].spacer_tail);
+    assert!(
+        screen.rows[1]
+            .iter()
+            .all(|cell| cell.text == " " && !cell.spacer_tail)
+    );
+}
+
+#[test]
 fn accessibility_snapshot_preserves_production_soft_wraps() {
     let mut emulator = emulator(3, 2);
     emulator.feed(b"abcdef");

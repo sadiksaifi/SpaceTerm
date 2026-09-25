@@ -1,4 +1,5 @@
 use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
+mod compression;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem;
@@ -2408,16 +2409,13 @@ impl TerminalEmulator {
                             selected |= head.selected;
                             head.selected = selected;
                         }
-                        let text = if spacer_tail {
-                            " ".to_owned()
-                        } else {
-                            let graphemes = cell.graphemes()?;
-                            if graphemes.is_empty() {
-                                " ".to_owned()
-                            } else {
-                                graphemes.into_iter().collect()
-                            }
-                        };
+                        let mut text = String::with_capacity(4);
+                        if !spacer_tail {
+                            cell.graphemes_utf8(&mut text)?;
+                        }
+                        if text.is_empty() {
+                            text.push(' ');
+                        }
                         let hyperlink = if raw_cell.has_hyperlink()? {
                             let reference =
                                 self.terminal.grid_ref(Point::Viewport(PointCoordinate {
@@ -2803,3 +2801,7 @@ fn ghostty_color(color: Color) -> RgbColor {
 #[cfg(test)]
 #[path = "emulator/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "emulator/performance.rs"]
+mod performance;

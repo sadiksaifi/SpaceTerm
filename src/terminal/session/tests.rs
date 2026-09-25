@@ -1673,6 +1673,46 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
 }
 
 #[test]
+fn queued_input_runs_before_due_scrollback_compression() {
+    let now = Instant::now();
+    let (command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: SessionMetadataState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events,
+        events,
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(now + Duration::from_secs(30), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+    };
+    let activity = worker.emulator.compression_activity().unwrap();
+    worker
+        .schedules
+        .observe_compression(now - Duration::from_secs(1), activity, false);
+    assert!(worker.schedules.deadline(None).unwrap() < now);
+    command_tx
+        .send(Command::Key(text_key(KeyAction::Press)))
+        .unwrap();
+
+    let first = worker.receive_next_command();
+    assert!(matches!(first, Some(Command::Key(_))), "first={first:?}");
+    assert!(matches!(
+        worker.receive_next_command(),
+        Some(Command::CompressScrollback)
+    ));
+    worker.finish();
+}
+
+#[test]
 fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);

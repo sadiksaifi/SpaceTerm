@@ -1,6 +1,7 @@
 //! Private Session scheduling, including deadline arbitration and bounded fairness.
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
+use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
 use std::sync::{Mutex, MutexGuard};
 
 const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
@@ -9,6 +10,68 @@ const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 const PRESENTATION_ACCUMULATION_INTERVAL: Duration = Duration::from_millis(8);
 const PRESENTATION_INTERVAL: Duration = Duration::from_micros(16_667);
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+const COMPRESSION_IDLE_INTERVAL: Duration = Duration::from_millis(250);
+const COMPRESSION_STEP_INTERVAL: Duration = Duration::from_millis(1);
+
+struct CompressionSchedule<Activity> {
+    activity: Option<Activity>,
+    deadline: Option<Instant>,
+    disabled: bool,
+}
+
+impl<Activity: Eq> CompressionSchedule<Activity> {
+    fn new() -> Self {
+        Self {
+            activity: None,
+            deadline: None,
+            disabled: false,
+        }
+    }
+
+    fn observe(&mut self, now: Instant, activity: Activity, postpone: bool) {
+        if self.disabled {
+            return;
+        }
+        if self.activity.as_ref() != Some(&activity) {
+            self.activity = Some(activity);
+            self.deadline = Some(now + COMPRESSION_IDLE_INTERVAL);
+        } else if postpone && self.deadline.is_some() {
+            self.deadline = Some(now + COMPRESSION_IDLE_INTERVAL);
+        }
+    }
+
+    fn prime(&mut self, activity: Activity) {
+        if !self.disabled {
+            self.activity = Some(activity);
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.deadline = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn complete(&mut self, now: Instant, result: CompressionResult) {
+        match result {
+            CompressionResult::Pending => self.deadline = Some(now + COMPRESSION_STEP_INTERVAL),
+            CompressionResult::Complete => self.deadline = None,
+            CompressionResult::Unsupported => self.stop(),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.deadline = None;
+        self.disabled = true;
+    }
+}
 
 /// The Session handle can enqueue coalesced work without accessing worker schedules.
 #[derive(Clone, Default)]
@@ -61,9 +124,41 @@ pub(super) struct WorkerSchedules {
     metadata_presentation_pending: bool,
     metadata_presentation_queued: Arc<AtomicBool>,
     graphics_animation: Option<Instant>,
+    compression: CompressionSchedule<CompressionActivity>,
 }
 
 impl WorkerSchedules {
+    pub(super) fn prime_compression(&mut self, activity: CompressionActivity) {
+        self.compression.prime(activity);
+    }
+
+    pub(super) fn observe_compression(
+        &mut self,
+        now: Instant,
+        activity: CompressionActivity,
+        postpone: bool,
+    ) {
+        self.compression.observe(now, activity, postpone);
+    }
+
+    pub(super) fn complete_compression(&mut self, now: Instant, result: CompressionResult) {
+        self.compression.complete(now, result);
+    }
+
+    pub(super) fn disable_compression(&mut self) {
+        self.compression.stop();
+    }
+
+    pub(super) fn compression_due(&self, now: Instant) -> bool {
+        self.compression
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+    }
+
+    pub(super) fn take_compression_due(&mut self, now: Instant) -> bool {
+        self.compression.take_due(now)
+    }
+
     pub(super) fn take_terminal_appearance(&mut self) -> Option<TerminalAppearanceUpdate> {
         self.input.terminal_appearance.take()
     }
@@ -246,6 +341,7 @@ impl WorkerSchedules {
             metadata_presentation_pending: false,
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             graphics_animation: None,
+            compression: CompressionSchedule::new(),
         }
     }
 
@@ -257,6 +353,7 @@ impl WorkerSchedules {
             self.presentation.deadline(),
             self.accessibility_presentation.deadline(),
             self.graphics_animation,
+            self.compression.deadline(),
             Some(self.hidden_input.deadline),
         ]
         .into_iter()
@@ -291,6 +388,98 @@ impl WorkerSchedules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compression_waits_for_a_quiet_interval_after_activity() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+
+        schedule.observe(start, 1, false);
+
+        assert!(!schedule.take_due(start + Duration::from_millis(249)));
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn compression_postpones_pending_work_after_input_or_output() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        schedule.observe(start + Duration::from_millis(200), 1, true);
+
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+        assert!(schedule.take_due(start + Duration::from_millis(450)));
+    }
+
+    #[test]
+    fn compression_continues_in_bounded_steps_until_complete() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Pending,
+        );
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+        assert!(schedule.take_due(start + Duration::from_millis(251)));
+        schedule.complete(
+            start + Duration::from_millis(251),
+            CompressionResult::Complete,
+        );
+        assert_eq!(schedule.deadline(), None);
+    }
+
+    #[test]
+    fn completed_compression_restarts_only_when_activity_token_changes() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Complete,
+        );
+
+        schedule.observe(start + Duration::from_millis(300), 1, true);
+        assert_eq!(schedule.deadline(), None);
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+        assert_eq!(
+            schedule.deadline(),
+            Some(start + Duration::from_millis(550))
+        );
+    }
+
+    #[test]
+    fn unsupported_compression_stops_for_the_terminal_lifetime() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Unsupported,
+        );
+
+        schedule.observe(start + Duration::from_millis(300), 1, true);
+        assert_eq!(schedule.deadline(), None);
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+        assert_eq!(schedule.deadline(), None);
+    }
+
+    #[test]
+    fn failed_compression_stops_for_the_terminal_lifetime() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+
+        schedule.stop();
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+
+        assert_eq!(schedule.deadline(), None);
+    }
     #[test]
     fn accessibility_continuation_runs_after_eight_normal_commands() {
         let mut schedule = AccessibilityContinuationSchedule::default();
