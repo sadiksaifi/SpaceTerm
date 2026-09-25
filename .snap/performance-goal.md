@@ -1,9 +1,12 @@
 # Performance goal
 
-Status: second measured optimization pass completed on 2026-09-26.
-The continuing performance objective and remaining profiling are recorded below.
-The first measured implementation and PR reviews completed on 2026-09-25.
-PR [#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) is open and unmerged.
+Status: implementation, measurements, validation, and independent reviews complete
+on 2026-09-26; final PR publication is pending. The user asked for a concrete
+merge-ready endpoint, and implementation scope was frozen. PR
+[#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) remains open and unmerged.
+See [final results](performance-continuation-results.md) and
+[merge readiness](performance-merge-readiness.md) for current evidence.
+Earlier pass outcomes below are historical, not the current completion state.
 Started at baseline commit
 `134d7027b2014f89d29d0f9c4d087e894f33cfbc`.
 
@@ -33,6 +36,21 @@ reporting the PR ready. Do not merge it without a user request.
   correctness checks. Report unmeasured effects as hypotheses.
 - Compare equal output volume, geometry, settings, and display conditions. Lower
   resource use caused by lost output or reduced functionality is a regression.
+
+## Current completion criteria
+
+The continuation attributed idle wakeups, implemented and measured complete frame
+wake behavior, investigated graphics-ledger footprint, added native process-exit
+observation, removed Find corpus allocations, and verified lazy path targets.
+Focused, unfocused-visible, and hidden output/consumption checks pass. The normal
+release build and complete validation pass. Three independent final reviews have
+no unresolved material findings. Publication remains the final required step.
+
+A global optimum cannot be proven. Remaining Pane scaling, graphics residency,
+and first-frame experiments are explicit follow-up research in
+[the updated queue](performance-next.md). They do not imply a demonstrated
+regression in this PR or a promised gain. Preserve the measured limits rather
+than treating an unmeasured hypothesis as completed optimization.
 
 ## Second-pass outcome
 
