@@ -58,6 +58,8 @@ and desktop keymap installation moved before Settings I/O, font classification
 and control initialization. The startup order regression failed before the
 change and passed after it. `mise run test` now passes 3,113 tests, with zero
 failures and five ignored fixtures. Rust lint and the optimized build pass.
-Two independent GPT-6 Sol high reviewers found no material issue. These checks
-do not prove native first-frame ordering; the menu timing record retains that
-limitation and supersedes the earlier activation-only experiment.
+Two independent GPT-6 Sol high reviewers found no material issue. On 2026-09-26
+the user confirmed that the visible menu delay is resolved in the updated source
+app. Quantitative first-frame timing remains unmeasured. The menu timing record
+includes this manual verification and supersedes the earlier activation-only
+experiment.

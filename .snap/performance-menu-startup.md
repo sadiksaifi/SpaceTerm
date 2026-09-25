@@ -1,5 +1,11 @@
 # Native menu startup timing
 
+The user confirmed on 2026-09-26 that earlier full-menu installation resolves the
+observed menu delay. This is manual visual confirmation; quantitative first-frame
+timing remains unmeasured.
+
+## Initial report and audit
+
 The user reports File, Edit, View, Window and Help appearing after Workspace
 content on 2026-09-25. The screenshot shows the completed menu bar; it does not
 establish frame timing. Audit source: `e2b5bbd` on `perf/application-resources`.
@@ -100,8 +106,9 @@ Validation completed:
   found no material source-level issue. They checked menu shortcuts, later
   control initialization, early actions, failure handling and reopen behavior.
 
-This proves the application-side setup order. It does not establish AppKit's
-first visible menu frame. A launch with an appearance override different from
+The regression test proves the application-side setup order. The user subsequently
+confirmed that the visible menu delay is resolved. No quantitative first-frame
+timing was captured. A launch with an appearance override different from
 the system appearance also remains a native visual verification case. Earlier
 resource measurements predate these menu startup changes.
 

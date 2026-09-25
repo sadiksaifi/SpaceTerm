@@ -55,5 +55,6 @@ earlier installation of the complete menu, actions and keymap, before Settings
 I/O, fonts and control themes. Activation again follows successful window
 creation. The new regression failed before the reorder and passed afterward.
 The full suite passes 3,113 tests; Rust lint and the optimized build pass. Two
-independent GPT-6 Sol high reviews found no material issue. Exact visible menu
-frame timing remains unverified; see [menu startup timing](performance-menu-startup.md).
+independent GPT-6 Sol high reviews found no material issue. On 2026-09-26 the user
+confirmed that the visible menu delay is resolved. Quantitative first-frame timing
+remains unmeasured; see [menu startup timing](performance-menu-startup.md).
