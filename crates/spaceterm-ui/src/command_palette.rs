@@ -14,6 +14,7 @@ use crate::{
     TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
+    leading_columns::{LeadingColumnMetrics, LeadingColumns},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
 };
@@ -1328,6 +1329,14 @@ impl CommandPaletteMetrics {
         }
     }
 
+    fn leading_column_metrics(&self) -> LeadingColumnMetrics {
+        LeadingColumnMetrics {
+            state_width: px(0.0),
+            icon_width: self.leading_width,
+            column_gap: px(0.0),
+        }
+    }
+
     /// Returns the shared left edge of the editor, headings, status text, and row content.
     fn content_leading_inset(&self) -> Pixels {
         self.panel_padding + self.horizontal_padding
@@ -1403,7 +1412,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     ordinary_match_count: usize,
     matches: Rc<[CommandPaletteMatch]>,
     presented_results: Rc<PresentedResults>,
-    leading_reserved: bool,
+    leading_columns: LeadingColumns,
     header_actions: Vec<CommandPaletteAction>,
     hints: Vec<CommandPaletteHint>,
     actions_menu: Vec<MenuEntry<SharedString>>,
@@ -1755,7 +1764,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             match_command_palette_items(&items, "", CommandPaletteMatching::Semantic).into();
         let selected = first_enabled_id(&items, &matches);
         let presented_results = Rc::new(PresentedResults::new(&items, &matches));
-        let leading_reserved = items.iter().any(|item| item.leading_icon.is_some());
+        let leading_columns = palette_leading_columns(&items);
         let list =
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
@@ -1767,7 +1776,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             ordinary_match_count: matches.len(),
             matches,
             presented_results,
-            leading_reserved,
+            leading_columns,
             header_actions: Vec::new(),
             hints: Vec::new(),
             actions_menu: Vec::new(),
@@ -2270,10 +2279,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.presented_items = presented.into();
         self.matches = matches.into();
-        self.leading_reserved = self
-            .presented_items
-            .iter()
-            .any(|item| item.leading_icon.is_some());
+        self.leading_columns = palette_leading_columns(&self.presented_items);
         if selected_was_fallback && self.ordinary_match_count > 0 {
             self.selected = None;
         }
@@ -3142,7 +3148,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         // not keep claiming the row it happens to rest over.
         let hover_suppressed = self.pointer_suppressed || self.hover_suppressed;
         let hovered = self.hovered_row.clone().filter(|_| !hover_suppressed);
-        let leading_reserved = self.leading_reserved;
+        let leading_columns = self.leading_columns;
         let palette = cx.entity().downgrade();
         div()
             .relative()
@@ -3174,7 +3180,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         &matched.description_highlights,
                                         selected.as_ref() == Some(&item.id),
                                         hovered.as_ref() == Some(&item.id),
-                                        leading_reserved,
+                                        leading_columns,
                                         row_height,
                                         theme,
                                         typography.regular().clone(),
@@ -3457,6 +3463,12 @@ fn loading_row(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> im
         )
 }
 
+/// Palette rows are commands and never carry a checkmark. They reserve the icon column when one
+/// presented row has an icon.
+fn palette_leading_columns<I>(items: &[CommandPaletteItem<I>]) -> LeadingColumns {
+    LeadingColumns::new(false, items.iter().any(|item| item.leading_icon.is_some()))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one row's complete presentation inputs are clearer than an intermediate struct"
@@ -3469,7 +3481,7 @@ fn render_row<I: Clone + Eq + 'static>(
     description_highlights: &[Range<usize>],
     selected: bool,
     hovered: bool,
-    leading_reserved: bool,
+    leading_columns: LeadingColumns,
     height: Pixels,
     theme: CommandPaletteTheme,
     label_font: gpui::Font,
@@ -3518,20 +3530,14 @@ fn render_row<I: Clone + Eq + 'static>(
             })
         });
 
-    if leading_reserved {
-        let mut leading = div()
-            .w(metrics.leading_width)
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .relative()
-            .top(icon_offset);
-        if let Some(icon) = item.leading_icon.clone() {
-            leading = leading.child(icon(row_paint.icon, metrics.icon_size));
-        }
-        row = row.child(leading);
-    }
+    let icon = item
+        .leading_icon
+        .clone()
+        .map(|icon| icon(row_paint.icon, metrics.icon_size));
+    let leading = leading_columns
+        .render(metrics.leading_column_metrics(), None, icon)
+        .map(|columns| columns.relative().top(icon_offset));
+    row = row.children(leading);
 
     let label_line = div()
         .w_full()

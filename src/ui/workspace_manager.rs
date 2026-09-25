@@ -80,8 +80,8 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
-    AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCopy,
-    ComboBoxFallback, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
+    AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCommand,
+    ComboBoxCopy, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
     ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
     ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, Tooltip, WindowDragRegion,
@@ -221,18 +221,18 @@ impl WorkspaceTransientUi {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum WorkspaceSwitcherChoice {
-    Workspace(WorkspaceId),
-    Local(String),
-    Remote(String),
+/// A Workspace the switcher creates from its query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceCreation {
+    Local,
+    Remote,
 }
 
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
-    workspace_switcher: ComboBoxHandle<WorkspaceSwitcherChoice>,
+    workspace_switcher: ComboBoxHandle<WorkspaceId, WorkspaceCreation>,
     remote_workspace_name: Option<String>,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
@@ -749,7 +749,7 @@ impl WorkspaceManager {
         })
     }
 
-    fn workspace_switcher_items(&self, cx: &App) -> Vec<ComboBoxItem<WorkspaceSwitcherChoice>> {
+    fn workspace_switcher_items(&self, cx: &App) -> Vec<ComboBoxItem<WorkspaceId>> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         self.workspaces
             .iter()
@@ -759,19 +759,16 @@ impl WorkspaceManager {
                     WorkspaceLocation::Local => IconName::Terminal,
                     WorkspaceLocation::Remote { .. } => IconName::Globe,
                 };
-                let item = ComboBoxItem::new(
-                    WorkspaceSwitcherChoice::Workspace(workspace.id()),
-                    workspace.name().to_owned(),
-                )
-                .leading_icon(move |foreground, size| {
-                    div()
-                        .child(Icon::new(icon, size, foreground))
-                        .into_any_element()
-                })
-                .debug_selector(format!(
-                    "workspace-switcher-result-{}",
-                    workspace.id().get()
-                ));
+                let item = ComboBoxItem::new(workspace.id(), workspace.name().to_owned())
+                    .leading_icon(move |foreground, size| {
+                        div()
+                            .child(Icon::new(icon, size, foreground))
+                            .into_any_element()
+                    })
+                    .debug_selector(format!(
+                        "workspace-switcher-result-{}",
+                        workspace.id().get()
+                    ));
                 match workspace_activation_shortcut(index, presentation) {
                     Some(shortcut) => item.shortcut(shortcut),
                     None => item,
@@ -2726,11 +2723,8 @@ impl WorkspaceManager {
 
     fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
         if window_combo_box_is_open(window, cx) {
-            self.workspace_switcher.accept_matching(
-                |choice| matches!(choice, WorkspaceSwitcherChoice::Local(_)),
-                window,
-                cx,
-            );
+            self.workspace_switcher
+                .run_command(&WorkspaceCreation::Local, window, cx);
             return;
         }
         self.create_local_workspace(window, cx);
@@ -2743,11 +2737,8 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         if window_combo_box_is_open(window, cx) {
-            self.workspace_switcher.accept_matching(
-                |choice| matches!(choice, WorkspaceSwitcherChoice::Remote(_)),
-                window,
-                cx,
-            );
+            self.workspace_switcher
+                .run_command(&WorkspaceCreation::Remote, window, cx);
             return;
         }
         self.sidebar.update(cx, |sidebar, cx| {
@@ -2937,6 +2928,7 @@ impl WorkspaceManager {
         let drag_manager = manager.clone();
         let toggle_manager = manager.clone();
         let combo_lifecycle_manager = manager.clone();
+        let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
@@ -2960,14 +2952,49 @@ impl WorkspaceManager {
             || "Switch Workspace".to_owned(),
             |(identity, _)| identity.accessibility_name(),
         );
-        let chooser = ComboBox::new(
+        let chooser = ComboBox::with_commands(
             "workspace-switcher",
             switcher_accessibility_name,
-            Some(WorkspaceSwitcherChoice::Workspace(
-                self.workspaces.active_workspace_id(),
-            )),
+            Some(self.workspaces.active_workspace_id()),
             "Switch Workspace",
             self.workspace_switcher_items(cx),
+            move |_| {
+                let local = ComboBoxCommand::new(
+                    WorkspaceCreation::Local,
+                    super::workspace_creation::LOCAL_WORKSPACE_LABEL,
+                )
+                .leading_icon(move |foreground, size| {
+                    Icon::custom(
+                        super::workspace_creation::LOCAL_WORKSPACE_ICON,
+                        size,
+                        foreground,
+                    )
+                    .into_any_element()
+                })
+                .shortcut(new_workspace_shortcut)
+                .debug_selector("workspace-switcher-create-local");
+                let mut remote = ComboBoxCommand::new(
+                    WorkspaceCreation::Remote,
+                    super::workspace_creation::REMOTE_WORKSPACE_LABEL,
+                )
+                .shortcut(new_remote_workspace_shortcut)
+                .leading_icon(move |foreground, size| {
+                    Icon::custom(
+                        super::workspace_creation::REMOTE_WORKSPACE_ICON,
+                        size,
+                        foreground,
+                    )
+                    .into_any_element()
+                })
+                .debug_selector("workspace-switcher-create-remote");
+                if let Some(reason) = &remote_unavailable_reason {
+                    remote = remote
+                        .disabled(true)
+                        .description(reason.clone())
+                        .trailing(ComboBoxAccessory::Status("Unavailable".into()));
+                }
+                vec![local, remote]
+            },
         )
         .handle(self.workspace_switcher.clone())
         .when(sidebar_visible, |chooser| chooser.ghost_trigger())
@@ -3006,44 +3033,6 @@ impl WorkspaceManager {
             "No matching Workspaces",
         ))
         .menu_with_filter_header()
-        .fallback(ComboBoxFallback::pinned_rows(move |query| {
-            let name = query.trim().to_owned();
-            let local = ComboBoxItem::new(
-                WorkspaceSwitcherChoice::Local(name.clone()),
-                super::workspace_creation::LOCAL_WORKSPACE_LABEL,
-            )
-            .leading_icon(move |foreground, size| {
-                Icon::custom(
-                    super::workspace_creation::LOCAL_WORKSPACE_ICON,
-                    size,
-                    foreground,
-                )
-                .into_any_element()
-            })
-            .shortcut(new_workspace_shortcut)
-            .debug_selector("workspace-switcher-create-local");
-            let mut remote = ComboBoxItem::new(
-                WorkspaceSwitcherChoice::Remote(name),
-                super::workspace_creation::REMOTE_WORKSPACE_LABEL,
-            )
-            .shortcut(new_remote_workspace_shortcut)
-            .leading_icon(move |foreground, size| {
-                Icon::custom(
-                    super::workspace_creation::REMOTE_WORKSPACE_ICON,
-                    size,
-                    foreground,
-                )
-                .into_any_element()
-            })
-            .debug_selector("workspace-switcher-create-remote");
-            if let Some(reason) = &remote_unavailable_reason {
-                remote = remote
-                    .disabled(true)
-                    .description(reason.clone())
-                    .trailing(ComboBoxAccessory::Status("Unavailable".into()));
-            }
-            vec![local, remote]
-        }))
         // The chooser takes the top chrome's icon size rather than the selector's own, so the
         // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
         // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
@@ -3093,15 +3082,19 @@ impl WorkspaceManager {
             });
         })
         .on_accept(move |acceptance, window, cx| {
+            let _ = accept_manager.update(cx, |manager, cx| {
+                manager.activate_workspace(*acceptance.item_id(), window, cx);
+                manager.sync_terminal_focus_blocker(window, cx);
+            });
+        })
+        .on_command(move |activation, window, cx| {
             let _ = manager.update(cx, |manager, cx| {
-                match acceptance.item_id().clone() {
-                    WorkspaceSwitcherChoice::Workspace(id) => {
-                        manager.activate_workspace(id, window, cx);
-                    }
-                    WorkspaceSwitcherChoice::Local(name) => {
+                let name = activation.query().trim().to_owned();
+                match activation.command() {
+                    WorkspaceCreation::Local => {
                         manager.create_named_local_workspace(Some(name), window, cx)
                     }
-                    WorkspaceSwitcherChoice::Remote(name) => {
+                    WorkspaceCreation::Remote => {
                         manager.present_remote_workspace_flow(name, window, cx)
                     }
                 }

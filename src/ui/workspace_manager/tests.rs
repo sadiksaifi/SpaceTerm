@@ -8234,27 +8234,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("workspace-switcher-result-1").is_none());
-    let switcher = manager.read_with(cx, |manager, _| manager.workspace_switcher.clone());
-    assert!(!cx.update(|window, cx| switcher.accept_matching(
-        |choice| {
-            matches!(
-                choice,
-                WorkspaceSwitcherChoice::Workspace(id) if *id == WorkspaceId::new(2)
-            )
-        },
-        window,
-        cx,
-    )));
-    assert!(!cx.update(|window, cx| switcher.accept_matching(
-        |choice| {
-            matches!(
-                choice,
-                WorkspaceSwitcherChoice::Workspace(id) if *id == WorkspaceId::new(1)
-            )
-        },
-        window,
-        cx,
-    )));
+    assert!(cx.debug_bounds("workspace-switcher-result-2").is_none());
 }
 
 #[gpui::test]
@@ -8706,6 +8686,24 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
 }
 
 #[gpui::test]
+fn workspace_switcher_creation_rows_should_start_in_the_checkmark_column(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    open_workspace_switcher(cx);
+
+    let marker = cx.debug_bounds("combo-box-row-0-check").unwrap();
+    let workspace_label = cx.debug_bounds("combo-box-row-0-label").unwrap();
+    for (icon, label) in [
+        ("combo-box-row-1-identity-icon", "combo-box-row-1-label"),
+        ("combo-box-row-2-identity-icon", "combo-box-row-2-label"),
+    ] {
+        let icon = cx.debug_bounds(icon).unwrap();
+        let label = cx.debug_bounds(label).unwrap();
+        assert!(icon.left() < marker.right(), "{icon:?} {marker:?}");
+        assert!(label.left() < workspace_label.left());
+    }
+}
+
+#[gpui::test]
 fn workspace_filter_icon_should_precede_editable_input_without_affecting_creation(
     cx: &mut TestAppContext,
 ) {
@@ -8753,10 +8751,7 @@ fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut
     cx.run_until_parked();
     manager.read_with(cx, |manager, cx| {
         let items = manager.workspace_switcher_items(cx);
-        assert_eq!(
-            items[0].id(),
-            &WorkspaceSwitcherChoice::Workspace(WorkspaceId::new(2))
-        );
+        assert_eq!(items[0].id(), &WorkspaceId::new(2));
         assert_eq!(items[0].shortcut_text(), Some("Ctrl+1"));
         assert_eq!(items[8].shortcut_text(), Some("Ctrl+9"));
     });
@@ -9047,6 +9042,28 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
     }));
+}
+
+#[gpui::test]
+fn sidebar_workspace_menu_should_show_an_icon_before_every_label(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-shift-e shift-f10");
+    cx.run_until_parked();
+
+    for row in [
+        "workspace-menu-row-new-tab",
+        "workspace-menu-row-rename",
+        "workspace-menu-row-pin-directory",
+        "workspace-menu-row-close",
+    ] {
+        let icon_selector: &'static str = format!("{row}-icon").leak();
+        let label_selector: &'static str = format!("{row}-label").leak();
+        let icon = cx
+            .debug_bounds(icon_selector)
+            .unwrap_or_else(|| panic!("{row} has no icon"));
+        let label = cx.debug_bounds(label_selector).unwrap();
+        assert!(icon.right() <= label.left(), "{row}: {icon:?} {label:?}");
+    }
 }
 
 #[gpui::test]

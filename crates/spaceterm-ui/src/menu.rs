@@ -19,6 +19,7 @@ pub use crate::anchored_placement::{
     AnchoredPlacementConfig as MenuPlacementConfig,
 };
 use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
+use crate::leading_columns::{LeadingColumnMetrics, LeadingColumns};
 use crate::{FloatingRole, FloatingShell, Icon, IconName};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
@@ -324,7 +325,9 @@ pub struct MenuMetrics {
     separator_height: Pixels,
     trigger_height: Pixels,
     horizontal_padding: Pixels,
-    indicator_width: Pixels,
+    state_column_width: Pixels,
+    icon_column_width: Pixels,
+    column_gap: Pixels,
     gap: Pixels,
     trigger_corner_radius: Pixels,
     corner_radius: Pixels,
@@ -354,7 +357,9 @@ impl MenuMetrics {
             separator_height: px(9.0),
             trigger_height: row_height,
             horizontal_padding: px(8.0),
-            indicator_width: px(14.0),
+            state_column_width: px(14.0),
+            icon_column_width: px(16.0),
+            column_gap: px(4.0),
             gap: px(6.0),
             trigger_corner_radius: px(6.0),
             corner_radius: shell.corner_radius(),
@@ -386,13 +391,22 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets the leading indicator column width.
-    pub fn indicator_width(mut self, width: Pixels) -> Self {
-        self.indicator_width = width;
+    /// Sets the checkmark column width, the icon column width, and the gap between them.
+    ///
+    /// Each panel reserves a column only when one of its entries uses it.
+    pub fn leading_columns(
+        mut self,
+        state_width: Pixels,
+        icon_width: Pixels,
+        column_gap: Pixels,
+    ) -> Self {
+        self.state_column_width = state_width.max(px(0.0));
+        self.icon_column_width = icon_width.max(px(0.0));
+        self.column_gap = column_gap.max(px(0.0));
         self
     }
 
-    /// Sets spacing between row columns.
+    /// Sets the gap between the leading columns, the label, and the trailing content.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
@@ -452,6 +466,14 @@ impl MenuMetrics {
         self
     }
 
+    fn leading_column_metrics(self) -> LeadingColumnMetrics {
+        LeadingColumnMetrics {
+            state_width: self.state_column_width,
+            icon_width: self.icon_column_width,
+            column_gap: self.column_gap,
+        }
+    }
+
     fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
@@ -482,8 +504,17 @@ impl MenuMetrics {
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            indicator_width: crate::appearance::scale_metric(self.indicator_width, spacing_scale)
-                .max(icon_size),
+            state_column_width: crate::appearance::scale_metric(
+                self.state_column_width,
+                spacing_scale,
+            )
+            .max(icon_size),
+            icon_column_width: crate::appearance::scale_metric(
+                self.icon_column_width,
+                spacing_scale,
+            )
+            .max(icon_size),
+            column_gap: crate::appearance::scale_metric(self.column_gap, spacing_scale),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
             trigger_corner_radius: self.trigger_corner_radius,
             corner_radius: self.corner_radius,
@@ -731,7 +762,8 @@ impl<A> MenuRadioOption<A> {
 
     /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
-    /// The selected radio mark replaces the icon within the shared leading slot.
+    /// The icon sits after the radio mark. Every row in the panel reserves the icon column when one
+    /// entry has an icon.
     pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.item.icon = Some(Rc::new(build));
         self
@@ -883,7 +915,8 @@ impl<A> MenuEntry<A> {
 
     /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
-    /// A selected checkbox or radio mark replaces the icon within the shared leading slot.
+    /// The icon sits after any checkbox or radio mark. Every row in the panel reserves the icon
+    /// column when one entry has an icon.
     pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         match &mut self.kind {
             MenuEntryKind::Item(item) => item.icon = Some(Rc::new(build)),
@@ -3101,6 +3134,7 @@ fn render_panel(
         .overflow_y_scroll()
         .track_scroll(&scroll);
 
+    let columns = panel_leading_columns(&entries);
     for (index, entry) in entries.into_iter().enumerate() {
         match entry.kind {
             InternalEntryKind::Separator => {
@@ -3122,7 +3156,7 @@ fn render_panel(
                 content = content.child(
                     div()
                         .h(style.metrics.section_height)
-                        .pl(content_leading_inset(style.metrics))
+                        .pl(content_leading_inset(style.metrics, columns))
                         .pr(style.metrics.horizontal_padding + style.metrics.panel_padding)
                         .flex()
                         .items_center()
@@ -3153,6 +3187,7 @@ fn render_panel(
                     shortcut,
                     icon,
                     mark,
+                    columns,
                     debug_selector,
                     false,
                     Some(activate),
@@ -3183,6 +3218,7 @@ fn render_panel(
                     shortcut,
                     icon,
                     EntryMark::None,
+                    columns,
                     debug_selector,
                     true,
                     None,
@@ -3213,6 +3249,7 @@ fn render_row(
     shortcut: Option<SharedString>,
     icon: Option<RowIconBuilder>,
     mark: EntryMark,
+    columns: LeadingColumns,
     debug_selector: Option<String>,
     submenu: bool,
     activation: Option<InternalActivation>,
@@ -3244,10 +3281,13 @@ fn render_row(
     let icon_foreground = row_paint.map_or(foreground, |paint| paint.icon);
     let hover_state = state.clone();
     let pointer_state = state;
-    let logical_name = label.clone();
+    let row_selector = debug_selector.unwrap_or_else(|| label.to_string());
+    let label_selector = format!("{row_selector}-label");
+    let mark_selector = format!("{row_selector}-mark");
+    let icon_selector = format!("{row_selector}-icon");
     let mut row = div()
         .id(index)
-        .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
+        .debug_selector(move || row_selector)
         .relative()
         .h(style.metrics.row_height)
         .mx(style.metrics.panel_padding)
@@ -3275,26 +3315,35 @@ fn render_row(
                 });
             })
         });
-    let mut leading = div()
-        .w(style.metrics.indicator_width)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .relative()
-        .top(icon_offset);
-    if let Some(indicator) = mark_icon(mark) {
-        leading = leading.child(Icon::new(
-            indicator,
-            style.metrics.icon_size,
-            icon_foreground,
-        ));
-    } else if let Some(icon) = icon {
-        leading = leading.child(icon(icon_foreground, style.metrics.icon_size));
-    }
+    let mark = mark_icon(mark).map(|indicator| {
+        div()
+            .debug_selector(move || mark_selector)
+            .child(Icon::new(
+                indicator,
+                style.metrics.icon_size,
+                icon_foreground,
+            ))
+            .into_any_element()
+    });
+    let icon = icon.map(|icon| {
+        div()
+            .debug_selector(move || icon_selector)
+            .child(icon(icon_foreground, style.metrics.icon_size))
+            .into_any_element()
+    });
+    let leading = columns
+        .render(style.metrics.leading_column_metrics(), mark, icon)
+        .map(|columns| columns.relative().top(icon_offset));
     row = row
-        .child(leading)
-        .child(div().min_w_0().flex_grow().truncate().child(label))
+        .children(leading)
+        .child(
+            div()
+                .debug_selector(move || label_selector)
+                .min_w_0()
+                .flex_grow()
+                .truncate()
+                .child(label),
+        )
         .when_some(shortcut, |row, shortcut| {
             row.child(
                 div()
@@ -3466,8 +3515,33 @@ fn row_corner_radius(metrics: MenuMetrics) -> Pixels {
     (metrics.corner_radius - metrics.panel_padding).max(px(0.0))
 }
 
-fn content_leading_inset(metrics: MenuMetrics) -> Pixels {
-    metrics.panel_padding + metrics.horizontal_padding + metrics.indicator_width + metrics.gap
+fn content_leading_inset(metrics: MenuMetrics, columns: LeadingColumns) -> Pixels {
+    metrics.panel_padding
+        + metrics.horizontal_padding
+        + columns.label_offset(metrics.leading_column_metrics(), metrics.gap)
+}
+
+/// A panel reserves the checkmark column when it holds a checkbox or radio entry, checked or not,
+/// so toggling never moves its labels. It reserves the icon column when any entry has an icon.
+fn panel_leading_columns(entries: &[InternalEntry]) -> LeadingColumns {
+    let (state, icon) =
+        entries
+            .iter()
+            .fold((false, false), |(state, icon), entry| match &entry.kind {
+                InternalEntryKind::Item {
+                    mark,
+                    icon: row_icon,
+                    ..
+                } => (
+                    state || *mark != EntryMark::None,
+                    icon || row_icon.is_some(),
+                ),
+                InternalEntryKind::Submenu { icon: row_icon, .. } => {
+                    (state, icon || row_icon.is_some())
+                }
+                InternalEntryKind::Separator | InternalEntryKind::Heading(_) => (state, icon),
+            });
+    LeadingColumns::new(state, icon)
 }
 
 fn panel_size(entries: &[InternalEntry], metrics: MenuMetrics) -> gpui::Size<Pixels> {
@@ -4063,7 +4137,7 @@ mod tests {
     fn row_and_separator_geometry_should_follow_the_panel_content_grid() {
         let base = MenuMetrics::new(px(196.0), px(26.0))
             .horizontal_padding(px(6.0))
-            .indicator_width(px(16.0))
+            .leading_columns(px(16.0), px(18.0), px(4.0))
             .gap(px(6.0))
             .submenu_gap(px(2.0));
         let shell = test_shell();
@@ -4082,8 +4156,8 @@ mod tests {
 
         assert_eq!(row_corner_radius(metrics), shell.nested_radius());
         assert_eq!(
-            content_leading_inset(metrics),
-            shell.content_inset() + px(28.0)
+            content_leading_inset(metrics, panel_leading_columns(&entries)),
+            shell.content_inset() + px(6.0)
         );
         assert_eq!(metrics.panel_padding, shell.content_inset());
         assert_eq!(
@@ -4342,6 +4416,114 @@ mod tests {
             .expect("the open custom row icon was not refreshed");
         assert_eq!(default_icon.size, size(default_size, default_size));
         assert_eq!(scaled_icon.size, size(expected_size, expected_size));
+    }
+
+    struct ColumnsRoot {
+        entries: Vec<MenuEntry<&'static str>>,
+    }
+
+    impl Render for ColumnsRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Menu::new("columns-menu", "Actions", self.entries.clone())
+                .debug_selector("columns-menu")
+                .on_activate(|_, _, _| {})
+        }
+    }
+
+    fn open_columns_menu<'a>(
+        cx: &'a mut TestAppContext,
+        entries: Vec<MenuEntry<&'static str>>,
+    ) -> (MenuMetrics, &'a mut VisualTestContext) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(move |_, _| ColumnsRoot { entries });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("columns-menu").expect("menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let metrics = test_theme()
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics;
+        (metrics, cx)
+    }
+
+    fn label_inset(cx: &mut VisualTestContext, row: &'static str) -> Pixels {
+        let row_bounds = cx.debug_bounds(row).expect("menu row");
+        let label_selector: &'static str = format!("{row}-label").leak();
+        let label = cx.debug_bounds(label_selector).expect("menu row label");
+        label.left() - row_bounds.left()
+    }
+
+    fn test_icon(selector: &'static str) -> impl Fn(Rgba, Pixels) -> AnyElement + 'static {
+        move |foreground, size| {
+            div()
+                .debug_selector(move || selector.to_owned())
+                .size(size)
+                .bg(foreground)
+                .into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn command_menu_should_start_labels_at_the_row_padding(cx: &mut TestAppContext) {
+        let (metrics, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::action("New Tab", "new-tab").debug_selector("new-tab"),
+                MenuEntry::submenu("Move To", vec![MenuEntry::action("Window", "window")])
+                    .debug_selector("move-to"),
+                MenuEntry::separator(),
+                MenuEntry::action("Close", "close")
+                    .destructive(true)
+                    .debug_selector("close"),
+            ],
+        );
+
+        for row in ["new-tab", "move-to", "close"] {
+            assert_eq!(label_inset(cx, row), metrics.horizontal_padding, "{row}");
+        }
+    }
+
+    #[gpui::test]
+    fn unchecked_checkbox_should_reserve_the_state_column_for_its_panel(cx: &mut TestAppContext) {
+        let (metrics, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::checkbox("Wrap Lines", false, "wrap").debug_selector("wrap"),
+                MenuEntry::action("Reset", "reset").debug_selector("reset"),
+            ],
+        );
+
+        let expected = metrics.horizontal_padding + metrics.state_column_width + metrics.gap;
+        assert_eq!(label_inset(cx, "wrap"), expected);
+        assert_eq!(label_inset(cx, "reset"), expected);
+    }
+
+    #[gpui::test]
+    fn checked_row_should_keep_its_icon_beside_the_checkmark(cx: &mut TestAppContext) {
+        let (metrics, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::checkbox("Wrap Lines", true, "wrap")
+                    .icon(test_icon("wrap-icon"))
+                    .debug_selector("wrap"),
+                MenuEntry::action("Reset", "reset").debug_selector("reset"),
+            ],
+        );
+
+        let mark = cx.debug_bounds("wrap-mark").expect("checkmark");
+        let icon = cx
+            .debug_bounds("wrap-icon")
+            .expect("a checkmark must not replace the row icon");
+        assert!(mark.right() <= icon.left());
+        let expected = metrics.horizontal_padding
+            + metrics.state_column_width
+            + metrics.column_gap
+            + metrics.icon_column_width
+            + metrics.gap;
+        assert_eq!(label_inset(cx, "wrap"), expected);
+        assert_eq!(label_inset(cx, "reset"), expected);
     }
 
     #[test]

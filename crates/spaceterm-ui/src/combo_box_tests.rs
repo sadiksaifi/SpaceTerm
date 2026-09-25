@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ComboBox, ComboBoxAcceptance,
-    ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCopy, ComboBoxFallback, ComboBoxHandle,
+    ComboBoxActivationSource, ComboBoxCloseReason, ComboBoxCommand, ComboBoxCopy, ComboBoxHandle,
     ComboBoxItem, ComboBoxKeybindingProfile, ComboBoxLifecycleEvent, ComboBoxMetrics,
     ComboBoxPaint, ComboBoxTheme, CommandPalette, CommandPaletteEvent, CommandPaletteItem,
     CommandPaletteLifecycleEvent, CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme,
@@ -33,13 +33,21 @@ enum RecordedEvent {
         source: ComboBoxActivationSource,
         window_was_open: bool,
     },
+    Command {
+        command: u8,
+        query: String,
+        source: ComboBoxActivationSource,
+        window_was_open: bool,
+    },
 }
+
+type TestCommands = Rc<dyn Fn(&str) -> Vec<ComboBoxCommand<u8>>>;
 
 struct TestRoot {
     selected: Option<u8>,
     items: Vec<ComboBoxItem<u8>>,
-    fallback: Option<ComboBoxFallback<u8>>,
-    handle: ComboBoxHandle<u8>,
+    commands: Option<TestCommands>,
+    handle: ComboBoxHandle<u8, u8>,
     copy: ComboBoxCopy,
     disabled: bool,
     before_focus: FocusHandle,
@@ -54,20 +62,22 @@ impl Render for TestRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let lifecycle_events = Rc::clone(&self.events);
         let acceptance_events = Rc::clone(&self.events);
+        let command_events = Rc::clone(&self.events);
         let underlay_presses = Rc::clone(&self.underlay_presses);
-        let combo_box = ComboBox::new(
+        let commands = self.commands.clone();
+        let combo_box = ComboBox::with_commands(
             "test-combo-box",
             "Workspace type",
             self.selected,
             "Choose a workspace type",
             self.items.clone(),
+            move |query| {
+                commands
+                    .as_ref()
+                    .map_or_else(Vec::new, |commands| commands(query))
+            },
         )
-        .handle(self.handle.clone());
-        let combo_box = if let Some(fallback) = self.fallback.clone() {
-            combo_box.fallback(fallback)
-        } else {
-            combo_box
-        }
+        .handle(self.handle.clone())
         .copy(self.copy.clone())
         .disabled(self.disabled)
         .right_to_left(self.right_to_left)
@@ -89,6 +99,14 @@ impl Render for TestRoot {
                     source: acceptance.source(),
                     window_was_open: window_combo_box_is_open(window, cx),
                 });
+        })
+        .on_command(move |activation, window, cx| {
+            command_events.borrow_mut().push(RecordedEvent::Command {
+                command: *activation.command(),
+                query: activation.query().to_owned(),
+                source: activation.source(),
+                window_was_open: window_combo_box_is_open(window, cx),
+            });
         });
 
         div()
@@ -141,17 +159,27 @@ struct ModalReplacementRoot {
 }
 
 struct DialogComboBody {
-    handle: ComboBoxHandle<u8>,
+    handle: ComboBoxHandle<u8, u8>,
     accepted: Rc<Cell<Option<u8>>>,
+    ran: Rc<Cell<Option<u8>>>,
 }
 
 impl Render for DialogComboBody {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let accepted = Rc::clone(&self.accepted);
-        ComboBox::new("dialog-combo", "Dialog choice", None, "Choose", items())
-            .handle(self.handle.clone())
-            .debug_selector("dialog-combo-trigger")
-            .on_accept(move |event, _, _| accepted.set(Some(*event.item_id())))
+        let ran = Rc::clone(&self.ran);
+        ComboBox::with_commands(
+            "dialog-combo",
+            "Dialog choice",
+            None,
+            "Choose",
+            items(),
+            |_| vec![ComboBoxCommand::new(7, "Create")],
+        )
+        .handle(self.handle.clone())
+        .debug_selector("dialog-combo-trigger")
+        .on_accept(move |event, _, _| accepted.set(Some(*event.item_id())))
+        .on_command(move |event, _, _| ran.set(Some(*event.command())))
     }
 }
 
@@ -182,6 +210,7 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
     install_themes(cx);
     install_modal_test_support(cx);
     let accepted = Rc::new(Cell::new(None));
+    let ran = Rc::new(Cell::new(None));
     let handle = ComboBoxHandle::default();
     let (root, cx) = cx.add_window_view(|_, cx| DialogComboRoot {
         underlay: ComboBoxHandle::default(),
@@ -197,6 +226,7 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
             let body = cx.new(|_| DialogComboBody {
                 handle: handle.clone(),
                 accepted: Rc::clone(&accepted),
+                ran: Rc::clone(&ran),
             });
             crate::Dialog::new(
                 crate::ModalId::new("combo-dialog"),
@@ -240,9 +270,9 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
 
     assert!(cx.update(|window, cx| handle.open(window, cx)));
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
+    assert!(cx.update(|window, cx| handle.run_command(&7, window, cx)));
     cx.run_until_parked();
-    assert_eq!(accepted.get(), Some(3));
+    assert_eq!(ran.get(), Some(7));
 
     cx.simulate_click(trigger, Modifiers::none());
     cx.run_until_parked();
@@ -832,7 +862,7 @@ fn combo_box_window(
     let (root, cx) = cx.add_window_view(move |_, cx| TestRoot {
         selected,
         items,
-        fallback: None,
+        commands: None,
         handle: ComboBoxHandle::default(),
         copy: ComboBoxCopy::default(),
         disabled,
@@ -848,10 +878,11 @@ fn combo_box_window(
     (root, events, underlay_presses, cx)
 }
 
-fn fallback_combo_box_window(
+fn command_combo_box_window(
     cx: &mut TestAppContext,
-    fallback: ComboBoxFallback<u8>,
+    commands: impl Fn(&str) -> Vec<ComboBoxCommand<u8>> + 'static,
 ) -> ComboBoxWindow<'_> {
+    let commands: TestCommands = Rc::new(commands);
     install_themes(cx);
     let events = Rc::new(RefCell::new(Vec::new()));
     let underlay_presses = Rc::new(Cell::new(0));
@@ -860,7 +891,7 @@ fn fallback_combo_box_window(
     let (root, cx) = cx.add_window_view(move |_, cx| TestRoot {
         selected: None,
         items: items(),
-        fallback: Some(fallback),
+        commands: Some(commands),
         handle: ComboBoxHandle::default(),
         copy: ComboBoxCopy::default(),
         disabled: false,
@@ -1423,50 +1454,113 @@ fn printable_input_on_the_trigger_should_open_with_that_query(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn pinned_fallback_should_persist_after_filtering_and_receive_the_exact_query(
-    cx: &mut TestAppContext,
-) {
+fn commands_should_persist_after_filtering_and_run_with_the_exact_query(cx: &mut TestAppContext) {
     let queries = Rc::new(RefCell::new(Vec::new()));
     let recorded_queries = Rc::clone(&queries);
-    let fallback = ComboBoxFallback::new(move |query| {
+    let (_, events, _, cx) = command_combo_box_window(cx, move |query| {
         recorded_queries.borrow_mut().push(query.to_owned());
-        ComboBoxItem::new(9, format!("Create {query}")).debug_selector("combo-row-fallback")
+        vec![ComboBoxCommand::new(9, format!("Create {query}")).debug_selector("combo-row-command")]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     focus_trigger(cx);
 
-    cx.simulate_keystrokes("x");
+    cx.simulate_keystrokes("x space");
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("combo-row-local").is_none());
-    assert!(cx.debug_bounds("combo-row-fallback").is_some());
-    assert_eq!(queries.borrow().last().map(String::as_str), Some("x"));
+    assert!(cx.debug_bounds("combo-row-command").is_some());
+    assert_eq!(queries.borrow().last().map(String::as_str), Some("x "));
 
     events.borrow_mut().clear();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 9,
-        source: ComboBoxActivationSource::Keyboard,
-        window_was_open: false,
-    }));
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                ComboBoxCloseReason::Accepted
+            )),
+            RecordedEvent::Command {
+                command: 9,
+                query: "x ".to_owned(),
+                source: ComboBoxActivationSource::Keyboard,
+                window_was_open: false,
+            },
+        ]
+    );
+}
+
+fn label_inset(cx: &mut VisualTestContext, row: &'static str, label: &'static str) -> gpui::Pixels {
+    let row = cx.debug_bounds(row).expect("row should render");
+    let label = cx.debug_bounds(label).expect("row label should render");
+    label.left() - row.left()
+}
+
+// Default ComboBoxMetrics: 10 px row padding, a 16 px checkmark column, a 4 px column gap, an
+// 18 px icon column, and a 6 px gap before the label.
+const ROW_PADDING: f32 = 10.0;
+const CHECKMARK_COLUMN: f32 = 16.0 + 4.0;
+const ICON_COLUMN: f32 = 18.0 + 6.0;
+
+#[gpui::test]
+fn commands_should_reserve_no_checkmark_column(cx: &mut TestAppContext) {
+    let (root, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    root.update(cx, |root, cx| {
+        root.commands = Some(Rc::new(|_| {
+            vec![
+                ComboBoxCommand::new(8, "New Workspace")
+                    .leading_icon(|foreground, size| {
+                        div().size(size).bg(foreground).into_any_element()
+                    })
+                    .debug_selector("command-new"),
+                ComboBoxCommand::new(9, "Import").debug_selector("command-import"),
+            ]
+        }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+
+    let choice = px(ROW_PADDING + CHECKMARK_COLUMN + ICON_COLUMN);
+    let command = px(ROW_PADDING + ICON_COLUMN);
+    assert_eq!(
+        label_inset(cx, "combo-row-local", "combo-box-row-0-label"),
+        choice
+    );
+    assert_eq!(
+        label_inset(cx, "command-new", "combo-box-row-4-label"),
+        command
+    );
+    assert_eq!(
+        label_inset(cx, "command-import", "combo-box-row-5-label"),
+        command
+    );
 }
 
 #[gpui::test]
-fn ordinary_match_should_take_precedence_while_fallback_stays_pinned_last(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::new(|query| {
-        ComboBoxItem::new(9, format!("Create {query}")).debug_selector("combo-row-fallback")
-    });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
+fn chooser_without_a_selection_should_reserve_no_checkmark_column(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, None, items(), false);
     open_by_pointer(cx);
 
-    let ordinary = cx
+    assert_eq!(
+        label_inset(cx, "combo-row-local", "combo-box-row-0-label"),
+        px(ROW_PADDING + ICON_COLUMN)
+    );
+}
+
+#[gpui::test]
+fn choice_match_should_take_precedence_while_commands_stay_last(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = command_combo_box_window(cx, |query| {
+        vec![ComboBoxCommand::new(9, format!("Create {query}")).debug_selector("combo-row-command")]
+    });
+    open_by_pointer(cx);
+
+    let choice = cx
         .debug_bounds("combo-row-zellij")
-        .expect("the last ordinary row should render");
-    let fallback = cx
-        .debug_bounds("combo-row-fallback")
-        .expect("the pinned fallback should render");
-    assert!(fallback.top() >= ordinary.bottom());
+        .expect("the last choice should render");
+    let command = cx
+        .debug_bounds("combo-row-command")
+        .expect("the command should render");
+    assert!(command.top() >= choice.bottom());
 
     events.borrow_mut().clear();
     cx.simulate_keystrokes("enter");
@@ -1479,47 +1573,46 @@ fn ordinary_match_should_take_precedence_while_fallback_stays_pinned_last(cx: &m
 }
 
 #[gpui::test]
-fn pointer_should_accept_the_pinned_fallback(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::new(|query| {
-        ComboBoxItem::new(9, format!("Create {query}")).debug_selector("combo-row-fallback")
+fn pointer_should_run_a_command(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = command_combo_box_window(cx, |query| {
+        vec![ComboBoxCommand::new(9, format!("Create {query}")).debug_selector("combo-row-command")]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     open_by_pointer(cx);
     events.borrow_mut().clear();
-    let fallback = cx
-        .debug_bounds("combo-row-fallback")
-        .expect("the fallback row should render");
+    let command = cx
+        .debug_bounds("combo-row-command")
+        .expect("the command row should render");
 
-    cx.simulate_click(fallback.center(), Modifiers::none());
+    cx.simulate_click(command.center(), Modifiers::none());
     cx.run_until_parked();
 
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 9,
+    assert!(events.borrow().contains(&RecordedEvent::Command {
+        command: 9,
+        query: String::new(),
         source: ComboBoxActivationSource::Pointer,
         window_was_open: false,
     }));
 }
 
 #[gpui::test]
-fn disabled_pinned_fallback_should_render_without_becoming_provisional(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::new(|query| {
-        ComboBoxItem::new(9, format!("Create {query}"))
-            .disabled(true)
-            .debug_selector("combo-row-fallback")
+fn disabled_command_should_render_without_becoming_provisional(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = command_combo_box_window(cx, |query| {
+        vec![
+            ComboBoxCommand::new(9, format!("Create {query}"))
+                .disabled(true)
+                .debug_selector("combo-row-command"),
+        ]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     focus_trigger(cx);
 
     cx.simulate_keystrokes("x enter");
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds("combo-row-fallback").is_some());
-    assert!(
-        events
-            .borrow()
-            .iter()
-            .all(|event| !matches!(event, RecordedEvent::Accepted { .. }))
-    );
+    assert!(cx.debug_bounds("combo-row-command").is_some());
+    assert!(events.borrow().iter().all(|event| !matches!(
+        event,
+        RecordedEvent::Accepted { .. } | RecordedEvent::Command { .. }
+    )));
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
 
@@ -2212,7 +2305,8 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
             RecordedEvent::Lifecycle(_)
             | RecordedEvent::PaletteOpened
-            | RecordedEvent::ModalOpened => None,
+            | RecordedEvent::ModalOpened
+            | RecordedEvent::Command { .. } => None,
         })
         .expect("Page Up should leave an acceptible provisional item");
     assert!(page_up_id < 30);
@@ -2228,43 +2322,45 @@ fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestApp
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
             RecordedEvent::Lifecycle(_)
             | RecordedEvent::PaletteOpened
-            | RecordedEvent::ModalOpened => None,
+            | RecordedEvent::ModalOpened
+            | RecordedEvent::Command { .. } => None,
         })
         .expect("Page Down should leave an acceptible provisional item");
     assert!(page_down_id > 30);
 }
 
 #[gpui::test]
-fn page_navigation_should_include_the_pinned_group_separator(cx: &mut TestAppContext) {
+fn page_navigation_should_include_the_command_group_separator(cx: &mut TestAppContext) {
     // The 213 px viewport fits seven plain 30 px rows, but not the extra 9 px separator.
-    for (selected, key, expected) in [(5, "pagedown", 100), (101, "pageup", 6)] {
-        let ordinary = (1..=10)
+    for (keys, expected) in [("pagedown", 100), ("end pageup", 6)] {
+        let choices = (1..=10)
             .map(|id| ComboBoxItem::new(id, format!("Workspace {id}")))
             .collect();
-        let (root, events, _, cx) = combo_box_window(cx, Some(selected), ordinary, false);
+        let (root, events, _, cx) = combo_box_window(cx, Some(5), choices, false);
         root.update(cx, |root, cx| {
-            root.fallback = Some(ComboBoxFallback::pinned_rows(|_| {
+            root.commands = Some(Rc::new(|_| {
                 vec![
-                    ComboBoxItem::new(100, "Local Workspace"),
-                    ComboBoxItem::new(101, "Remote Workspace"),
+                    ComboBoxCommand::new(100, "Local Workspace"),
+                    ComboBoxCommand::new(101, "Remote Workspace"),
                 ]
             }));
             cx.notify();
         });
         cx.run_until_parked();
         open_by_pointer(cx);
-        cx.simulate_keystrokes(key);
+        cx.simulate_keystrokes(keys);
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         let accepted = events.borrow().iter().find_map(|event| match event {
             RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
+            RecordedEvent::Command { command, .. } => Some(*command),
             _ => None,
         });
         assert_eq!(
             accepted,
             Some(expected),
-            "{key} must include the separator height"
+            "{keys} must include the separator height"
         );
     }
 }
@@ -3102,57 +3198,10 @@ fn disabled_icon_trigger_should_not_present_tooltip_help(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn no_match_fallbacks_should_hide_until_an_unmatched_nonblank_query(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::when_no_matches(|_| {
-        vec![
-            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
-            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
-        ]
+fn command_should_reject_a_pointer_release_after_query_changes(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = command_combo_box_window(cx, |_| {
+        vec![ComboBoxCommand::new(9, "Create").debug_selector("create-workspace")]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
-    open_by_pointer(cx);
-    assert!(cx.debug_bounds("create-local").is_none());
-    cx.simulate_keystrokes("l o c a l");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("create-local").is_none());
-    cx.simulate_keystrokes("cmd-a x");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("create-local").is_some());
-    assert!(cx.debug_bounds("create-remote").is_some());
-    cx.simulate_keystrokes("down enter");
-    cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 9,
-        source: ComboBoxActivationSource::Keyboard,
-        window_was_open: false,
-    }));
-}
-
-#[gpui::test]
-fn no_match_fallbacks_should_hide_for_whitespace_when_there_are_no_items(cx: &mut TestAppContext) {
-    let (root, _, _, cx) = combo_box_window(cx, None, Vec::new(), false);
-    cx.update(|_, cx| {
-        root.update(cx, |root, cx| {
-            root.fallback = Some(ComboBoxFallback::when_no_matches(|_| {
-                vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
-            }));
-            cx.notify();
-        })
-    });
-    cx.run_until_parked();
-    open_by_pointer(cx);
-    cx.simulate_keystrokes("space space");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("create-workspace").is_none());
-    assert!(cx.debug_bounds("combo-box-empty").is_some());
-}
-
-#[gpui::test]
-fn no_match_fallbacks_should_reject_a_pointer_release_after_query_changes(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::when_no_matches(|_| {
-        vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
-    });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     open_by_pointer(cx);
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
@@ -3166,7 +3215,7 @@ fn no_match_fallbacks_should_reject_a_pointer_release_after_query_changes(cx: &m
         !events
             .borrow()
             .iter()
-            .any(|event| matches!(event, RecordedEvent::Accepted { .. }))
+            .any(|event| matches!(event, RecordedEvent::Command { .. }))
     );
 }
 
@@ -3206,14 +3255,23 @@ fn handle_should_not_open_a_removed_trigger(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn handle_accept_matching_should_use_normal_acceptance_without_highlight(cx: &mut TestAppContext) {
+fn handle_run_command_should_use_normal_activation_without_highlight(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    root.update(cx, |root, cx| {
+        root.commands = Some(Rc::new(|_| {
+            vec![
+                ComboBoxCommand::new(8, "Local Workspace"),
+                ComboBoxCommand::new(9, "Remote Workspace"),
+            ]
+        }));
+        cx.notify();
+    });
     let handle = cx.update(|_, cx| root.read(cx).handle.clone());
     cx.update(|window, cx| root.read(cx).before_focus.focus(window));
     assert!(cx.update(|window, cx| handle.open(window, cx)));
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
-    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 3, window, cx)));
+    assert!(cx.update(|window, cx| handle.run_command(&9, window, cx)));
+    assert!(!cx.update(|window, cx| handle.run_command(&9, window, cx)));
     cx.run_until_parked();
     assert!(cx.update(|window, cx| root.read(cx).before_focus.is_focused(window)));
     assert_eq!(
@@ -3223,8 +3281,9 @@ fn handle_accept_matching_should_use_normal_acceptance_without_highlight(cx: &mu
             RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
                 ComboBoxCloseReason::Accepted
             )),
-            RecordedEvent::Accepted {
-                item_id: 3,
+            RecordedEvent::Command {
+                command: 9,
+                query: String::new(),
                 source: ComboBoxActivationSource::Keyboard,
                 window_was_open: false
             },
@@ -3233,19 +3292,30 @@ fn handle_accept_matching_should_use_normal_acceptance_without_highlight(cx: &mu
 }
 
 #[gpui::test]
-fn handle_accept_matching_should_reject_disabled_and_filtered_choices(cx: &mut TestAppContext) {
+fn handle_run_command_should_reject_disabled_and_absent_commands(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    root.update(cx, |root, cx| {
+        root.commands = Some(Rc::new(|query| {
+            let mut commands = vec![ComboBoxCommand::new(8, "Import").disabled(true)];
+            if !query.is_empty() {
+                commands.push(ComboBoxCommand::new(9, format!("Create {query}")));
+            }
+            commands
+        }));
+        cx.notify();
+    });
     let handle = cx.update(|_, cx| root.read(cx).handle.clone());
     assert!(cx.update(|window, cx| handle.open(window, cx)));
     cx.run_until_parked();
-    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 2, window, cx)));
+    assert!(!cx.update(|window, cx| handle.run_command(&8, window, cx)));
+    assert!(!cx.update(|window, cx| handle.run_command(&9, window, cx)));
     cx.simulate_keystrokes("s s h");
     cx.run_until_parked();
-    assert!(!cx.update(|window, cx| handle.accept_matching(|id| *id == 1, window, cx)));
-    cx.simulate_keystrokes("enter");
+    assert!(cx.update(|window, cx| handle.run_command(&9, window, cx)));
     cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 3,
+    assert!(events.borrow().contains(&RecordedEvent::Command {
+        command: 9,
+        query: "ssh".to_owned(),
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));
@@ -3259,31 +3329,6 @@ fn handle_should_not_open_a_disabled_trigger(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn no_match_fallbacks_should_yield_to_a_new_ordinary_match(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::when_no_matches(|_| {
-        vec![ComboBoxItem::new(9, "Create").debug_selector("create-workspace")]
-    });
-    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
-    open_by_pointer(cx);
-    cx.simulate_keystrokes("x");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("create-workspace").is_some());
-    root.update(cx, |root, cx| {
-        root.items.push(ComboBoxItem::new(7, "Existing x"));
-        cx.notify();
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("Existing x").is_some());
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 7,
-        source: ComboBoxActivationSource::Keyboard,
-        window_was_open: false,
-    }));
-}
-
-#[gpui::test]
 fn handle_should_not_open_its_control_in_another_window(cx: &mut TestAppContext) {
     let (root, _, _, first) = combo_box_window(cx, None, items(), false);
     let handle = first.update(|_, cx| root.read(cx).handle.clone());
@@ -3294,14 +3339,13 @@ fn handle_should_not_open_its_control_in_another_window(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn pinned_rows_should_follow_ordinary_matches_when_query_is_empty(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::pinned_rows(|_| {
+fn commands_should_follow_choices_when_query_is_empty(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = command_combo_box_window(cx, |_| {
         vec![
-            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
-            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+            ComboBoxCommand::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxCommand::new(9, "Remote Workspace").debug_selector("create-remote"),
         ]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     open_by_pointer(cx);
     let ordinary = cx.debug_bounds("combo-row-zellij").unwrap();
     let local = cx.debug_bounds("create-local").unwrap();
@@ -3318,19 +3362,16 @@ fn pinned_rows_should_follow_ordinary_matches_when_query_is_empty(cx: &mut TestA
 }
 
 #[gpui::test]
-fn pinned_rows_should_allow_keyboard_creation_with_a_matching_existing_name(
-    cx: &mut TestAppContext,
-) {
+fn commands_should_allow_keyboard_creation_with_a_matching_existing_name(cx: &mut TestAppContext) {
     let queries = Rc::new(RefCell::new(Vec::new()));
     let captured_queries = queries.clone();
-    let fallback = ComboBoxFallback::pinned_rows(move |query| {
+    let (_, events, _, cx) = command_combo_box_window(cx, move |query| {
         captured_queries.borrow_mut().push(query.to_owned());
         vec![
-            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
-            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+            ComboBoxCommand::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxCommand::new(9, "Remote Workspace").debug_selector("create-remote"),
         ]
     });
-    let (_, events, _, cx) = fallback_combo_box_window(cx, fallback);
     open_by_pointer(cx);
     cx.simulate_keystrokes("L o c a l space W o r k s p a c e");
     cx.run_until_parked();
@@ -3345,27 +3386,27 @@ fn pinned_rows_should_allow_keyboard_creation_with_a_matching_existing_name(
     );
     cx.simulate_keystrokes("down enter");
     cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 8,
+    assert!(events.borrow().contains(&RecordedEvent::Command {
+        command: 8,
+        query: "Local Workspace".to_owned(),
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));
 }
 
 #[gpui::test]
-fn macos_control_navigation_should_wrap_across_filtered_results_and_pinned_rows(
+fn macos_control_navigation_should_wrap_across_filtered_results_and_commands(
     cx: &mut TestAppContext,
 ) {
     let queries = Rc::new(RefCell::new(Vec::new()));
     let captured_queries = Rc::clone(&queries);
-    let fallback = ComboBoxFallback::pinned_rows(move |query| {
+    let (root, events, _, cx) = command_combo_box_window(cx, move |query| {
         captured_queries.borrow_mut().push(query.to_owned());
         vec![
-            ComboBoxItem::new(8, "Local Workspace").debug_selector("create-local"),
-            ComboBoxItem::new(9, "Remote Workspace").debug_selector("create-remote"),
+            ComboBoxCommand::new(8, "Local Workspace").debug_selector("create-local"),
+            ComboBoxCommand::new(9, "Remote Workspace").debug_selector("create-remote"),
         ]
     });
-    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
     install_macos_combo_box_profile(cx);
     open_by_pointer(cx);
     cx.simulate_keystrokes("L o c a l space W o r k s p a c e ctrl-p");
@@ -3382,22 +3423,22 @@ fn macos_control_navigation_should_wrap_across_filtered_results_and_pinned_rows(
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 9,
+    assert!(events.borrow().contains(&RecordedEvent::Command {
+        command: 9,
+        query: "Local Workspace".to_owned(),
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));
 }
 
 #[gpui::test]
-fn pinned_selection_should_survive_ordinary_item_metadata_refresh(cx: &mut TestAppContext) {
-    let fallback = ComboBoxFallback::pinned_rows(|_| {
+fn command_selection_should_survive_choice_metadata_refresh(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = command_combo_box_window(cx, |_| {
         vec![
-            ComboBoxItem::new(8, "Local Workspace"),
-            ComboBoxItem::new(9, "Remote Workspace"),
+            ComboBoxCommand::new(8, "Local Workspace"),
+            ComboBoxCommand::new(9, "Remote Workspace"),
         ]
     });
-    let (root, events, _, cx) = fallback_combo_box_window(cx, fallback);
     open_by_pointer(cx);
     cx.simulate_keystrokes("L o c a l down");
     cx.run_until_parked();
@@ -3409,8 +3450,9 @@ fn pinned_selection_should_survive_ordinary_item_metadata_refresh(cx: &mut TestA
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 8,
+    assert!(events.borrow().contains(&RecordedEvent::Command {
+        command: 8,
+        query: "Local".to_owned(),
         source: ComboBoxActivationSource::Keyboard,
         window_was_open: false,
     }));
