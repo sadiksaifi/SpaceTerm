@@ -2,6 +2,51 @@ use super::*;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
 use std::hint::black_box;
 
+/// Measures repeated snapshot checks, including cursor-only presentation changes.
+#[test]
+#[ignore = "explicit optimized performance fixture; run mise run bench:one performance_snapshot_checks"]
+fn performance_snapshot_checks() {
+    assert!(!black_box(cfg!(debug_assertions)), "run in release mode");
+    const FRAMES: usize = 20_000;
+    for cursor_changes in [false, true] {
+        for repetition in 0..7 {
+            let geometry = TerminalGeometry::from_grid(
+                CellGridSize::new(120, 40),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            );
+            let mut emulator = TerminalEmulator::new(geometry).unwrap();
+            emulator.feed(b"snapshot fixture");
+            black_box(emulator.snapshot().unwrap().unwrap());
+            for frame in 0..100 {
+                if cursor_changes {
+                    emulator.feed(if frame % 2 == 0 {
+                        b"\x1b[1;1H"
+                    } else {
+                        b"\x1b[1;2H"
+                    });
+                }
+                black_box(emulator.snapshot().unwrap());
+            }
+            let started = Instant::now();
+            for frame in 0..FRAMES {
+                if cursor_changes {
+                    emulator.feed(black_box(if frame % 2 == 0 {
+                        &b"\x1b[1;1H"[..]
+                    } else {
+                        &b"\x1b[1;2H"[..]
+                    }));
+                }
+                black_box(emulator.snapshot().unwrap());
+            }
+            println!(
+                "{{\"fixture\":\"snapshot_checks\",\"cursor_changes\":{cursor_changes},\"repetition\":{repetition},\"frames\":{FRAMES},\"ns_per_frame\":{}}}",
+                started.elapsed().as_nanos() / FRAMES as u128,
+            );
+        }
+    }
+}
+
 /// Measures parser plus immutable Screen construction, excluding GPUI and PTY I/O.
 #[test]
 #[ignore = "explicit optimized performance fixture; run mise run bench:one performance_snapshot"]

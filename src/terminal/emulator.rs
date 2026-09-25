@@ -2288,18 +2288,31 @@ impl TerminalEmulator {
         };
 
         let palette_overrides = self.terminal.color_palette_overrides()?;
-        let configured_colors = Arc::new(self.applied_appearance.appearance.colors.clone());
+        let palette = colors.palette.map(Color::from);
+        let palette_overrides =
+            std::array::from_fn(|index| palette_overrides.is_set(PaletteIndex(index as u8)));
+        let cached_colors = self.cached_colors.as_ref();
+        let configured_colors = cached_colors
+            .filter(|cached| {
+                cached.configured.as_ref() == &self.applied_appearance.appearance.colors
+            })
+            .map(|cached| Arc::clone(&cached.configured))
+            .unwrap_or_else(|| Arc::new(self.applied_appearance.appearance.colors.clone()));
         let terminal_colors = TerminalColorsSnapshot {
             foreground: colors.foreground.into(),
             background: colors.background.into(),
-            palette: Arc::new(colors.palette.map(Color::from)),
+            palette: cached_colors
+                .filter(|cached| cached.palette.as_ref() == &palette)
+                .map(|cached| Arc::clone(&cached.palette))
+                .unwrap_or_else(|| Arc::new(palette)),
             reversed: self.terminal.mode(Mode::REVERSE_COLORS)?,
             foreground_source: color_source(self.terminal.fg_color_overridden()?),
             background_source: color_source(self.terminal.bg_color_overridden()?),
             cursor_source: color_source(self.terminal.cursor_color_overridden()?),
-            palette_overrides: Arc::new(std::array::from_fn(|index| {
-                palette_overrides.is_set(PaletteIndex(index as u8))
-            })),
+            palette_overrides: cached_colors
+                .filter(|cached| cached.palette_overrides.as_ref() == &palette_overrides)
+                .map(|cached| Arc::clone(&cached.palette_overrides))
+                .unwrap_or_else(|| Arc::new(palette_overrides)),
             configured: Arc::clone(&configured_colors),
             bold_as_bright: self.applied_appearance.appearance.bold_as_bright,
         };
