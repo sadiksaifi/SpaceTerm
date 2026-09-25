@@ -481,6 +481,8 @@ pub(crate) fn open(
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
+    // Request activation with the menu installed before GPUI shows the native window.
+    cx.activate(true);
     let result = cx.open_window(
         WindowOptions {
             window_background: crate::ui::appearance_runtime::window_background(cx),
@@ -528,7 +530,6 @@ pub(crate) fn open(
     );
 
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
-    cx.activate(true);
     Ok(window)
 }
 

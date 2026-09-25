@@ -46,3 +46,11 @@ on this host. Do not claim gains from those trials. Unfocused-visible windows,
 first-frame timing, first Settings opening, Pane scaling, graphics lifetime, GPU
 execution/residency, and remote idle polling remain explicit follow-up measurements
 in the inventory. No production change was selected for those unmeasured areas.
+
+## Menu startup follow-up
+
+The user approved requesting application activation before native window creation.
+The change passed 21 application tests, lint, format and an optimized build. Two
+additional GPT-6 Sol high reviews found no material issue. The source development
+app opened and its File menu worked. Exact first-frame menu ordering remains
+unverified; see [menu startup timing](performance-menu-startup.md).
