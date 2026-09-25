@@ -393,6 +393,10 @@ arg "[state]" help="focused or hidden" default="focused"
 '''
 run = 'python3 scripts/measure-macos-application-resources.py "${usage_baseline?}" "${usage_candidate?}" --mode "${usage_mode}" --repetitions "${usage_repetitions}" --state "${usage_state}"'
 
+[tasks."bench:macos:exit-observation"]
+description = "Compare native process exit observation with polling using owned local children"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --bin spaceterm --release --features macos-native-tests,gpui/inspector --locked macos_ssh_exit_observer_resources -- --ignored --nocapture --test-threads=1"
+
 [tasks."package:macos"]
 description = "Build and verify the macOS app and disk image"
 usage = '''

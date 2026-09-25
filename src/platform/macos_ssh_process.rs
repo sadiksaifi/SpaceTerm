@@ -5,9 +5,11 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 use crate::ssh::process::{
-    ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessAdapter, SshProcessMechanismError,
-    SshProcessPipes, SshProcessSpawnRequest, SshProcessStdio,
+    ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessAdapter, SshProcessExitObservation,
+    SshProcessMechanismError, SshProcessPipes, SshProcessSpawnRequest, SshProcessStdio,
 };
+
+mod exit_observation;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct MacOsSshProcessAdapter;
@@ -112,6 +114,10 @@ impl SshProcessAdapter for MacOsSshProcessAdapter {
             ProcessSignal::Kill => libc::SIGKILL,
         };
         signal_group(process.process_group, signal)
+    }
+
+    fn observe_exit(&self, process: &mut Self::Process) -> Option<SshProcessExitObservation> {
+        exit_observation::observe(self, process)
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
@@ -289,6 +295,30 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(group > 0 && group == process_group && initial.is_none());
+    }
+
+    #[test]
+    fn macos_collected_process_exit_should_remain_observable() {
+        let adapter = MacOsSshProcessAdapter;
+        let mut spawned = adapter.spawn(shell_request("exit 7")).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let exit = loop {
+            if let Some(exit) = adapter.try_status(spawned.process_mut()).unwrap() {
+                break exit;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture child did not exit"
+            );
+            std::thread::yield_now();
+        };
+        let observation = adapter.observe_exit(spawned.process_mut());
+        adapter.reap(spawned.into_process()).unwrap();
+        assert_eq!(exit.code(), Some(7));
+        assert!(
+            observation.is_some(),
+            "native child exit observation should be available"
+        );
     }
 
     #[test]
