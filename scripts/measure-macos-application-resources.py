@@ -30,7 +30,7 @@ BENCHMARK_FAILURES = frozenset({
     "owned application window count was not one",
     "owned application was not fully launched",
     "hidden application state was not verified",
-    "application window geometry changed during capture",
+    "application window geometry changed during comparison",
     "application exited before the workload reported readiness",
     "timed out waiting for the owned workload",
     "resource sampler failed",
@@ -177,7 +177,7 @@ def validate_window_state(state, before, after):
         if state == "hidden" and (observation["frontmost"] or bounds or not observation["hidden"]):
             raise RuntimeError("hidden application state was not verified")
     if state == "focused" and before["window_bounds_points"] != after["window_bounds_points"]:
-        raise RuntimeError("application window geometry changed during capture")
+        raise RuntimeError("application window geometry changed during comparison")
 
 
 def wait_for_file(path, app, timeout):
@@ -231,7 +231,7 @@ def stage_binary(source, destination):
     return binary
 
 
-def run_trial(label, binary, mode, state, warmup, capture, interval, rate, root):
+def run_trial(label, binary, mode, state, warmup, capture, interval, rate, root, reference=None):
     trial_root = root / f"{label}-{mode}-{state}-{time.monotonic_ns()}"
     trial_root.mkdir(mode=0o700)
     environment = os.environ.copy()
@@ -284,7 +284,7 @@ def run_trial(label, binary, mode, state, warmup, capture, interval, rate, root)
             time.sleep(1)
         before = observe_window_state(app.pid)
         try:
-            validate_window_state(state, before, before)
+            validate_window_state(state, reference if reference is not None else before, before)
         except RuntimeError:
             print(json.dumps({"event": "invalid_state", "binary": label, "mode": mode,
                               "state": state, "phase": "before", "app_alive": app.poll() is None,
@@ -373,11 +373,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="spaceterm-application-bench-") as temporary:
         root = Path(temporary)
         binaries = {label: stage_binary(source, root / label) for label, source in sources.items()}
+        reference = None
         for repetition in range(args.repetitions):
             order = ("baseline", "candidate") if repetition % 2 == 0 else ("candidate", "baseline")
             for label in order:
                 result = run_trial(label, binaries[label], args.mode, args.state, args.warmup,
-                                   args.capture, args.interval, args.rate, root)
+                                   args.capture, args.interval, args.rate, root, reference)
+                if reference is None:
+                    reference = result["window_before"]
                 result["repetition"] = repetition + 1
                 print(json.dumps(result), flush=True)
 
