@@ -1,6 +1,15 @@
 # Performance progress
 
-## Current state
+## Second pass
+
+The user renewed the performance goal on 2026-09-26. Three research agents audited
+remaining launch, rendering, and Terminal Emulator costs. Color snapshot reuse
+and glyph color lookup are selected after optimized measurements. A font catalog
+experiment was rejected after its complete production path proved slower.
+See [second-pass work](performance-round2.md), [results](performance-round2-results.md),
+and [independent review](performance-round2-review.md) for current state.
+
+## First pass
 
 The measured implementation batch is complete on `perf/application-resources`.
 PR [#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) is open and unmerged.
