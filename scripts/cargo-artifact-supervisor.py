@@ -18,8 +18,14 @@ MONITOR_INTERVAL_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.05
 TERMINATE_GRACE_SECONDS = 1.0
 KILL_GRACE_SECONDS = 5.0
+MEASUREMENT_ATTEMPTS = 3
+MEASUREMENT_RETRY_SECONDS = 0.1
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 OWNER_FILE = ".spaceterm-cargo-target-owner"
+
+
+class ArtifactMeasurementError(Exception):
+    """No complete artifact measurement was available after bounded retries."""
 
 
 class Supervisor:
@@ -131,23 +137,30 @@ class Supervisor:
         return stopped
 
     def target_size_kib(self) -> int:
-        if not self.target_dir.is_dir():
-            return 0
-        try:
-            result = subprocess.run(
-                ["du", "-sk", str(self.target_dir)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if self.received_signal is not None:
+        for attempt in range(MEASUREMENT_ATTEMPTS):
+            if self.received_signal is not None or not self.target_dir.is_dir():
                 return 0
-            if result.returncode != 0:
-                raise ValueError
-            return int(result.stdout.split()[0])
-        except (OSError, ValueError, IndexError):
-            print("error: could not measure Cargo artifact usage", file=sys.stderr)
-            raise SystemExit(2) from None
+            try:
+                result = subprocess.run(
+                    ["du", "-sk", str(self.target_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if self.received_signal is not None:
+                    return 0
+                # Cargo can remove temporary files during traversal. Never use
+                # the partial count from a failed traversal to authorize cleanup.
+                if result.returncode != 0:
+                    raise ValueError
+                size = int(result.stdout.split()[0])
+                if size < 0:
+                    raise ValueError
+                return size
+            except (OSError, ValueError, IndexError):
+                if attempt + 1 < MEASUREMENT_ATTEMPTS:
+                    time.sleep(MEASUREMENT_RETRY_SECONDS)
+        raise ArtifactMeasurementError from None
 
     def target_is_verified(self) -> bool:
         try:
@@ -230,6 +243,26 @@ class Supervisor:
         return 128 - status if status < 0 else status
 
     def run(self, command: list[str]) -> int:
+        try:
+            status = self._run(command)
+        except ArtifactMeasurementError:
+            print("error: could not measure Cargo artifact usage", file=sys.stderr)
+            status = 2
+        finally:
+            # Retain group ownership until every exit path has stopped its
+            # writers. Measurement failures must not orphan a running build.
+            if self.active_process is not None:
+                if not self.terminate_active_group():
+                    print(
+                        "warning: guarded command termination could not be verified",
+                        file=sys.stderr,
+                    )
+                self._clear_active()
+        if self.received_signal is not None:
+            return 128 + self.received_signal
+        return status
+
+    def _run(self, command: list[str]) -> int:
         if not self.ensure_target_owned():
             return 2
         if self.target_size_kib() > self.budget_kib:

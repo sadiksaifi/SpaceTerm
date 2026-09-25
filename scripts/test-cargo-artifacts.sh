@@ -20,6 +20,111 @@ make_oversized_target() {
     dd if=/dev/zero of="$target/artifact" bs=1048576 count=2 >/dev/null 2>&1
 }
 
+# Exercise measurement failures with an actual owned process group. The fixture
+# always cleans up its own children, including when the supervisor is broken.
+python3 - "$script_dir/cargo-artifact-supervisor.py" "$repo_dir" "$temp_root" <<'PY'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+supervisor, repo, root = sys.argv[1:]
+failures = []
+
+
+def live(pid):
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True
+    )
+    return result.returncode == 0 and any(
+        line.strip() and not line.strip().startswith("Z")
+        for line in result.stdout.splitlines()
+    )
+
+
+for mode in ("transient", "persistent"):
+    fixture = Path(root) / f"measurement-{mode}"
+    target = fixture / "target"
+    target.mkdir(parents=True)
+    (target / ".spaceterm-cargo-target-owner").write_text(repo + "\n")
+    (target / "retained-artifact").write_text("must survive an unknown size")
+    binary = fixture / "bin"
+    binary.mkdir()
+    du = binary / "du"
+    du.write_text("""#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+root = Path(os.environ["MEASUREMENT_FIXTURE"])
+if (root / "ready").exists():
+    counter = root / "failures"
+    count = int(counter.read_text()) if counter.exists() else 0
+    if os.environ["MEASUREMENT_MODE"] == "persistent" or count < 2:
+        counter.write_text(str(count + 1))
+        print("999999 partial-result")
+        sys.exit(1)
+    (root / "recovered").touch()
+print("0 complete-result")
+""")
+    du.chmod(0o755)
+    command = fixture / "command.py"
+    command.write_text("""import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+root = Path(os.environ["MEASUREMENT_FIXTURE"])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+(root / "pids").write_text(f"{os.getpid()} {child.pid}")
+(root / "ready").touch()
+while not (root / "recovered").exists():
+    time.sleep(0.02)
+child.kill()
+child.wait()
+sys.exit(37)
+""")
+    env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+               MEASUREMENT_FIXTURE=str(fixture), MEASUREMENT_MODE=mode)
+    errors = (fixture / "stderr").open("wb")
+    process = subprocess.Popen(
+        [sys.executable, supervisor, "--repo-dir", repo, "--target-dir", str(target),
+         "--budget-kib", "1024", "--", sys.executable, str(command)],
+        env=env, stdout=subprocess.DEVNULL, stderr=errors,
+    )
+    try:
+        process.wait(timeout=15)
+        stderr = (fixture / "stderr").read_bytes()
+        expected = 37 if mode == "transient" else 2
+        assert process.returncode == expected, f"{mode}: status {process.returncode}"
+        assert (target / "retained-artifact").exists(), f"{mode}: cleaned unknown size"
+        assert (fixture / "failures").exists(), f"{mode}: no measurement failure injected"
+        if mode == "persistent":
+            pids = [int(value) for value in (fixture / "pids").read_text().split()]
+            assert not any(live(pid) for pid in pids), "persistent: owned process survived"
+            assert b"could not measure Cargo artifact usage" in stderr
+    except (AssertionError, subprocess.TimeoutExpired) as error:
+        failures.append(str(error))
+    finally:
+        if (fixture / "pids").exists():
+            pids = [int(value) for value in (fixture / "pids").read_text().split()]
+            if any(live(pid) for pid in pids):
+                try:
+                    os.killpg(pids[0], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        errors.close()
+
+if failures:
+    raise SystemExit("; ".join(failures))
+PY
+
 target=$temp_root/pre/target
 make_oversized_target "$target"
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
