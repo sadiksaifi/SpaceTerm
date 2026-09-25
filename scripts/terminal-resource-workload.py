@@ -12,6 +12,21 @@ import time
 import zlib
 
 
+def write_benchmark_file(path, value):
+    if not path:
+        return
+    temporary = f"{path}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output)
+            output.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def bounded_number(minimum, maximum):
     def parse(value):
         number = float(value)
@@ -54,7 +69,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-l", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--mode", choices=("idle", "partial", "scroll", "image"),
+        "--mode", choices=("idle", "partial", "scroll", "history", "image"),
         default=os.environ.get("SPACETERM_BENCH_MODE", "scroll"),
     )
     parser.add_argument(
@@ -68,8 +83,8 @@ def main():
     )
     parser.add_argument("--smoke", action="store_true", help="allow redirected output, up to 5 seconds")
     args = parser.parse_args()
-    if args.mode not in ("idle", "partial", "scroll", "image"):
-        parser.error("SPACETERM_BENCH_MODE must be idle, partial, scroll, or image")
+    if args.mode not in ("idle", "partial", "scroll", "history", "image"):
+        parser.error("SPACETERM_BENCH_MODE must be idle, partial, scroll, history, or image")
     if not sys.stdout.isatty() and not args.smoke:
         parser.error("stdout must be a terminal; use --smoke for a redirected check")
     if args.smoke and args.duration > 5:
@@ -81,6 +96,7 @@ def main():
     emitted_bytes = 0
     emitted_lines = 0
     started = time.monotonic()
+    write_benchmark_file(os.environ.get("SPACETERM_BENCH_PID_FILE"), {"pid": os.getpid()})
 
     def write(data):
         nonlocal emitted_bytes, emitted_lines
@@ -91,7 +107,7 @@ def main():
         emitted_lines += encoded.count(b"\n")
 
     frame = 0
-    if args.mode != "image":
+    if args.mode not in ("image", "history"):
         write("\x1b[2J\x1b[H" + "".join(f"{row:04d} {payload}\r\n" for row in range(40)))
     if args.mode == "image":
         if not args.smoke:
@@ -100,6 +116,14 @@ def main():
         frame = 1
         time.sleep(max(0, started + args.duration - time.monotonic()))
     elif args.mode == "idle":
+        time.sleep(args.duration)
+    elif args.mode == "history":
+        for first in range(0, 10000, 100):
+            write("".join(f"{row:08d} {payload}\r\n" for row in range(first, first + 100)))
+        frame = 10000
+        write_benchmark_file(os.environ.get("SPACETERM_BENCH_READY_FILE"), {
+            "event": "history_ready", "emitted_lines": emitted_lines,
+        })
         time.sleep(args.duration)
     else:
         deadline = time.monotonic() + args.duration
@@ -114,14 +138,16 @@ def main():
             next_tick = max(next_tick + 1 / args.rate, time.monotonic())
             time.sleep(max(0, min(next_tick, deadline) - time.monotonic()))
 
-    print(json.dumps({
+    summary = {
         "event": "workload_complete",
         "mode": args.mode,
         "updates": frame,
         "emitted_lines": emitted_lines,
         "emitted_bytes": emitted_bytes,
         "elapsed_s": time.monotonic() - started,
-    }), file=sys.stderr, flush=True)
+    }
+    write_benchmark_file(os.environ.get("SPACETERM_BENCH_SUMMARY_FILE"), summary)
+    print(json.dumps(summary), file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

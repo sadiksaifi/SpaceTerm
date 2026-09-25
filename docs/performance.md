@@ -98,4 +98,39 @@ WindowServer, the producer, profiling overhead, and unrelated applications.
 Report it separately from application CPU and wakeups. Activity Monitor Energy
 Impact is a relative score, not watts. Raw billed-energy counters are not watts
 either. Record unavailable power or GPU metrics explicitly rather than inferring
-them from CPU or memory. These scripts never invoke sudo or control application UI.
+them from CPU or memory. The process sampler and workload do not invoke sudo or
+control application UI.
+
+## Source application comparison on macOS
+
+After building both optimized source binaries, compare fresh processes with one
+fixture at a time:
+
+```sh
+mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm idle 2
+mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm scroll 2
+mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm scroll 2 hidden
+mise run bench:macos:application target/performance/spaceterm-baseline target/release/spaceterm history 2
+```
+
+The task stages temporary signed application bundles with distinct benchmark
+bundle identifiers. Each trial uses separate
+XDG configuration, data, state, cache, and runtime directories, preserving the
+account's `HOME` and existing SpaceTerm settings. The workload becomes that
+launch's shell, and writes its process identifier and completed output counts
+to private files. Two ten-second captures begin after five seconds of warm-up.
+The task samples the application and workload process separately, records
+on-screen window bounds and frontmost status before and after capture, and
+alternates binary order across repetitions. The optional `hidden` state hides
+only the owned application, then verifies that it has no on-screen window.
+If macOS refuses the hide request, the trial fails without a hidden-state
+measurement. Window observations use a fresh AppKit helper process because
+[NSRunningApplication properties](https://developer.apple.com/documentation/appkit/nsrunningapplication?language=objc)
+can remain cached until the next main-runloop turn.
+The `history` fixture emits exactly 10,000 fixed ASCII lines, reports readiness
+after output completes, and holds the terminal idle during warm-up and capture.
+The task terminates only processes it started. Compare output counts and elapsed
+times before interpreting resource
+differences. The reported shell-start interval is neither first-frame time nor
+shell-ready time for a normal login shell. Window bounds do not prove identical
+terminal grid dimensions. GPU residency and power remain unmeasured.

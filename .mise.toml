@@ -289,6 +289,31 @@ arg "[rate]" help="Updates per second" default="60"
 '''
 run = 'python3 scripts/terminal-resource-workload.py --mode "${usage_mode}" --duration "${usage_duration}" --rate "${usage_rate}"'
 
+[tasks."bench:one"]
+description = "Run an explicit optimized performance fixture without parallel test noise"
+usage = '''
+arg "<filter>" help="Ignored performance fixture name"
+'''
+run = './scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --bin spaceterm --release --features gpui/inspector --locked "${usage_filter?}" -- --ignored --nocapture --test-threads=1'
+
+[tasks."bench:macos:fonts"]
+description = "Measure native font enumeration and classification in fresh optimized processes"
+usage = '''
+arg "[mode]" help="listing, full, or selected" default="full"
+arg "[repetitions]" help="Number of fresh-process samples" default="10"
+'''
+run = '''
+set -eu
+case "${usage_mode}" in listing|full|selected) ;; *) echo "invalid font benchmark mode" >&2; exit 2 ;; esac
+./scripts/cargo-artifacts.sh run -- cargo build --release --locked --example performance_fonts
+perf_target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+perf_iteration=0
+while [ "$perf_iteration" -lt "${usage_repetitions}" ]; do
+  "$perf_target_dir/release/examples/performance_fonts" "${usage_mode}"
+  perf_iteration=$((perf_iteration + 1))
+done
+'''
+
 [tasks."setup:macos"]
 description = "Prepare the macOS development environment"
 run = [
@@ -332,7 +357,7 @@ run = '''
 set -eu
 bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
 shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/measure-macos-application-resources.py
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
@@ -356,6 +381,17 @@ arg "[duration]" help="Duration in seconds" default="20"
 arg "[interval]" help="Sampling interval in seconds" default="1"
 '''
 run = 'python3 scripts/measure-macos-terminal-resources.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
+
+[tasks."bench:macos:application"]
+description = "Compare two optimized source builds with fresh, isolated macOS terminal workloads"
+usage = '''
+arg "<baseline>" help="Baseline source binary"
+arg "<candidate>" help="Candidate source binary"
+arg "[mode]" help="idle, partial, scroll, or history" default="idle"
+arg "[repetitions]" help="Fresh process pairs" default="2"
+arg "[state]" help="focused or hidden" default="focused"
+'''
+run = 'python3 scripts/measure-macos-application-resources.py "${usage_baseline?}" "${usage_candidate?}" --mode "${usage_mode}" --repetitions "${usage_repetitions}" --state "${usage_state}"'
 
 [tasks."package:macos"]
 description = "Build and verify the macOS app and disk image"

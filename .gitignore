@@ -31,7 +31,8 @@ __pycache__/
 
 # ai slop
 
-.snap
+.snap/*
+!.snap/*.md
 .codex
 .opencode
 .claude
