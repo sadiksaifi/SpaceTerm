@@ -4149,8 +4149,7 @@ impl ChromeAppearance {
             FloatingSurfacePaints::new(
                 paint(self.floating_colors.elevated_surface_background, false),
                 paint(self.colors.preview_background, true),
-            )
-            .tooltip(paint(self.colors.elevated_surface_background, true)),
+            ),
             rgba(
                 self.colors
                     .shadow

@@ -178,30 +178,20 @@ impl FloatingSurfacePaint {
 
 /// The complete set of treatments the window's floating surfaces apply.
 ///
-/// Interactive floating surfaces share one raised treatment, which makes them read as one system.
-/// A Pane-local readout is the single exception: it reports rather than accepts input, and the
-/// application authors it as its own quieter product color.
+/// Menus, pickers, the ComboBox popup, the Command Palette, tooltips, and modals share one raised
+/// treatment, which makes them read as one system. A Pane-local readout is the single exception:
+/// it reports rather than accepts input, and the application authors it as its own quieter
+/// product color.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatingSurfacePaints {
     raised: FloatingSurfacePaint,
-    tooltip: FloatingSurfacePaint,
     readout: FloatingSurfacePaint,
 }
 
 impl FloatingSurfacePaints {
     /// Creates the complete bounded material catalog.
     pub fn new(raised: FloatingSurfacePaint, readout: FloatingSurfacePaint) -> Self {
-        Self {
-            raised,
-            tooltip: raised,
-            readout,
-        }
-    }
-
-    /// Supplies the text-dense Tooltip treatment independently of interactive surfaces.
-    pub fn tooltip(mut self, paint: FloatingSurfacePaint) -> Self {
-        self.tooltip = paint;
-        self
+        Self { raised, readout }
     }
 }
 
@@ -275,9 +265,7 @@ impl FloatingSurfaceTheme {
             FloatingRole::Command | FloatingRole::Modal => self.corner_radii[2],
         };
         let scale = self.spacing_scale;
-        let paint = if role == FloatingRole::Tooltip {
-            self.paints.tooltip
-        } else if role.quiet_material() {
+        let paint = if role.quiet_material() {
             self.paints.readout
         } else {
             self.paints.raised
