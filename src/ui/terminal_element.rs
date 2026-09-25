@@ -438,6 +438,24 @@ struct PreparedText {
 }
 
 impl PreparedText {
+    #[inline]
+    fn color_at(&self, glyph_index: usize) -> Hsla {
+        if self.paint_runs.len() <= 8 {
+            return self
+                .paint_runs
+                .iter()
+                .find(|paint| glyph_index < paint.end)
+                .map_or_else(Hsla::transparent_black, |paint| paint.color);
+        }
+        // Run ends follow UTF-8 byte order, independently of shaped glyph order.
+        let index = self
+            .paint_runs
+            .partition_point(|paint| paint.end <= glyph_index);
+        self.paint_runs
+            .get(index)
+            .map_or_else(Hsla::transparent_black, |paint| paint.color)
+    }
+
     fn positioned_glyphs(
         &self,
     ) -> impl Iterator<Item = (gpui::FontId, &gpui::ShapedGlyph, gpui::Point<Pixels>)> {
@@ -874,11 +892,7 @@ fn paint_terminal_text(
                 )?,
             }
         } else {
-            let color = text
-                .paint_runs
-                .iter()
-                .find(|paint| glyph.index < paint.end)
-                .map_or_else(|| rgba(0).into(), |paint| paint.color);
+            let color = text.color_at(glyph.index);
             match cursor_paint {
                 CursorTextPaint::Unchanged => {
                     window.paint_glyph(origin, font_id, glyph.id, layout.font_size, color)?
@@ -3306,6 +3320,170 @@ mod tests {
                 2.0,
             ),
         }
+    }
+
+    #[gpui::test]
+    fn glyph_colors_follow_utf8_boundaries_independent_of_glyph_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let red = Color::rgb(0xdd_00_00);
+                let blue = Color::rgb(0x00_00_dd);
+                let green = Color::rgb(0x00_dd_00);
+                let styled_cells = [
+                    ("a", red),
+                    ("é", red),
+                    ("b", blue),
+                    ("c", green),
+                    ("d", red),
+                    ("é", blue),
+                    ("f", green),
+                    ("g", red),
+                    ("h", blue),
+                    ("i", green),
+                    ("j", red),
+                ];
+                for (cell_count, expected_text, expected_colors) in [
+                    (4, "aébc", &[red, red, red, blue, green][..]),
+                    (
+                        11,
+                        "aébcdéfghij",
+                        &[
+                            red, red, red, blue, green, red, blue, blue, green, red, blue, green,
+                            red,
+                        ][..],
+                    ),
+                ] {
+                    let cells = styled_cells[..cell_count]
+                        .iter()
+                        .map(|(text, foreground)| {
+                            let mut subject = cell(text);
+                            subject.foreground_source = TerminalColor::Rgb(*foreground);
+                            subject
+                        })
+                        .collect::<Vec<_>>();
+                    let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells)]);
+                    let mut cache = TerminalGridCache::new();
+                    let inputs =
+                        cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                    let prepared = cache.prepare_visible_geometry(
+                        &inputs,
+                        1,
+                        prepared_grid_layout(&fonts, px(14.0), px(8.0)),
+                        window,
+                    );
+                    assert_eq!(prepared[0].text.len(), 1);
+                    let text = &prepared[0].text[0];
+                    assert_eq!(text.line.text.as_ref(), expected_text);
+                    for index in (0..expected_colors.len())
+                        .rev()
+                        .chain(0..expected_colors.len())
+                    {
+                        assert_eq!(
+                            text.color_at(index),
+                            gpui_color(expected_colors[index]).into()
+                        );
+                    }
+                    assert_eq!(text.color_at(expected_colors.len()), rgba(0).into());
+                    assert_eq!(text.color_at(usize::MAX), rgba(0).into());
+                    let mut empty = text.clone();
+                    empty.paint_runs = Arc::from([]);
+                    assert_eq!(empty.color_at(0), rgba(0).into());
+                }
+            })
+            .expect("the glyph color test window should remain available");
+    }
+
+    #[gpui::test]
+    #[ignore = "optimized glyph color benchmark; run with mise run bench:one performance_glyph_colors"]
+    fn performance_glyph_colors(cx: &mut gpui::TestAppContext) {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const COLUMNS: usize = 120;
+        const ITERATIONS: usize = 20_000;
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                for run_count in [1, 4, 8, 16, 120] {
+                    let cells = (0..COLUMNS)
+                        .map(|column| {
+                            let mut subject = cell("a");
+                            subject.foreground_source = TerminalColor::Rgb(
+                                if (column * run_count / COLUMNS).is_multiple_of(2) {
+                                    Color::rgb(0xdd_00_00)
+                                } else {
+                                    Color::rgb(0x00_00_dd)
+                                },
+                            );
+                            subject
+                        })
+                        .collect::<Vec<_>>();
+                    let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells)]);
+                    let mut cache = TerminalGridCache::new();
+                    let inputs =
+                        cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                    let prepared = cache.prepare_visible_geometry(
+                        &inputs,
+                        1,
+                        prepared_grid_layout(&fonts, px(14.0), px(8.0)),
+                        window,
+                    );
+                    assert_eq!(prepared[0].text.len(), 1);
+                    let text = &prepared[0].text[0];
+                    assert_eq!(text.paint_runs.len(), run_count);
+                    let mut samples = Vec::with_capacity(7);
+                    let mut legacy_samples = Vec::with_capacity(7);
+                    for sample in 0..7 {
+                        for candidate in [sample % 2 == 0, sample % 2 != 0] {
+                            let start = Instant::now();
+                            if candidate {
+                                for _ in 0..ITERATIONS {
+                                    for index in 0..COLUMNS {
+                                        black_box(black_box(text).color_at(black_box(index)));
+                                    }
+                                }
+                            } else {
+                                for _ in 0..ITERATIONS {
+                                    for index in 0..COLUMNS {
+                                        let subject = black_box(text);
+                                        let index = black_box(index);
+                                        black_box(
+                                            subject
+                                                .paint_runs
+                                                .iter()
+                                                .find(|paint| index < paint.end)
+                                                .map_or_else(|| rgba(0).into(), |paint| paint.color),
+                                        );
+                                    }
+                                }
+                            }
+                            let micros_per_row =
+                                start.elapsed().as_secs_f64() * 1_000_000.0 / ITERATIONS as f64;
+                            if candidate {
+                                samples.push(micros_per_row);
+                            } else {
+                                legacy_samples.push(micros_per_row);
+                            }
+                        }
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    legacy_samples.sort_by(f64::total_cmp);
+                    eprintln!(
+                        "performance_glyph_colors columns={COLUMNS} runs={run_count} rows_per_sample={ITERATIONS} micros_per_row={samples:?} median={:.3}",
+                        samples[3]
+                    );
+                    eprintln!(
+                        "performance_glyph_colors_legacy columns={COLUMNS} runs={run_count} rows_per_sample={ITERATIONS} micros_per_row={legacy_samples:?} median={:.3}",
+                        legacy_samples[3]
+                    );
+                }
+            })
+            .expect("the glyph color benchmark window should remain available");
     }
 
     #[gpui::test]
