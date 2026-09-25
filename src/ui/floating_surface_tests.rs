@@ -596,29 +596,72 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
                     .increase_contrast = increase_contrast;
                 let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
                 for prepared in [&active, &inactive] {
-                    for role in [FloatingRole::Tooltip, FloatingRole::Readout] {
-                        let shell = prepared.floating_surfaces().shell(role);
-                        if transparency > 0.0 {
-                            assert_eq!(shell.backdrop_blur_radius(), gpui::px(20.0));
-                            let minimum = if increase_contrast { 0.95 } else { 0.90 };
-                            assert!(shell.backdrop_tone().a >= minimum);
+                    let shell = prepared.floating_surfaces().shell(FloatingRole::Readout);
+                    if transparency > 0.0 {
+                        assert_eq!(shell.backdrop_blur_radius(), gpui::px(20.0));
+                        let minimum = if increase_contrast { 0.95 } else { 0.90 };
+                        assert!(shell.backdrop_tone().a >= minimum);
+                    } else {
+                        assert_eq!(shell.material().a, 1.0);
+                    }
+                    let foreground = prepared.floating_colors.preview_foreground;
+                    for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                        let host = shell_endpoint_background(shell, underlay);
+                        let minimum = if prepared.active || increase_contrast {
+                            4.5
                         } else {
-                            assert_eq!(shell.material().a, 1.0);
-                        }
-                        let foreground = if role == FloatingRole::Readout {
-                            prepared.floating_colors.preview_foreground
-                        } else {
-                            prepared.floating_colors.text_secondary
+                            3.0
                         };
-                        for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
-                            let host = shell_endpoint_background(shell, underlay);
-                            let minimum = if prepared.active || increase_contrast {
-                                4.5
-                            } else {
-                                3.0
-                            };
-                            assert!(foreground.source_over(host).contrast_ratio(host) >= minimum);
-                        }
+                        assert!(foreground.source_over(host).contrast_ratio(host) >= minimum);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn interactive_floating_roles_share_one_material() {
+    let default_transparency = AppearancePreferences::default().background.transparency;
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for increase_contrast in [false, true] {
+            for transparency in [0.0, default_transparency, 1.0] {
+                let (mut resolved, _) =
+                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                std::sync::Arc::make_mut(&mut resolved.chrome)
+                    .composition
+                    .capabilities
+                    .increase_contrast = increase_contrast;
+                let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+                for prepared in [&active, &inactive] {
+                    let surfaces = prepared.floating_surfaces();
+                    let popover = surfaces.shell(FloatingRole::Popover);
+                    for role in [
+                        FloatingRole::Command,
+                        FloatingRole::Modal,
+                        FloatingRole::Tooltip,
+                        FloatingRole::Notice,
+                    ] {
+                        let shell = surfaces.shell(role);
+                        let case = format!(
+                            "{appearance:?} {role:?} transparency={transparency} \
+                             increase_contrast={increase_contrast} active={}",
+                            prepared.active
+                        );
+                        assert_eq!(shell.backdrop_tone(), popover.backdrop_tone(), "{case}");
+                        assert_eq!(shell.material(), popover.material(), "{case}");
+                        assert_eq!(shell.edge(), popover.edge(), "{case}");
+                        assert_eq!(shell.divider(), popover.divider(), "{case}");
+                        assert_eq!(
+                            shell.backdrop_alpha_limit(),
+                            popover.backdrop_alpha_limit(),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            shell.backdrop_blur_radius(),
+                            popover.backdrop_blur_radius(),
+                            "{case}"
+                        );
                     }
                 }
             }
@@ -3829,7 +3872,7 @@ fn midgray_custom_floating_material_moves_only_its_tint_to_admit_readable_conten
             let shell = prepared.floating_surfaces().shell(role);
             let tone = Color::rgba(u32::from(shell.backdrop_tone()));
             let alpha = f32::from(tone.a) / 255.0;
-            if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
+            if role == FloatingRole::Readout {
                 assert!(alpha >= 0.90);
             } else {
                 assert!((0.65..=0.75).contains(&alpha));
@@ -4161,8 +4204,8 @@ fn translucent_authored_elevation_is_composited_once_for_shell_and_host_referenc
         );
         let reference = gpui::rgba(expected_material.rgba_hex());
         for role in FLOATING_ROLES {
-            // Text-dense surfaces apply their own tone-alpha floor after this shared host solve.
-            if matches!(role, FloatingRole::Tooltip | FloatingRole::Readout) {
+            // The readout applies its own tone-alpha floor after this shared host solve.
+            if role == FloatingRole::Readout {
                 continue;
             }
             let shell = prepared.floating_surfaces().shell(role);

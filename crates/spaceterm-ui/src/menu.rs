@@ -3409,13 +3409,16 @@ fn resolve_row_paint(
     rows.map(|rows| rows.resolve_for_collection(enabled, selected, hovered, collection_focused))
 }
 
+/// Checkboxes, radio options, and Picker selections share one checkmark, matching the ComboBox
+/// popup and the Operating-System menus they stand beside.
 fn mark_icon(mark: EntryMark) -> Option<IconName> {
     match mark {
-        EntryMark::None => None,
-        EntryMark::Checkbox(true) => Some(IconName::Check),
-        EntryMark::Checkbox(false) => None,
-        EntryMark::Radio { selected: true, .. } => Some(IconName::CircleDot),
-        EntryMark::Radio {
+        EntryMark::Checkbox(true) | EntryMark::Radio { selected: true, .. } => {
+            Some(IconName::Check)
+        }
+        EntryMark::None
+        | EntryMark::Checkbox(false)
+        | EntryMark::Radio {
             selected: false, ..
         } => None,
     }
@@ -4023,7 +4026,7 @@ mod tests {
                 index: 0,
             })
             .map(IconName::unicode),
-            Some(IconName::CircleDot.unicode())
+            Some(IconName::Check.unicode())
         );
     }
 
