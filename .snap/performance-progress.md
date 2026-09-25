@@ -2,10 +2,10 @@
 
 ## Current state
 
-The performance goal is active on `perf/application-resources`. The initial
-inventory and three research reports are complete. GPT-6 Sol agents at high
-reasoning own the font, geometry, compression, and native process experiments.
-The parent owns cell UTF-8 construction and integration.
+The measured implementation batch is complete on `perf/application-resources`.
+PR [#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) is open and unmerged.
+The inventory, three research reports, four production improvements, measurements
+and three independent GPT-6 Sol high adversarial reviews are recorded here.
 
 | Work item | Evidence | State |
 | --- | --- | --- |
@@ -14,8 +14,8 @@ The parent owns cell UTF-8 construction and integration.
 | Startup font work | Native full/selected classification fixture differs by about 262 ms; 19 appearance tests pass | Implemented |
 | Idle compression | Four native fixtures save 0.375-0.391 MiB with exact history copy; bounded scheduling, worker fairness, Find and selection checks pass | Implemented |
 | Complete application resources | Valid ABBA comparisons for focused idle and scrolling; hidden and focused-history attempts excluded | Captured with limits |
-| Combined validation and PR | 3,112 tests pass; format, Rust lint and release build pass | PR pending |
-| Three adversarial PR reviews | Run after PR creation; resolve material findings | Pending |
+| Combined validation and PR | 3,112 tests pass; format, Rust/script lint and release build pass; PR #352 published | Complete |
+| Three adversarial PR reviews | Two initial reviews found no material issue; third found one P2 test gap, corrected and rechecked by all three reviewers | Complete |
 
 The optimized baseline build passed on retry. Baseline portable test binaries
 reported 2,893 passing tests and zero failures, but that task exited with status 2
@@ -28,11 +28,16 @@ reference interfaces that release GPUI otherwise omits. Native font measurements
 need a real GPUI application on the main thread: GPUI's normal test text system
 does not enumerate native fonts.
 
-## Next actions
+## Review outcome
 
-1. Publish the validated implementation and measurement records as a PR.
-2. Run three independent GPT-6 Sol high adversarial reviews against that PR.
-3. Resolve material findings, revalidate affected behavior, and update the PR.
+The reviews covered all 31 initial changed paths. One test copied the selection
+before testing Find over compressed history. Commit `9596103` moved the marker to
+older retained history, runs Find first after compression, and recompresses before
+checking selection copying. The focused test and Rust lint passed again. All
+three reviewers verified the correction, with no new material finding.
+
+Production code and the measured application binary are unchanged by that fix.
+The PR remains unmerged for the user's review.
 
 ## Remaining profiling work
 

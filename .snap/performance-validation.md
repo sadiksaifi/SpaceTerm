@@ -11,6 +11,7 @@ All changes belong to `perf/application-resources`.
 | `mise run lint:rust` | Pass after resolving three lint findings |
 | `mise run build:release` | Pass after combined implementation |
 | `mise run fmt:check` | Pass |
+| `mise run lint:scripts` | Pass |
 | `mise run lint:macos:scripts` | Pass |
 | `git diff --check` | Pass |
 
@@ -34,5 +35,18 @@ afterward.
 Benchmark methods, scope and results are in the individual measurement records.
 Valid application measurements cover focused idle and scrolling; hidden and
 focused-history trials were excluded after native state verification failed.
-Three PR review reports will supplement this record. Native GPU time/residency and an exhaustive visual comparison are not
+Three independent PR reviews completed. One P2 test-coverage finding was corrected
+and verified by its reviewer; see the review records. Native GPU time/residency and an exhaustive visual comparison are not
 measured by these checks.
+
+## Review correction
+
+After the full suite, review identified that selection copying restored history
+before the compression test's Find assertion. Commit `9596103` moves the marker
+to older retained history, executes Find first after compression, and recompresses
+before checking selection copying. The focused test and Rust lint passed again.
+This test-only change leaves the measured production binary unchanged.
+
+- [Terminal review](performance-review-1.md).
+- [Appearance review](performance-review-2.md).
+- [Evidence review and resolved finding](performance-review-3.md).

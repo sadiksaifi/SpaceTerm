@@ -1,6 +1,8 @@
 # Performance goal
 
-Status: active. Started 2026-09-25 at baseline commit
+Status: measured implementation and PR reviews complete on 2026-09-25.
+PR [#352](https://github.com/sadiksaifi/SpaceTerm/pull/352) is open and unmerged.
+Started at baseline commit
 `134d7027b2014f89d29d0f9c4d087e894f33cfbc`.
 
 Improve SpaceTerm launch latency, CPU, GPU, memory, wakeups, and sustained terminal
@@ -35,11 +37,12 @@ reporting the PR ready. Do not merge it without a user request.
 | Background | Existing visibility gates audited; hidden process comparison selected; unfocused-visible and inactive-Tab scaling remain profiling work | Hidden capture unavailable; limitation recorded |
 | Memory and lifetime | Bounded idle compression preserves history and reduces native footprint; Pane and graphics lifetime profiling remains | Compression implemented |
 | GPU | Source audit complete; no native execution/residency measurement, so no GPU allocation or scheduling changes selected | Deferred with evidence requirements |
-| Regression protection | 3,112 tests, Rust lint, format and optimized build pass; three PR reviews follow publication | Reviews pending |
+| Regression protection | 3,112 tests, Rust lint, format and optimized build pass; three independent reviews complete; one test-coverage finding corrected and verified | Complete |
 
-"Best possible" has no provable global endpoint. Keep this goal active until the
-measured candidates are resolved and remaining limits are explicitly documented.
-Do not infer overall completion from one faster benchmark.
+"Best possible" has no provable global endpoint. This measured implementation
+batch is complete: all four selected candidates are implemented, validated and
+reviewed. The unmeasured areas above remain follow-up profiling work. Completion
+of this batch is not a claim that every possible performance cost is eliminated.
 
 ## Records
 
@@ -48,6 +51,8 @@ Do not infer overall completion from one faster benchmark.
 - [Engine research](performance-research-engines.md): Ghostty, libghostty-vt, WezTerm.
 - [Rendering research](performance-research-rendering.md): GPUI, Zed, rendering and visibility.
 - [Launch research](performance-research-launch.md): launch and resource ownership.
-- [Progress](performance-progress.md): implemented changes and next actions.
+- [Progress](performance-progress.md): implemented changes and remaining profiling.
+- [Validation and reviews](performance-validation.md): checks and three independent reviews.
+- [Application results](performance-application-results.md): accepted comparisons and limits.
 
 Update this record and the relevant evidence file after each completed work item.
