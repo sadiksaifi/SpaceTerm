@@ -9045,6 +9045,28 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
 }
 
 #[gpui::test]
+fn sidebar_workspace_menu_should_show_an_icon_before_every_label(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-shift-e shift-f10");
+    cx.run_until_parked();
+
+    for row in [
+        "workspace-menu-row-new-tab",
+        "workspace-menu-row-rename",
+        "workspace-menu-row-pin-directory",
+        "workspace-menu-row-close",
+    ] {
+        let icon_selector: &'static str = format!("{row}-icon").leak();
+        let label_selector: &'static str = format!("{row}-label").leak();
+        let icon = cx
+            .debug_bounds(icon_selector)
+            .unwrap_or_else(|| panic!("{row} has no icon"));
+        let label = cx.debug_bounds(label_selector).unwrap();
+        assert!(icon.right() <= label.left(), "{row}: {icon:?} {label:?}");
+    }
+}
+
+#[gpui::test]
 fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-shift-e shift-f10");

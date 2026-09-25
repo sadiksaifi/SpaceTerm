@@ -680,7 +680,7 @@ fn new_workspace_menu_entries(
     ]
 }
 
-/// Management commands use labels and shortcuts. Creation commands retain Local/Remote symbols.
+/// Every Workspace command carries a symbol, so all labels share the icon column.
 fn workspace_menu_entries(
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
@@ -693,8 +693,14 @@ fn workspace_menu_entries(
             RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
         )
         .shortcut(shortcut)
+        .icon(|foreground, size| {
+            Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
+        })
         .debug_selector("workspace-menu-row-new-tab"),
         MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
+            .icon(|foreground, size| {
+                Icon::new(IconName::Pencil, size, foreground).into_any_element()
+            })
             .debug_selector("workspace-menu-row-rename"),
     ];
     entries.push(
@@ -706,6 +712,7 @@ fn workspace_menu_entries(
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
+        .icon(|foreground, size| Icon::new(IconName::Pin, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-pin-directory"),
     );
     if pinned {
@@ -714,6 +721,9 @@ fn workspace_menu_entries(
                 "Unpin Directory",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::UnpinDirectory),
             )
+            .icon(|foreground, size| {
+                Icon::new(IconName::PinOff, size, foreground).into_any_element()
+            })
             .debug_selector("workspace-menu-row-unpin-directory"),
         );
     }
@@ -726,6 +736,9 @@ fn workspace_menu_entries(
                 "Reconnect",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::Reconnect),
             )
+            .icon(|foreground, size| {
+                Icon::new(IconName::RotateCw, size, foreground).into_any_element()
+            })
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
@@ -736,6 +749,7 @@ fn workspace_menu_entries(
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
         )
         .destructive(true)
+        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
     ]);
     entries

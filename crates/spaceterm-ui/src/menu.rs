@@ -3284,6 +3284,7 @@ fn render_row(
     let row_selector = debug_selector.unwrap_or_else(|| label.to_string());
     let label_selector = format!("{row_selector}-label");
     let mark_selector = format!("{row_selector}-mark");
+    let icon_selector = format!("{row_selector}-icon");
     let mut row = div()
         .id(index)
         .debug_selector(move || row_selector)
@@ -3324,7 +3325,12 @@ fn render_row(
             ))
             .into_any_element()
     });
-    let icon = icon.map(|icon| icon(icon_foreground, style.metrics.icon_size));
+    let icon = icon.map(|icon| {
+        div()
+            .debug_selector(move || icon_selector)
+            .child(icon(icon_foreground, style.metrics.icon_size))
+            .into_any_element()
+    });
     let leading = columns
         .render(style.metrics.leading_column_metrics(), mark, icon)
         .map(|columns| columns.relative().top(icon_offset));
