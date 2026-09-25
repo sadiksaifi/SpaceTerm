@@ -151,6 +151,22 @@ run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo check -
 description = "Verify backdrop-filter pixels on a native Metal GPU"
 run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked backdrop::tests"
 
+[tasks."test:gpui:display-link:macos"]
+description = "Test native display-link subscription and ownership transitions"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked platform::mac::display_link::tests"
+
+[tasks."test:gpui:path-textures:macos"]
+description = "Verify lazy path target ownership and native Metal path pixels"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo test --manifest-path third_party/gpui/Cargo.toml --lib --no-default-features --features test-support --locked path_texture_tests -- --test-threads=1"
+
+[tasks."test:gpui:display-link-native:macos"]
+description = "Exercise real CoreVideo and dispatch source start, stop, and close cycles"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo run --manifest-path third_party/gpui/Cargo.toml --example macos_display_link_lifecycle --no-default-features --features native-test-support --locked"
+
+[tasks."test:gpui:frame-demand:macos"]
+description = "Exercise native idle sleep and complete frame demand wake behavior"
+run = "CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- cargo run --manifest-path third_party/gpui/Cargo.toml --example macos_frame_demand --no-default-features --features native-test-support --locked"
+
 [tasks."check:gpui:windows"]
 description = "Cross-check the vendored GPUI DirectX renderer for Windows"
 usage = '''
@@ -166,6 +182,8 @@ run = "python3 scripts/validate-gpui.py"
 description = "Validate Metal pixels and the alternate Blade renderer"
 run = [
   { task = "test:gpui:backdrop:macos" },
+  { task = "test:gpui:display-link:macos" },
+  { task = "test:gpui:path-textures:macos" },
   { task = "check:gpui:blade:macos" },
 ]
 

@@ -316,7 +316,17 @@ impl MetalRenderer {
             width: DevicePixels(size.width as i32),
             height: DevicePixels(size.height as i32),
         };
-        self.update_path_intermediate_textures(device_pixels_size);
+        if self
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| {
+                texture.width() != device_pixels_size.width.0 as u64
+                    || texture.height() != device_pixels_size.height.0 as u64
+            })
+        {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        }
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -326,6 +336,15 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            return;
+        }
+        if self
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| {
+                texture.width() == size.width.0 as u64 && texture.height() == size.height.0 as u64
+            })
+        {
             return;
         }
 
@@ -580,7 +599,7 @@ impl MetalRenderer {
     }
 
     fn draw_paths_to_intermediate(
-        &self,
+        &mut self,
         paths: &[Path<ScaledPixels>],
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
@@ -590,6 +609,7 @@ impl MetalRenderer {
         if paths.is_empty() {
             return true;
         }
+        self.update_path_intermediate_textures(viewport_size);
         let Some(intermediate_texture) = &self.path_intermediate_texture else {
             return false;
         };
@@ -1384,4 +1404,128 @@ pub struct PathSprite {
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+}
+
+#[cfg(test)]
+mod path_texture_tests {
+    use super::*;
+    use crate::{PathBuilder, px, rgba};
+
+    #[test]
+    fn drawable_resizes_without_paths_do_not_allocate_path_targets() {
+        let mut renderer = MetalRenderer::new(Arc::default());
+        for dimension in [64, 128, 128, 0, 64] {
+            renderer.update_drawable_size(size(DevicePixels(dimension), DevicePixels(dimension)));
+            assert!(renderer.path_intermediate_texture.is_none());
+            assert!(renderer.path_intermediate_msaa_texture.is_none());
+        }
+    }
+
+    #[test]
+    fn first_path_after_resize_preserves_pixels_and_multisample_coverage() {
+        let mut renderer = MetalRenderer::new(Arc::default());
+        let mut builder = PathBuilder::fill();
+        builder.move_to(point(px(8.25), px(8.25)));
+        builder.line_to(point(px(39.75), px(8.25)));
+        builder.line_to(point(px(39.75), px(39.75)));
+        builder.line_to(point(px(8.25), px(39.75)));
+        builder.close();
+        let mut path = builder.build().unwrap().scale(1.);
+        path.color = rgba(0xff000080).into();
+        path.content_mask.bounds = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(256.), ScaledPixels(256.)),
+        );
+
+        let mut previous_target = None;
+        for dimension in [64, 64, 128, 128, 64] {
+            let viewport = size(DevicePixels(dimension), DevicePixels(dimension));
+            renderer.update_drawable_size(viewport);
+            let queue = renderer.command_queue.clone();
+            let commands = queue.new_command_buffer();
+            let mut instances = renderer
+                .instance_buffer_pool
+                .lock()
+                .acquire(&renderer.device);
+            let mut offset = 0;
+            assert!(renderer.draw_paths_to_intermediate(
+                std::slice::from_ref(&path),
+                &mut instances,
+                &mut offset,
+                viewport,
+                commands,
+            ));
+            instances.metal_buffer.did_modify_range(NSRange {
+                location: 0,
+                length: offset as _,
+            });
+            let target = renderer.path_intermediate_texture.as_ref().unwrap();
+            if let Some((previous_dimension, previous_pointer)) = previous_target
+                && previous_dimension == dimension
+            {
+                assert_eq!(target.as_ptr(), previous_pointer);
+            }
+            previous_target = Some((dimension, target.as_ptr()));
+            assert_eq!(
+                (target.width(), target.height()),
+                (dimension as u64, dimension as u64)
+            );
+            assert_eq!(
+                renderer
+                    .path_intermediate_msaa_texture
+                    .as_ref()
+                    .unwrap()
+                    .sample_count(),
+                4
+            );
+
+            let descriptor = metal::TextureDescriptor::new();
+            descriptor.set_width(dimension as u64);
+            descriptor.set_height(dimension as u64);
+            descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            descriptor.set_storage_mode(if renderer.device.has_unified_memory() {
+                metal::MTLStorageMode::Shared
+            } else {
+                metal::MTLStorageMode::Managed
+            });
+            let readable = renderer.device.new_texture(&descriptor);
+            let copy = commands.new_blit_command_encoder();
+            copy.copy_from_texture(
+                target,
+                0,
+                0,
+                metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                metal::MTLSize {
+                    width: dimension as u64,
+                    height: dimension as u64,
+                    depth: 1,
+                },
+                &readable,
+                0,
+                0,
+                metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+            if !renderer.device.has_unified_memory() {
+                copy.synchronize_resource(&readable);
+            }
+            copy.end_encoding();
+            commands.commit();
+            commands.wait_until_completed();
+            assert_eq!(commands.status(), metal::MTLCommandBufferStatus::Completed);
+            let mut pixels = vec![0u8; dimension as usize * dimension as usize * 4];
+            readable.get_bytes(
+                pixels.as_mut_ptr().cast(),
+                dimension as u64 * 4,
+                metal::MTLRegion::new_2d(0, 0, dimension as u64, dimension as u64),
+                0,
+            );
+            let center = (24 * dimension as usize + 24) * 4;
+            assert_eq!(&pixels[center..center + 4], &[0, 0, 128, 128]);
+            assert_eq!(&pixels[..4], &[0, 0, 0, 0]);
+            let edge = (24 * dimension as usize + 8) * 4;
+            assert!(pixels[edge + 3] > 0 && pixels[edge + 3] < 128);
+            assert_eq!(pixels[edge + 2], pixels[edge + 3]);
+            renderer.instance_buffer_pool.lock().release(instances);
+        }
+    }
 }

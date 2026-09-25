@@ -68,6 +68,42 @@ fn terminal_find_matches_across_soft_wraps() {
 }
 
 #[test]
+fn snapshot_preserves_full_graphemes_and_empty_cells() {
+    let mut emulator = emulator(12, 2);
+    let cluster = format!("e{}", "\u{301}".repeat(20));
+    emulator.feed(format!("A{cluster}界😀").as_bytes());
+    let screen = emulator.snapshot().unwrap().unwrap();
+
+    assert_eq!(
+        screen.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "A",
+            cluster.as_str(),
+            "界",
+            " ",
+            "😀",
+            " ",
+            " ",
+            " ",
+            " ",
+            " ",
+            " ",
+            " "
+        ],
+    );
+    assert!(screen.rows[0][3].spacer_tail);
+    assert!(screen.rows[0][5].spacer_tail);
+    assert!(
+        screen.rows[1]
+            .iter()
+            .all(|cell| cell.text == " " && !cell.spacer_tail)
+    );
+}
+
+#[test]
 fn accessibility_snapshot_preserves_production_soft_wraps() {
     let mut emulator = emulator(3, 2);
     emulator.feed(b"abcdef");
@@ -119,6 +155,29 @@ fn terminal_find_highlights_the_complete_wide_grapheme() {
             end_column: 1,
             current: false,
         }]
+    );
+}
+
+#[test]
+fn terminal_find_maps_a_long_cluster_to_its_head_and_wide_match_end() {
+    let mut emulator = emulator(8, 2);
+    emulator.feed(format!("Ae{}界", "\u{301}".repeat(20)).as_bytes());
+    emulator.set_find_query(FindQueryGeneration::test(1), "\u{301}\u{301}界".to_owned());
+
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    let found = snapshot.find.as_ref().unwrap();
+
+    assert_eq!(
+        (found.total_matches, found.visible_spans.as_ref()),
+        (
+            1,
+            &[crate::terminal::FindHighlightSpan {
+                row: 0,
+                start_column: 1,
+                end_column: 3,
+                current: false,
+            }][..]
+        )
     );
 }
 

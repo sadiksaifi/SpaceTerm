@@ -20,6 +20,8 @@ pub mod colors;
 mod element;
 mod elements;
 mod executor;
+#[cfg(feature = "native-test-support")]
+mod frame_test_support;
 mod geometry;
 mod global;
 mod input;
@@ -76,6 +78,8 @@ pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
+#[cfg(feature = "native-test-support")]
+pub use frame_test_support::FrameTestSnapshot;
 pub use geometry::*;
 pub use global::*;
 pub use gpui_macros::{AppContext, IntoElement, Render, VisualContext, register_action, test};

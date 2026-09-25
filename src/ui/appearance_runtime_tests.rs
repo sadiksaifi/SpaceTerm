@@ -51,6 +51,47 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
     (settings, platform)
 }
 
+#[gpui::test]
+fn initial_fonts_match_the_complete_catalog_when_settings_requests_it(cx: &mut TestAppContext) {
+    start(cx);
+    cx.update(|cx| {
+        let before = current(cx);
+        let initial = cx.global::<AppearanceRuntime>().fonts.clone();
+        complete_font_catalog(cx);
+        let complete = available_fonts(cx);
+        assert!(initial.installed.len() < complete.installed.len());
+        assert_eq!(complete, capture_fonts(cx));
+        assert!(Arc::ptr_eq(&before, &current(cx)));
+    });
+}
+
+#[gpui::test]
+fn a_new_named_font_is_classified_before_appearance_resolution(cx: &mut TestAppContext) {
+    let (settings, _) = start(cx);
+    let token = settings.begin_preview(0).unwrap();
+    let mut document = SettingsDocument::default();
+    document.preferences.chrome.typography.family = ChromeFontFamily::Named {
+        family: "Arial".to_owned(),
+    };
+    settings.update_preview(&token, document).unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let before = current(cx);
+        assert!(
+            cx.global::<AppearanceRuntime>()
+                .fonts
+                .installed
+                .iter()
+                .any(|font| font.family == "Arial")
+        );
+        complete_font_catalog(cx);
+        let complete = available_fonts(cx);
+        assert_eq!(complete, capture_fonts(cx));
+        refresh(cx).unwrap();
+        assert!(Arc::ptr_eq(&before, &current(cx)));
+    });
+}
+
 /// A blurred Workspace asks the framework only for a transparent window: SpaceTerm installs the
 /// native backdrop itself, and takes it away again when the composition resolves opaque.
 #[gpui::test]

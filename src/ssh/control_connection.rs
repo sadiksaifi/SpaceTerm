@@ -169,10 +169,41 @@ pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     runtime: Arc<ControlRuntimeCleanup>,
     pending_cleanup: Arc<Mutex<Option<SshProcessCleanup>>>,
     authority: Option<Arc<LiveConnectionAuthority>>,
-    supervisor_stop: Arc<AtomicBool>,
-    supervisor: Option<JoinHandle<()>>,
+    supervisor: Option<ControlSupervisor>,
     #[cfg(test)]
     control_path: PathBuf,
+}
+
+struct ControlSupervisor {
+    stop: Arc<AtomicBool>,
+    interrupt: Option<Arc<dyn super::process::SshProcessExitInterrupt>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ControlSupervisor {
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(interrupt) = &self.interrupt {
+            interrupt.interrupt();
+        }
+    }
+
+    fn into_join_handle(mut self) -> Option<JoinHandle<()>> {
+        self.request_stop();
+        self.thread.take()
+    }
+
+    fn stop_and_join(self) {
+        if let Some(thread) = self.into_join_handle() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ControlSupervisor {
+    fn drop(&mut self) {
+        self.request_stop();
+    }
 }
 
 struct ControlRuntimeCleanup {
@@ -607,31 +638,30 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .authority
             .as_ref()
             .ok_or(ControlConnectionError::Ownership)?;
-        let stop = Arc::new(AtomicBool::new(false));
         let supervisor = spawn_supervisor(
             Arc::clone(&self.backend),
             Arc::clone(&self.child),
             Arc::clone(authority),
-            Arc::clone(&stop),
             Arc::clone(&self.runtime),
             Arc::clone(&self.pending_cleanup),
         )?;
-        self.supervisor_stop = stop;
         self.supervisor = Some(supervisor);
         Ok(())
     }
 
     fn stop_supervisor(&mut self) {
-        self.supervisor_stop.store(true, Ordering::Release);
         if let Some(supervisor) = self.supervisor.take() {
-            let _ = supervisor.join();
+            supervisor.stop_and_join();
         }
     }
 }
 
 impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
     fn drop(&mut self) {
-        self.supervisor_stop.store(true, Ordering::Release);
+        let supervisor = self
+            .supervisor
+            .take()
+            .and_then(ControlSupervisor::into_join_handle);
         if let Some(authority) = self.authority.take() {
             authority.transition(LiveConnectionState::Closed);
         }
@@ -639,7 +669,7 @@ impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
         if let Some(child) = child {
             let cleanup = self
                 .backend
-                .begin_cleanup(child, Some(self.runtime.callback(self.supervisor.take())));
+                .begin_cleanup(child, Some(self.runtime.callback(supervisor)));
             if let Ok(mut pending) = self.pending_cleanup.lock() {
                 *pending = Some(cleanup);
             }
@@ -673,12 +703,10 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
         let runtime = Arc::new(ControlRuntimeCleanup::new(runtime_owner));
         let pending_cleanup = Arc::new(Mutex::new(None));
         let child = Arc::new(Mutex::new(Some(child)));
-        let supervisor_stop = Arc::new(AtomicBool::new(false));
         let supervisor = match spawn_supervisor(
             Arc::clone(&self.backend),
             Arc::clone(&child),
             Arc::clone(&authority),
-            Arc::clone(&supervisor_stop),
             Arc::clone(&runtime),
             Arc::clone(&pending_cleanup),
         ) {
@@ -702,7 +730,6 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             runtime,
             pending_cleanup,
             authority: Some(authority),
-            supervisor_stop,
             supervisor: Some(supervisor),
             #[cfg(test)]
             control_path,
@@ -736,16 +763,32 @@ fn spawn_supervisor<B: SshProcessBackend>(
     backend: Arc<B>,
     child: Arc<Mutex<Option<B::Child>>>,
     authority: Arc<LiveConnectionAuthority>,
-    stop: Arc<AtomicBool>,
     runtime: Arc<ControlRuntimeCleanup>,
     pending_cleanup: Arc<Mutex<Option<SshProcessCleanup>>>,
-) -> Result<JoinHandle<()>, ControlConnectionError> {
-    std::thread::Builder::new()
+) -> Result<ControlSupervisor, ControlConnectionError> {
+    let mut observation = child
+        .lock()
+        .ok()
+        .and_then(|mut child| child.as_mut().and_then(|child| backend.observe_exit(child)));
+    let interrupt = observation
+        .as_ref()
+        .map(|observation| observation.interrupt_handle());
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread = std::thread::Builder::new()
         .name("spaceterm-ssh-supervisor".to_owned())
         .spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                std::thread::sleep(PROCESS_POLL_INTERVAL);
-                if stop.load(Ordering::Acquire) {
+            while !thread_stop.load(Ordering::Acquire) {
+                match observation.as_mut().map(|observation| observation.wait()) {
+                    Some(Ok(super::process::SshProcessExitWake::Exit)) => {}
+                    Some(Ok(super::process::SshProcessExitWake::Interrupted) | Err(_)) => {
+                        // Native observation is optional. A failed or unexpected wake must not
+                        // revoke live authority or prevent the existing polling path working.
+                        drop(observation.take());
+                    }
+                    None => std::thread::sleep(PROCESS_POLL_INTERVAL),
+                }
+                if thread_stop.load(Ordering::Acquire) {
                     return;
                 }
                 let result = child.lock().map_or_else(
@@ -769,7 +812,9 @@ fn spawn_supervisor<B: SshProcessBackend>(
                     },
                 );
                 match result {
-                    Ok(None) => {}
+                    // A one-shot exit hint need not imply status is collectible yet. Preserve
+                    // the existing poll instead of blocking again on a consumed notification.
+                    Ok(None) => observation = None,
                     Ok(Some(_)) | Err(_) => {
                         authority.transition(LiveConnectionState::Failed);
                         return;
@@ -777,7 +822,12 @@ fn spawn_supervisor<B: SshProcessBackend>(
                 }
             }
         })
-        .map_err(|_| ControlConnectionError::StartSupervisor)
+        .map_err(|_| ControlConnectionError::StartSupervisor)?;
+    Ok(ControlSupervisor {
+        stop,
+        interrupt,
+        thread: Some(thread),
+    })
 }
 
 fn reserve_socket(
@@ -793,12 +843,16 @@ fn reserve_socket(
 
 #[cfg(test)]
 mod tests {
+    use super::super::process::{
+        SshProcessExitInterrupt, SshProcessExitObservation, SshProcessExitWait, SshProcessExitWake,
+    };
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::future::pending;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::{Duration, Instant};
@@ -847,6 +901,10 @@ mod tests {
     }
 
     struct FakeState {
+        observations: VecDeque<SshProcessExitObservation>,
+        status_checks: usize,
+        cleanup_notification: Option<mpsc::Sender<()>>,
+        shutdown_rejection: Option<ProcessExit>,
         readiness: VecDeque<ProcessExit>,
         early_exits: VecDeque<Option<ProcessExit>>,
         records: Vec<Vec<OsString>>,
@@ -867,6 +925,10 @@ mod tests {
     impl Default for FakeState {
         fn default() -> Self {
             Self {
+                observations: VecDeque::new(),
+                status_checks: 0,
+                cleanup_notification: None,
+                shutdown_rejection: None,
                 readiness: VecDeque::new(),
                 early_exits: VecDeque::new(),
                 records: Vec::new(),
@@ -925,6 +987,212 @@ mod tests {
         fn reap_count(&self) -> usize {
             self.state.lock().unwrap().reaps
         }
+    }
+
+    type ExitWaitResult = Result<SshProcessExitWake, SshProcessMechanismError>;
+
+    struct FakeExitWait {
+        events: mpsc::Receiver<ExitWaitResult>,
+        entered: mpsc::Sender<()>,
+    }
+
+    impl SshProcessExitWait for FakeExitWait {
+        fn wait(&mut self) -> ExitWaitResult {
+            let _ = self.entered.send(());
+            self.events
+                .recv()
+                .unwrap_or(Err(SshProcessMechanismError::StatusFailed))
+        }
+    }
+
+    struct FakeExitInterrupt(mpsc::Sender<ExitWaitResult>);
+
+    impl SshProcessExitInterrupt for FakeExitInterrupt {
+        fn interrupt(&self) {
+            let _ = self.0.send(Ok(SshProcessExitWake::Interrupted));
+        }
+    }
+
+    fn fake_exit_observation() -> (
+        SshProcessExitObservation,
+        mpsc::Sender<ExitWaitResult>,
+        mpsc::Receiver<()>,
+    ) {
+        let (events, receiver) = mpsc::channel();
+        let (entered, entered_receiver) = mpsc::channel();
+        (
+            SshProcessExitObservation::new(
+                FakeExitWait {
+                    events: receiver,
+                    entered,
+                },
+                Arc::new(FakeExitInterrupt(events.clone())),
+            ),
+            events,
+            entered_receiver,
+        )
+    }
+
+    struct ObservedConnection {
+        connection: OpenSshControlConnection<FakeBackend>,
+        backend: Arc<FakeBackend>,
+        events: mpsc::Sender<ExitWaitResult>,
+        cleanup: mpsc::Receiver<()>,
+    }
+
+    impl ObservedConnection {
+        fn new(directory: &TestDirectory, cx: &mut TestAppContext) -> Self {
+            let backend = Arc::new(FakeBackend::with_readiness(
+                directory.1.clone(),
+                [ProcessExit::successful()],
+            ));
+            let (observation, events, entered) = fake_exit_observation();
+            let (cleanup_sender, cleanup) = mpsc::channel();
+            {
+                let mut state = backend.state.lock().unwrap();
+                state.observations.push_back(observation);
+                state.cleanup_notification = Some(cleanup_sender);
+            }
+            let connection = cx
+                .executor()
+                .block(OpenSshControlConnection::connect(
+                    &directory.paths(),
+                    OpenSshExecutable::for_test(),
+                    &RecordingControlSocketProbe(directory.1.clone()),
+                    destination(),
+                    Arc::clone(&backend),
+                    &SshCancellationToken::default(),
+                    timing(),
+                ))
+                .unwrap();
+            entered.recv_timeout(Duration::from_secs(2)).unwrap();
+            Self {
+                connection,
+                backend,
+                events,
+                cleanup,
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn exit_observation_should_revoke_commands_and_reap_once(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let observed = ObservedConnection::new(&directory, cx);
+        let checks = observed.backend.state.lock().unwrap().status_checks;
+        let pane = observed
+            .connection
+            .prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            )
+            .unwrap();
+        let utility = observed.connection.remote_utility_command().unwrap();
+        observed
+            .backend
+            .state
+            .lock()
+            .unwrap()
+            .early_exits
+            .push_back(Some(ProcessExit::unsuccessful(Some(9))));
+        observed.events.send(Ok(SshProcessExitWake::Exit)).unwrap();
+        observed
+            .cleanup
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed.connection.state(), ControlConnectionState::Failed);
+        assert_eq!(
+            observed.backend.state.lock().unwrap().status_checks,
+            checks + 1
+        );
+        assert_eq!(observed.backend.reap_count(), 1);
+        assert!(matches!(
+            pane.take(),
+            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+        ));
+        assert!(
+            utility
+                .connection_cancellation()
+                .is_some_and(|cancellation| cancellation.is_cancelled())
+        );
+    }
+
+    #[gpui::test]
+    fn failed_or_spurious_exit_observation_should_preserve_polling(cx: &mut TestAppContext) {
+        for wake in [
+            Err(SshProcessMechanismError::StatusFailed),
+            Ok(SshProcessExitWake::Exit),
+            Ok(SshProcessExitWake::Interrupted),
+        ] {
+            let directory = TestDirectory::new();
+            let observed = ObservedConnection::new(&directory, cx);
+            let checks = {
+                let mut state = observed.backend.state.lock().unwrap();
+                state
+                    .early_exits
+                    .extend([None, Some(ProcessExit::unsuccessful(Some(9)))]);
+                state.status_checks
+            };
+            observed.events.send(wake).unwrap();
+            observed
+                .cleanup
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(observed.connection.state(), ControlConnectionState::Failed);
+            assert_eq!(
+                observed.backend.state.lock().unwrap().status_checks,
+                checks + 2
+            );
+            assert_eq!(observed.backend.reap_count(), 1);
+        }
+    }
+
+    #[gpui::test]
+    fn rejected_shutdown_should_restore_fresh_exit_observation(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let mut observed = ObservedConnection::new(&directory, cx);
+        let (next, events, entered) = fake_exit_observation();
+        {
+            let mut state = observed.backend.state.lock().unwrap();
+            state.observations.push_back(next);
+            state.shutdown_rejection = Some(ProcessExit::unsuccessful(Some(255)));
+        }
+        let result = cx.executor().block(observed.connection.shutdown());
+        assert!(matches!(
+            result,
+            Err(ControlConnectionError::ShutdownRejected(_))
+        ));
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(observed.connection.state(), ControlConnectionState::Ready);
+        observed
+            .backend
+            .state
+            .lock()
+            .unwrap()
+            .early_exits
+            .push_back(Some(ProcessExit::unsuccessful(Some(9))));
+        events.send(Ok(SshProcessExitWake::Exit)).unwrap();
+        observed
+            .cleanup
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed.connection.state(), ControlConnectionState::Failed);
+    }
+
+    #[gpui::test]
+    fn dropping_observed_connection_should_interrupt_before_cleanup_join(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let observed = ObservedConnection::new(&directory, cx);
+        let lifecycle = observed.connection.lifecycle_observer().unwrap();
+        drop(observed.connection);
+        observed
+            .cleanup
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed.backend.reap_count(), 1);
+        assert_eq!(
+            cx.executor().block(lifecycle.terminal()),
+            crate::ssh::live_connection::ControlConnectionTerminalState::Closed
+        );
     }
 
     impl SshProcessBackend for FakeBackend {
@@ -990,6 +1258,9 @@ mod tests {
                     .pop_front()
                     .unwrap_or(ProcessExit::unsuccessful(Some(255))))
             } else {
+                if is_shutdown && let Some(exit) = state.shutdown_rejection.take() {
+                    return Ok(exit);
+                }
                 if is_shutdown && state.exit_after_shutdown {
                     state.early_exits.push_back(Some(ProcessExit::successful()));
                 }
@@ -1002,6 +1273,7 @@ mod tests {
             child: &mut Self::Child,
         ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
             let mut state = self.state.lock().unwrap();
+            state.status_checks += 1;
             let exit = state.early_exits.pop_front().flatten();
             if exit.is_some() {
                 child.listener.take();
@@ -1011,6 +1283,10 @@ mod tests {
                 }
             }
             Ok(exit)
+        }
+
+        fn observe_exit(&self, _child: &mut Self::Child) -> Option<SshProcessExitObservation> {
+            self.state.lock().unwrap().observations.pop_front()
         }
 
         fn signal_process_group(
@@ -1041,6 +1317,9 @@ mod tests {
             }
             if let Some(after) = after {
                 after();
+            }
+            if let Some(notification) = &self.state.lock().unwrap().cleanup_notification {
+                let _ = notification.send(());
             }
             SshProcessCleanup::completed()
         }

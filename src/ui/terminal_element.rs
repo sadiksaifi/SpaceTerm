@@ -52,6 +52,7 @@ pub(crate) struct TerminalGridCache {
     symbol_plans: SymbolPlanCache,
     prepared_text: Vec<PreparedRowTextCacheEntry>,
     prepared_geometry: Vec<Option<PreparedRowCacheEntry<PreparedRow>>>,
+    prepared_visible_geometry: Option<PreparedVisibleGeometry>,
     preedit: Option<PreparedPreedit>,
 }
 
@@ -69,6 +70,7 @@ impl TerminalGridCache {
             symbol_plans: SymbolPlanCache::default(),
             prepared_text: Vec::new(),
             prepared_geometry: Vec::new(),
+            prepared_visible_geometry: None,
             preedit: None,
         }
     }
@@ -85,6 +87,7 @@ impl TerminalGridCache {
         self.symbol_plans.invalidate_scale_dependent();
         self.prepared_text.clear();
         self.prepared_geometry.clear();
+        self.prepared_visible_geometry = None;
         self.preedit = None;
     }
 
@@ -435,6 +438,24 @@ struct PreparedText {
 }
 
 impl PreparedText {
+    #[inline]
+    fn color_at(&self, glyph_index: usize) -> Hsla {
+        if self.paint_runs.len() <= 8 {
+            return self
+                .paint_runs
+                .iter()
+                .find(|paint| glyph_index < paint.end)
+                .map_or_else(Hsla::transparent_black, |paint| paint.color);
+        }
+        // Run ends follow UTF-8 byte order, independently of shaped glyph order.
+        let index = self
+            .paint_runs
+            .partition_point(|paint| paint.end <= glyph_index);
+        self.paint_runs
+            .get(index)
+            .map_or_else(Hsla::transparent_black, |paint| paint.color)
+    }
+
     fn positioned_glyphs(
         &self,
     ) -> impl Iterator<Item = (gpui::FontId, &gpui::ShapedGlyph, gpui::Point<Pixels>)> {
@@ -871,11 +892,7 @@ fn paint_terminal_text(
                 )?,
             }
         } else {
-            let color = text
-                .paint_runs
-                .iter()
-                .find(|paint| glyph.index < paint.end)
-                .map_or_else(|| rgba(0).into(), |paint| paint.color);
+            let color = text.color_at(glyph.index);
             match cursor_paint {
                 CursorTextPaint::Unchanged => {
                     window.paint_glyph(origin, font_id, glyph.id, layout.font_size, color)?
@@ -943,7 +960,7 @@ struct PreparedRowKey {
     decoration_metrics: DecorationMetrics,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PreparedGridLayout {
     grid_bounds: Bounds<Pixels>,
     font_size: Pixels,
@@ -951,6 +968,14 @@ struct PreparedGridLayout {
     line_height: Pixels,
     scale_factor: f32,
     decoration_metrics: DecorationMetrics,
+}
+
+type PreparedRows = Arc<[Arc<PreparedRow>]>;
+
+struct PreparedVisibleGeometry {
+    source: Arc<[Arc<RowPaintInput>]>,
+    layout: PreparedGridLayout,
+    rows: PreparedRows,
 }
 
 struct PreparedRowCacheEntry<T> {
@@ -1023,7 +1048,7 @@ impl TerminalGridCache {
         cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
         cursor_style: CursorSnapshot,
         window: &mut Window,
-    ) -> (Vec<Arc<PreparedRow>>, Option<(usize, PreparedDecorations)>) {
+    ) -> (PreparedRows, Option<(usize, PreparedDecorations)>) {
         let stable_rows = self.prepare_visible_geometry(rows, visible_rows, layout, window);
         let cursor_symbols = cursor
             .filter(|_| {
@@ -1061,8 +1086,15 @@ impl TerminalGridCache {
         visible_rows: usize,
         layout: PreparedGridLayout,
         window: &mut Window,
-    ) -> Vec<Arc<PreparedRow>> {
+    ) -> PreparedRows {
         let visible_rows = visible_rows.min(rows.len());
+        if let Some(cached) = &self.prepared_visible_geometry
+            && Arc::ptr_eq(&cached.source, rows)
+            && cached.layout == layout
+            && cached.rows.len() == visible_rows
+        {
+            return Arc::clone(&cached.rows);
+        }
         self.prepared_geometry.resize_with(visible_rows, || None);
         self.prepared_geometry.truncate(visible_rows);
         let previous_text = std::mem::take(&mut self.prepared_text);
@@ -1121,6 +1153,12 @@ impl TerminalGridCache {
         }
 
         self.prepared_text = prepared_text;
+        let prepared_rows = Arc::from(prepared_rows);
+        self.prepared_visible_geometry = Some(PreparedVisibleGeometry {
+            source: Arc::clone(rows),
+            layout,
+            rows: Arc::clone(&prepared_rows),
+        });
         prepared_rows
     }
 
@@ -1580,7 +1618,7 @@ impl Element for TerminalGridElement {
             hyperlink_occurrence(&self.presentation, self.active_hyperlink);
         let mut batch_cursor_text_overlay = None;
 
-        for (row_index, stable) in stable_rows.into_iter().enumerate() {
+        for (row_index, stable) in stable_rows.iter().cloned().enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
             let find_backgrounds = prepare_background_geometry(
                 &find_background_spans(
@@ -3144,7 +3182,8 @@ mod tests {
         );
         assert!(stable_rows.iter().all(|row| !row.text.is_empty()));
         let mut rows = stable_rows
-            .into_iter()
+            .iter()
+            .cloned()
             .map(PreparedFrameRow::new)
             .collect::<Vec<_>>();
         rows[0].cursor_background = Some(fill(cursor_bounds, rgba(0x22_44_88_ff)));
@@ -3281,6 +3320,217 @@ mod tests {
                 2.0,
             ),
         }
+    }
+
+    #[gpui::test]
+    fn glyph_colors_follow_utf8_boundaries_independent_of_glyph_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let red = Color::rgb(0xdd_00_00);
+                let blue = Color::rgb(0x00_00_dd);
+                let green = Color::rgb(0x00_dd_00);
+                let styled_cells = [
+                    ("a", red),
+                    ("é", red),
+                    ("b", blue),
+                    ("c", green),
+                    ("d", red),
+                    ("é", blue),
+                    ("f", green),
+                    ("g", red),
+                    ("h", blue),
+                    ("i", green),
+                    ("j", red),
+                ];
+                for (cell_count, expected_text, expected_colors) in [
+                    (4, "aébc", &[red, red, red, blue, green][..]),
+                    (
+                        11,
+                        "aébcdéfghij",
+                        &[
+                            red, red, red, blue, green, red, blue, blue, green, red, blue, green,
+                            red,
+                        ][..],
+                    ),
+                ] {
+                    let cells = styled_cells[..cell_count]
+                        .iter()
+                        .map(|(text, foreground)| {
+                            let mut subject = cell(text);
+                            subject.foreground_source = TerminalColor::Rgb(*foreground);
+                            subject
+                        })
+                        .collect::<Vec<_>>();
+                    let rows = Arc::<[RowSnapshot]>::from([Arc::from(cells)]);
+                    let mut cache = TerminalGridCache::new();
+                    let inputs =
+                        cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
+                    let prepared = cache.prepare_visible_geometry(
+                        &inputs,
+                        1,
+                        prepared_grid_layout(&fonts, px(14.0), px(8.0)),
+                        window,
+                    );
+                    assert_eq!(prepared[0].text.len(), 1);
+                    let text = &prepared[0].text[0];
+                    assert_eq!(text.line.text.as_ref(), expected_text);
+                    for index in (0..expected_colors.len())
+                        .rev()
+                        .chain(0..expected_colors.len())
+                    {
+                        assert_eq!(
+                            text.color_at(index),
+                            gpui_color(expected_colors[index]).into()
+                        );
+                    }
+                    assert_eq!(text.color_at(expected_colors.len()), rgba(0).into());
+                    assert_eq!(text.color_at(usize::MAX), rgba(0).into());
+                    let mut empty = text.clone();
+                    empty.paint_runs = Arc::from([]);
+                    assert_eq!(empty.color_at(0), rgba(0).into());
+                }
+            })
+            .expect("the glyph color test window should remain available");
+    }
+
+    #[gpui::test]
+    fn visible_geometry_reuses_exact_inputs_and_rebuilds_for_every_layout_dependency(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let rows = Arc::<[RowSnapshot]>::from([
+                    Arc::<[CellSnapshot]>::from([cell("first")]),
+                    Arc::<[CellSnapshot]>::from([cell("second")]),
+                ]);
+                let mut cache = TerminalGridCache::new();
+                let colors = colors();
+                let inputs = cache.prepare(&rows, &colors, &fonts, &Arc::from([]), grid_metrics());
+                let layout = prepared_grid_layout(&fonts, px(14.0), px(8.0));
+                let original = cache.prepare_visible_geometry(&inputs, 2, layout, window);
+                let reused = cache.prepare_visible_geometry(&inputs, 2, layout, window);
+                assert!(Arc::ptr_eq(&original, &reused));
+
+                let variants = [
+                    PreparedGridLayout {
+                        grid_bounds: Bounds::new(point(px(3.0), px(5.0)), layout.grid_bounds.size),
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        grid_bounds: Bounds::new(
+                            layout.grid_bounds.origin,
+                            size(px(75.0), px(31.0)),
+                        ),
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        font_size: px(15.0),
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        cell_width: px(8.5),
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        line_height: px(21.0),
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        scale_factor: 1.0,
+                        ..layout
+                    },
+                    PreparedGridLayout {
+                        decoration_metrics: DecorationMetrics {
+                            device_pixel: px(0.25),
+                            ..layout.decoration_metrics
+                        },
+                        ..layout
+                    },
+                ];
+                for variant in variants {
+                    let rebuilt = cache.prepare_visible_geometry(&inputs, 2, variant, window);
+                    assert!(!Arc::ptr_eq(&original, &rebuilt));
+                }
+
+                let moved = cache.prepare_visible_geometry(
+                    &inputs,
+                    2,
+                    PreparedGridLayout {
+                        grid_bounds: Bounds::new(point(px(3.0), px(5.0)), layout.grid_bounds.size),
+                        ..layout
+                    },
+                    window,
+                );
+                assert_eq!(moved[0].text[0].origin, point(px(3.0), px(5.0)));
+
+                let clipped = cache.prepare_visible_geometry(
+                    &inputs,
+                    2,
+                    PreparedGridLayout {
+                        grid_bounds: Bounds::new(
+                            layout.grid_bounds.origin,
+                            size(px(75.0), px(31.0)),
+                        ),
+                        ..layout
+                    },
+                    window,
+                );
+                assert_eq!(clipped[1].text[0].origin.y, px(20.0));
+                assert_eq!(
+                    cache
+                        .prepare_visible_geometry(&inputs, 1, layout, window)
+                        .len(),
+                    1
+                );
+
+                let mut changed_colors = colors.clone();
+                changed_colors.foreground = Color::rgb(0x12_34_56);
+                Arc::make_mut(&mut changed_colors.configured).foreground =
+                    changed_colors.foreground;
+                let changed_inputs = cache.prepare(
+                    &rows,
+                    &changed_colors,
+                    &fonts,
+                    &Arc::from([]),
+                    grid_metrics(),
+                );
+                let recolored = cache.prepare_visible_geometry(&changed_inputs, 2, layout, window);
+                assert!(!Arc::ptr_eq(&original, &recolored));
+                assert_ne!(
+                    original[0].text[0].paint_runs[0].color,
+                    recolored[0].text[0].paint_runs[0].color
+                );
+
+                let mut selected = cell("first");
+                selected.selected = true;
+                let selected_rows = Arc::<[RowSnapshot]>::from([
+                    Arc::<[CellSnapshot]>::from([selected]),
+                    Arc::<[CellSnapshot]>::from([cell("second")]),
+                ]);
+                let selected_inputs = cache.prepare(
+                    &selected_rows,
+                    &colors,
+                    &fonts,
+                    &Arc::from([]),
+                    grid_metrics(),
+                );
+                let selected_geometry =
+                    cache.prepare_visible_geometry(&selected_inputs, 2, layout, window);
+                assert!(!Arc::ptr_eq(&original, &selected_geometry));
+                assert!(!selected_geometry[0].selections.is_empty());
+
+                let retained = Arc::downgrade(&selected_geometry);
+                drop(selected_geometry);
+                cache.evict();
+                assert!(retained.upgrade().is_none());
+            })
+            .expect("the geometry cache test window should remain available");
     }
 
     fn prepared_preedit_key(layout: &PreeditLayout, visible_rows: usize) -> PreparedPreeditKey {
@@ -5078,7 +5328,7 @@ mod tests {
                             surface: None,
                             grid_bounds: layout.grid_bounds,
                             line_height: layout.line_height,
-                            rows: stable.into_iter().map(PreparedFrameRow::new).collect(),
+                            rows: stable.iter().cloned().map(PreparedFrameRow::new).collect(),
                             cursor_text_overlay: None,
                             graphics: GraphicsPaintPlan::default(),
                             blink_phase_visible: true,
@@ -5192,7 +5442,7 @@ mod tests {
                         assert!(
                             baseline
                                 .iter()
-                                .zip(&prepared)
+                                .zip(prepared.iter())
                                 .all(|(before, after)| { Arc::ptr_eq(before, after) }),
                             "cursor movement must reuse every row's stable geometry"
                         );

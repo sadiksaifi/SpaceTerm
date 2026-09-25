@@ -335,12 +335,18 @@ impl SearchCorpus {
                     }
                     Err(error) => return Err(error),
                 };
-                let text = graphemes[..count].iter().collect::<String>();
-                corpus.push_grapheme(
-                    &text,
-                    point,
-                    if cell.wide()? == CellWide::Wide { 2 } else { 1 },
-                );
+                let width = if cell.wide()? == CellWide::Wide { 2 } else { 1 };
+                // Reserve the whole cluster so per-character appends preserve corpus capacity.
+                let byte_count = graphemes[..count]
+                    .iter()
+                    .map(|character| character.len_utf8())
+                    .sum();
+                corpus.bytes.reserve(byte_count);
+                corpus.cells.reserve(byte_count);
+                let mut encoded = [0; 4];
+                for character in &graphemes[..count] {
+                    corpus.push_grapheme(character.encode_utf8(&mut encoded), point, width);
+                }
             }
 
             if !wrapped && y + 1 < total_rows {

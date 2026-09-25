@@ -392,6 +392,9 @@ struct MacWindowState {
     native_view: NonNull<Object>,
     blurred_view: Option<id>,
     display_link: Option<DisplayLink>,
+    frame_requested: bool,
+    frame_running: bool,
+    closed: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>>,
@@ -473,28 +476,57 @@ impl MacWindowState {
         }
     }
 
-    fn start_display_link(&mut self) {
-        self.stop_display_link();
+    fn request_frame(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.frame_requested = true;
+        self.reconcile_frame_source();
+    }
+
+    fn is_visible(&self) -> bool {
         unsafe {
-            if !self
-                .native_window
+            self.native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
-            {
+        }
+    }
+
+    fn reconcile_frame_source(&mut self) {
+        // A callback can enqueue more work. Its driver restores the callback
+        // before reconciling, so completion cannot strand that new request.
+        if self.frame_running {
+            return;
+        }
+        if self.closed
+            || !self.frame_requested
+            || self.request_frame_callback.is_none()
+            || !self.is_visible()
+        {
+            self.stop_display_link();
+            return;
+        }
+        if self.display_link.is_none() {
+            let screen = unsafe { self.native_window.screen() };
+            if screen == nil {
+                // Screen-change/restoration will retry; keep pending demand.
                 return;
             }
+            let display_id = unsafe { display_id_for_screen(screen) };
+            self.display_link =
+                DisplayLink::new(display_id, self.native_view.as_ptr().cast(), step).log_err();
         }
-        let display_id = unsafe { display_id_for_screen(self.native_window.screen()) };
-        if let Some(mut display_link) =
-            DisplayLink::new(display_id, self.native_view.as_ptr() as *mut c_void, step).log_err()
-        {
+        if let Some(display_link) = self.display_link.as_mut() {
             display_link.start().log_err();
-            self.display_link = Some(display_link);
         }
     }
 
     fn stop_display_link(&mut self) {
-        self.display_link = None;
+        // Retain the source across idle and hidden periods. Its GCD source is
+        // released only when retargeting displays or closing the Window.
+        if let Some(display_link) = self.display_link.as_mut() {
+            display_link.stop().log_err();
+        }
     }
 
     fn is_maximized(&self) -> bool {
@@ -689,6 +721,9 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
                 display_link: None,
+                frame_requested: true,
+                frame_running: false,
+                closed: false,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -932,6 +967,9 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        this.closed = true;
+        this.frame_requested = false;
+        this.request_frame_callback.take();
         this.renderer.destroy();
         let window = this.native_window;
         this.display_link.take();
@@ -1383,7 +1421,58 @@ impl PlatformWindow for MacWindow {
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
-        self.0.as_ref().lock().request_frame_callback = Some(callback);
+        let mut state = self.0.lock();
+        state.request_frame_callback = Some(callback);
+        state.request_frame();
+    }
+
+    fn frame_requester(&self) -> Rc<dyn Fn()> {
+        let state = Arc::downgrade(&self.0);
+        let executor = self.0.lock().executor.clone();
+        let retry_pending = Rc::new(Cell::new(false));
+        Rc::new(move || {
+            let Some(window_state) = state.upgrade() else {
+                return;
+            };
+            if let Some(mut lock) = window_state.try_lock() {
+                lock.request_frame();
+                return;
+            }
+            // AppKit may reenter while a native window operation holds this
+            // mutex. Never block that thread or borrow the App to wake it.
+            if retry_pending.replace(true) {
+                return;
+            }
+            let state = state.clone();
+            let retry_pending = retry_pending.clone();
+            executor
+                .spawn(async move {
+                    loop {
+                        let delivered = state.upgrade().is_none_or(|state| {
+                            if let Some(mut state) = state.try_lock() {
+                                state.request_frame();
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if delivered {
+                            break;
+                        }
+                        // A nested AppKit run loop can execute the retry before
+                        // the outer native operation releases its mutex.
+                        Timer::after(Duration::from_millis(1)).await;
+                    }
+                    retry_pending.set(false);
+                })
+                .detach();
+        })
+    }
+
+    fn completed_frame(&self, needs_frame: bool) {
+        let mut state = self.0.lock();
+        state.frame_requested |= needs_frame;
+        state.reconcile_frame_source();
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>) {
@@ -1920,7 +2009,7 @@ extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
             .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
         {
             lock.move_traffic_light();
-            lock.start_display_link();
+            lock.request_frame();
         } else {
             lock.stop_display_link();
         }
@@ -1976,7 +2065,10 @@ extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
 extern "C" fn window_did_change_screen(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
-    lock.start_display_link();
+    // A source is tied to its display. Its replacement reuses the registry's
+    // native link when returning to a previously observed display.
+    lock.display_link.take();
+    lock.request_frame();
 }
 
 extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) {
@@ -2013,22 +2105,11 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
         let window_state = unsafe { get_window_state(this) };
         let mut lock = window_state.lock();
 
-        if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
-                #[cfg(not(feature = "macos-blade"))]
-                lock.renderer.set_presents_with_transaction(true);
-                lock.stop_display_link();
-                drop(lock);
-                callback(Default::default());
-
-                let mut lock = window_state.lock();
-                lock.request_frame_callback = Some(callback);
-                #[cfg(not(feature = "macos-blade"))]
-                lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link();
-            }
-        } else {
-            lock.activated_least_once = true;
+        let subsequent_activation = lock.activated_least_once;
+        lock.activated_least_once = true;
+        drop(lock);
+        if subsequent_activation {
+            run_frame(&window_state, true);
         }
     }
 
@@ -2141,32 +2222,58 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.lock();
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        #[cfg(not(feature = "macos-blade"))]
-        lock.renderer.set_presents_with_transaction(true);
-        lock.stop_display_link();
-        drop(lock);
-        callback(Default::default());
-
-        let mut lock = window_state.lock();
-        lock.request_frame_callback = Some(callback);
-        #[cfg(not(feature = "macos-blade"))]
-        lock.renderer.set_presents_with_transaction(false);
-        lock.start_display_link();
-    }
+    run_frame(&window_state, true);
 }
 
 unsafe extern "C" fn step(view: *mut c_void) {
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
-    let mut lock = window_state.lock();
+    run_frame(&window_state, false);
+}
 
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        drop(lock);
-        callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+fn run_frame(window_state: &Mutex<MacWindowState>, synchronous: bool) {
+    let mut lock = window_state.lock();
+    if lock.closed {
+        return;
     }
+    if synchronous {
+        // A nested AppKit layer/activation request is retained even while the
+        // outer frame has temporarily taken the callback.
+        lock.frame_requested = true;
+    }
+    if lock.frame_running {
+        return;
+    }
+    if !lock.frame_requested || (!synchronous && !lock.is_visible()) {
+        lock.stop_display_link();
+        return;
+    }
+    let Some(mut callback) = lock.request_frame_callback.take() else {
+        return;
+    };
+    lock.frame_requested = false;
+    lock.frame_running = true;
+    if synchronous {
+        #[cfg(not(feature = "macos-blade"))]
+        lock.renderer.set_presents_with_transaction(true);
+        lock.stop_display_link();
+    }
+    drop(lock);
+    callback(Default::default());
+
+    let mut lock = window_state.lock();
+    lock.frame_running = false;
+    if lock.closed {
+        // The callback can remove its Window. Native ivars may still retain the
+        // state until queued teardown, but its renderer is already destroyed.
+        return;
+    }
+    lock.request_frame_callback = Some(callback);
+    if synchronous {
+        #[cfg(not(feature = "macos-blade"))]
+        lock.renderer.set_presents_with_transaction(false);
+    }
+    lock.reconcile_frame_source();
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &Object, _: Sel) -> id {
@@ -2499,6 +2606,7 @@ unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
         let screen_number_key: id = NSString::alloc(nil).init_str("NSScreenNumber");
         let screen_number = device_description.objectForKey_(screen_number_key);
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
+        let _: () = msg_send![screen_number_key, release];
         screen_number as CGDirectDisplayID
     }
 }

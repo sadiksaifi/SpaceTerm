@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -148,6 +149,12 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
         child: &mut Self::Child,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError>;
 
+    /// Optionally observes child exit without transferring child or reaping ownership.
+    /// Registration may recheck and cache status through the retained owner; the waiter cannot reap.
+    fn observe_exit(&self, _child: &mut Self::Child) -> Option<SshProcessExitObservation> {
+        None
+    }
+
     /// Signals the private process group owned by `child`.
     fn signal_process_group(
         &self,
@@ -216,6 +223,47 @@ impl SshProcessCleanup {
 pub(crate) enum ProcessSignal {
     Terminate,
     Kill,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SshProcessExitWake {
+    Exit,
+    Interrupted,
+}
+
+/// Blocking, non-reaping exit observation; used only by the dedicated supervisor thread.
+pub(crate) trait SshProcessExitWait: Send {
+    fn wait(&mut self) -> Result<SshProcessExitWake, SshProcessMechanismError>;
+}
+
+/// Idempotently wakes a current or future exit wait without joining or locking its child.
+pub(crate) trait SshProcessExitInterrupt: Send + Sync {
+    fn interrupt(&self);
+}
+
+pub(crate) struct SshProcessExitObservation {
+    waiter: Box<dyn SshProcessExitWait>,
+    interrupt: Arc<dyn SshProcessExitInterrupt>,
+}
+
+impl SshProcessExitObservation {
+    pub(crate) fn new(
+        waiter: impl SshProcessExitWait + 'static,
+        interrupt: Arc<dyn SshProcessExitInterrupt>,
+    ) -> Self {
+        Self {
+            waiter: Box::new(waiter),
+            interrupt,
+        }
+    }
+
+    pub(crate) fn interrupt_handle(&self) -> Arc<dyn SshProcessExitInterrupt> {
+        Arc::clone(&self.interrupt)
+    }
+
+    pub(crate) fn wait(&mut self) -> Result<SshProcessExitWake, SshProcessMechanismError> {
+        self.waiter.wait()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -388,6 +436,12 @@ pub(crate) trait SshProcessAdapter: Clone + Send + Sync + 'static {
         &self,
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError>;
+
+    /// Returns an optional non-reaping waiter; registration may collect and cache owned status.
+    /// Native observation failures retain polling behavior.
+    fn observe_exit(&self, _process: &mut Self::Process) -> Option<SshProcessExitObservation> {
+        None
+    }
 
     fn signal(
         &self,
@@ -662,6 +716,10 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
             return Ok(Some(ProcessExit::unsuccessful(None)));
         };
         child.adapter.try_status(process)
+    }
+
+    fn observe_exit(&self, child: &mut Self::Child) -> Option<SshProcessExitObservation> {
+        child.adapter.observe_exit(child.process.as_mut()?)
     }
 
     fn signal_process_group(

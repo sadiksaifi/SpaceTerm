@@ -324,6 +324,7 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        super::appearance_runtime::complete_font_catalog(cx);
         // Transparent native chrome hides this visually while retaining a stable Operating-System
         // window identity for the Window menu and accessibility clients.
         window.set_window_title("Settings");
