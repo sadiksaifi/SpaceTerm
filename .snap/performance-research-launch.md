@@ -47,3 +47,8 @@ The reaper's unbounded channel accepts at most one cleanup ownership from its on
 Instrument the launch stages first, with particular attention to complete SSH supervision and installed-font classification. The raw SSH command is short on this host, so a nontrivial async capability redesign is justified only if the full probe or its slow tail materially delays the first frame. The font scan has a concrete behavior-preserving reduction path: resolve the selected and default fallback families up front, and finish the full list before Settings first renders. Its actual cost is still unmeasured, so use stage timing as the selection gate. For remote idle energy, measure the 10 ms Control Connection supervisor first; it is a durable wakeup source. Keep Pane thread consolidation behind resource scaling evidence because its current ownership protects cleanup.
 
 The selected-font candidate and its isolated measurements are recorded in [launch results](performance-launch-results.md). Application first-frame timing remains an open validation step.
+
+The subsequent user report of late menu-bar presentation is audited in
+[menu startup timing](performance-menu-startup.md). Menu installation precedes
+window creation, but explicit application activation follows it. Native visible
+frame timing remains to be established.
