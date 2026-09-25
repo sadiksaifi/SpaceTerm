@@ -159,6 +159,29 @@ fn terminal_find_highlights_the_complete_wide_grapheme() {
 }
 
 #[test]
+fn terminal_find_maps_a_long_cluster_to_its_head_and_wide_match_end() {
+    let mut emulator = emulator(8, 2);
+    emulator.feed(format!("Ae{}界", "\u{301}".repeat(20)).as_bytes());
+    emulator.set_find_query(FindQueryGeneration::test(1), "\u{301}\u{301}界".to_owned());
+
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    let found = snapshot.find.as_ref().unwrap();
+
+    assert_eq!(
+        (found.total_matches, found.visible_spans.as_ref()),
+        (
+            1,
+            &[crate::terminal::FindHighlightSpan {
+                row: 0,
+                start_column: 1,
+                end_column: 3,
+                current: false,
+            }][..]
+        )
+    );
+}
+
+#[test]
 fn terminal_find_query_only_snapshot_reuses_rows() {
     let mut emulator = emulator(8, 2);
     emulator.feed(b"needle");
