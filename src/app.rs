@@ -481,8 +481,6 @@ pub(crate) fn open(
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    // Request activation with the menu installed before GPUI shows the native window.
-    cx.activate(true);
     let result = cx.open_window(
         WindowOptions {
             window_background: crate::ui::appearance_runtime::window_background(cx),
@@ -530,6 +528,7 @@ pub(crate) fn open(
     );
 
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
+    cx.activate(true);
     Ok(window)
 }
 
@@ -903,12 +902,7 @@ fn start_application(
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
-    if let Some((storage, platform)) = &host.appearance {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
-        crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
-            .map_err(|_| RuntimeError::Initialization)?;
-    }
-    crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    // Native menu construction reads the keymap; install both before Settings I/O and fonts.
     host.profile.install(cx);
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
@@ -924,6 +918,12 @@ fn start_application(
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
+    if let Some((storage, platform)) = &host.appearance {
+        let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
+            .map_err(|_| RuntimeError::Initialization)?;
+    }
+    crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
@@ -1221,6 +1221,63 @@ mod runtime_tests {
                     ),
                 ),
         )
+    }
+
+    #[gpui::test]
+    fn startup_installs_menu_with_shortcuts_before_reading_settings(cx: &mut gpui::TestAppContext) {
+        use crate::platform::application_menu::ApplicationMenuError;
+        use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
+        use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
+        use gpui::Action as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone, Default)]
+        struct StartupProbe(Arc<AtomicBool>);
+
+        impl ApplicationMenuAdapter for StartupProbe {
+            fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
+                let shortcut = gpui::Keystroke::parse("cmd-q").unwrap();
+                assert!(
+                    cx.all_bindings_for_input(&[shortcut])
+                        .iter()
+                        .any(|binding| { binding.action().name() == QuitApplication.name() })
+                );
+                assert!(cx.is_action_available(&crate::ui::settings_window::OpenSettings));
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn perform(&self, _: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+                Err(ApplicationMenuError::Unavailable)
+            }
+        }
+
+        impl SettingsStorage for StartupProbe {
+            fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
+                assert!(
+                    self.0.load(Ordering::SeqCst),
+                    "native menu installation must precede Settings I/O"
+                );
+                Ok(None)
+            }
+
+            fn write(
+                &self,
+                _: &[u8],
+                _: Option<&SecureEntryIdentity>,
+            ) -> Result<StorageCommit, StorageError> {
+                Err(StorageError::Unavailable)
+            }
+        }
+
+        let probe = StartupProbe::default();
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.adapters.application_menu = Rc::new(probe.clone());
+        let host = HostComposition::new(wiring).unwrap().with_appearance(
+            Arc::new(probe),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+        );
+        cx.update(|cx| start_application(cx, &host).unwrap());
     }
 
     #[gpui::test]

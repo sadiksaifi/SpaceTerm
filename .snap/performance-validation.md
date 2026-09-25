@@ -50,3 +50,14 @@ This test-only change leaves the measured production binary unchanged.
 - [Terminal review](performance-review-1.md).
 - [Appearance review](performance-review-2.md).
 - [Evidence review and resolved finding](performance-review-3.md).
+
+## Earlier menu bootstrap follow-up
+
+After the user reported the activation-only experiment insufficient, menu/actions
+and desktop keymap installation moved before Settings I/O, font classification
+and control initialization. The startup order regression failed before the
+change and passed after it. `mise run test` now passes 3,113 tests, with zero
+failures and five ignored fixtures. Rust lint and the optimized build pass.
+Two independent GPT-6 Sol high reviewers found no material issue. These checks
+do not prove native first-frame ordering; the menu timing record retains that
+limitation and supersedes the earlier activation-only experiment.

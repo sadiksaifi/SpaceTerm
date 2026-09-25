@@ -69,3 +69,43 @@ The native check establishes that the app and menu work after launch. It does
 not establish which appeared on the first visible frame. That effect remains
 an experiment for direct observation; no menu-first timing gain is claimed.
 The earlier application resource measurements predate this activation change.
+
+## Earlier full menu installation
+
+On 2026-09-26 the user reported that the application-name menu appears first but
+File, Edit, View, Window and Help still arrive much later. The activation-only
+experiment did not resolve that observation. It has been replaced, restoring
+activation after successful window creation.
+
+`start_application` now installs the desktop profile, registers Services,
+configures Settings composition and installs all menu actions and menus before
+reading Settings or initializing appearance and controls. This removes Settings
+I/O, font enumeration/classification and control-theme setup from the path before
+full menu installation. The native menu still receives the existing keymap.
+Appearance still initializes before controls, preserving the font inventory and
+control-theme dependencies. No timer or nested event loop was introduced.
+
+The new startup regression test uses the existing menu and storage boundaries.
+It checks that the Quit shortcut and Settings action exist when menu installation
+is requested, and that installation precedes the first Settings read. It failed
+against the previous order with `native menu installation must precede Settings
+I/O`, then passed after the reorder.
+
+Validation completed:
+
+- `mise run test`: 3,113 passed, zero failures, five ignored fixtures.
+- Focused startup regression, `mise run lint:rust`, `mise run fmt`, and
+  `mise run build:release`: passed.
+- Two independent GPT-6 Sol high reviewers (`menu_startup_audit`, `pr_review_ui`)
+  found no material source-level issue. They checked menu shortcuts, later
+  control initialization, early actions, failure handling and reopen behavior.
+
+This proves the application-side setup order. It does not establish AppKit's
+first visible menu frame. A launch with an appearance override different from
+the system appearance also remains a native visual verification case. Earlier
+resource measurements predate these menu startup changes.
+
+`mise run dev:macos` built and opened the updated development app successfully.
+Native inspection confirmed all six top-level menus and an operable File menu.
+The menu was dismissed and SpaceTerm Dev was left open for the user. This check
+was performed after launch and does not measure first-frame timing.

@@ -49,8 +49,11 @@ in the inventory. No production change was selected for those unmeasured areas.
 
 ## Menu startup follow-up
 
-The user approved requesting application activation before native window creation.
-The change passed 21 application tests, lint, format and an optimized build. Two
-additional GPT-6 Sol high reviews found no material issue. The source development
-app opened and its File menu worked. Exact first-frame menu ordering remains
-unverified; see [menu startup timing](performance-menu-startup.md).
+The activation-only experiment did not resolve the user's observation that the
+application name appears before File/Edit/View/Window/Help. It was replaced with
+earlier installation of the complete menu, actions and keymap, before Settings
+I/O, fonts and control themes. Activation again follows successful window
+creation. The new regression failed before the reorder and passed afterward.
+The full suite passes 3,113 tests; Rust lint and the optimized build pass. Two
+independent GPT-6 Sol high reviews found no material issue. Exact visible menu
+frame timing remains unverified; see [menu startup timing](performance-menu-startup.md).

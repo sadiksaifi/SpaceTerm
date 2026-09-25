@@ -37,7 +37,7 @@ reporting the PR ready. Do not merge it without a user request.
 | Background | Existing visibility gates audited; hidden process comparison selected; unfocused-visible and inactive-Tab scaling remain profiling work | Hidden capture unavailable; limitation recorded |
 | Memory and lifetime | Bounded idle compression preserves history and reduces native footprint; Pane and graphics lifetime profiling remains | Compression implemented |
 | GPU | Source audit complete; no native execution/residency measurement, so no GPU allocation or scheduling changes selected | Deferred with evidence requirements |
-| Regression protection | 3,112 tests, Rust lint, format and optimized build pass; three independent reviews complete; one test-coverage finding corrected and verified | Complete |
+| Regression protection | 3,113 tests, Rust lint, format and optimized build pass; three independent reviews complete; one test-coverage finding corrected and verified | Complete |
 
 "Best possible" has no provable global endpoint. This measured implementation
 batch is complete: all four selected candidates are implemented, validated and
