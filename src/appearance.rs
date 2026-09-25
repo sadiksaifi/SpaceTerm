@@ -214,9 +214,10 @@ pub(crate) use preferences::{
     SchemeSlots, TerminalFontFamily,
 };
 pub(crate) use resolution::{
-    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
-    ResolvedAppearance, ResolvedChromeAppearance, ResolvedChromeTypography, ResolvedFontDescriptor,
-    ResolvedTerminalAppearance, ResolvedTerminalTypography, SystemAppearance,
+    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
+    DEFAULT_TERMINAL_FAMILIES, FontClass, FontStyle, ResolvedAppearance, ResolvedChromeAppearance,
+    ResolvedChromeTypography, ResolvedFontDescriptor, ResolvedTerminalAppearance,
+    ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use scheme::{
     Appearance, CatalogError, ChromeColors, CustomScheme, SchemeCatalog, SchemeId, SchemeKind,

@@ -420,21 +420,23 @@ fn resolve_chrome_typography(
     }
 }
 
+/// Ordered fallback families used when Terminal typography requests the default.
+pub(crate) const DEFAULT_TERMINAL_FAMILIES: [&str; 4] = [
+    "JetBrainsMono Nerd Font",
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrains Mono",
+    "Menlo",
+];
+
 fn resolve_terminal_typography(
     preferences: &AppearancePreferences,
     fonts: &AvailableFonts,
     diagnostics: &mut Vec<AppearanceDiagnostic>,
 ) -> ResolvedTerminalTypography {
-    const DEFAULTS: [&str; 4] = [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ];
     let requested = &preferences.terminal.typography;
     let mut unavailable = false;
     let selected = match &requested.family {
-        TerminalFontFamily::DefaultMonospace => DEFAULTS
+        TerminalFontFamily::DefaultMonospace => DEFAULT_TERMINAL_FAMILIES
             .iter()
             .find_map(|family| {
                 fonts
@@ -458,7 +460,7 @@ fn resolve_terminal_typography(
         diagnostics.push(AppearanceDiagnostic::TerminalFontUnavailable);
     }
     let mut fallbacks = vec![String::from("Apple Color Emoji")];
-    for family in DEFAULTS {
+    for family in DEFAULT_TERMINAL_FAMILIES {
         if family != selected.family && !fallbacks.iter().any(|value| value == family) {
             fallbacks.push(family.to_owned());
         }

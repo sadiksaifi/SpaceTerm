@@ -11,8 +11,9 @@ use gpui::{App, Global, Task, font, px};
 use crate::platform::window_frame::WindowFrameGeometry;
 
 use crate::appearance::{
-    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
-    CompositionCapabilities, FontClass, ResolvedAppearance, SchemeCatalog, SystemAppearance,
+    AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
+    AvailableFonts, ChromeFontFamily, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES,
+    FontClass, ResolvedAppearance, SchemeCatalog, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -78,6 +79,7 @@ pub(crate) struct AppearanceRuntime {
     pub(crate) settings: UserSettings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
+    pending_font_names: Option<Vec<String>>,
     progress_motion: spaceterm_ui::ProgressMotion,
     #[cfg(feature = "appearance-exerciser")]
     accessibility_preview: AccessibilityPreviewOverride,
@@ -92,7 +94,8 @@ pub(crate) fn install(
     platform: Rc<dyn AppearancePlatform>,
     cx: &mut App,
 ) -> Result<(), SettingsError> {
-    let fonts = capture_fonts(cx);
+    let (fonts, pending_font_names) =
+        capture_initial_fonts(cx, &settings.snapshot().candidate.preferences);
     let observation = platform.observe();
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
@@ -127,6 +130,7 @@ pub(crate) fn install(
         settings,
         platform,
         fonts,
+        pending_font_names,
         progress_motion: spaceterm_ui::ProgressMotion::Standard,
         #[cfg(feature = "appearance-exerciser")]
         accessibility_preview: AccessibilityPreviewOverride::default(),
@@ -137,15 +141,16 @@ pub(crate) fn install(
 }
 
 pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
-    let (platform, candidate, fonts, previous_progress_motion) = {
+    let (platform, candidate, previous_progress_motion) = {
         let runtime = cx.global::<AppearanceRuntime>();
         (
             Rc::clone(&runtime.platform),
             runtime.settings.snapshot().candidate,
-            runtime.fonts.clone(),
             runtime.progress_motion,
         )
     };
+    ensure_selected_fonts(&candidate.preferences, cx);
+    let fonts = cx.global::<AppearanceRuntime>().fonts.clone();
     let catalog = SchemeCatalog::from_custom_schemes(&candidate.custom_schemes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
@@ -296,34 +301,28 @@ pub(crate) fn reset_accessibility_preview(cx: &mut App) -> Result<(), SettingsEr
     Ok(())
 }
 
-/// Called only at startup or an explicit font reload. No frame or timer enumerates fonts.
-fn capture_fonts(cx: &App) -> AvailableFonts {
-    let text = cx.text_system();
-    let installed = text
-        .all_font_names()
-        .into_iter()
-        .map(|family| {
-            let id = text.resolve_font(&font(family.clone()));
-            let widths =
-                ['i', 'M', '0', ' '].map(|character| text.advance(id, px(18.0), character));
-            let monospace = widths.iter().all(|width| width.is_ok())
-                && widths.windows(2).all(|pair| {
-                    (f32::from(pair[0].as_ref().unwrap().width)
-                        - f32::from(pair[1].as_ref().unwrap().width))
-                    .abs()
-                        < 0.01
-                });
-            AvailableFont {
-                resolution_identity: format!("{id:?}"),
-                family,
-                class: if monospace {
-                    FontClass::Monospace
-                } else {
-                    FontClass::Proportional
-                },
-            }
-        })
-        .collect();
+fn available_font(text: &gpui::TextSystem, family: String) -> AvailableFont {
+    let id = text.resolve_font(&font(family.clone()));
+    let widths = ['i', 'M', '0', ' '].map(|character| text.advance(id, px(18.0), character));
+    let monospace = widths.iter().all(|width| width.is_ok())
+        && widths.windows(2).all(|pair| {
+            (f32::from(pair[0].as_ref().unwrap().width)
+                - f32::from(pair[1].as_ref().unwrap().width))
+            .abs()
+                < 0.01
+        });
+    AvailableFont {
+        resolution_identity: format!("{id:?}"),
+        family,
+        class: if monospace {
+            FontClass::Monospace
+        } else {
+            FontClass::Proportional
+        },
+    }
+}
+
+fn base_fonts(installed: Vec<AvailableFont>) -> AvailableFonts {
     AvailableFonts {
         system_ui: AvailableFont {
             family: ".SystemUIFont".into(),
@@ -339,10 +338,109 @@ fn capture_fonts(cx: &App) -> AvailableFonts {
     }
 }
 
+fn selected_font(family: &str, preferences: &AppearancePreferences) -> bool {
+    let chrome = matches!(
+        &preferences.chrome.typography.family,
+        ChromeFontFamily::Named { family: selected } if selected == family
+    );
+    let terminal = match &preferences.terminal.typography.family {
+        TerminalFontFamily::DefaultMonospace => DEFAULT_TERMINAL_FAMILIES.contains(&family),
+        TerminalFontFamily::Named { family: selected } => selected == family,
+    };
+    chrome || terminal
+}
+
+/// Enumerate once before the first window, but classify only families that can affect its type.
+fn capture_initial_fonts(
+    cx: &App,
+    preferences: &AppearancePreferences,
+) -> (AvailableFonts, Option<Vec<String>>) {
+    let text = cx.text_system();
+    let names = text.all_font_names();
+    let installed = names
+        .iter()
+        .filter(|family| selected_font(family, preferences))
+        .cloned()
+        .map(|family| available_font(text, family))
+        .collect();
+    (base_fonts(installed), Some(names))
+}
+
+/// Classify a newly requested family before resolving an appearance change.
+fn ensure_selected_fonts(preferences: &AppearancePreferences, cx: &mut App) {
+    let missing = {
+        let runtime = cx.global::<AppearanceRuntime>();
+        runtime.pending_font_names.as_ref().map(|names| {
+            names
+                .iter()
+                .filter(|family| {
+                    selected_font(family, preferences)
+                        && !runtime
+                            .fonts
+                            .installed
+                            .iter()
+                            .any(|font| font.family == family.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let Some(missing) = missing else {
+        return;
+    };
+    let text = cx.text_system().clone();
+    let added = missing
+        .into_iter()
+        .map(|family| available_font(&text, family));
+    cx.global_mut::<AppearanceRuntime>()
+        .fonts
+        .installed
+        .extend(added);
+}
+
+pub(crate) fn complete_font_catalog(cx: &mut App) {
+    if !cx.has_global::<AppearanceRuntime>() {
+        return;
+    }
+    let Some(names) = cx
+        .global_mut::<AppearanceRuntime>()
+        .pending_font_names
+        .take()
+    else {
+        return;
+    };
+    let selected = cx.global::<AppearanceRuntime>().fonts.installed.clone();
+    let text = cx.text_system().clone();
+    let installed = names
+        .into_iter()
+        .map(|family| {
+            selected
+                .iter()
+                .find(|font| font.family == family)
+                .cloned()
+                .unwrap_or_else(|| available_font(&text, family))
+        })
+        .collect();
+    cx.global_mut::<AppearanceRuntime>().fonts.installed = installed;
+}
+
+/// Classify all fonts only for explicit font reloads.
+#[cfg(any(test, feature = "appearance-exerciser"))]
+fn capture_fonts(cx: &App) -> AvailableFonts {
+    let text = cx.text_system();
+    base_fonts(
+        text.all_font_names()
+            .into_iter()
+            .map(|family| available_font(text, family))
+            .collect(),
+    )
+}
+
 #[cfg(feature = "appearance-exerciser")]
 pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
     let fonts = capture_fonts(cx);
     cx.global_mut::<AppearanceRuntime>().fonts = fonts;
+    cx.global_mut::<AppearanceRuntime>().pending_font_names = None;
     refresh(cx)
 }
 
