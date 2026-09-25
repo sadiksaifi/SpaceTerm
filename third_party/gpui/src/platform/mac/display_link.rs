@@ -25,8 +25,8 @@ use std::{
 };
 use util::ResultExt;
 
-#[cfg(feature = "performance-probes")]
-use crate::frame_performance::{Counter, record};
+#[cfg(feature = "native-test-support")]
+use crate::frame_test_support::{Counter, record};
 
 static REGISTRY: Mutex<Registry<sys::DisplayLink, Arc<FrameRequestSource>>> =
     Mutex::new(Registry::new());
@@ -153,7 +153,7 @@ unsafe extern "C" fn display_link_callback(
     _flags_out: *mut i64,
     display_id: *mut c_void,
 ) -> i32 {
-    #[cfg(feature = "performance-probes")]
+    #[cfg(feature = "native-test-support")]
     record(Counter::NativeVsync, 1);
     let display_id = display_id as usize as CGDirectDisplayID;
     lock_registry().for_each_subscriber(display_id, |source| unsafe {
@@ -178,7 +178,7 @@ fn subscribe(
                 display_id as usize as *mut c_void,
             )?
         };
-        #[cfg(feature = "performance-probes")]
+        #[cfg(feature = "native-test-support")]
         record(Counter::NativeLinkCreated, 1);
         Some(link)
     } else {
@@ -188,14 +188,12 @@ fn subscribe(
     if let Some(mut link) = link_to_start {
         if let Err(error) = unsafe { link.start() } {
             lock_registry().start_failed(display_id, subscriber_id);
-            #[cfg(feature = "performance-probes")]
-            record(Counter::NativeStartFailure, 1);
             return Err(error);
         }
-        #[cfg(feature = "performance-probes")]
+        #[cfg(feature = "native-test-support")]
         record(Counter::NativeLinkStarted, 1);
     }
-    #[cfg(feature = "performance-probes")]
+    #[cfg(feature = "native-test-support")]
     record(Counter::WindowSourceSubscribed, 1);
     Ok(subscriber_id)
 }
@@ -203,11 +201,11 @@ fn subscribe(
 fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) -> Result<()> {
     debug_assert_main_thread();
     let link_to_stop = lock_registry().unsubscribe(display_id, subscriber_id);
-    #[cfg(feature = "performance-probes")]
+    #[cfg(feature = "native-test-support")]
     record(Counter::WindowSourceUnsubscribed, 1);
     if let Some(mut link) = link_to_stop {
         unsafe { link.stop()? };
-        #[cfg(feature = "performance-probes")]
+        #[cfg(feature = "native-test-support")]
         record(Counter::NativeLinkStopped, 1);
     }
     Ok(())
@@ -226,7 +224,7 @@ impl Drop for FrameRequestSource {
             dispatch_source_cancel(self.0);
             dispatch_release(dispatch_object_t { _ds: self.0 });
         }
-        #[cfg(feature = "performance-probes")]
+        #[cfg(feature = "native-test-support")]
         record(Counter::WindowSourceReleased, 1);
     }
 }
@@ -258,7 +256,7 @@ impl DisplayLink {
             // Resume once for its lifetime. Dropping a suspended source is unsafe,
             // and source suspension is unnecessary when the registry unsubscribes it.
             dispatch_resume(dispatch_object_t { _ds: source });
-            #[cfg(feature = "performance-probes")]
+            #[cfg(feature = "native-test-support")]
             record(Counter::WindowSourceCreated, 1);
             Arc::new(FrameRequestSource(source))
         };

@@ -133,36 +133,6 @@ pub struct PathRasterizationVertex {
 
 impl MetalRenderer {
     pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
-        #[cfg(feature = "performance-probes")]
-        let mut startup_timing = {
-            use std::sync::atomic::{AtomicU8, Ordering};
-            static RECORDED_RENDERERS: AtomicU8 = AtomicU8::new(0);
-            let enabled = std::env::var_os("SPACETERM_BENCH_FRAME_COUNTERS").as_deref()
-                == Some(std::ffi::OsStr::new("1"));
-            enabled
-                .then(|| {
-                    RECORDED_RENDERERS
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                            (count < 8).then_some(count + 1)
-                        })
-                        .ok()
-                })
-                .flatten()
-                .map(|index| {
-                    let now = std::time::Instant::now();
-                    (index, now, now, [0_u64; 9])
-                })
-        };
-        macro_rules! startup_checkpoint {
-            ($index:literal) => {
-                #[cfg(feature = "performance-probes")]
-                if let Some((_, _, previous, stages)) = &mut startup_timing {
-                    let now = std::time::Instant::now();
-                    stages[$index] = now.duration_since(*previous).as_nanos() as u64;
-                    *previous = now;
-                }
-            };
-        }
         // Prefer low‐power integrated GPUs on Intel Mac. On Apple
         // Silicon, there is only ever one GPU, so this is equivalent to
         // `metal::Device::system_default()`.
@@ -172,7 +142,6 @@ impl MetalRenderer {
             log::error!("unable to access a compatible graphics device");
             std::process::exit(1);
         };
-        startup_checkpoint!(0);
 
         let layer = metal::MetalLayer::new();
         layer.set_device(&device);
@@ -188,7 +157,6 @@ impl MetalRenderer {
                     | AutoresizingMask::HEIGHT_SIZABLE
             ];
         }
-        startup_checkpoint!(1);
         #[cfg(feature = "runtime_shaders")]
         let library = device
             .new_library_with_source(&SHADERS_SOURCE_FILE, &metal::CompileOptions::new())
@@ -197,7 +165,6 @@ impl MetalRenderer {
         let library = device
             .new_library_with_data(SHADERS_METALLIB)
             .expect("error building metal library");
-        startup_checkpoint!(2);
 
         fn to_float2_bits(point: PointF) -> u64 {
             let mut output = point.y.to_bits() as u64;
@@ -219,7 +186,6 @@ impl MetalRenderer {
             mem::size_of_val(&unit_vertices) as u64,
             MTLResourceOptions::StorageModeManaged,
         );
-        startup_checkpoint!(3);
 
         let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
             &device,
@@ -286,37 +252,12 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
-        startup_checkpoint!(4);
 
         let command_queue = device.new_command_queue();
-        startup_checkpoint!(5);
         let backdrop = BackdropRenderer::new(&device, &library);
-        startup_checkpoint!(6);
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone()));
-        startup_checkpoint!(7);
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
-        startup_checkpoint!(8);
-        #[cfg(feature = "performance-probes")]
-        if let Some((index, started, finished, stages)) = startup_timing {
-            use std::io::Write as _;
-            // One bounded, content-free event after timed work. Normal builds omit all probes.
-            // End-to-end probe launches include this logging cost; constructor_total_ns does not.
-            let total = finished.duration_since(started).as_nanos() as u64;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "{{\"event\":\"metal_startup\",\"renderer_index\":{index},\"constructor_total_ns\":{total},\"device_ns\":{},\"layer_ns\":{},\"library_ns\":{},\"vertex_buffer_ns\":{},\"pipelines_ns\":{},\"command_queue_ns\":{},\"backdrop_ns\":{},\"atlas_ns\":{},\"video_cache_ns\":{}}}",
-                stages[0],
-                stages[1],
-                stages[2],
-                stages[3],
-                stages[4],
-                stages[5],
-                stages[6],
-                stages[7],
-                stages[8],
-            );
-        }
 
         Self {
             device,
@@ -407,12 +348,6 @@ impl MetalRenderer {
             return;
         }
 
-        #[cfg(feature = "performance-probes")]
-        crate::frame_performance::record(
-            crate::frame_performance::Counter::PathTextureAllocationSet,
-            1,
-        );
-
         let texture_descriptor = metal::TextureDescriptor::new();
         texture_descriptor.set_width(size.width.0 as u64);
         texture_descriptor.set_height(size.height.0 as u64);
@@ -441,10 +376,6 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
-        #[cfg(feature = "performance-probes")]
-        if !scene.paths.is_empty() {
-            crate::frame_performance::record(crate::frame_performance::Counter::SceneWithPaths, 1);
-        }
         let has_backdrop = !scene.backdrop_filters.is_empty();
         self.layer.set_framebuffer_only(!has_backdrop);
         if !has_backdrop {
@@ -1479,55 +1410,6 @@ pub struct SurfaceBounds {
 mod path_texture_tests {
     use super::*;
     use crate::{PathBuilder, px, rgba};
-
-    #[test]
-    #[ignore = "explicit native allocation measurement; run mise run bench:gpui:path-targets:macos"]
-    fn path_target_allocation_resources() {
-        use std::{hint::black_box, time::Instant};
-        assert!(!black_box(cfg!(debug_assertions)), "run in release mode");
-        let mut renderer = MetalRenderer::new(Arc::default());
-        for repetition in 0..4 {
-            for eager in if repetition % 2 == 0 {
-                [true, false]
-            } else {
-                [false, true]
-            } {
-                renderer.path_intermediate_texture = None;
-                renderer.path_intermediate_msaa_texture = None;
-                let mut peak_path_bytes = 0;
-                let mut peak_device_bytes = 0;
-                let mut elapsed = std::time::Duration::ZERO;
-                for _ in 0..20 {
-                    for (width, height) in [(1800, 1160), (2944, 1874), (1800, 1160)] {
-                        let viewport = size(DevicePixels(width), DevicePixels(height));
-                        let started = Instant::now();
-                        renderer.update_drawable_size(viewport);
-                        if eager {
-                            renderer.update_path_intermediate_textures(viewport);
-                        }
-                        elapsed += started.elapsed();
-                        peak_path_bytes = peak_path_bytes.max(
-                            renderer
-                                .path_intermediate_texture
-                                .as_ref()
-                                .map_or(0, |t| t.allocated_size())
-                                + renderer
-                                    .path_intermediate_msaa_texture
-                                    .as_ref()
-                                    .map_or(0, |t| t.allocated_size()),
-                        );
-                        peak_device_bytes =
-                            peak_device_bytes.max(renderer.device.current_allocated_size());
-                    }
-                }
-                let strategy = if eager { "eager" } else { "lazy" };
-                println!(
-                    "path_target_resources repetition={repetition} strategy={strategy} resizes=60 ns_per_resize={} peak_path_allocated_bytes={peak_path_bytes} peak_device_allocated_bytes={peak_device_bytes}",
-                    elapsed.as_nanos() / 60
-                );
-            }
-        }
-    }
 
     #[test]
     fn drawable_resizes_without_paths_do_not_allocate_path_targets() {

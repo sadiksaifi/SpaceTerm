@@ -12,15 +12,7 @@ mod ui;
 
 mod desktop_profile;
 
-#[cfg(feature = "performance-probes")]
-mod performance_probes;
-
 fn main() {
-    #[cfg(feature = "performance-probes")]
-    if performance_probes::start().is_err() {
-        eprintln!("could not start performance sampler");
-        std::process::exit(1);
-    }
     platform::main();
 }
 

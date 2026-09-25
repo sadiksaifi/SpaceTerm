@@ -35,6 +35,7 @@ repository = "https://github.com/zed-industries/zed"
 resolver = "2"
 
 [features]
+native-test-support = []
 default = [
     "font-kit",
     "wayland",
@@ -42,7 +43,6 @@ default = [
     "windows-manifest",
 ]
 inspector = ["gpui_macros/inspector"]
-performance-probes = []
 leak-detection = ["backtrace"]
 macos-blade = [
     "blade-graphics",
@@ -176,11 +176,12 @@ path = "examples/pattern.rs"
 [[example]]
 name = "macos_display_link_lifecycle"
 path = "examples/macos_display_link_lifecycle.rs"
+required-features = ["native-test-support"]
 
 [[example]]
 name = "macos_frame_demand"
 path = "examples/macos_frame_demand.rs"
-required-features = ["performance-probes"]
+required-features = ["native-test-support"]
 
 [[example]]
 name = "scrollable"

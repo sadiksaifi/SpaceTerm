@@ -1048,25 +1048,15 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
             move |request_frame_options| {
-                #[cfg(feature = "performance-probes")]
-                crate::frame_performance::record(
-                    crate::frame_performance::Counter::LogicalFrame,
+                #[cfg(feature = "native-test-support")]
+                crate::frame_test_support::record(
+                    crate::frame_test_support::Counter::LogicalFrame,
                     1,
                 );
                 let next_frame_callbacks = next_frame_callbacks.take();
                 if !next_frame_callbacks.is_empty() {
-                    #[cfg(feature = "performance-probes")]
-                    crate::frame_performance::record(
-                        crate::frame_performance::Counter::FrameWithCallbacks,
-                        1,
-                    );
                     handle
                         .update(&mut cx, |_, window, cx| {
-                            #[cfg(feature = "performance-probes")]
-                            crate::frame_performance::record(
-                                crate::frame_performance::Counter::NextFrameCallback,
-                                next_frame_callbacks.len() as u64,
-                            );
                             for callback in next_frame_callbacks {
                                 callback(window, cx);
                             }
@@ -1076,33 +1066,6 @@ impl Window {
 
                 // Keep presenting the current scene for 1 extra second since the
                 // last input to prevent the display from underclocking the refresh rate.
-                #[cfg(feature = "performance-probes")]
-                {
-                    use crate::frame_performance::{Counter, record};
-                    record(
-                        Counter::FrameWithDirtyScene,
-                        u64::from(invalidator.is_dirty()),
-                    );
-                    record(
-                        Counter::FrameWithPendingPresentation,
-                        u64::from(needs_present.get()),
-                    );
-                    record(
-                        Counter::FrameWithInputGrace,
-                        u64::from(
-                            active.get()
-                                && last_input_timestamp.get().elapsed() < Duration::from_secs(1),
-                        ),
-                    );
-                    record(
-                        Counter::FrameRequiringPresentation,
-                        u64::from(request_frame_options.require_presentation),
-                    );
-                    record(
-                        Counter::FrameForcingRender,
-                        u64::from(request_frame_options.force_render),
-                    );
-                }
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || (active.get()
@@ -1123,12 +1086,6 @@ impl Window {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .log_err();
-                } else {
-                    #[cfg(feature = "performance-probes")]
-                    crate::frame_performance::record(
-                        crate::frame_performance::Counter::CleanFrame,
-                        1,
-                    );
                 }
 
                 handle
@@ -2096,8 +2053,8 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
-        #[cfg(feature = "performance-probes")]
-        crate::frame_performance::record(crate::frame_performance::Counter::SceneDraw, 1);
+        #[cfg(feature = "native-test-support")]
+        crate::frame_test_support::record(crate::frame_test_support::Counter::SceneDraw, 1);
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2192,8 +2149,8 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
-        #[cfg(feature = "performance-probes")]
-        crate::frame_performance::record(crate::frame_performance::Counter::ScenePresent, 1);
+        #[cfg(feature = "native-test-support")]
+        crate::frame_test_support::record(crate::frame_test_support::Counter::ScenePresent, 1);
         self.platform_window.draw(&self.rendered_frame.scene);
         self.needs_present.set(false);
         profiling::finish_frame!();

@@ -2814,7 +2814,3 @@ fn ghostty_color(color: Color) -> RgbColor {
 #[cfg(test)]
 #[path = "emulator/tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "emulator/performance.rs"]
-mod performance;

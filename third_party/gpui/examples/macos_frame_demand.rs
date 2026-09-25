@@ -2,14 +2,10 @@
 //! TestAppContext's automatic drawing cannot satisfy these assertions.
 use anyhow::{Result, anyhow, ensure};
 use gpui::{
-    App, Application, AsyncApp, Bounds, Context, FramePerformanceSnapshot, Timer, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, AsyncApp, Bounds, Context, FrameTestSnapshot, Timer, Window, WindowBounds,
+    WindowHandle, WindowOptions, div, prelude::*, px, rgb, size,
 };
-use std::{
-    cell::Cell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 #[derive(Default)]
 struct Observations {
@@ -82,9 +78,9 @@ async fn settle() {
 }
 
 async fn assert_idle(stage: &str) -> Result<()> {
-    let before = FramePerformanceSnapshot::capture();
+    let before = FrameTestSnapshot::capture();
     Timer::after(Duration::from_millis(250)).await;
-    let after = FramePerformanceSnapshot::capture();
+    let after = FrameTestSnapshot::capture();
     if after.logical_frames != before.logical_frames
         || after.native_vsync_callbacks != before.native_vsync_callbacks
         || after.scene_presents != before.scene_presents
@@ -163,28 +159,28 @@ async fn run(
     );
     assert_idle("animation").await?;
 
-    let before = FramePerformanceSnapshot::capture();
+    let before = FrameTestSnapshot::capture();
     gpui::AnyWindowHandle::from(window)
         .update(cx, |_, window, cx| window.draw(cx).clear())
         .map_err(|_| anyhow!("direct draw window unavailable"))?;
     Timer::after(Duration::from_millis(250)).await;
     ensure!(
-        FramePerformanceSnapshot::capture().scene_presents > before.scene_presents,
+        FrameTestSnapshot::capture().scene_presents > before.scene_presents,
         "direct draw was not presented"
     );
     assert_idle("direct_draw").await?;
 
-    let before = FramePerformanceSnapshot::capture();
+    let before = FrameTestSnapshot::capture();
     inject_key(window, cx)?;
     Timer::after(Duration::from_millis(250)).await;
     ensure!(
-        FramePerformanceSnapshot::capture().scene_presents > before.scene_presents,
+        FrameTestSnapshot::capture().scene_presents > before.scene_presents,
         "input did not restart presentation grace"
     );
-    let during_grace = FramePerformanceSnapshot::capture();
+    let during_grace = FrameTestSnapshot::capture();
     Timer::after(Duration::from_millis(250)).await;
     ensure!(
-        FramePerformanceSnapshot::capture().scene_presents > during_grace.scene_presents,
+        FrameTestSnapshot::capture().scene_presents > during_grace.scene_presents,
         "input presentation grace ended prematurely"
     );
     settle().await;
@@ -193,7 +189,7 @@ async fn run(
     cx.update(|cx| cx.hide())
         .map_err(|_| anyhow!("application unavailable"))?;
     Timer::after(Duration::from_millis(250)).await;
-    let before = FramePerformanceSnapshot::capture();
+    let before = FrameTestSnapshot::capture();
     let callback_observed = observed.clone();
     window
         .update(cx, |view, window, cx| {
@@ -214,7 +210,7 @@ async fn run(
         "hidden frame callback ran before restoration"
     );
     ensure!(
-        FramePerformanceSnapshot::capture().scene_draws == before.scene_draws,
+        FrameTestSnapshot::capture().scene_draws == before.scene_draws,
         "hidden notification rendered before restoration"
     );
     cx.update(|cx| cx.activate(true))
@@ -300,7 +296,7 @@ async fn run(
         window.update(cx, |_, _, _| ()).is_err(),
         "frame callback failed to close its window"
     );
-    let closed = FramePerformanceSnapshot::capture();
+    let closed = FrameTestSnapshot::capture();
     ensure!(
         closed.window_sources_created == closed.window_sources_released,
         "closed windows retained frame sources"
@@ -312,124 +308,7 @@ async fn run(
     Ok(())
 }
 
-fn keep_source_awake(window: &Window, enabled: Rc<Cell<bool>>) {
-    window.on_next_frame(move |window, _| {
-        if enabled.get() {
-            keep_source_awake(window, enabled);
-        }
-    });
-}
-
-async fn check_source_state(continuous: bool) -> Result<()> {
-    let before = FramePerformanceSnapshot::capture();
-    Timer::after(Duration::from_millis(100)).await;
-    let after = FramePerformanceSnapshot::capture();
-    ensure!(
-        (after.native_vsync_callbacks > before.native_vsync_callbacks) == continuous,
-        "latency fixture source state did not settle"
-    );
-    Ok(())
-}
-
-async fn await_presentation(
-    started: Instant,
-    previous_presents: u64,
-    revision: Option<(&Observations, u32)>,
-) -> Result<u128> {
-    loop {
-        if FramePerformanceSnapshot::capture().scene_presents > previous_presents
-            && revision
-                .is_none_or(|(observed, revision)| observed.rendered_revision.get() == revision)
-        {
-            return Ok(started.elapsed().as_micros());
-        }
-        ensure!(
-            started.elapsed() < Duration::from_secs(2),
-            "latency fixture presentation deadline exceeded"
-        );
-        Timer::after(Duration::from_millis(1)).await;
-    }
-}
-
-async fn run_latency(
-    window: WindowHandle<Fixture>,
-    observed: Rc<Observations>,
-    cx: &mut AsyncApp,
-) -> Result<()> {
-    const SAMPLES: u32 = 16;
-    let mut samples = Vec::with_capacity(SAMPLES as usize);
-    for sample in 0..SAMPLES {
-        let continuous = sample % 2 == 0;
-        let enabled = Rc::new(Cell::new(continuous));
-        if continuous {
-            let enabled = enabled.clone();
-            window
-                .update(cx, |_, window, _| keep_source_awake(window, enabled))
-                .map_err(|_| anyhow!("continuous control window unavailable"))?;
-        }
-        // Deterministic phase variation avoids sampling only one refresh phase.
-        let settle_duration = Duration::from_millis(1500 + u64::from((sample * 13) % 31));
-        Timer::after(settle_duration).await;
-        check_source_state(continuous).await?;
-        let revision = 100 + sample;
-        let before = FramePerformanceSnapshot::capture();
-        let started = Instant::now();
-        window
-            .update(cx, |view, _, cx| {
-                view.revision = revision;
-                cx.notify();
-            })
-            .map_err(|_| anyhow!("latency notification window unavailable"))?;
-        let notify_us =
-            await_presentation(started, before.scene_presents, Some((&observed, revision))).await?;
-
-        Timer::after(settle_duration).await;
-        check_source_state(continuous).await?;
-        let before = FramePerformanceSnapshot::capture();
-        let started = Instant::now();
-        inject_key(window, cx)?;
-        let input_us = await_presentation(started, before.scene_presents, None).await?;
-        enabled.set(false);
-        let source = if continuous { "continuous" } else { "idle" };
-        println!(
-            "native_frame_latency sample={sample} source={source} notify_to_present_us={notify_us} input_to_present_us={input_us}"
-        );
-        samples.push((continuous, notify_us, input_us));
-    }
-    for continuous in [true, false] {
-        let mut notify = samples
-            .iter()
-            .filter(|sample| sample.0 == continuous)
-            .map(|sample| sample.1)
-            .collect::<Vec<_>>();
-        let mut input = samples
-            .iter()
-            .filter(|sample| sample.0 == continuous)
-            .map(|sample| sample.2)
-            .collect::<Vec<_>>();
-        notify.sort_unstable();
-        input.sort_unstable();
-        let source = if continuous { "continuous" } else { "idle" };
-        let count = notify.len();
-        let notify_median = (notify[count / 2 - 1] + notify[count / 2]) / 2;
-        let input_median = (input[count / 2 - 1] + input[count / 2]) / 2;
-        println!(
-            "native_frame_latency_summary source={source} samples={count} notify_median_us={notify_median} notify_min_us={} notify_max_us={} input_median_us={input_median} input_min_us={} input_max_us={}",
-            notify[0],
-            notify[count - 1],
-            input[0],
-            input[count - 1]
-        );
-    }
-    settle().await;
-    assert_idle("latency_complete").await?;
-    println!("native_frame_latency status=pass");
-    Ok(())
-}
-
 fn main() {
-    let latency_mode =
-        std::env::var_os("GPUI_FRAME_DEMAND_LATENCY").is_some_and(|value| value == "1");
     let success = Rc::new(Cell::new(false));
     let result = success.clone();
     Application::new().run(move |cx: &mut App| {
@@ -452,11 +331,7 @@ fn main() {
             .expect("native fixture window creation failed");
         cx.activate(true);
         cx.spawn(async move |cx| {
-            let check = if latency_mode {
-                run_latency(window, observed, cx).await
-            } else {
-                run(window, observed, cx).await
-            };
+            let check = run(window, observed, cx).await;
             match check {
                 Ok(()) => result.set(true),
                 Err(error) => {

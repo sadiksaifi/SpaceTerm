@@ -2226,8 +2226,6 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
 }
 
 unsafe extern "C" fn step(view: *mut c_void) {
-    #[cfg(feature = "performance-probes")]
-    crate::frame_performance::record(crate::frame_performance::Counter::WindowVsync, 1);
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
     run_frame(&window_state, false);
@@ -2261,10 +2259,6 @@ fn run_frame(window_state: &Mutex<MacWindowState>, synchronous: bool) {
         lock.stop_display_link();
     }
     drop(lock);
-    #[cfg(feature = "performance-probes")]
-    if synchronous {
-        crate::frame_performance::record(crate::frame_performance::Counter::NativeSyncFrame, 1);
-    }
     callback(Default::default());
 
     let mut lock = window_state.lock();

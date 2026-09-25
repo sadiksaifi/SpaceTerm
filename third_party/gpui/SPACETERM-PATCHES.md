@@ -51,11 +51,13 @@ their existing pacing; Wayland still commits every completed frame.
 The temporary Objective-C key used to obtain a screen's display identifier is
 released after use.
 
-The optional `performance-probes` feature exposes numeric cumulative frame and
-source-lifetime counters and bounded startup-stage timings for explicit
-measurements. The window-callback counter includes initial source signals;
-the native-vsync counter counts only CoreVideo callbacks. Normal builds omit
-the probes and recording operations. No terminal or window content is collected.
+The `native-test-support` feature supplies cumulative counters used by the native
+frame-demand and display-link lifecycle regression examples. Normal builds omit
+these counters. The examples assert idle source suspension, wake and rendering
+behavior, hidden restoration, callback-driven closure, and balanced source
+ownership. This feature does not enable `test-support`, whose automatic drawing
+would bypass native frame scheduling. Native Metal tests assert lazy path
+allocation and pixel parity.
 
-Keep local changes limited to documented behavior and measurement seams. Remove
+Keep local changes limited to documented behavior and regression coverage. Remove
 each correction when an adopted upstream release provides equivalent behavior.

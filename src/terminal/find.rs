@@ -4,9 +4,6 @@ use libghostty_vt::screen::{CellWide, Screen, TrackedGridRef};
 use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace, ScrollViewport};
 use libghostty_vt::{Error, Terminal};
 
-#[cfg(test)]
-mod performance;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FindDirection {
     Next,

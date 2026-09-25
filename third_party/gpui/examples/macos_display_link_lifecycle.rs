@@ -21,10 +21,10 @@ fn dispatch_get_main_queue() -> dispatch_sys::dispatch_queue_t {
 #[path = "../src/platform/mac/display_link.rs"]
 mod display_link;
 
-#[cfg(all(target_os = "macos", feature = "performance-probes"))]
+#[cfg(all(target_os = "macos", feature = "native-test-support"))]
 #[allow(dead_code)]
-#[path = "../src/frame_performance.rs"]
-mod frame_performance;
+#[path = "../src/frame_test_support.rs"]
+mod frame_test_support;
 
 #[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
@@ -215,9 +215,9 @@ mod native {
             + first.late_ticks.get()
             + second.late_ticks.get();
         ensure!(late_ticks == 0, "cancelled source invoked a closed context");
-        #[cfg(feature = "performance-probes")]
+        #[cfg(feature = "native-test-support")]
         {
-            let snapshot = crate::frame_performance::FramePerformanceSnapshot::capture();
+            let snapshot = crate::frame_test_support::FrameTestSnapshot::capture();
             ensure!(
                 snapshot.native_links_created == 1,
                 "native links accumulated across lifetimes"
