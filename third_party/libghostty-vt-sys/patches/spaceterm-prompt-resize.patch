@@ -1,5 +1,5 @@
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 208e276a2..338dcbe08 100644
+index 208e276a2..8a7793ebf 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
 @@ -2030,6 +2030,21 @@ pub inline fn resize(
@@ -24,27 +24,50 @@ index 208e276a2..338dcbe08 100644
      // We need to insert a tracked pin for our saved cursor so we can
      // modify its X/Y for reflow. Do this before changing any state since
      // tracking the pin can fail.
-@@ -2131,7 +2146,18 @@ pub inline fn resize(
-     // Clear any redrawable prompt after the fallible resize but before
-     // restoring the cursor style and hyperlink, so cleared cells retain the
-     // same default styling they had with the previous ordering.
+@@ -2128,10 +2143,38 @@ pub inline fn resize(
+     // state is correct.
+     self.cursorReload();
+ 
+-    // Clear any redrawable prompt after the fallible resize but before
+-    // restoring the cursor style and hyperlink, so cleared cells retain the
+-    // same default styling they had with the previous ordering.
 -    self.clearPromptForRedraw(opts.prompt_redraw);
-+    self.clearPromptForRedraw(
-+        opts.prompt_redraw,
-+        if (prompt) |p| p.start.* else null,
-+    );
-+
 +    if (prompt) |p| {
 +        if (self.pages.pointFromPin(.active, p.start.*)) |position| {
 +            const start_y: size.CellCountInt = @intCast(position.active.y);
-+            const target = @min(start_y +| p.rows, self.pages.rows - 1);
-+            if (target != self.cursor.y) self.cursorAbsolute(self.cursor.x, target);
++            const last_y = self.pages.rows - 1;
++            const visible_offset = @min(p.rows, last_y);
++            const rows_to_scroll = start_y +| visible_offset -| last_y;
++            if (rows_to_scroll > 0) {
++                self.cursorAbsolute(self.cursor.x, last_y);
++                for (0..rows_to_scroll) |_| self.cursorDownScroll() catch break;
++            }
 +        }
++    }
++
++    // Clear the prompt after making room, before restoring the cursor style
++    // and hyperlink, so cleared cells retain their default styling. A prompt
++    // start in history means its visible portion begins at the active top.
++    self.clearPromptForRedraw(
++        opts.prompt_redraw,
++        if (prompt) |p| if (self.pages.pointFromPin(.active, p.start.*) != null)
++            p.start.*
++        else
++            self.pages.getTopLeft(.active) else null,
++    );
++
++    if (prompt) |p| {
++        const start_y: size.CellCountInt = if (self.pages.pointFromPin(.active, p.start.*)) |position|
++            @intCast(position.active.y)
++        else
++            0;
++        const target = @min(start_y +| p.rows, self.pages.rows - 1);
++        if (target != self.cursor.y) self.cursorAbsolute(self.cursor.x, target);
 +    }
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2227,6 +2253,7 @@ pub inline fn resize(
+@@ -2227,6 +2270,7 @@ pub inline fn resize(
  fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -52,7 +75,7 @@ index 208e276a2..338dcbe08 100644
  ) void {
      // If our cursor is on a prompt or input line, clear it so the shell can
      // redraw it. This works with OSC 133 semantic prompts. We do this after
-@@ -2255,7 +2282,7 @@ fn clearPromptForRedraw(
+@@ -2255,7 +2299,7 @@ fn clearPromptForRedraw(
              },
  
              .true => {

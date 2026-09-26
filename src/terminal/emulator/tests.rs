@@ -1395,6 +1395,47 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
 }
 
 #[test]
+fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
+    let mut emulator = emulator(50, 5);
+    let prompt = b"SpaceTerm on fix/resize-prompt-redraw is v0.0.0 via v1.98.1\r\n> ";
+    emulator.feed(b"header\r\n\x1b]133;A;redraw=1\x07> \x1b]133;B\x07echo QA_RESIZE_MARKER\x1b]133;C\x07");
+    emulator.feed(b"\r\nQA_RESIZE_MARKER\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt);
+    emulator.feed(b"\x1b]133;B\x07");
+
+    emulator.resize(geometry(150, 5, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
+    emulator.feed(prompt);
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+        "zsh must not erase command output below a bottom-aligned prompt"
+    );
+}
+
+#[test]
+fn zsh_prompt_redraw_with_fewer_rows_than_old_offset_preserves_scrollback() {
+    let mut emulator = emulator(50, 5);
+    let prompt = b"SpaceTerm on fix/resize-prompt-redraw is v0.0.0 via v1.98.1\r\n> ";
+    emulator.feed(b"header\r\n\x1b]133;A;redraw=1\x07> \x1b]133;B\x07print_marker\x1b]133;C\x07");
+    emulator.feed(b"\r\nQA_RESIZE_MARKER\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt);
+    emulator.feed(b"\x1b]133;B\x07");
+
+    emulator.resize(geometry(150, 2, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
+    emulator.feed(prompt);
+    emulator.set_find_query(FindQueryGeneration::test(1), "QA_RESIZE_MARKER".to_owned());
+
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+}
+
+#[test]
 fn grid_resize_preserves_selection_anchors_across_reflow() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world");
