@@ -3,6 +3,7 @@
 
 import argparse
 from pathlib import Path
+import subprocess
 import tomllib
 
 
@@ -36,7 +37,14 @@ def main() -> None:
     if not (checkout / "SPACETERM.md").is_file():
         parser.error(f"not a SpaceTerm Zed checkout: {checkout}")
 
-    lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    committed_lock = subprocess.run(
+        ["git", "show", "HEAD:Cargo.lock"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    lock = tomllib.loads(committed_lock)
     names = sorted(
         package["name"]
         for package in lock["package"]
