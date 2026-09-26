@@ -2,13 +2,16 @@
 """Bump SpaceTerm's pinned Zed fork tag and matching Rust toolchain."""
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import tomllib
 from urllib.error import URLError
@@ -27,6 +30,7 @@ EXPECTED = {
 TAG_PATTERN = re.compile(r"spaceterm-\d{4}-\d{2}-\d{2}\Z")
 FIELD_PATTERN = re.compile(r'(\btag\s*=\s*")([^"]*)(")')
 CHANNEL_PATTERN = re.compile(r'(?m)^([ \t]*channel[ \t]*=[ \t]*")([^"]*)("[^\n]*)$')
+CANCEL_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 class Failure(Enum):
@@ -52,6 +56,10 @@ class BumpError(Exception):
         super().__init__(kind.value)
 
 
+class BumpCancelled(BaseException):
+    """A termination request received during a bump."""
+
+
 @dataclass(frozen=True)
 class BumpResult:
     old_tag: str
@@ -64,6 +72,49 @@ class BumpResult:
 class OriginalFile:
     contents: bytes
     mode: int
+
+
+def cancel_on_sigterm(signum, frame) -> None:
+    raise BumpCancelled
+
+
+@contextmanager
+def sigterm_cancellation():
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, cancel_on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@contextmanager
+def defer_signals(block: bool = True):
+    received = []
+    previous_handlers = {signum: signal.getsignal(signum) for signum in CANCEL_SIGNALS}
+
+    def record(signum, frame):
+        received.append(signum)
+
+    previous_mask = None
+    try:
+        for signum in CANCEL_SIGNALS:
+            signal.signal(signum, record)
+        if block and hasattr(signal, "pthread_sigmask"):
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+        yield received
+    finally:
+        try:
+            if previous_mask is not None:
+                try:
+                    for signum in signal.sigpending().intersection(CANCEL_SIGNALS):
+                        signal.sigwait({signum})
+                        received.append(signum)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
 class ForkRemote:
@@ -118,20 +169,29 @@ def atomic_write(path: Path, contents: bytes, mode: int) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def restore_originals(originals: dict[Path, OriginalFile]) -> None:
+def restore_originals(originals: dict[Path, OriginalFile]) -> bool:
     failed = False
-    for path, original in originals.items():
-        try:
-            if (
-                not path.exists()
-                or path.read_bytes() != original.contents
-                or stat.S_IMODE(path.stat().st_mode) != original.mode
-            ):
-                atomic_write(path, original.contents, original.mode)
-        except Exception:
-            failed = True
+    with defer_signals() as received:
+        for path, original in originals.items():
+            for attempt in range(2):
+                try:
+                    if (
+                        not path.exists()
+                        or path.read_bytes() != original.contents
+                        or stat.S_IMODE(path.stat().st_mode) != original.mode
+                    ):
+                        atomic_write(path, original.contents, original.mode)
+                    break
+                except (KeyboardInterrupt, SystemExit, BumpCancelled):
+                    received.append(signal.SIGINT)
+                    if attempt == 1:
+                        failed = True
+                except BaseException:
+                    failed = True
+                    break
     if failed:
         raise BumpError(Failure.RESTORE_FAILED)
+    return bool(received)
 
 
 def fork_dependencies(contents: str, tag: str) -> tuple[str, str]:
@@ -221,10 +281,56 @@ def cargo_update(root: Path, packages: list[str]) -> None:
     command = ["cargo", "update"]
     for package in packages:
         command.extend(("--package", package))
+    process = None
     try:
-        subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise BumpError(Failure.UPDATE_FAILED) from error
+        # The child inherits the parent's mask, so record signals without blocking while it starts.
+        with defer_signals(block=False) as startup_signals:
+            process = subprocess.Popen(
+                command,
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=os.name == "posix",
+            )
+        if startup_signals:
+            raise BumpCancelled
+        returncode = process.wait()
+    except BaseException as error:
+        if process is not None:
+            try:
+                with defer_signals():
+                    stop_cargo_process(process)
+            except BaseException as stop_error:
+                raise BumpError(Failure.UPDATE_FAILED) from stop_error
+        if isinstance(error, OSError):
+            raise BumpError(Failure.UPDATE_FAILED) from error
+        raise
+    if returncode != 0:
+        raise BumpError(Failure.UPDATE_FAILED)
+
+
+def stop_cargo_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        process.wait()
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
 
 
 def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpResult:
@@ -261,42 +367,66 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
     new_channel = channel(remote.toolchain(tag))
     _, new_toolchain = set_channel(toolchain_contents, new_channel)
 
-    try:
-        if new_manifest != manifest_contents:
-            atomic_write(manifest_path, new_manifest.encode("utf-8"), originals[manifest_path].mode)
-        if new_toolchain != toolchain_contents:
-            atomic_write(toolchain_path, new_toolchain.encode("utf-8"), originals[toolchain_path].mode)
-        if old_tag != tag or lock_tags != {tag}:
-            try:
-                update(root, packages)
-                _, updated_tags = fork_packages(read_file(lock_path), tag, tag)
-                if updated_tags != {tag}:
-                    raise BumpError(Failure.UPDATE_FAILED)
-            except Exception as error:
-                raise BumpError(Failure.UPDATE_FAILED) from error
-    except Exception as error:
+    with sigterm_cancellation():
         try:
-            restore_originals(originals)
-        except BumpError as restore_error:
-            raise restore_error from error
-        if isinstance(error, BumpError):
-            raise
-        raise BumpError(Failure.FILE_WRITE_FAILED) from error
+            if new_manifest != manifest_contents:
+                atomic_write(manifest_path, new_manifest.encode("utf-8"), originals[manifest_path].mode)
+            if new_toolchain != toolchain_contents:
+                atomic_write(toolchain_path, new_toolchain.encode("utf-8"), originals[toolchain_path].mode)
+            if old_tag != tag or lock_tags != {tag}:
+                try:
+                    update(root, packages)
+                    _, updated_tags = fork_packages(read_file(lock_path), tag, tag)
+                    if updated_tags != {tag}:
+                        raise BumpError(Failure.UPDATE_FAILED)
+                except Exception as error:
+                    raise BumpError(Failure.UPDATE_FAILED) from error
+        except BaseException as error:
+            try:
+                interrupted_during_restore = restore_originals(originals)
+            except BumpError as restore_error:
+                raise restore_error from error
+            if interrupted_during_restore:
+                raise BumpCancelled from error
+            if isinstance(error, (BumpError, KeyboardInterrupt, SystemExit, BumpCancelled)):
+                raise
+            raise BumpError(Failure.FILE_WRITE_FAILED) from error
     return BumpResult(old_tag, tag, old_channel, new_channel)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag")
-    args = parser.parse_args()
-    try:
-        result = bump(ROOT, args.tag, ForkRemote())
-    except BumpError as error:
-        parser.exit(1, f"gpui:bump: {error}\n")
-    print(f"Fork tag: {result.old_tag} -> {result.new_tag}")
-    print(f"Rust toolchain: {result.old_channel} -> {result.new_channel}")
-    print("Next: mise run validate && mise run test:macos")
+    with sigterm_cancellation():
+        try:
+            args = parser.parse_args()
+        except SystemExit:
+            raise
+        except (KeyboardInterrupt, BumpCancelled):
+            parser.exit(130, "gpui:bump: cancelled\n")
+        except BaseException:
+            parser.exit(1, "gpui:bump: failed\n")
+        try:
+            result = bump(ROOT, args.tag, ForkRemote())
+            print(f"Fork tag: {result.old_tag} -> {result.new_tag}")
+            print(f"Rust toolchain: {result.old_channel} -> {result.new_channel}")
+            print("Next: mise run validate && mise run test:macos")
+        except BumpError as error:
+            parser.exit(1, f"gpui:bump: {error}\n")
+        except (KeyboardInterrupt, SystemExit, BumpCancelled):
+            parser.exit(130, "gpui:bump: cancelled\n")
+        except BaseException:
+            parser.exit(1, "gpui:bump: failed\n")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except (KeyboardInterrupt, BumpCancelled):
+        sys.stderr.write("gpui:bump: cancelled\n")
+        raise SystemExit(130) from None
+    except BaseException:
+        sys.stderr.write("gpui:bump: failed\n")
+        raise SystemExit(1) from None

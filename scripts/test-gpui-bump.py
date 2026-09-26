@@ -2,7 +2,11 @@
 """Exercise GPUI fork bumps in an isolated repository without network access."""
 
 import importlib.util
+from contextlib import redirect_stderr
+import io
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -198,15 +202,194 @@ class GpuiBumpTests(unittest.TestCase):
         self.assertEqual(self.updates, [])
         self.assertEqual(list(self.root.glob(".rust-toolchain.toml.*")), [])
 
+    def test_interrupt_during_update_restores_all_originals(self):
+        original = self.snapshot()
+
+        def interrupt_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise KeyboardInterrupt
+
+        self.update = interrupt_update
+        with self.assertRaises(KeyboardInterrupt):
+            self.bump()
+        self.assertEqual(self.snapshot(), original)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
+    def test_sigterm_during_update_restores_all_originals(self):
+        original = self.snapshot()
+
+        def interrupt_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        self.update = interrupt_update
+        with self.assertRaises(MODULE.BumpCancelled):
+            self.bump()
+        self.assertEqual(self.snapshot(), original)
+
+    def test_system_exit_during_update_restores_all_originals(self):
+        original = self.snapshot()
+
+        def interrupt_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise SystemExit(2)
+
+        self.update = interrupt_update
+        with self.assertRaises(SystemExit):
+            self.bump()
+        self.assertEqual(self.snapshot(), original)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
+    def test_interrupt_during_restoration_finishes_restoration(self):
+        original = self.snapshot()
+
+        def fail_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
+
+        self.update = fail_update
+        original_write = MODULE.atomic_write
+        interrupted = False
+
+        def interrupt_restore(path, contents, mode):
+            nonlocal interrupted
+            if path == self.root / "Cargo.toml" and contents == original[0] and not interrupted:
+                interrupted = True
+                os.kill(os.getpid(), signal.SIGINT)
+            return original_write(path, contents, mode)
+
+        with patch.object(MODULE, "atomic_write", interrupt_restore):
+            with self.assertRaises(MODULE.BumpCancelled):
+                self.bump()
+        self.assertTrue(interrupted)
+        self.assertEqual(self.snapshot(), original)
+
+    def test_raised_interrupt_during_restoration_retries_the_file(self):
+        original = self.snapshot()
+
+        def fail_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
+
+        self.update = fail_update
+        original_write = MODULE.atomic_write
+        interrupted = False
+
+        def interrupt_restore(path, contents, mode):
+            nonlocal interrupted
+            if path == self.root / "Cargo.toml" and contents == original[0] and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return original_write(path, contents, mode)
+
+        with patch.object(MODULE, "atomic_write", interrupt_restore):
+            with self.assertRaises(MODULE.BumpCancelled):
+                self.bump()
+        self.assertTrue(interrupted)
+        self.assertEqual(self.snapshot(), original)
+
+    def test_restore_failure_still_attempts_other_files(self):
+        original = self.snapshot()
+
+        def fail_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
+
+        self.update = fail_update
+        original_write = MODULE.atomic_write
+        attempted = []
+
+        def fail_manifest_restore(path, contents, mode):
+            if contents in original:
+                attempted.append(path.name)
+            if path == self.root / "Cargo.toml" and contents == original[0]:
+                raise OSError("injected restore failure")
+            return original_write(path, contents, mode)
+
+        with patch.object(MODULE, "atomic_write", fail_manifest_restore):
+            with self.assertRaises(MODULE.BumpError) as raised:
+                self.bump()
+        self.assertEqual(raised.exception.kind, MODULE.Failure.RESTORE_FAILED)
+        self.assertEqual(attempted, ["Cargo.toml", "rust-toolchain.toml", "Cargo.lock"])
+        self.assertNotEqual(self.snapshot()[0], original[0])
+        self.assertEqual(self.snapshot()[1:], original[1:])
+
+    def test_cli_reports_cancellation_without_traceback(self):
+        for interruption in (KeyboardInterrupt, SystemExit(2), MODULE.BumpCancelled):
+            with self.subTest(interruption=interruption):
+                output = io.StringIO()
+                with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
+                    with patch.object(MODULE, "bump", side_effect=interruption):
+                        with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                            MODULE.main()
+                self.assertEqual(raised.exception.code, 130)
+                self.assertEqual(output.getvalue(), "gpui:bump: cancelled\n")
+
+    def test_cli_reports_failure_without_traceback(self):
+        for failure, message in (
+            (MODULE.BumpError(MODULE.Failure.UPDATE_FAILED),
+             "gpui:bump: cargo update failed for the fork packages\n"),
+            (RuntimeError("sensitive details"), "gpui:bump: failed\n"),
+        ):
+            with self.subTest(failure=failure):
+                output = io.StringIO()
+                with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
+                    with patch.object(MODULE, "bump", side_effect=failure):
+                        with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                            MODULE.main()
+                self.assertNotEqual(raised.exception.code, 0)
+                self.assertEqual(output.getvalue(), message)
+
     def test_cargo_update_scopes_the_command_to_lockfile_packages(self):
-        with patch.object(MODULE.subprocess, "run") as run:
+        with patch.object(MODULE.subprocess, "Popen") as popen:
+            popen.return_value.wait.return_value = 0
             MODULE.cargo_update(self.root, list(LOCK_NAMES))
         command = ["cargo", "update"]
         for name in LOCK_NAMES:
             command.extend(("--package", name))
-        run.assert_called_once_with(
-            command, cwd=self.root, check=True, capture_output=True, text=True
+        popen.assert_called_once_with(
+            command,
+            cwd=self.root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name == "posix",
         )
+
+    def test_cargo_child_is_stopped_after_interruption(self):
+        with patch.object(MODULE.subprocess, "Popen") as popen:
+            process = popen.return_value
+            process.pid = 12345
+            process.poll.return_value = None
+            process.wait.side_effect = [KeyboardInterrupt, 0]
+            with patch.object(MODULE.os, "killpg", create=True) as killpg:
+                with self.assertRaises(KeyboardInterrupt):
+                    MODULE.cargo_update(self.root, list(LOCK_NAMES))
+        if os.name == "posix":
+            killpg.assert_called_once_with(12345, signal.SIGTERM)
+        else:
+            process.terminate.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
+    def test_cargo_child_is_stopped_when_interrupted_during_spawn(self):
+        with patch.object(MODULE.subprocess, "Popen") as popen:
+            process = popen.return_value
+            process.pid = 12345
+            process.poll.return_value = None
+            process.wait.return_value = 0
+
+            def spawn(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGTERM)
+                return process
+
+            popen.side_effect = spawn
+            with patch.object(MODULE.os, "killpg", create=True) as killpg:
+                with self.assertRaises(MODULE.BumpCancelled):
+                    MODULE.cargo_update(self.root, list(LOCK_NAMES))
+        if os.name == "posix":
+            killpg.assert_called_once_with(12345, signal.SIGTERM)
+        else:
+            process.terminate.assert_called_once_with()
 
 
 if __name__ == "__main__":
