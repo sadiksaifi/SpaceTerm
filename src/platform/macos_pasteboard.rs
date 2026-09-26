@@ -1,6 +1,6 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPasteboardTypeString};
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSString, NSUTF8StringEncoding};
 use std::path::PathBuf;
 
 #[cfg(all(test, feature = "macos-native-tests"))]
@@ -69,14 +69,40 @@ fn read_file_urls_from_items(
         let value = item
             .stringForType(&file_url_type)
             .ok_or_else(|| "file URL is unreadable".to_owned())?;
-        let text = value.to_string();
-        if text.len() > MAX_FILE_INSERTION_BYTES.saturating_sub(bytes) {
-            return Err("clipboard files exceed the size limit".to_owned());
-        }
+        let text = read_file_url_text(
+            &value,
+            MAX_FILE_INSERTION_BYTES.saturating_sub(bytes),
+            copy_file_url_utf8,
+        )?;
         bytes += text.len();
         urls.push(text);
     }
     parse_file_urls(paths, &urls).map_err(str::to_owned)
+}
+
+fn read_file_url_text(
+    value: &NSString,
+    remaining: usize,
+    copy: impl FnOnce(&NSString, usize) -> Result<String, String>,
+) -> Result<String, String> {
+    let byte_len = value.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
+    if byte_len > remaining {
+        return Err("clipboard files exceed the size limit".to_owned());
+    }
+    copy(value, byte_len)
+}
+
+fn copy_file_url_utf8(value: &NSString, byte_len: usize) -> Result<String, String> {
+    let utf8 = value.UTF8String();
+    if utf8.is_null() {
+        return Err("file URL is unreadable".to_owned());
+    }
+    // SAFETY: NSString retains the UTF-8 buffer through this synchronous copy. The byte length
+    // was checked against the remaining Paste Payload limit before constructing the slice.
+    let bytes = unsafe { std::slice::from_raw_parts(utf8.cast::<u8>(), byte_len) };
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| "file URL is unreadable".to_owned())
 }
 
 pub(crate) fn write_selection(plain_text: &str, html: Option<&str>) -> Result<(), String> {
@@ -137,6 +163,15 @@ mod tests {
         let item = NSPasteboardItem::new();
         assert!(item.setString_forType(&NSString::from_str(value), ty));
         item
+    }
+
+    #[test]
+    fn oversized_file_url_is_rejected_before_conversion() {
+        let value = NSString::from_str("file:///large");
+        let result = read_file_url_text(&value, 1, |_, _| {
+            panic!("oversized file URL reached conversion")
+        });
+        assert_eq!(result.unwrap_err(), "clipboard files exceed the size limit");
     }
 
     #[test]
