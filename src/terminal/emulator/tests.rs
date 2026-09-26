@@ -3765,15 +3765,23 @@ fn terminal_reset_returns_to_a_clean_primary_screen() {
 
 #[test]
 fn primary_scrollback_is_bounded_to_the_configured_history() {
-    let mut emulator = emulator(10, 2);
-    let output = b"x\r\n".repeat(MAX_SCROLLBACK_ROWS + 100);
-    emulator.feed(&output);
+    let mut emulator = emulator(80, 2);
+    emulator.feed(&b"x\r\n".repeat(MAX_SCROLLBACK_ROWS + 1));
+    let full = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        full.scrollbar.total_rows - full.scrollbar.visible_rows,
+        u64::try_from(MAX_SCROLLBACK_ROWS).unwrap()
+    );
+    emulator.feed(&b"x\r\n".repeat(99));
 
     let snapshot = emulator.snapshot().unwrap().unwrap();
+    let scrollback_rows = snapshot.scrollbar.total_rows - snapshot.scrollbar.visible_rows;
 
     assert!(
-        snapshot.scrollbar.total_rows
-            <= u64::try_from(MAX_SCROLLBACK_ROWS).unwrap() + snapshot.scrollbar.visible_rows
+        (u64::try_from(MAX_SCROLLBACK_ROWS - 600).unwrap()
+            ..=u64::try_from(MAX_SCROLLBACK_ROWS + 600).unwrap())
+            .contains(&scrollback_rows),
+        "retained {scrollback_rows} scrollback rows"
     );
     assert_eq!(
         snapshot.scrollbar.offset_rows + snapshot.scrollbar.visible_rows,

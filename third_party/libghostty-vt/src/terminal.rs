@@ -241,7 +241,8 @@ pub struct Options {
     pub cols: u16,
     /// Terminal height in cells. Must be greater than zero.
     pub rows: u16,
-    /// Maximum number of lines to keep in scrollback history.
+    /// Maximum number of lines to keep in scrollback history, subject to
+    /// Ghostty's page-granular pruning. No byte limit applies by default.
     pub max_scrollback: usize,
 }
 
@@ -284,10 +285,11 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         let result =
             unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
-        let terminal = Self {
+        let mut terminal = Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),
         };
+        terminal.set_scrollback_max_bytes(None)?;
         terminal.set(Opt::SCROLLBACK_MAX_LINES, &opts.max_scrollback)?;
         Ok(terminal)
     }
@@ -685,6 +687,13 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///  The number of scrollback rows (total rows minus viewport rows).
     pub fn scrollback_rows(&self) -> Result<usize> {
         self.get(Data::SCROLLBACK_ROWS)
+    }
+
+    /// Set the scrollback byte limit. `None` removes the byte limit, leaving
+    /// the configured row count as the history bound.
+    pub fn set_scrollback_max_bytes(&mut self, max: Option<usize>) -> Result<&mut Self> {
+        self.set_optional(Opt::SCROLLBACK_MAX_BYTES, max.as_ref())?;
+        Ok(self)
     }
 
     /// The effective foreground color (override or default).
@@ -1924,6 +1933,43 @@ mod tests {
     use crate::render::CursorVisualStyle;
     use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
+
+    #[test]
+    fn configured_scrollback_rows_survive_at_wide_grids_and_after_widening() {
+        const LIMIT: usize = 1_200;
+
+        for (initial_cols, final_cols) in [(80, 80), (200, 200), (80, 200)] {
+            let mut terminal = Terminal::new(Options {
+                cols: initial_cols,
+                rows: 10,
+                max_scrollback: LIMIT,
+            })
+            .unwrap();
+
+            let line = format!("{}\r\n", "x".repeat(usize::from(initial_cols) - 2));
+            for _ in 0..LIMIT + 9 {
+                terminal.vt_write(line.as_bytes());
+            }
+            assert_eq!(
+                terminal.scrollback_rows().unwrap(),
+                LIMIT,
+                "{initial_cols} columns did not fill the configured history"
+            );
+            if final_cols != initial_cols {
+                terminal.resize(final_cols, 10, 8, 16).unwrap();
+                assert_eq!(terminal.scrollback_rows().unwrap(), LIMIT);
+            }
+            for _ in 0..600 {
+                terminal.vt_write(line.as_bytes());
+            }
+
+            let retained = terminal.scrollback_rows().unwrap();
+            assert!(
+                (LIMIT / 2..=LIMIT + 200).contains(&retained),
+                "{initial_cols}->{final_cols} columns retained {retained} rows"
+            );
+        }
+    }
 
     #[inline(never)]
     fn build_terminal<'cb>(callback_count: &'cb RefCell<usize>) -> Terminal<'static, 'cb> {
