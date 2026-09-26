@@ -92,7 +92,7 @@ raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["test-support"] }
-gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26" }
+gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["font-kit", "test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
 
 [lints.rust]

@@ -748,3 +748,38 @@ fn native_sources_do_not_fabricate_main_thread_authority() {
         );
     }
 }
+
+#[test]
+fn main_thread_runner_lists_every_native_platform_fixture() {
+    // The runner has no test attribute discovery, so an unlisted fixture would never run.
+    let platform = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform");
+    let runner = std::fs::read_to_string(platform.join("native_main_thread_tests.rs")).unwrap();
+    let runner: String = runner.split_whitespace().collect();
+    let mut files = Vec::new();
+    collect_rust_sources(&platform, &mut files);
+    let mut fixture_count = 0;
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let Some((_, fixtures)) =
+            source.split_once("#[cfg(all(test, feature = \"macos-native-tests\"))]")
+        else {
+            continue;
+        };
+        let module = path.file_stem().unwrap().to_str().unwrap();
+        for line in fixtures.lines() {
+            let Some(name) = line
+                .trim_start()
+                .strip_prefix("pub(in crate::platform) fn ")
+                .and_then(|rest| rest.split(['(', '<']).next())
+            else {
+                continue;
+            };
+            fixture_count += 1;
+            assert!(
+                runner.contains(&format!("{module}::tests::{name})")),
+                "{module}::tests::{name} is not run by native_main_thread_tests.rs"
+            );
+        }
+    }
+    assert!(fixture_count > 0, "no native main-thread fixtures were found");
+}
