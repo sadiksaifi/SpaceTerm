@@ -574,9 +574,15 @@ struct PreparedPreedit {
 
 #[derive(Clone, Default)]
 struct PreparedPreeditRow {
-    text: Arc<[PreparedText]>,
+    text: Arc<[PreparedPreeditText]>,
     backgrounds: Arc<[PaintQuad]>,
     caret: Option<PaintQuad>,
+}
+
+#[derive(Clone)]
+struct PreparedPreeditText {
+    text: PreparedText,
+    underline: UnderlineStyle,
 }
 
 impl PreparedFrameRow {
@@ -683,7 +689,7 @@ impl TerminalPaintBatch {
                             row.preedit
                                 .as_ref()
                                 .into_iter()
-                                .flat_map(|preedit| preedit.text.iter()),
+                                .flat_map(|preedit| preedit.text.iter().map(|text| &text.text)),
                         )
                 })
                 .flat_map(|text| text.line.text.chars())
@@ -697,7 +703,7 @@ impl TerminalPaintBatch {
         grid_bounds: Bounds<Pixels>,
         count_quads: bool,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> Result<(), PaintBatchFailure> {
         #[cfg(test)]
         let counter = count_quads.then_some(self.quad_paint_calls.as_deref()).flatten();
@@ -806,15 +812,7 @@ impl TerminalPaintBatch {
                             window.paint_quad(background.clone());
                         }
                         for text in preedit.text.iter() {
-                            text.line
-                                .paint(
-                                    text.origin,
-                                    self.line_height,
-                                    gpui::TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                )
+                            paint_preedit_text(text, self.line_height, window)
                                 .map_err(|_| PaintBatchFailure::Presentation)?;
                         }
                         if let Some(caret) = &preedit.caret {
@@ -913,6 +911,30 @@ fn paint_terminal_text(
         }
     }
     Ok(())
+}
+
+fn paint_preedit_text(
+    preedit: &PreparedPreeditText,
+    line_height: Pixels,
+    window: &mut Window,
+) -> gpui::Result<()> {
+    let text = &preedit.text;
+    let layout = &*text.line;
+    window.paint_layer(
+        Bounds::new(text.origin, size(layout.width, line_height)),
+        |window| {
+            paint_terminal_text(text, line_height, CursorTextPaint::Unchanged, window)?;
+            if let Some(first_glyph) = text.glyph_origins.first() {
+                let underline_origin = point(
+                    first_glyph.x,
+                    text.origin.y
+                        + gpui::underline_y_offset(line_height, layout.ascent, layout.descent),
+                );
+                window.paint_underline(underline_origin, layout.width, &preedit.underline);
+            }
+            Ok(())
+        },
+    )
 }
 
 #[derive(Clone, Default)]
@@ -1217,6 +1239,11 @@ impl TerminalGridCache {
                     gpui_color(background),
                 ));
                 let color = gpui_color(foreground).into();
+                let underline = UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(color),
+                    wavy: false,
+                };
                 let line = Arc::new(window.text_system().shape_line(
                     cluster.text.clone().into(),
                     font_size,
@@ -1225,11 +1252,7 @@ impl TerminalGridCache {
                         font: font.clone(),
                         color,
                         background_color: None,
-                        underline: Some(UnderlineStyle {
-                            thickness: px(1.0),
-                            color: Some(color),
-                            wavy: false,
-                        }),
+                        underline: Some(underline),
                         strikethrough: None,
                     }],
                     None,
@@ -1247,15 +1270,18 @@ impl TerminalGridCache {
                         position
                     })
                     .collect();
-                text.push(PreparedText {
-                    line,
-                    origin,
-                    glyph_origins,
-                    blinking: false,
-                    paint_runs: Arc::from([TextPaintRun {
-                        end: cluster.text.len(),
-                        color,
-                    }]),
+                text.push(PreparedPreeditText {
+                    text: PreparedText {
+                        line,
+                        origin,
+                        glyph_origins,
+                        blinking: false,
+                        paint_runs: Arc::from([TextPaintRun {
+                            end: cluster.text.len(),
+                            color,
+                        }]),
+                    },
+                    underline,
                 });
             }
             row.text = Arc::from(text);
@@ -3077,13 +3103,13 @@ mod tests {
         include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     enum PaintedGlyphKind {
         Monochrome { color: Hsla },
         Emoji,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct PaintedGlyph {
         kind: PaintedGlyphKind,
         raster_bounds: Bounds<gpui::ScaledPixels>,
@@ -3136,6 +3162,7 @@ mod tests {
         rasterized: Mutex<Vec<gpui::RenderGlyphParams>>,
         dilations: Mutex<Vec<u8>>,
         fail_next_raster: AtomicBool,
+        fail_glyph: Mutex<Option<gpui::GlyphId>>,
     }
 
     impl gpui::PlatformTextSystem for RasterTextSystem {
@@ -3189,7 +3216,9 @@ mod tests {
         ) -> gpui::Result<(gpui::Size<gpui::DevicePixels>, Vec<u8>)> {
             if let Some(observation) = &self.observation {
                 observation.rasterized.lock().unwrap().push(params.clone());
-                if observation.fail_next_raster.swap(false, Ordering::Relaxed) {
+                if observation.fail_next_raster.swap(false, Ordering::Relaxed)
+                    || observation.fail_glyph.lock().unwrap().as_ref() == Some(&params.glyph_id)
+                {
                     anyhow::bail!("injected glyph raster failure");
                 }
             }
@@ -3212,7 +3241,11 @@ mod tests {
             font_size: Pixels,
             runs: &[gpui::FontRun],
         ) -> gpui::LineLayout {
-            self.base.layout_line(text, font_size, runs)
+            let mut layout = self.base.layout_line(text, font_size, runs);
+            for glyph in layout.runs.iter_mut().flat_map(|run| &mut run.glyphs) {
+                glyph.id = gpui::GlyphId(text[glyph.index..].chars().next().unwrap() as u32);
+            }
+            layout
         }
 
         fn recommended_rendering_mode(
@@ -3676,7 +3709,7 @@ mod tests {
             let observation = Arc::clone(&observation);
             move |window, _| {
                 let mut batch = cursor_render_batches(window, false).remove(0);
-                let layout = layout_preedit("P", 0, 0, 10, 1);
+                let layout = layout_preedit("界", 0, 0, 10, 1);
                 let preedit = TerminalGridCache::new()
                     .prepare_preedit(
                         Some(&layout),
@@ -3698,14 +3731,135 @@ mod tests {
                     move |_, _, _| batch,
                     move |_, batch, window, cx| {
                         batch.preflight(None, window, cx).unwrap();
-                        let prepared = observation.rasterized.lock().unwrap().len();
-                        assert!(prepared > 0);
+                        let prepared = observation.rasterized.lock().unwrap().clone();
+                        let preedit_glyph = gpui::GlyphId('界' as u32);
+                        assert!(prepared.iter().any(|params| params.glyph_id == preedit_glyph));
+                        assert!(prepared.iter().any(|params| params.glyph_id != preedit_glyph));
                         batch.submit(batch.grid_bounds, true, window, cx).unwrap();
-                        assert_eq!(observation.rasterized.lock().unwrap().len(), prepared);
+                        assert_eq!(*observation.rasterized.lock().unwrap(), prepared);
                     },
                 )
                 .size_full()
             }
+        });
+    }
+
+    #[test]
+    fn preedit_paint_matches_shaped_line_glyphs_and_underline() {
+        let paint = |reference: bool| {
+            let mut cx = recording_test_app(Arc::new(RasterObservation::default()));
+            let cx = cx.add_empty_window();
+            cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
+                let layout = layout_preedit("e\u{0301}", 0, 0, 10, 1);
+                let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+                let rows = TerminalGridCache::new()
+                    .prepare_preedit(
+                        Some(&layout),
+                        2,
+                        bounds,
+                        &terminal_cell_font(&"Menlo".into(), false, false),
+                        px(18.0),
+                        px(8.375),
+                        px(14.0),
+                        Color::rgb(0xff_ff_ff),
+                        Color::rgb(0),
+                        Color::rgb(0xff_ff_ff),
+                        window.scale_factor(),
+                        window,
+                    )
+                    .unwrap();
+                let preedit = rows[0].text[0].clone();
+                gpui::canvas(
+                    move |_, _, _| preedit,
+                    move |_, preedit, window, cx| {
+                        if reference {
+                            preedit
+                                .text
+                                .line
+                                .paint(
+                                    preedit.text.origin,
+                                    px(14.0),
+                                    gpui::TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                                .unwrap();
+                        } else {
+                            paint_preedit_text(&preedit, px(14.0), window).unwrap();
+                        }
+                    },
+                )
+                .size_full()
+            });
+            cx.update(|window, _| {
+                (
+                    painted_glyphs(window),
+                    format!("{:?}", window.painted_underlines()),
+                )
+            })
+        };
+        let actual = paint(false);
+        assert!(!actual.0.is_empty());
+        assert_ne!(actual.1, "[]");
+        assert_eq!(actual, paint(true));
+    }
+
+    #[test]
+    fn cold_preedit_raster_failure_paints_only_the_retained_surface() {
+        let observation = Arc::new(RasterObservation::default());
+        *observation.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('界' as u32));
+        let mut cx = recording_test_app(Arc::clone(&observation));
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
+            let mut candidate = cursor_render_batches(window, false).remove(0);
+            let layout = layout_preedit("界", 0, 0, 10, 1);
+            let preedit = TerminalGridCache::new()
+                .prepare_preedit(
+                    Some(&layout),
+                    2,
+                    candidate.grid_bounds,
+                    &terminal_cell_font(&"Menlo".into(), false, false),
+                    px(18.0),
+                    px(8.375),
+                    candidate.line_height,
+                    Color::rgb(0xff_ff_ff),
+                    Color::rgb(0),
+                    Color::rgb(0xff_ff_ff),
+                    window.scale_factor(),
+                    window,
+                )
+                .unwrap();
+            candidate.rows[0].preedit = Some(preedit[0].clone());
+            let retained = TerminalPaintBatch {
+                surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
+                grid_bounds: candidate.grid_bounds,
+                line_height: candidate.line_height,
+                rows: Vec::new(),
+                cursor_text_overlay: None,
+                graphics: GraphicsPaintPlan::default(),
+                blink_phase_visible: true,
+                quad_paint_calls: None,
+            };
+            gpui::canvas(
+                move |_, _, _| (candidate, retained),
+                move |_, (candidate, retained), window, cx| {
+                    assert_eq!(
+                        candidate.preflight(None, window, cx),
+                        Err(PaintBatchFailure::Presentation)
+                    );
+                    retained.preflight(None, window, cx).unwrap();
+                    retained.submit(retained.grid_bounds, true, window, cx).unwrap();
+                },
+            )
+            .size_full()
+        });
+        let rasterized = observation.rasterized.lock().unwrap();
+        assert!(rasterized.iter().any(|params| params.glyph_id == gpui::GlyphId('界' as u32)));
+        cx.update(|window, _| {
+            assert_eq!(window.painted_quads().len(), 1);
+            assert!(painted_glyphs(window).is_empty());
+            assert!(window.painted_underlines().is_empty());
         });
     }
 
