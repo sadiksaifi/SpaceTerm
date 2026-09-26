@@ -93,6 +93,7 @@ clean_target() {
         echo "error: refusing to clean a Cargo target directory not owned by this repository" >&2
         return 2
     fi
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$target_dir/CACHEDIR.TAG"
     cargo clean --manifest-path "$repo_dir/Cargo.toml" --target-dir "$target_dir"
 }
 

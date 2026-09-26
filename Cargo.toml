@@ -38,7 +38,6 @@ members = [
 ]
 default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
 resolver = "2"
-exclude = ["third_party/gpui"]
 
 [features]
 default = []
@@ -53,11 +52,13 @@ sha2 = "0.10"
 anyhow = "1.0.100"
 async-channel = "2.5.0"
 getrandom = "=0.4.3"
-gpui = "=0.2.2"
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26" }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["font-kit"] }
 image = { version = "=0.25.10", default-features = false }
 libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
 portable-pty = "=0.9.0"
+pollster = "=0.4.0"
 smallvec = "=1.15.2"
 spaceterm-directories = { path = "crates/spaceterm-directories" }
 spaceterm-ui = { path = "crates/spaceterm-ui" }
@@ -74,7 +75,8 @@ objc = "=0.2.7"
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
-gpui = { version = "=0.2.2", features = ["test-support"] }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["test-support"] }
+gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26" }
 jsonschema = { version = "=0.56.0", default-features = false }
 
 [lints.rust]
@@ -105,6 +107,3 @@ debug = false
 [profile.test.build-override]
 debug = false
 incremental = false
-
-[patch.crates-io]
-gpui = { path = "third_party/gpui" }
