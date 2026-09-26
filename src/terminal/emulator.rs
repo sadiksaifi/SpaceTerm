@@ -63,6 +63,8 @@ use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSp
 use crate::terminal::{FindDirection, FindQueryGeneration, TerminalFindSnapshot};
 const MAX_WHEEL_STEPS: i32 = 100;
 const MAX_SCROLLBACK_ROWS: usize = 10_000;
+// Match Ghostty's application default in third_party/ghostty/src/config/Config.zig.
+const MAX_SCROLLBACK_BYTES: usize = 50_000_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -960,6 +962,7 @@ impl TerminalEmulator {
             cols: grid.cols,
             rows: grid.rows,
             max_scrollback: MAX_SCROLLBACK_ROWS,
+            max_scrollback_bytes: MAX_SCROLLBACK_BYTES,
         })?;
 
         terminal
