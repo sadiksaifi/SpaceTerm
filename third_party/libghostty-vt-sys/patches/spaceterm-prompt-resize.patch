@@ -1,31 +1,72 @@
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 208e276a2..b6f4301d6 100644
+index 208e276a2..b3473701f 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
-@@ -2030,6 +2030,22 @@ pub inline fn resize(
+@@ -83,6 +83,10 @@ else
+ /// Semantic prompt (OSC133) state.
+ semantic_prompt: SemanticPrompt = .disabled,
+ 
++/// A prompt cleared for a pending shell redraw. The shell's cursor-up count
++/// still refers to the physical rows it drew before the first resize.
++pending_prompt_redraw: ?struct { start: *Pin, rows: u32 } = null,
++
+ /// Dirty flags for the renderer.
+ dirty: Dirty = .{},
+ 
+@@ -351,9 +355,17 @@ pub fn deinit(self: *Screen) void {
+         self.kitty_images.deinit(self.alloc, self);
+     }
+     self.cursor.deinit(self.alloc);
++    self.finishPromptRedraw();
+     self.pages.deinit();
+ }
+ 
++pub fn finishPromptRedraw(self: *Screen) void {
++    if (self.pending_prompt_redraw) |pending| {
++        self.pages.untrackPin(pending.start);
++        self.pending_prompt_redraw = null;
++    }
++}
++
+ /// Assert that the screen is in a consistent state. This doesn't check
+ /// all pages in the page list because that is SO SLOW even just for
+ /// tests. This only asserts the screen specific data so callers should
+@@ -403,6 +415,7 @@ pub fn assertIntegrity(self: *const Screen) void {
+ /// - Disables protection mode
+ ///
+ pub fn reset(self: *Screen) void {
++    self.finishPromptRedraw();
+     // Reset our pages
+     self.pages.reset();
+ 
+@@ -2030,6 +2043,26 @@ pub inline fn resize(
      const tw = resize_tw;
      defer self.assertIntegrity();
  
-+    // A shell redraws using the number of physical prompt rows it printed
-+    // before SIGWINCH. Track the current prompt start through reflow because
-+    // its row marker may move or merge with an earlier prompt row.
-+    const prompt: ?struct { start: *Pin, rows: u32 } = if (opts.prompt_redraw == .true and
++    // SIGWINCH can arrive again before the shell writes its next prompt.
++    // Keep the offset from the first resize because reflowing cleared rows
++    // does not preserve the row count that the shell will move up by.
++    const new_prompt = self.pending_prompt_redraw == null;
++    if (new_prompt and opts.prompt_redraw == .true and
 +        self.cursor.semantic_content != .output)
 +    prompt: {
 +        var it = self.cursor.page_pin.promptIterator(.left_up, null);
-+        const start = it.next() orelse break :prompt null;
++        const start = it.next() orelse break :prompt;
 +        const position = self.pages.pointFromPin(.screen, start).?;
 +        const cursor_position = self.pages.pointFromPin(.screen, self.cursor.page_pin.*).?;
-+        if (position.screen.y > cursor_position.screen.y) break :prompt null;
-+        const rows = cursor_position.screen.y - position.screen.y;
-+        break :prompt .{ .start = try self.pages.trackPin(start), .rows = rows };
-+    } else null;
-+    defer if (prompt) |p| self.pages.untrackPin(p.start);
++        if (position.screen.y > cursor_position.screen.y) break :prompt;
++        self.pending_prompt_redraw = .{
++            .start = try self.pages.trackPin(start),
++            .rows = cursor_position.screen.y - position.screen.y,
++        };
++    }
++    errdefer if (new_prompt) self.finishPromptRedraw();
++    const prompt = self.pending_prompt_redraw;
 +
      // We need to insert a tracked pin for our saved cursor so we can
      // modify its X/Y for reflow. Do this before changing any state since
      // tracking the pin can fail.
-@@ -2128,10 +2144,48 @@ pub inline fn resize(
+@@ -2128,10 +2161,48 @@ pub inline fn resize(
      // state is correct.
      self.cursorReload();
  
@@ -78,7 +119,7 @@ index 208e276a2..b6f4301d6 100644
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2227,6 +2281,7 @@ pub inline fn resize(
+@@ -2227,6 +2298,7 @@ pub inline fn resize(
  fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -86,7 +127,7 @@ index 208e276a2..b6f4301d6 100644
  ) void {
      // If our cursor is on a prompt or input line, clear it so the shell can
      // redraw it. This works with OSC 133 semantic prompts. We do this after
-@@ -2255,7 +2310,7 @@ fn clearPromptForRedraw(
+@@ -2255,7 +2327,7 @@ fn clearPromptForRedraw(
              },
  
              .true => {
@@ -95,3 +136,31 @@ index 208e276a2..b6f4301d6 100644
                      var it = self.cursor.page_pin.promptIterator(
                          .left_up,
                          null,
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index e9cc3b8e6..5aa8e835d 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -2093,6 +2093,7 @@ pub fn semanticPrompt(
+             try self.semanticPromptFreshLine();
+ 
+             const screen: *Screen = self.screens.active;
++            screen.finishPromptRedraw();
+ 
+             // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
+             // is a prompt string (as if followed by OSC 133;P;k=i\007)."
+@@ -2100,12 +2101,9 @@ pub fn semanticPrompt(
+                 .prompt = cmd.readOption(.prompt_kind) orelse .initial,
+             });
+ 
+-            // This is a kitty-specific flag that notes that the shell
+-            // is NOT capable of redraw. Redraw defaults to true so this
+-            // usually just disables it, but either is possible.
+-            if (cmd.readOption(.redraw)) |v| {
+-                self.flags.shell_redraws_prompt = v;
+-            }
++            // The policy belongs to this prompt. An omitted option restores
++            // the OSC 133 default instead of inheriting the previous shell's.
++            self.flags.shell_redraws_prompt = cmd.readOption(.redraw) orelse .true;
+ 
+             click: {
+                 // Handle click_events as a priority over cl. click_events

@@ -19,7 +19,7 @@ fn spaceterm-encode {|value|
 }
 
 fn spaceterm-prompt {
-  printf "\e]7;file://localhost%s\a\e]133;A\a" (spaceterm-encode $pwd)
+  printf "\e]7;file://localhost%s\a\e]133;A;redraw=1\a" (spaceterm-encode $pwd)
 }
 fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C\a" }
 fn spaceterm-finished {|info|

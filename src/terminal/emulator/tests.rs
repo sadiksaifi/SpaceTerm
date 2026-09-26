@@ -1448,10 +1448,9 @@ fn zsh_resize_rows(
     old_prompt_offset: u16,
 ) -> Vec<String> {
     let mut emulator = emulator(old_size.0, old_size.1);
-    let marked_prompt = prompt.replace("\r\n", "\r\n\x1b]133;P;k=s\x07");
     emulator.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n");
     emulator.feed(b"\x1b]133;A;redraw=1\x07");
-    emulator.feed(marked_prompt.as_bytes());
+    emulator.feed(prompt.as_bytes());
     emulator.feed(b"\x1b]133;B\x07");
     emulator.feed(input.as_bytes());
 
@@ -1461,8 +1460,9 @@ fn zsh_resize_rows(
     emulator.feed(
         format!("\r\r\x1b[{old_prompt_offset}A\x1b[0m\x1b[27m\x1b[24m\x1b[J").as_bytes(),
     );
+    // Zsh emits this mark from PS1 on SIGWINCH. Its precmd hook does not run.
     emulator.feed(b"\x1b]133;A;redraw=1\x07");
-    emulator.feed(marked_prompt.as_bytes());
+    emulator.feed(prompt.as_bytes());
     emulator.feed(b"\x1b]133;B\x07");
     emulator.feed(input.as_bytes());
 
@@ -1519,6 +1519,84 @@ fn zsh_redraw_clears_every_line_of_multiline_prompt_in_scrollback() {
     let prompt = format!("TOP\r\n{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "", 6);
     assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+#[test]
+fn zsh_redraw_keeps_original_offset_across_two_resizes_before_sigwinch() {
+    let mut emulator = emulator(50, 20);
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    emulator.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt.as_bytes());
+    emulator.feed(b"\x1b]133;B\x07");
+
+    emulator.resize(geometry(20, 20, 10.0, 20.0)).unwrap();
+    emulator.resize(geometry(150, 20, 10.0, 20.0)).unwrap();
+    // Captured from zsh after the first width change. Two SIGWINCH events
+    // coalescing leave zsh's original two-row cursor-up unchanged.
+    emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt.as_bytes());
+    emulator.feed(b"\x1b]133;B\x07");
+
+    assert_complete_zsh_redraw(&all_grid_rows(&mut emulator), &prompt, "");
+}
+
+#[test]
+fn zsh_repeated_tall_prompt_redraw_has_one_prompt_and_right_prompt() {
+    let mut emulator = emulator(50, 20);
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    emulator.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt.as_bytes());
+    emulator.feed(b"\x1b]133;B\x07\x1b[K\x1b[42CRIGHT\x1b[47Dunfinished");
+
+    for (cols, rows, redraw) in [
+        (20, 3, b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
+        (100, 10, b"\r\r\x1b[5A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
+        (20, 3, b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
+    ] {
+        emulator.resize(geometry(cols, rows, 10.0, 20.0)).unwrap();
+        emulator.feed(redraw);
+        emulator.feed(b"\x1b]133;A;redraw=1\x07");
+        emulator.feed(prompt.as_bytes());
+        emulator.feed(b"\x1b]133;B\x07unfinished\x1b[K");
+        match cols {
+            100 => emulator.feed(b"\x1b[82CRIGHT\x1b[87D"),
+            _ => emulator.feed(b"\x1b[2CRIGHT\x08\x08\x08\x08\x08\x08\x08"),
+        }
+    }
+
+    let rows = all_grid_rows(&mut emulator);
+    let content = rows.iter().flat_map(|row| row.chars()).filter(|ch| !ch.is_whitespace()).collect::<String>();
+    assert_eq!(content, format!("echoMARKERQA_RESIZE_MARKER{}>unfinishedRIGHT", "P".repeat(100)));
+}
+
+#[test]
+fn bash_after_zsh_retains_first_line_of_multiline_prompt_on_resize() {
+    let mut emulator = emulator(50, 20);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07ZSH> \x1b]133;B\x07bash\r\nQA_RESIZE_MARKER\r\n");
+    emulator.feed(b"\x1b]133;A;redraw=last\x07BASH_TOP\r\n> ");
+    emulator.resize(geometry(20, 20, 10.0, 20.0)).unwrap();
+    // Bash readline only redraws its final prompt row on SIGWINCH.
+    emulator.feed(b"\r\x1b[K> ");
+    let content = all_grid_rows(&mut emulator)
+        .iter()
+        .flat_map(|row| row.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert_eq!(content, "ZSH>bashQA_RESIZE_MARKERBASH_TOP>");
+}
+
+#[test]
+fn unoptioned_prompt_start_resets_the_previous_shell_redraw_policy() {
+    let mut emulator = emulator(50, 5);
+    emulator.feed(b"\x1b]133;A;redraw=0\x07OLD> \x1b]133;B\x07run\r\nQA_RESIZE_MARKER\r\n");
+    emulator.feed(b"\x1b]133;A\x07NEW_TOP\r\n> ");
+    emulator.resize(geometry(20, 5, 10.0, 20.0)).unwrap();
+    let content = all_grid_rows(&mut emulator)
+        .iter()
+        .flat_map(|row| row.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert_eq!(content, "OLD>runQA_RESIZE_MARKER");
 }
 
 #[test]

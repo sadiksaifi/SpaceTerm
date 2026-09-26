@@ -8,7 +8,7 @@ end
 if status --is-interactive; and test "$SPACETERM_SHELL_INTEGRATION_VERSION" = 1; and not set -q _SPACETERM_INTEGRATION_LOADED
     set --global _SPACETERM_INTEGRATION_LOADED 1
     function _spaceterm_prompt --on-event fish_prompt
-        printf '\e]7;file://localhost%s\a\e]133;A\a' (string escape --style=url -- "$PWD" | string replace --all '%2F' '/')
+        printf '\e]7;file://localhost%s\a\e]133;A;redraw=1\a' (string escape --style=url -- "$PWD" | string replace --all '%2F' '/')
     end
     function _spaceterm_preexec --on-event fish_preexec
         printf '\e]133;B\a\e]133;C;cmdline=%s\a' (string escape --style=url -- "$argv")
