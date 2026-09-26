@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use cocoa::appkit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
 use cocoa::base::{YES, nil};
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString};

@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use gpui::{App, Menu, MenuItem, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 

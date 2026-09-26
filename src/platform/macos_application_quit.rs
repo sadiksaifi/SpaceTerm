@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};

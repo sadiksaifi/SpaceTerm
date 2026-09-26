@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use std::marker::PhantomData;
 use std::path::Path;
 use std::rc::Rc;
