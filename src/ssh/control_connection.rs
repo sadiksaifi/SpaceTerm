@@ -854,7 +854,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::time::{Duration, Instant};
 
     use gpui::TestAppContext;
@@ -1054,8 +1054,8 @@ mod tests {
                 state.cleanup_notification = Some(cleanup_sender);
             }
             let connection = cx
-                .executor()
-                .block(OpenSshControlConnection::connect(
+                .foreground_executor()
+                .block_test(OpenSshControlConnection::connect(
                     &directory.paths(),
                     OpenSshExecutable::for_test(),
                     &RecordingControlSocketProbe(directory.1.clone()),
@@ -1156,7 +1156,9 @@ mod tests {
             state.observations.push_back(next);
             state.shutdown_rejection = Some(ProcessExit::unsuccessful(Some(255)));
         }
-        let result = cx.executor().block(observed.connection.shutdown());
+        let result = cx
+            .foreground_executor()
+            .block_test(observed.connection.shutdown());
         assert!(matches!(
             result,
             Err(ControlConnectionError::ShutdownRejected(_))
@@ -1190,7 +1192,7 @@ mod tests {
             .unwrap();
         assert_eq!(observed.backend.reap_count(), 1);
         assert_eq!(
-            cx.executor().block(lifecycle.terminal()),
+            cx.foreground_executor().block_test(lifecycle.terminal()),
             crate::ssh::live_connection::ControlConnectionTerminalState::Closed
         );
     }
@@ -1378,8 +1380,8 @@ mod tests {
         let cancellation = SshCancellationToken::default();
 
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1401,8 +1403,8 @@ mod tests {
         let paths = directory.paths();
         let cancellation = SshCancellationToken::default();
         let first = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1416,8 +1418,8 @@ mod tests {
             ))
             .unwrap();
         let second = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1446,8 +1448,8 @@ mod tests {
         ));
         let cancellation = SshCancellationToken::default();
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1495,8 +1497,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1547,8 +1549,8 @@ mod tests {
         let cancellation = SshCancellationToken::default();
 
         let error = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1584,8 +1586,8 @@ mod tests {
         let cancellation = SshCancellationToken::default();
 
         let error = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1600,7 +1602,7 @@ mod tests {
         assert!(matches!(
             &error,
             ControlConnectionError::MasterExited { exit, error_output: Some(output) }
-                if *exit == ProcessExit::unsuccessful(Some(7))
+                if exit == &ProcessExit::unsuccessful(Some(7))
                     && output.as_str() == "bad  config"
                     && !format!("{error:?}").contains("bad")
         ));
@@ -1615,8 +1617,8 @@ mod tests {
         backend.state.lock().unwrap().cancel_on_delay = Some(cancellation.clone());
 
         let error = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1640,15 +1642,17 @@ mod tests {
         let unrelated = directory.0.join("unrelated");
         directory.1.create_socket(&unrelated);
 
-        let _ = cx.executor().block(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &RecordingControlSocketProbe(directory.1.clone()),
-            destination(),
-            Arc::clone(&backend),
-            &cancellation,
-            timing(),
-        ));
+        let _ = cx
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
+                &paths,
+                OpenSshExecutable::for_test(),
+                &RecordingControlSocketProbe(directory.1.clone()),
+                destination(),
+                Arc::clone(&backend),
+                &cancellation,
+                timing(),
+            ));
 
         let socket_path = backend.socket_path();
         assert!(directory.1.has_socket(&socket_path) && directory.1.has_socket(&unrelated));
@@ -1693,8 +1697,8 @@ mod tests {
         ));
         let cancellation = SshCancellationToken::default();
         let mut connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1706,8 +1710,12 @@ mod tests {
             .unwrap();
         let socket_path = connection.control_path().to_path_buf();
 
-        cx.executor().block(connection.shutdown()).unwrap();
-        cx.executor().block(connection.shutdown()).unwrap();
+        cx.foreground_executor()
+            .block_test(connection.shutdown())
+            .unwrap();
+        cx.foreground_executor()
+            .block_test(connection.shutdown())
+            .unwrap();
 
         let exit_commands = backend
             .records()
@@ -1732,8 +1740,8 @@ mod tests {
         backend.state.lock().unwrap().hang_readiness = true;
 
         let error = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1760,8 +1768,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let mut connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1773,7 +1781,10 @@ mod tests {
             .unwrap();
         backend.state.lock().unwrap().hang_shutdown = true;
 
-        let error = cx.executor().block(connection.shutdown()).unwrap_err();
+        let error = cx
+            .foreground_executor()
+            .block_test(connection.shutdown())
+            .unwrap_err();
 
         assert!(
             matches!(
@@ -1796,8 +1807,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let mut connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1813,7 +1824,9 @@ mod tests {
             state.exit_on_signal = ProcessSignal::Kill;
         }
 
-        cx.executor().block(connection.shutdown()).unwrap();
+        cx.foreground_executor()
+            .block_test(connection.shutdown())
+            .unwrap();
 
         assert_eq!(
             backend.state.lock().unwrap().signals,
@@ -1830,8 +1843,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1864,7 +1877,7 @@ mod tests {
 
         assert_eq!(connection.state(), ControlConnectionState::Failed);
         assert_eq!(
-            cx.executor().block(lifecycle.terminal()),
+            cx.foreground_executor().block_test(lifecycle.terminal()),
             crate::ssh::live_connection::ControlConnectionTerminalState::Failed
         );
         assert!(matches!(
@@ -1887,8 +1900,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1903,7 +1916,7 @@ mod tests {
         drop(connection);
 
         assert_eq!(
-            cx.executor().block(lifecycle.terminal()),
+            cx.foreground_executor().block_test(lifecycle.terminal()),
             crate::ssh::live_connection::ControlConnectionTerminalState::Closed
         );
     }
@@ -1917,8 +1930,8 @@ mod tests {
             [ProcessExit::successful()],
         ));
         let connection = cx
-            .executor()
-            .block(OpenSshControlConnection::connect(
+            .foreground_executor()
+            .block_test(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
                 &RecordingControlSocketProbe(directory.1.clone()),
@@ -1973,8 +1986,7 @@ mod tests {
             &cancellation,
             timing(),
         ));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
 
         assert!(matches!(
             Pin::as_mut(&mut future).poll(&mut context),
@@ -1984,12 +1996,6 @@ mod tests {
 
         let socket_path = backend.socket_path();
         assert!(backend.reap_count() == 1 && directory.1.has_socket(&socket_path));
-    }
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
     }
 }
 

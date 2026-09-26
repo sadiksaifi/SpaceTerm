@@ -225,7 +225,7 @@ impl StatusGlyph {
             colors,
             // The animation hangs off this Session's own glyph identity, so one spinner never
             // shares its frame state with another Session's.
-            id: ElementId::NamedChild(Box::new(id.clone()), "progress".into()),
+            id: ElementId::NamedChild(std::sync::Arc::new(id.clone()), "progress".into()),
             selector: format!("{selector_prefix}-progress"),
         };
         if !attention {

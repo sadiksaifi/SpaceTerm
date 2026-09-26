@@ -164,7 +164,7 @@ pub(crate) fn themed_field_frame(
     state: FieldState,
 ) -> Stateful<Div> {
     let id = id.into();
-    let ring_id = ElementId::NamedChild(Box::new(id.clone()), "focus-ring".into());
+    let ring_id = ElementId::NamedChild(std::sync::Arc::new(id.clone()), "focus-ring".into());
     themed_field_surface(theme, id, state)
         .track_focus(focus)
         .when(!state.disabled, |frame| {
@@ -337,7 +337,7 @@ mod tests {
         .focus_ring(ring);
         let (root, cx) = cx.add_window_view(move |window, cx| {
             let focus = cx.focus_handle();
-            focus.focus(window);
+            focus.focus(window, cx);
             FocusFixture {
                 focus,
                 state: FieldState::default().invalid(true),
@@ -345,12 +345,12 @@ mod tests {
             }
         });
         cx.run_until_parked();
-        let quads = cx.update(|window, _| window.painted_quads_for_test());
+        let quads = cx.update(|window, _| window.painted_quads());
         let bounds_for = |color: gpui::Rgba| {
             quads
                 .iter()
                 .filter(|quad| quad.border_color == color.into())
-                .map(|quad| quad.visible_bounds)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
                 .reduce(|bounds, next| bounds.union(&next))
                 .unwrap()
         };
@@ -383,7 +383,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.update(|window, _| {
             window
-                .painted_quads_for_test()
+                .painted_quads()
                 .iter()
                 .all(|quad| quad.border_color != ring.into())
         }));

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use cocoa::appkit::NSApplication;
 use cocoa::base::nil;
 use cocoa::foundation::NSInteger;

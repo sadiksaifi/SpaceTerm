@@ -6,7 +6,7 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Bounds, Corner, ElementId, Entity, FocusHandle, Font,
+    Anchor, AnyElement, App, BorrowAppContext as _, Bounds, ElementId, Entity, FocusHandle, Font,
     Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
     RenderOnce, Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _,
@@ -1310,7 +1310,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
             .when_some(self.leading_icon, |content, icon| {
                 content.child(div().relative().top(icon_offset).child(icon(foreground)))
             })
-            .child(div().flex_grow().child(self.selected_label))
+            .child(div().flex_grow(1.0).child(self.selected_label))
             .child(
                 div()
                     .debug_selector(move || disclosure_selector)
@@ -2003,7 +2003,7 @@ pub fn dismiss_active_menu(window: &mut Window, cx: &mut App) -> bool {
         return false;
     };
     if let Some(focus) = restore_focus.and_then(|focus| focus.upgrade()) {
-        focus.focus(window);
+        focus.focus(window, cx);
     }
     true
 }
@@ -2248,7 +2248,7 @@ impl MenuState {
         self.invalidate_submenu_task();
         self.pointer_button = None;
         self.pointer_press = None;
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         self.emit_lifecycle(MenuLifecycleEvent::Opened, cx);
         cx.notify();
         true
@@ -2295,9 +2295,9 @@ impl MenuState {
             let predecessor = self.restore_focus.take().and_then(|focus| focus.upgrade());
             if let Some(window) = window {
                 if let Some(focus) = predecessor {
-                    focus.focus(window);
+                    focus.focus(window, cx);
                 } else if self.focus_handle.is_focused(window) {
-                    window.blur();
+                    window.blur(cx);
                 }
             }
         } else {
@@ -3086,7 +3086,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         });
 
     anchored()
-        .anchor(Corner::TopLeft)
+        .anchor(Anchor::TopLeft)
         .position(point(px(0.0), px(0.0)))
         .snap_to_window()
         .child(overlay)
@@ -3340,7 +3340,7 @@ fn render_row(
             div()
                 .debug_selector(move || label_selector)
                 .min_w_0()
-                .flex_grow()
+                .flex_grow(1.0)
                 .truncate()
                 .child(label),
         )
@@ -3709,15 +3709,16 @@ mod tests {
             ("ghost-menu", "ghost-menu-keyboard-focus"),
             ("ghost-picker", "ghost-picker-keyboard-focus"),
         ] {
-            cx.update(|window, _| window.focus_next());
+            cx.update(|window, cx| window.focus_next(cx));
             cx.run_until_parked();
             let bounds = cx.debug_bounds(selector).unwrap();
             let keyboard_focus = cx.update(|window, cx| window.focused(cx)).unwrap();
             assert!(cx.debug_bounds(focus_selector).is_none());
             cx.update(|window, _| {
                 assert!(
-                    window.painted_quads_for_test().iter().any(|quad| {
-                        quad.visible_bounds == bounds.scale(window.scale_factor())
+                    window.painted_quads().iter().any(|quad| {
+                        quad.bounds.intersect(&quad.content_mask.bounds)
+                            == bounds.scale(window.scale_factor())
                             && quad.background == hover.into()
                     }),
                     "focused {selector} must retain ghost hover feedback"
@@ -3732,7 +3733,7 @@ mod tests {
             assert!(cx.update(|window, _| keyboard_focus.is_focused(window)));
         }
         for selector in ["ghost-menu", "ghost-picker"] {
-            cx.update(|window, _| window.blur());
+            cx.update(|window, cx| window.blur(cx));
             let bounds = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(bounds.center(), Modifiers::none());
             cx.run_until_parked();
@@ -3743,8 +3744,9 @@ mod tests {
             assert!(cx.update(|window, cx| window.focused(cx).is_none()));
             cx.update(|window, _| {
                 assert!(
-                    !window.painted_quads_for_test().iter().any(|quad| {
-                        quad.visible_bounds == bounds.scale(window.scale_factor())
+                    !window.painted_quads().iter().any(|quad| {
+                        quad.bounds.intersect(&quad.content_mask.bounds)
+                            == bounds.scale(window.scale_factor())
                             && quad.background == hover.into()
                     }),
                     "dismissed {selector} must not retain ghost focus fill"
@@ -3779,7 +3781,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.run_until_parked();
 
         let trigger = cx
@@ -3803,12 +3805,12 @@ mod tests {
         );
         cx.update(|window, _| {
             let scale = window.scale_factor();
-            let quads = window.painted_quads_for_test();
+            let quads = window.painted_quads();
             let visible = |color: Rgba| {
                 quads
                     .iter()
                     .filter(|quad| quad.border_color == color.into())
-                    .map(|quad| quad.visible_bounds)
+                    .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
                     .reduce(|bounds, next| bounds.union(&next))
             };
             assert_eq!(visible(ordinary), Some(trigger.scale(scale)));
@@ -4825,9 +4827,9 @@ mod tests {
     #[gpui::test]
     fn keyboard_should_open_and_skip_disabled_entries(cx: &mut TestAppContext) {
         let (_, events, cx) = menu_window(cx);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         cx.simulate_keystrokes("space");
         cx.run_until_parked();
@@ -4980,9 +4982,9 @@ mod tests {
         let (_, cx) = cx.add_window_view(move |_, _| PickerRoot {
             changes: root_changes,
         });
-        cx.update(|window, _| {
+        cx.update(|window, cx| {
             window.activate_window();
-            window.focus_next();
+            window.focus_next(cx);
         });
         cx.run_until_parked();
 
@@ -5078,7 +5080,7 @@ mod tests {
             .debug_bounds("activation-order-trigger")
             .unwrap_or_else(|| panic!("activation-order trigger not painted"));
         // This case exercises restoration to an existing keyboard target before activation.
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.simulate_click(trigger.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
@@ -5166,7 +5168,7 @@ mod tests {
     fn outside_dismissal_should_restore_focus_and_not_leak_to_underlay(cx: &mut TestAppContext) {
         let (root, lifecycle, underlay, cx) = lifecycle_window(cx);
         let focus = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| focus.focus(window));
+        cx.update(|window, cx| focus.focus(window, cx));
         let trigger = cx
             .debug_bounds("lifecycle-trigger")
             .unwrap_or_else(|| panic!("lifecycle trigger not painted"));
@@ -5204,11 +5206,11 @@ mod tests {
             for dismissal in ["escape", "enter", "trigger", "outside", "deactivate"] {
                 let (root, _, _, cx) = lifecycle_window(cx);
                 let prior = root.read_with(cx, |root, _| root.other_focus.clone());
-                cx.update(|window, _| {
+                cx.update(|window, cx| {
                     if prior_focus {
-                        prior.focus(window);
+                        prior.focus(window, cx);
                     } else {
-                        window.blur();
+                        window.blur(cx);
                     }
                 });
                 let trigger = cx.debug_bounds("lifecycle-trigger").unwrap();
@@ -5256,7 +5258,7 @@ mod tests {
     ) {
         let (root, lifecycle, _, cx) = lifecycle_window(cx);
         let focus = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| focus.focus(window));
+        cx.update(|window, cx| focus.focus(window, cx));
         let trigger = cx
             .debug_bounds("lifecycle-trigger")
             .unwrap_or_else(|| panic!("lifecycle trigger not painted"));
@@ -5280,7 +5282,7 @@ mod tests {
     #[gpui::test]
     fn escape_and_deactivation_should_emit_one_closed_transition_each(cx: &mut TestAppContext) {
         let (_, lifecycle, _, cx) = lifecycle_window(cx);
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.simulate_keystrokes("space");
         cx.run_until_parked();
         cx.simulate_keystrokes("escape");
@@ -5836,7 +5838,8 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.activate_window();
-            root.read(cx).focus.focus(window);
+            let focus = root.read(cx).focus.clone();
+            focus.focus(window, cx);
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("shift-f10");

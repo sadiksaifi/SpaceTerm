@@ -347,7 +347,7 @@ fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualT
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _cx| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx)
@@ -408,7 +408,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     });
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     let window_id = cx.update(|window, _| window.window_handle().window_id());
@@ -777,7 +777,7 @@ fn connected_terminal_pane(
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _cx| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records)
@@ -872,7 +872,7 @@ fn connected_remote_terminal_pane(
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records)
@@ -894,7 +894,7 @@ fn connected_remote_terminal_pane_with_readiness(
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records)
@@ -974,7 +974,7 @@ fn remote_restart_resets_caption_before_successor_output_and_preserves_screen(
     let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
-        cx.executor().block(
+        cx.foreground_executor().block_test(
             factory
                 .revalidate_remote_child_launch()
                 .expect("remote restart must require revalidation"),
@@ -1055,7 +1055,7 @@ fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
     let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
-        cx.executor().block(
+        cx.foreground_executor().block_test(
             factory
                 .revalidate_remote_child_launch()
                 .expect("remote restart must require revalidation"),
@@ -1304,7 +1304,7 @@ fn disconnect_and_restart_clear_hidden_input_before_successor_focus(cx: &mut Tes
     }));
 
     assert_eq!(
-        cx.executor().block(
+        cx.foreground_executor().block_test(
             factory
                 .revalidate_remote_child_launch()
                 .expect("remote restart must require revalidation"),
@@ -1618,8 +1618,8 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
     let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
-        cx.executor()
-            .block(factory.revalidate_remote_child_launch().unwrap()),
+        cx.foreground_executor()
+            .block_test(factory.revalidate_remote_child_launch().unwrap()),
         Ok(())
     );
     let prepared_launch = factory.prepare_child_launch().unwrap();
@@ -2084,7 +2084,7 @@ fn connected_terminal_pane_with_key_propagation(
     let pane = probe.read_with(cx, |probe, _| probe.pane.clone());
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records, propagated_key_downs)
@@ -2115,7 +2115,7 @@ fn terminal_pane_with_selection_copy(
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _cx| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records)
@@ -2148,7 +2148,7 @@ fn terminal_pane_with_paste_response(
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        pane.update(cx, |pane, _cx| pane.focus(window));
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
     });
     cx.run_until_parked();
     (pane, cx, records)
@@ -2469,7 +2469,7 @@ fn repeated_terminal_find_selects_and_refocuses_the_existing_query(cx: &mut Test
     cx.dispatch_action(OpenTerminalFind);
     let input = terminal_find_input(&pane, cx);
     replace_terminal_find_input(&input, "needle", cx);
-    cx.update(|window, cx| pane.update(cx, |pane, _| pane.focus(window)));
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.focus(window, cx)));
 
     cx.dispatch_action(OpenTerminalFind);
 
@@ -2795,6 +2795,7 @@ fn terminal_find_return_activates_each_focused_button(cx: &mut TestAppContext) {
         let enter = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyUpEvent { keystroke: enter });
@@ -4006,7 +4007,7 @@ fn responder_focus_away_and_back_invalidates_the_previous_service_origin(cx: &mu
     let accepted = cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.open_find(&OpenTerminalFind, window, cx);
-            pane.focus(window);
+            pane.focus(window, cx);
             pane.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
         })
     });
@@ -4152,9 +4153,13 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
     let status_backgrounds = cx.update(|window, _| {
         let status_rail = status_rail.scale(window.scale_factor());
         window
-            .painted_quads_for_test()
+            .painted_quads()
             .into_iter()
-            .filter(|quad| quad.visible_bounds.intersects(&status_rail))
+            .filter(|quad| {
+                quad.bounds
+                    .intersect(&quad.content_mask.bounds)
+                    .intersects(&status_rail)
+            })
             .map(|quad| quad.background)
             .collect::<Vec<_>>()
     });
@@ -4173,9 +4178,13 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
     let paste_backgrounds = cx.update(|window, _| {
         let paste_rail = paste_rail.scale(window.scale_factor());
         window
-            .painted_quads_for_test()
+            .painted_quads()
             .into_iter()
-            .filter(|quad| quad.visible_bounds.intersects(&paste_rail))
+            .filter(|quad| {
+                quad.bounds
+                    .intersect(&quad.content_mask.bounds)
+                    .intersects(&paste_rail)
+            })
             .map(|quad| quad.background)
             .collect::<Vec<_>>()
     });
@@ -4521,6 +4530,7 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
 
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent { keystroke });
@@ -5067,6 +5077,7 @@ fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEven
             key_char: key_char.map(ToOwned::to_owned),
             modifiers,
         },
+        prefer_character_input: false,
         is_held: false,
     }
 }

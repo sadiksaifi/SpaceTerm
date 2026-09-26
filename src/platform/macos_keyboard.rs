@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::ffi::CStr;
 
 use cocoa::appkit::{NSApp, NSEvent, NSEventModifierFlags, NSEventType};

@@ -4,6 +4,7 @@
 //! access to a Service's supplied pasteboard. Request policy and lifetime authority live in
 //! the portable Services owner; this adapter only connects those operations to AppKit.
 
+#![allow(deprecated)]
 use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;

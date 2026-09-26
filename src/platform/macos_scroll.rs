@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use cocoa::appkit::{NSApp, NSEvent, NSEventType};
 use cocoa::base::{id, nil};
 use gpui::Window;

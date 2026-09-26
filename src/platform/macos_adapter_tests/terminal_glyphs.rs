@@ -1,8 +1,14 @@
 use super::*;
 
+fn macos_text_system() -> gpui::WindowTextSystem {
+    gpui::WindowTextSystem::new(Arc::new(gpui::TextSystem::new(Arc::new(
+        gpui_macos::MacTextSystem::new(),
+    ))))
+}
+
 #[test]
 fn macos_scope_guide_redraw_keeps_native_glyphs_on_exact_columns() {
-    let text_system = gpui::WindowTextSystem::macos_for_test();
+    let text_system = macos_text_system();
     let fonts = test_terminal_fonts(&"Menlo".into());
     let sample = prepare_row(
         &Arc::from([cell("a"), cell("a")]),
@@ -60,7 +66,7 @@ fn macos_scope_guide_redraw_keeps_native_glyphs_on_exact_columns() {
 
 #[test]
 fn macos_cell_anchoring_preserves_complex_cluster_offsets() {
-    let text_system = gpui::WindowTextSystem::macos_for_test();
+    let text_system = macos_text_system();
     for (cluster, width) in [
         ("e\u{301}\u{30d}", 1),
         ("界", 2),

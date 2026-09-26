@@ -454,14 +454,14 @@ impl PaneHost {
         terminal
     }
 
-    pub(crate) fn focus(&self, window: &mut Window, cx: &App) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         let Some(terminal) = self
             .terminal_tab
             .terminal(self.terminal_tab.focused_pane_id())
         else {
             return;
         };
-        terminal.read(cx).focus(window);
+        terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
     }
 
     pub(crate) fn native_service_status(
@@ -908,7 +908,7 @@ impl PaneHost {
         });
         cx.notify();
         if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
-            terminal.update(cx, |terminal, _| terminal.focus(window));
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
     }
 
@@ -1089,7 +1089,7 @@ impl PaneHost {
                 });
                 cx.notify();
                 if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
-                    terminal.update(cx, |terminal, _| terminal.focus(window));
+                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
             Err(error) => eprintln!("failed to split Pane: {error}"),
@@ -1161,7 +1161,7 @@ impl PaneHost {
                 if self.active
                     && let Some(terminal) = self.terminal_tab.terminal(focused_pane_id)
                 {
-                    terminal.update(cx, |terminal, _| terminal.focus(window));
+                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
             Err(error) => eprintln!("failed to close Pane: {error}"),
@@ -4607,7 +4607,7 @@ mod tests {
 
         let mut indicator = None;
         for _ in 0..32 {
-            cx.update(|window, _| window.focus_next());
+            cx.update(|window, cx| window.focus_next(cx));
             cx.run_until_parked();
             indicator = cx.debug_bounds("split-resize-1-keyboard-focus-indicator");
             if indicator.is_some() {

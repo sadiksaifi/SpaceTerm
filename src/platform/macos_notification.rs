@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::sync::Mutex;
 
 use block::ConcreteBlock;

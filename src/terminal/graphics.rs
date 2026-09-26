@@ -370,7 +370,7 @@ fn copy_image(
             }
             let mut rgba =
                 Vec::with_capacity(pixel_count.checked_mul(4).ok_or(Error::OutOfMemory)?);
-            for pixel in source.chunks_exact(3) {
+            for pixel in source.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], u8::MAX]);
             }
             Arc::from(rgba)

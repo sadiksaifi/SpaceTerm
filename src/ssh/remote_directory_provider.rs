@@ -388,14 +388,17 @@ mod tests {
             ],
         );
 
-        let account = cx.executor().block(provider.discover_account()).unwrap();
+        let account = cx
+            .foreground_executor()
+            .block_test(provider.discover_account())
+            .unwrap();
         assert_eq!(account.user(), "tester");
         assert_eq!(account.home_identity().as_str(), "/home/tester");
         assert_eq!(account.login_shell().as_str(), "/bin/zsh");
 
         let listing = cx
-            .executor()
-            .block(provider.list_directories(directory("/srv")))
+            .foreground_executor()
+            .block_test(provider.list_directories(directory("/srv")))
             .unwrap();
         assert_eq!(
             listing
@@ -407,17 +410,17 @@ mod tests {
         );
         assert!(listing.is_truncated());
         assert_eq!(
-            cx.executor()
-                .block(provider.probe_exact_path(directory("/srv/missing")))
+            cx.foreground_executor()
+                .block_test(provider.probe_exact_path(directory("/srv/missing")))
                 .unwrap(),
             RemoteDirectoryExactPathState::Missing
         );
-        cx.executor()
-            .block(provider.create_directory_recursively(directory("/srv/new")))
+        cx.foreground_executor()
+            .block_test(provider.create_directory_recursively(directory("/srv/new")))
             .unwrap();
         assert_eq!(
-            cx.executor()
-                .block(provider.validate_physical_identity(directory("/srv/link")))
+            cx.foreground_executor()
+                .block_test(provider.validate_physical_identity(directory("/srv/link")))
                 .unwrap()
                 .as_str(),
             "/srv/physical"
@@ -443,7 +446,10 @@ mod tests {
             )],
         );
 
-        let account = cx.executor().block(provider.discover_account()).unwrap();
+        let account = cx
+            .foreground_executor()
+            .block_test(provider.discover_account())
+            .unwrap();
 
         assert_eq!(account.login_shell().as_str(), "/bin/sh");
     }
@@ -468,8 +474,8 @@ mod tests {
         );
 
         assert_eq!(
-            cx.executor()
-                .block(provider.discover_account())
+            cx.foreground_executor()
+                .block_test(provider.discover_account())
                 .unwrap_err(),
             RemoteDirectoryProviderError::UnsupportedLoginShell
         );
@@ -485,8 +491,8 @@ mod tests {
         );
 
         let listing = cx
-            .executor()
-            .block(provider.list_directories(directory("/srv")))
+            .foreground_executor()
+            .block_test(provider.list_directories(directory("/srv")))
             .unwrap();
 
         assert_eq!(listing.rows()[0].name(), "safe");
@@ -514,7 +520,7 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            cx.executor().block(timed_out).unwrap_err(),
+            cx.foreground_executor().block_test(timed_out).unwrap_err(),
             RemoteDirectoryProviderError::Other
         );
         assert!(second.is_cancelled());

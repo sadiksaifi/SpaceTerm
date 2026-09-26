@@ -656,10 +656,17 @@ struct ModalFocusAnchorRegistration {
     frame: u64,
 }
 
+#[derive(Clone, Copy)]
+struct TrackedFocusBounds {
+    bounds: Bounds<Pixels>,
+    scroll_offset: gpui::Point<Pixels>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ModalFocusAnchor {
     anchor: ScrollAnchor,
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    scroll_handle: ScrollHandle,
+    bounds: Rc<Cell<Option<TrackedFocusBounds>>>,
 }
 
 impl ModalFocusAnchor {
@@ -668,13 +675,22 @@ impl ModalFocusAnchor {
     }
 
     pub(crate) fn track_bounds(&self, bounds: Bounds<Pixels>) {
-        self.bounds.set(Some(bounds));
+        self.bounds.set(Some(TrackedFocusBounds {
+            bounds,
+            scroll_offset: self.scroll_handle.offset(),
+        }));
     }
 
     pub(crate) fn bounds_tracker(&self, inset: Pixels) -> AnyElement {
         let bounds = self.bounds.clone();
+        let scroll_handle = self.scroll_handle.clone();
         canvas(
-            move |control_bounds, _, _| bounds.set(Some(control_bounds.dilate(inset))),
+            move |control_bounds, _, _| {
+                bounds.set(Some(TrackedFocusBounds {
+                    bounds: control_bounds.dilate(inset),
+                    scroll_offset: scroll_handle.offset(),
+                }));
+            },
             |_, _, _, _| {},
         )
         .absolute()
@@ -713,6 +729,7 @@ impl ModalFocusAnchorRegistry {
         }
         let control = ModalFocusAnchor {
             anchor: ScrollAnchor::for_handle(self.scroll_handle.clone()),
+            scroll_handle: self.scroll_handle.clone(),
             bounds: Rc::new(Cell::new(None)),
         };
         registrations.push(ModalFocusAnchorRegistration {
@@ -736,9 +753,12 @@ impl ModalFocusAnchorRegistry {
         let Some(control) = control else {
             return false;
         };
-        if let Some(bounds) = control.bounds.get() {
+        if let Some(tracked) = control.bounds.get() {
+            let mut bounds = tracked.bounds;
             let viewport = self.scroll_handle.bounds();
             let previous_offset = self.scroll_handle.offset();
+            bounds.origin.x += previous_offset.x - tracked.scroll_offset.x;
+            bounds.origin.y += previous_offset.y - tracked.scroll_offset.y;
             let mut offset = previous_offset;
             if bounds.top() < viewport.top() {
                 offset.y += viewport.top() - bounds.top();
@@ -1000,7 +1020,7 @@ impl RenderOnce for Button {
                         .child(self.label),
                 )
                 .when(full_width && has_trailing, |content| {
-                    content.child(div().flex_grow())
+                    content.child(div().flex_grow(1.0))
                 })
                 .when_some(self.trailing, |content, build| {
                     content.child(
@@ -2226,7 +2246,7 @@ mod tests {
     fn pointer_activation_should_preserve_existing_focus(cx: &mut TestAppContext) {
         let (root, _, _, cx) = button_window(cx, false, true);
         let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| other_focus.focus(window));
+        cx.update(|window, cx| other_focus.focus(window, cx));
         let center = button_center(cx);
 
         cx.simulate_click(center, Modifiers::default());
@@ -2237,13 +2257,14 @@ mod tests {
     #[gpui::test]
     fn focused_space_should_activate_on_key_up(cx: &mut TestAppContext) {
         let (_, activations, source, cx) = button_window(cx, false, true);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
 
         cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse("space").unwrap_or_default(),
+            prefer_character_input: false,
             is_held: false,
         });
         assert_eq!(activations.get(), 0);
@@ -2265,9 +2286,9 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("test-button-keyboard-focus").is_none());
 
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         cx.run_until_parked();
         let button = cx
@@ -2277,7 +2298,7 @@ mod tests {
             .debug_bounds("test-button-keyboard-focus")
             .expect("focused button should strengthen its single focus outline");
         let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| other_focus.focus(window));
+        cx.update(|window, cx| other_focus.focus(window, cx));
         cx.run_until_parked();
 
         assert!(
@@ -2293,18 +2314,20 @@ mod tests {
     #[gpui::test]
     fn focused_return_should_activate_once_on_key_up(cx: &mut TestAppContext) {
         let (_, activations, source, cx) = button_window(cx, false, true);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
 
         let enter = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: true,
         });
         assert_eq!(activations.get(), 0);
@@ -2326,9 +2349,9 @@ mod tests {
             first_activations: root_first_activations,
             second_activations: root_second_activations,
         });
-        cx.update(|window, _| {
+        cx.update(|window, cx| {
             window.activate_window();
-            window.focus_next();
+            window.focus_next(cx);
         });
         cx.run_until_parked();
         assert!(
@@ -2338,9 +2361,10 @@ mod tests {
         let enter = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("return-transfer-second-keyboard-focus")
@@ -2349,6 +2373,7 @@ mod tests {
 
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: true,
         });
         cx.simulate_event(KeyUpEvent { keystroke: enter });
@@ -2360,17 +2385,18 @@ mod tests {
     #[gpui::test]
     fn return_release_after_focus_change_should_not_activate(cx: &mut TestAppContext) {
         let (root, activations, _, cx) = button_window(cx, false, true);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         let enter = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| other_focus.focus(window));
+        cx.update(|window, cx| other_focus.focus(window, cx));
 
         cx.simulate_event(KeyUpEvent { keystroke: enter });
 
@@ -2384,6 +2410,7 @@ mod tests {
 
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyUpEvent { keystroke: enter });
@@ -2394,12 +2421,13 @@ mod tests {
     #[gpui::test]
     fn modified_space_release_should_cancel_the_owned_keyboard_press(cx: &mut TestAppContext) {
         let (_, activations, _, cx) = button_window(cx, false, true);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse("space").unwrap_or_default(),
+            prefer_character_input: false,
             is_held: false,
         });
 

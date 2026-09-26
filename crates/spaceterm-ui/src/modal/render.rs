@@ -1361,7 +1361,7 @@ fn render_footer(
         .when(axis == ActionAxis::Vertical, |footer| footer.flex_col())
         .gap(metrics.action_gap)
         .when(axis == ActionAxis::Horizontal && !has_help, |footer| {
-            footer.child(div().flex_grow())
+            footer.child(div().flex_grow(1.0))
         })
         .when(has_help, |footer| footer.child(help_actions))
         .child(decisions)
@@ -1570,10 +1570,10 @@ impl ModalFocusRing {
     }
 
     fn focus_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.leading.focus(window);
-        window.focus_next();
+        self.leading.focus(window, cx);
+        window.focus_next(cx);
         if self.trailing.is_focused(window) {
-            self.surface.focus(window);
+            self.surface.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
@@ -1582,7 +1582,7 @@ impl ModalFocusRing {
         if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_first(window, cx);
         } else {
-            window.focus_next();
+            window.focus_next(cx);
             self.reveal_current_focus(window, cx);
         }
     }
@@ -1591,16 +1591,16 @@ impl ModalFocusRing {
         if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_last(window, cx);
         } else {
-            window.focus_prev();
+            window.focus_prev(cx);
             self.reveal_current_focus(window, cx);
         }
     }
 
     fn focus_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.trailing.focus(window);
-        window.focus_prev();
+        self.trailing.focus(window, cx);
+        window.focus_prev(cx);
         if self.leading.is_focused(window) {
-            self.surface.focus(window);
+            self.surface.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
@@ -1639,7 +1639,7 @@ impl ModalFocusRing {
             if let Some(requested) = requested
                 && self.scope.contains(&requested, window)
             {
-                requested.focus(window);
+                requested.focus(window, cx);
                 if !matches!(self.initial, PreparedFocusIntent::Surface)
                     && window.focused(cx).is_some_and(|focused| !focused.tab_stop)
                 {

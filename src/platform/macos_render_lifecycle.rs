@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::rc::Rc;
 
 use block::ConcreteBlock;

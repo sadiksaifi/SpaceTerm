@@ -344,7 +344,7 @@ fn frame_spinner_paints_only_with_the_inherited_foreground(cx: &mut TestAppConte
         ProgressSize::Compact,
         ProgressMotion::Reduced,
     );
-    let quads = cx.update(|window, _| window.painted_quads_for_test());
+    let quads = cx.update(|window, _| window.painted_quads());
     let expected = gpui::Background::from(rgba(0x123456ff));
 
     assert!(!quads.is_empty());

@@ -350,7 +350,7 @@ fn upload_image(image: Arc<ImageSnapshot>) -> Result<CachedImage, GraphicsResour
     let width = image.width;
     let height = image.height;
     let mut bgra = image.rgba.to_vec();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let buffer = RgbaImage::from_raw(image.width, image.height, bgra)
@@ -613,6 +613,7 @@ impl GraphicsPaintPlan {
                     if window
                         .paint_image(
                             paint.full_image,
+                            paint.full_image,
                             Default::default(),
                             Arc::clone(&paint.image),
                             0,
@@ -640,6 +641,7 @@ impl GraphicsPaintPlan {
         for paint in self.paints.iter().filter(|paint| paint.layer == layer) {
             window
                 .paint_image(
+                    Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
                     Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
                     Default::default(),
                     Arc::clone(&paint.image),

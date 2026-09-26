@@ -41,9 +41,7 @@ impl ApplicationQuitHandler {
     }
 
     pub(crate) fn handle_native(&self) -> ApplicationQuitDecision {
-        self.app
-            .update(|cx| self.handle(cx))
-            .unwrap_or(ApplicationQuitDecision::Cancel)
+        self.app.update(|cx| self.handle(cx))
     }
 }
 

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 #[cfg(not(test))]
 use cocoa::appkit::NSApp;
 #[cfg(not(test))]

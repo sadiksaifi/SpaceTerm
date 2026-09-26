@@ -190,7 +190,12 @@ fn fixture_window(
 
 fn focus_input(fixture: &Entity<ModalAppearanceRegressionFixture>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
-        fixture.read(cx).input.read(cx).focus_handle().focus(window);
+        fixture
+            .read(cx)
+            .input
+            .read(cx)
+            .focus_handle()
+            .focus(window, cx);
     });
     cx.run_until_parked();
 }

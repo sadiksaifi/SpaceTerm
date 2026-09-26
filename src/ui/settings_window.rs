@@ -341,7 +341,7 @@ impl SettingsWindow {
         // The window takes focus so its own shortcuts and Tab traversal resolve from the moment it
         // opens, rather than only after something inside it is clicked.
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window);
+        focus_handle.focus(window, cx);
         let navigation_focus = cx.focus_handle().tab_stop(true);
         cx.on_focus(&navigation_focus, window, |_, _, cx| cx.notify())
             .detach();
@@ -374,9 +374,9 @@ impl SettingsWindow {
                 ) {
                     settings.navigation_focus_visible = true;
                     if matches!(event, TextInputEvent::TabForwardRequested) {
-                        window.focus_next();
+                        window.focus_next(cx);
                     } else {
-                        window.focus_prev();
+                        window.focus_prev(cx);
                     }
                     cx.notify();
                 }
@@ -496,7 +496,7 @@ impl SettingsWindow {
             search.select_all(cx);
             search.focus_handle()
         });
-        handle.focus(window);
+        handle.focus(window, cx);
         cx.notify();
     }
 
@@ -508,7 +508,7 @@ impl SettingsWindow {
     ) {
         if self.query.is_empty() {
             if self.search.read(cx).is_focused() {
-                self.focus_handle.focus(window);
+                self.focus_handle.focus(window, cx);
             }
             return;
         }
@@ -517,7 +517,7 @@ impl SettingsWindow {
         });
         self.query = SharedString::default();
         self.revealed = None;
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -635,7 +635,7 @@ impl SettingsWindow {
         ScrollMetrics::for_pixels(
             0.0,
             f32::from(self.scroll.bounds().size.height),
-            f32::from(self.scroll.max_offset().height),
+            f32::from(self.scroll.max_offset().y),
             -f32::from(self.scroll.offset().y),
         )
     }
@@ -704,9 +704,9 @@ impl SettingsWindow {
                 // Inputs and popups handle their own traversal first. Other Settings controls
                 // delegate an unhandled Tab to the window's registered focus order.
                 if modifiers.shift {
-                    window.focus_prev();
+                    window.focus_prev(cx);
                 } else {
-                    window.focus_next();
+                    window.focus_next(cx);
                 }
                 window.prevent_default();
                 cx.stop_propagation();
@@ -736,10 +736,11 @@ impl SettingsWindow {
         &mut self,
         event: WindowDragRegionEvent,
         window: &mut Window,
+        cx: &mut App,
     ) -> WindowDragRegionResponse {
         match event {
             WindowDragRegionEvent::InteractionStarted { .. } => {
-                self.focus_handle.focus(window);
+                self.focus_handle.focus(window, cx);
                 if let Err(error) = self
                     .operating_system_window_drag_platform
                     .interaction_started()
@@ -799,8 +800,8 @@ impl SettingsWindow {
         .on_event(move |event, window, cx| {
             let event = *event;
             owner
-                .update(cx, |settings, _| {
-                    settings.handle_window_drag_event(event, window)
+                .update(cx, |settings, cx| {
+                    settings.handle_window_drag_event(event, window, cx)
                 })
                 .unwrap_or_default()
         })
@@ -842,8 +843,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         let appearance = &settings.chrome;
         let section = self.active_section;
-        let scrolled =
-            self.scroll.max_offset().height > px(0.0) && self.scroll.offset().y < px(-0.5);
+        let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         let heading = div()
             .size_full()
             .px(appearance.spacing(CONTENT_GUTTER))
@@ -1021,7 +1021,7 @@ impl SettingsWindow {
                                     // A completed pointer selection is authoritative even if
                                     // native focus moved between the press and release.
                                     settings.navigation_focus_visible = false;
-                                    settings.focus_handle.focus(window);
+                                    settings.focus_handle.focus(window, cx);
                                     settings.reveal_section(section, cx);
                                 });
                             })
@@ -1106,7 +1106,7 @@ impl SettingsWindow {
                                     }
                                     window.prevent_default();
                                     settings.navigation_focus_visible = false;
-                                    settings.focus_handle.focus(window);
+                                    settings.focus_handle.focus(window, cx);
                                     cx.notify();
                                 },
                             ))

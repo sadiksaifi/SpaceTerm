@@ -1769,7 +1769,6 @@ impl WorkspaceManager {
                     .update(cx, |manager, cx| {
                         manager.prepare_remote_restart(factory, generation, cx)
                     })
-                    .map_err(|_| RemoteWorkspaceReconnectFailure::Cancelled)?
                     .await
                     .map_err(classify_remote_workspace_restart_failure)?;
                 if work_cancelled.load(Ordering::Acquire) {

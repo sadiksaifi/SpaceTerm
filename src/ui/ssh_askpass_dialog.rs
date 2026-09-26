@@ -466,7 +466,7 @@ impl Render for AskPassSecretBody {
                         .chrome_text(appearance.typography.style(TextRole::Body))
                         .text_color(gpui_color(colors.text))
                         .on_click(move |_, window, cx| {
-                            input_focus.focus(window);
+                            input_focus.focus(window, cx);
                             cx.stop_propagation();
                         })
                         .child(self.input.clone()),

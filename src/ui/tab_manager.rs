@@ -542,7 +542,9 @@ impl TabManager {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         if self.active {
-            self.tabs.active_tab().read(cx).focus(window, cx);
+            self.tabs
+                .active_tab()
+                .update(cx, |tab, cx| tab.focus(window, cx));
         }
     }
 
@@ -1785,7 +1787,7 @@ fn render_tab_identity(
             .child(
                 div()
                     .debug_selector(move || format!("tab-place-{}", tab_id.get()))
-                    .flex_shrink()
+                    .flex_shrink(1.0)
                     .min_w_0()
                     .truncate()
                     .child(identity.place.clone()),
@@ -4809,7 +4811,7 @@ mod tests {
             .expect("Tab 2 session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
-            window.blur();
+            window.blur(cx);
         });
 
         active_sender

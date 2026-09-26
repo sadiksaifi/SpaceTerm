@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Mutex;

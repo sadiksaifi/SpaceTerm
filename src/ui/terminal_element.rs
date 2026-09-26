@@ -810,7 +810,14 @@ impl TerminalPaintBatch {
                         }
                         for text in preedit.text.iter() {
                             text.line
-                                .paint(text.origin, self.line_height, window, cx)
+                                .paint(
+                                    text.origin,
+                                    self.line_height,
+                                    gpui::TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
                                 .map_err(|_| PaintBatchFailure::Presentation)?;
                         }
                         if let Some(caret) = &preedit.caret {
@@ -2367,7 +2374,7 @@ fn push_device_polygon_quads(
             }
         }
         intersections.sort_by(f32::total_cmp);
-        for pair in intersections.chunks_exact(2) {
+        for pair in intersections.as_chunks::<2>().0 {
             push_device_quad(
                 prepared,
                 pair[0],
@@ -3043,6 +3050,7 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 #[cfg(test)]
 mod tests {
     use std::{
+        borrow::Cow,
         cell::{Cell, RefCell},
         rc::Rc,
     };
@@ -3055,16 +3063,149 @@ mod tests {
         include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
     }
 
+    #[derive(Clone, Debug)]
+    enum PaintedGlyphKind {
+        Monochrome { color: Hsla },
+        Emoji,
+    }
+
+    #[derive(Clone, Debug)]
+    struct PaintedGlyph {
+        kind: PaintedGlyphKind,
+        raster_bounds: Bounds<gpui::ScaledPixels>,
+        visible_bounds: Bounds<gpui::ScaledPixels>,
+        order: gpui::DrawOrder,
+    }
+
+    fn painted_glyphs(window: &Window) -> Vec<PaintedGlyph> {
+        let mut glyphs = Vec::new();
+        for sprite in window.painted_monochrome_sprites() {
+            glyphs.push(PaintedGlyph {
+                kind: PaintedGlyphKind::Monochrome {
+                    color: sprite.color,
+                },
+                raster_bounds: sprite.bounds,
+                visible_bounds: sprite.bounds.intersect(&sprite.content_mask.bounds),
+                order: sprite.order,
+            });
+        }
+        for sprite in window.painted_subpixel_sprites() {
+            glyphs.push(PaintedGlyph {
+                kind: PaintedGlyphKind::Monochrome {
+                    color: sprite.color,
+                },
+                raster_bounds: sprite.bounds,
+                visible_bounds: sprite.bounds.intersect(&sprite.content_mask.bounds),
+                order: sprite.order,
+            });
+        }
+        for sprite in window.painted_polychrome_sprites() {
+            glyphs.push(PaintedGlyph {
+                kind: PaintedGlyphKind::Emoji,
+                raster_bounds: sprite.bounds,
+                visible_bounds: sprite.bounds.intersect(&sprite.content_mask.bounds),
+                order: sprite.order,
+            });
+        }
+        glyphs.sort_by_key(|glyph| glyph.order);
+        glyphs
+    }
+
+    struct RasterTextSystem {
+        base: gpui::NoopTextSystem,
+        bounds: Bounds<gpui::DevicePixels>,
+    }
+
+    impl gpui::PlatformTextSystem for RasterTextSystem {
+        fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> gpui::Result<()> {
+            self.base.add_fonts(fonts)
+        }
+
+        fn all_font_names(&self) -> Vec<String> {
+            self.base.all_font_names()
+        }
+
+        fn font_id(&self, descriptor: &Font) -> gpui::Result<gpui::FontId> {
+            self.base.font_id(descriptor)
+        }
+
+        fn font_metrics(&self, font_id: gpui::FontId) -> gpui::FontMetrics {
+            self.base.font_metrics(font_id)
+        }
+
+        fn typographic_bounds(
+            &self,
+            font_id: gpui::FontId,
+            glyph_id: gpui::GlyphId,
+        ) -> gpui::Result<Bounds<f32>> {
+            self.base.typographic_bounds(font_id, glyph_id)
+        }
+
+        fn advance(
+            &self,
+            font_id: gpui::FontId,
+            glyph_id: gpui::GlyphId,
+        ) -> gpui::Result<gpui::Size<f32>> {
+            self.base.advance(font_id, glyph_id)
+        }
+
+        fn glyph_for_char(&self, font_id: gpui::FontId, ch: char) -> Option<gpui::GlyphId> {
+            self.base.glyph_for_char(font_id, ch)
+        }
+
+        fn glyph_raster_bounds(
+            &self,
+            _: &gpui::RenderGlyphParams,
+        ) -> gpui::Result<Bounds<gpui::DevicePixels>> {
+            Ok(self.bounds)
+        }
+
+        fn rasterize_glyph(
+            &self,
+            params: &gpui::RenderGlyphParams,
+            bounds: Bounds<gpui::DevicePixels>,
+        ) -> gpui::Result<(gpui::Size<gpui::DevicePixels>, Vec<u8>)> {
+            self.base.rasterize_glyph(params, bounds)
+        }
+
+        fn layout_line(
+            &self,
+            text: &str,
+            font_size: Pixels,
+            runs: &[gpui::FontRun],
+        ) -> gpui::LineLayout {
+            self.base.layout_line(text, font_size, runs)
+        }
+
+        fn recommended_rendering_mode(
+            &self,
+            font_id: gpui::FontId,
+            font_size: Pixels,
+        ) -> gpui::TextRenderingMode {
+            self.base.recommended_rendering_mode(font_id, font_size)
+        }
+    }
+
+    fn test_app_with_raster_bounds(bounds: Bounds<gpui::DevicePixels>) -> gpui::TestAppContext {
+        gpui::TestAppContext::build_with_text_system(
+            gpui::TestDispatcher::new(0),
+            None,
+            Arc::new(RasterTextSystem {
+                base: gpui::NoopTextSystem,
+                bounds,
+            }),
+        )
+    }
+
     #[derive(Clone, Default)]
     struct PaintCapture {
-        glyphs: Rc<RefCell<Vec<gpui::PaintedGlyphForTest>>>,
-        quads: Rc<RefCell<Vec<gpui::PaintedQuadForTest>>>,
+        glyphs: Rc<RefCell<Vec<PaintedGlyph>>>,
+        quads: Rc<RefCell<Vec<gpui::Quad>>>,
         quad_paint_calls: Rc<Cell<usize>>,
     }
 
     struct PaintBatches {
         batches: Vec<TerminalPaintBatch>,
-        capture: PaintCapture,
     }
 
     impl IntoElement for PaintBatches {
@@ -3118,16 +3259,19 @@ mod tests {
             window: &mut Window,
             cx: &mut App,
         ) {
-            window.reset_paint_call_counts_for_test();
             for batch in &self.batches {
                 batch.submit(batch.grid_bounds, window, cx).unwrap();
             }
-            *self.capture.glyphs.borrow_mut() = window.painted_glyphs_for_test();
-            *self.capture.quads.borrow_mut() = window.painted_quads_for_test();
-            self.capture
-                .quad_paint_calls
-                .set(window.quad_paint_call_count_for_test());
         }
+    }
+
+    fn capture_frame(cx: &mut gpui::VisualTestContext, capture: &PaintCapture) {
+        cx.update(|window, _| {
+            *capture.glyphs.borrow_mut() = painted_glyphs(window);
+            let quads = window.painted_quads();
+            capture.quad_paint_calls.set(quads.len());
+            *capture.quads.borrow_mut() = quads;
+        });
     }
 
     fn cursor_render_batches(window: &mut Window, retained: bool) -> Vec<TerminalPaintBatch> {
@@ -3801,28 +3945,31 @@ mod tests {
         assert_eq!(cursor_text_paint(None, 1), CursorTextPaint::Unchanged);
     }
 
-    #[gpui::test]
-    fn direct_block_cursor_clips_real_neighbor_glyphs_and_recolors_only_its_row(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.set_glyph_raster_bounds(Bounds::new(
+    #[test]
+    fn direct_block_cursor_clips_real_neighbor_glyphs_and_recolors_only_its_row() {
+        let mut cx = test_app_with_raster_bounds(Bounds::new(
             point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
             size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
         ));
         let cx = cx.add_empty_window();
         let capture = PaintCapture::default();
-        let paint_capture = capture.clone();
         cx.draw(
             point(px(0.0), px(0.0)),
             size(px(80.0), px(28.0)),
             move |window, _| PaintBatches {
                 batches: cursor_render_batches(window, false),
-                capture: paint_capture,
             },
         );
+        capture_frame(cx, &capture);
         let scale_factor = cx.update(|window, _| window.scale_factor());
         let glyphs = capture.glyphs.borrow();
-        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+        let cursor = cx
+            .update(|window, _| {
+                window.pixel_snap_bounds(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(8.375 * 3.0), px(14.0)),
+                ))
+            })
             .scale(scale_factor);
         let red: Hsla = rgba(0xdd_00_00_ff).into();
         let white: Hsla = rgba(0xff_ff_ff_ff).into();
@@ -3831,7 +3978,7 @@ mod tests {
             .filter(|glyph| {
                 matches!(
                     glyph.kind,
-                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                    PaintedGlyphKind::Monochrome { color } if color == red
                 )
             })
             .collect::<Vec<_>>();
@@ -3845,18 +3992,18 @@ mod tests {
             neighbor_text
                 .iter()
                 .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
-            "neighboring monochrome pixels must be excluded from the cursor"
+            "neighboring monochrome pixels must be excluded from the cursor: neighbor={neighbor_text:#?}; cursor={cursor:?}"
         );
         assert!(glyphs.iter().any(|glyph| {
             matches!(
                 glyph.kind,
-                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+                PaintedGlyphKind::Monochrome { color } if color == white
             ) && glyph.visible_bounds.intersects(&cursor)
         }));
 
         let emoji = glyphs
             .iter()
-            .filter(|glyph| matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji))
+            .filter(|glyph| matches!(glyph.kind, PaintedGlyphKind::Emoji))
             .collect::<Vec<_>>();
         let cursor_center_y = cursor.origin.y + cursor.size.height / 2.0;
         let cursor_emoji = emoji
@@ -3887,29 +4034,32 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn retained_block_cursor_covers_neighbor_overhang_before_repainting_its_row(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.set_glyph_raster_bounds(Bounds::new(
+    #[test]
+    fn retained_block_cursor_covers_neighbor_overhang_before_repainting_its_row() {
+        let mut cx = test_app_with_raster_bounds(Bounds::new(
             point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
             size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
         ));
         let cx = cx.add_empty_window();
         let capture = PaintCapture::default();
-        let paint_capture = capture.clone();
         cx.draw(
             point(px(0.0), px(0.0)),
             size(px(80.0), px(28.0)),
             move |window, _| PaintBatches {
                 batches: cursor_render_batches(window, true),
-                capture: paint_capture,
             },
         );
+        capture_frame(cx, &capture);
         let scale_factor = cx.update(|window, _| window.scale_factor());
         let glyphs = capture.glyphs.borrow();
         let quads = capture.quads.borrow();
-        let cursor = Bounds::new(point(px(0.0), px(0.0)), size(px(8.375 * 3.0), px(14.0)))
+        let cursor = cx
+            .update(|window, _| {
+                window.pixel_snap_bounds(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(8.375 * 3.0), px(14.0)),
+                ))
+            })
             .scale(scale_factor);
         let red: Hsla = rgba(0xdd_00_00_ff).into();
         let white: Hsla = rgba(0xff_ff_ff_ff).into();
@@ -3918,7 +4068,7 @@ mod tests {
             .filter(|glyph| {
                 matches!(
                     glyph.kind,
-                    gpui::PaintedGlyphKindForTest::Monochrome { color } if color == red
+                    PaintedGlyphKind::Monochrome { color } if color == red
                 ) && glyph.visible_bounds.intersects(&cursor)
             })
             .map(|glyph| glyph.order)
@@ -3926,19 +4076,22 @@ mod tests {
             .expect("the retained base frame keeps the neighboring overhang");
         let cover_order = quads
             .iter()
-            .filter(|quad| quad.visible_bounds == cursor && quad.order > neighbor_order)
+            .filter(|quad| {
+                quad.bounds.intersect(&quad.content_mask.bounds) == cursor
+                    && quad.order > neighbor_order
+            })
             .map(|quad| quad.order)
             .max()
-            .expect("the retained cursor layer must cover the cursor rectangle");
+            .unwrap_or_else(|| panic!("the retained cursor layer must cover the cursor rectangle: quads={quads:#?}; cursor={cursor:?}; neighbor_order={neighbor_order:?}"));
         assert!(glyphs.iter().any(|glyph| {
             matches!(
                 glyph.kind,
-                gpui::PaintedGlyphKindForTest::Monochrome { color } if color == white
+                PaintedGlyphKind::Monochrome { color } if color == white
             ) && glyph.visible_bounds.intersects(&cursor)
                 && glyph.order > cover_order
         }));
         assert!(glyphs.iter().any(|glyph| {
-            matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Emoji)
+            matches!(glyph.kind, PaintedGlyphKind::Emoji)
                 && glyph.visible_bounds.intersects(&cursor)
                 && glyph.order > cover_order
         }));
@@ -3948,7 +4101,6 @@ mod tests {
     fn direct_block_cursor_visits_each_symbol_quad_once(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let capture = PaintCapture::default();
-        let paint_capture = capture.clone();
         cx.draw(
             point(px(0.0), px(0.0)),
             size(px(80.0), px(60.0)),
@@ -4001,10 +4153,10 @@ mod tests {
                         graphics: GraphicsPaintPlan::default(),
                         blink_phase_visible: true,
                     }],
-                    capture: paint_capture,
                 }
             },
         );
+        capture_frame(cx, &capture);
 
         assert_eq!(capture.quad_paint_calls.get(), 3);
     }
@@ -5292,9 +5444,9 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn scope_guide_redraw_preserves_suffix_glyph_raster_positions(cx: &mut gpui::TestAppContext) {
-        cx.set_glyph_raster_bounds(Bounds::new(
+    #[test]
+    fn scope_guide_redraw_preserves_suffix_glyph_raster_positions() {
+        let mut cx = test_app_with_raster_bounds(Bounds::new(
             point(gpui::DevicePixels(0), gpui::DevicePixels(-10)),
             size(gpui::DevicePixels(6), gpui::DevicePixels(12)),
         ));
@@ -5303,7 +5455,6 @@ mod tests {
         let mut baseline = None;
         for guide in [" ", "│", " "] {
             let capture = PaintCapture::default();
-            let paint_capture = capture.clone();
             cx.draw(
                 point(px(0.0), px(0.0)),
                 size(px(1100.0), px(40.0)),
@@ -5333,16 +5484,16 @@ mod tests {
                             graphics: GraphicsPaintPlan::default(),
                             blink_phase_visible: true,
                         }],
-                        capture: paint_capture,
                     }
                 },
             );
+            capture_frame(cx, &capture);
             let positions = capture
                 .glyphs
                 .borrow()
                 .iter()
                 .filter_map(|glyph| {
-                    matches!(glyph.kind, gpui::PaintedGlyphKindForTest::Monochrome { color }
+                    matches!(glyph.kind, PaintedGlyphKind::Monochrome { color }
                     if color == Hsla::from(gpui_color(suffix_color)))
                     .then_some(glyph.raster_bounds.origin)
                 })

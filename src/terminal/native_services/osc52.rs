@@ -245,7 +245,7 @@ fn decode_base64(input: &[u8]) -> Result<Vec<u8>, Osc52Rejection> {
         return Err(Osc52Rejection::InvalidBase64);
     }
     let mut output = Vec::with_capacity(input.len() / 4 * 3);
-    for (index, chunk) in input.chunks_exact(4).enumerate() {
+    for (index, chunk) in input.as_chunks::<4>().0.iter().enumerate() {
         let last = index + 1 == input.len() / 4;
         let padding = match (chunk[2] == b'=', chunk[3] == b'=') {
             (true, true) => 2,

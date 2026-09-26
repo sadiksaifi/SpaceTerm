@@ -437,7 +437,14 @@ fn icon_svg(path: SharedString, size: Pixels, tint: IconTint) -> impl IntoElemen
             let tint = tint.resolve(window);
             // Like GPUI's Svg element, an asset or raster failure omits the glyph. Canvas has no
             // error channel through which to return a recoverable paint failure.
-            let _paint = window.paint_svg(bounds, path, Default::default(), tint, cx);
+            let _paint = window.paint_svg(
+                bounds,
+                path,
+                Default::default(),
+                Default::default(),
+                tint,
+                cx,
+            );
         },
     )
     .size(size)
@@ -502,9 +509,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use gpui::{
-        Context, InteractiveElement as _, ParentElement as _, Render, TestAppContext, Window, size,
-    };
+    use gpui::{Context, InteractiveElement as _, Render, TestAppContext, Window, size};
 
     struct IconTestRoot;
 
@@ -721,7 +726,9 @@ mod tests {
                 rendered
                     .as_bytes(0)
                     .expect("rasterized SVG frame")
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|pixel| pixel[3] != 0),
                 "the inherited glyph raster must contain painted pixels"
             );
@@ -888,19 +895,34 @@ mod tests {
                 let rendered = gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.into_owned())
                     .to_image_data(cx.svg_renderer())
                     .expect("bundled vector should parse and rasterize through GPUI");
+                let raster_width = width * 2;
                 assert_eq!(
                     rendered.size(0),
-                    size(gpui::DevicePixels(width), gpui::DevicePixels(width))
+                    size(
+                        gpui::DevicePixels(raster_width),
+                        gpui::DevicePixels(raster_width),
+                    )
                 );
                 let pixels = rendered.as_bytes(0).expect("rasterized SVG frame");
-                assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
-                let width = width as usize;
                 assert!(
-                    pixels.chunks_exact(4).enumerate().all(|(index, pixel)| {
-                        let x = index % width;
-                        let y = index / width;
-                        (x != 0 && y != 0 && x != width - 1 && y != width - 1) || pixel[3] == 0
-                    }),
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|pixel| pixel[3] == 255)
+                );
+                let width = raster_width as usize;
+                assert!(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .all(|(index, pixel)| {
+                            let x = index % width;
+                            let y = index / width;
+                            (x != 0 && y != 0 && x != width - 1 && y != width - 1) || pixel[3] == 0
+                        }),
                     "artwork should not reach the square canvas edge"
                 );
             });

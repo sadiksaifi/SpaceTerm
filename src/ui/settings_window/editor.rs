@@ -5,6 +5,9 @@
 
 mod draft;
 
+#[cfg(test)]
+use std::future::Future as _;
+
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -14,6 +17,8 @@ use std::{
 use gpui::{Context, Task};
 
 use crate::appearance::{ResetTarget, SchemeId, SchemeKind, SchemeSummary, SettingsDocument};
+#[cfg(test)]
+use crate::settings::CommitJob;
 use crate::settings::storage::StorageError;
 use crate::settings::{CommitOutcome, ImportReceipt, SchemeImport, SettingsError, UserSettings};
 
@@ -193,7 +198,24 @@ impl SettingsEditor {
         self.pending = None;
         if let Some(active) = self.in_flight.take() {
             drop(active.completion);
-            let result = cx.background_executor().block(active.result.wait());
+            let wait = active.result.wait();
+            #[cfg(test)]
+            let result = {
+                let dispatcher = cx.background_executor().dispatcher();
+                let test = dispatcher.as_test().expect("test dispatcher");
+                let mut wait = std::pin::pin!(wait);
+                let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                loop {
+                    if let std::task::Poll::Ready(result) = wait.as_mut().poll(&mut context) {
+                        break result;
+                    }
+                    if !test.tick(true) {
+                        std::thread::yield_now();
+                    }
+                }
+            };
+            #[cfg(not(test))]
+            let result = pollster::block_on(wait);
             self.draft
                 .settle(active.generation == self.generation, result);
         }
@@ -258,21 +280,21 @@ impl SettingsEditor {
     }
 
     #[cfg(test)]
-    pub(super) fn start_threaded_commit(
+    pub(super) fn start_deferred_commit(
         &mut self,
         cx: &mut Context<SettingsWindow>,
-    ) -> std::thread::JoinHandle<()> {
+    ) -> (
+        CommitJob,
+        async_channel::Sender<Result<CommitOutcome, SettingsError>>,
+    ) {
         self.pending = None;
         let job = self.draft.prepare_commit().unwrap();
         let (sender, receiver) = async_channel::bounded(1);
-        let worker = std::thread::spawn(move || {
-            let _ = sender.send_blocking(job.run());
-        });
         let result = cx
             .background_executor()
             .spawn(async move { receiver.recv().await.unwrap() });
         self.track_commit(self.generation, result, cx);
-        worker
+        (job, sender)
     }
 
     fn track_commit(

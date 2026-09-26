@@ -853,11 +853,10 @@ impl RemoteWorkspaceFlow {
                 }
             }
             SshHostPickerEvent::RequestDeleteHost(alias)
-                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection
+                    && !self.backend.host_in_active_use(alias) =>
             {
-                if !self.backend.host_in_active_use(alias) {
-                    self.present_delete_confirmation(alias.clone(), window, cx);
-                }
+                self.present_delete_confirmation(alias.clone(), window, cx);
             }
             _ => {}
         }
@@ -2150,7 +2149,7 @@ mod tests {
             })
             .detach();
             let prior_focus = cx.focus_handle();
-            prior_focus.focus(window);
+            prior_focus.focus(window, cx);
             FlowHarness {
                 flow,
                 events,
@@ -2193,7 +2192,8 @@ mod tests {
         let flow = harness.read_with(cx, |harness, _| harness.flow.clone());
         cx.update(|window, cx| {
             window.activate_window();
-            harness.read(cx).prior_focus.focus(window);
+            let focus = harness.read(cx).prior_focus.clone();
+            focus.focus(window, cx);
         });
         cx.run_until_parked();
         click("remote-source-chooser", cx);
@@ -2305,6 +2305,7 @@ mod tests {
         let keystroke = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyUpEvent { keystroke });

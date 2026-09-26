@@ -706,7 +706,7 @@ impl ToggleCore {
         });
         let focus_handle = state.read(cx).focus_handle.clone();
         if !enabled && focus_handle.is_focused(window) {
-            window.blur();
+            window.blur(cx);
         }
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);
@@ -1515,15 +1515,16 @@ mod tests {
     #[gpui::test]
     fn focused_space_should_request_switch_change_on_key_up(cx: &mut TestAppContext) {
         let (_, _, changes, _, last, cx) = toggle_window(cx, false);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         let space = Keystroke::parse("space").expect("space should parse");
 
         cx.simulate_event(KeyDownEvent {
             keystroke: space.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         assert_eq!(changes.get(), 0);
@@ -1543,15 +1544,16 @@ mod tests {
     #[gpui::test]
     fn modified_space_release_should_cancel_without_requesting_change(cx: &mut TestAppContext) {
         let (_, checkbox_changes, _, _, _, cx) = toggle_window(cx, false);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         let space = Keystroke::parse("space").expect("space should parse");
         let shifted_space = Keystroke::parse("shift-space").expect("shift-space should parse");
 
         cx.simulate_event(KeyDownEvent {
             keystroke: space.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyUpEvent {
@@ -1565,14 +1567,15 @@ mod tests {
     #[gpui::test]
     fn enter_should_not_change_checkbox_or_switch(cx: &mut TestAppContext) {
         let (_, checkbox_changes, switch_changes, _, _, cx) = toggle_window(cx, false);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         let enter = Keystroke::parse("enter").expect("enter should parse");
 
         cx.simulate_event(KeyDownEvent {
             keystroke: enter.clone(),
+            prefer_character_input: false,
             is_held: false,
         });
         cx.simulate_event(KeyUpEvent { keystroke: enter });
@@ -1585,8 +1588,8 @@ mod tests {
     fn disabled_toggles_should_skip_tab_order_and_ignore_pointer(cx: &mut TestAppContext) {
         let (root, checkbox_changes, switch_changes, _, _, cx) = toggle_window(cx, true);
         let other = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| {
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
         });
         assert!(cx.update(|window, _| other.is_focused(window)));
 
@@ -1603,7 +1606,7 @@ mod tests {
     fn disabled_toggle_pointer_should_preserve_existing_focus(cx: &mut TestAppContext) {
         let (root, _, _, _, _, cx) = toggle_window(cx, true);
         let other = root.read_with(cx, |root, _| root.other_focus.clone());
-        cx.update(|window, _| other.focus(window));
+        cx.update(|window, cx| other.focus(window, cx));
         let bounds = cx
             .debug_bounds("test-checkbox")
             .expect("checkbox should render");
@@ -1616,9 +1619,9 @@ mod tests {
     #[gpui::test]
     fn disabling_focused_toggle_should_release_focus(cx: &mut TestAppContext) {
         let (root, _, _, _, _, cx) = toggle_window(cx, false);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
 
         root.update(cx, |root, cx| {
@@ -1633,9 +1636,9 @@ mod tests {
     #[gpui::test]
     fn keyboard_focus_should_draw_one_outset_indicator_ring(cx: &mut TestAppContext) {
         let (_, _, _, _, _, cx) = toggle_window(cx, false);
-        cx.update(|window, _| {
-            window.focus_next();
-            window.focus_next();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
         });
         cx.run_until_parked();
 

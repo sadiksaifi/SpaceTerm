@@ -124,6 +124,7 @@ impl ControlShadowLayer {
 
     fn into_box_shadow(self) -> BoxShadow {
         BoxShadow {
+            inset: false,
             color: self.color,
             offset: point(self.offset_x, self.offset_y),
             blur_radius: self.blur_radius,

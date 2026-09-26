@@ -420,7 +420,7 @@ impl ApplicationQuitCoordinator {
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
             let confirmed = prompt.await == Ok(0);
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if confirmed {
                     coordinator.wait_for_settings(Some(snapshot), cx);
                 } else {
@@ -642,7 +642,7 @@ mod tests {
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            pane.update(cx, |pane, _| pane.focus(window));
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
         });
         cx.run_until_parked();
         cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
@@ -707,7 +707,6 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                 })
             })
             .ok()
-            .and_then(Result::ok)
             .unwrap_or_default()
     }
 
@@ -727,7 +726,6 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                 })
             })
             .ok()
-            .and_then(Result::ok)
             .flatten()
     }
 
@@ -747,7 +745,6 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                 })
             })
             .ok()
-            .and_then(Result::ok)
             .unwrap_or(false)
     }
 }
@@ -881,7 +878,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let reported_failure = Rc::clone(&failure);
     let host = Rc::new(host);
     let reopened_host = Rc::clone(&host);
-    let application = gpui::Application::new().with_assets(spaceterm_ui::EmbeddedAssets);
+    let application = gpui_platform::application().with_assets(spaceterm_ui::EmbeddedAssets);
     application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
     application.run(move |cx| {
         if let Err(error) = start_application(cx, &host) {
@@ -1405,7 +1402,9 @@ mod runtime_tests {
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
         cx.update(|cx| {
-            workspace.update(cx, |_, window, _| window.blur()).unwrap();
+            workspace
+                .update(cx, |_, window, cx| window.blur(cx))
+                .unwrap();
         });
         if from_settings {
             cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));

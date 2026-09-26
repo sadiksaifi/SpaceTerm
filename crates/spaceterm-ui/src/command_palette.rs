@@ -1,7 +1,7 @@
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Corner, CursorStyle, Entity,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, CursorStyle, Entity,
     EventEmitter, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Render, Rgba, ScrollWheelEvent, SharedString,
@@ -1742,7 +1742,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     .take()
                     .and_then(|focus| focus.upgrade())
             {
-                focus.focus(window);
+                focus.focus(window, cx);
             }
         })
         .detach();
@@ -1966,7 +1966,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.open {
             if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx)
             {
-                self.input.read(cx).focus_handle().focus(window);
+                self.input.read(cx).focus_handle().focus(window, cx);
             }
             return false;
         }
@@ -2042,7 +2042,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.reveal_selected();
         self.selection_reveal_pending = true;
         if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx) {
-            self.input.read(cx).focus_handle().focus(window);
+            self.input.read(cx).focus_handle().focus(window, cx);
         }
         if replaced_combo_box {
             let palette = cx.entity().downgrade();
@@ -2090,7 +2090,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             && self.suspended_by_modal.is_none()
             && !crate::modal::window_modal_is_open(window, cx)
         {
-            self.input.read(cx).focus_handle().focus(window);
+            self.input.read(cx).focus_handle().focus(window, cx);
         }
     }
 
@@ -2293,7 +2293,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
         let track_height = f32::from(self.list.viewport_bounds().size.height);
-        let maximum_offset = f32::from(self.list.max_offset_for_scrollbar().height);
+        let maximum_offset = f32::from(self.list.max_offset_for_scrollbar().y);
         let offset = f32::from(-self.list.scroll_px_offset_for_scrollbar().y);
         ScrollMetrics::for_pixels(0.0, track_height, maximum_offset, offset)
     }
@@ -2540,30 +2540,30 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     }
 
     fn focus_next_control(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        window.focus_next();
+        window.focus_next(cx);
         if !self.focus_scope.contains_focused(window, cx) {
-            self.input.read(cx).focus_handle().focus(window);
+            self.input.read(cx).focus_handle().focus(window, cx);
         }
         cx.stop_propagation();
     }
 
     fn focus_previous_control(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        window.focus_prev();
+        window.focus_prev(cx);
         if self.focus_scope.contains_focused(window, cx) {
             cx.stop_propagation();
             return;
         }
 
         let input_focus = self.input.read(cx).focus_handle();
-        input_focus.focus(window);
+        input_focus.focus(window, cx);
         let mut last_internal = input_focus;
         let maximum_steps = self.header_actions.len()
             + usize::from(!self.actions_menu.is_empty())
             + usize::from(self.confirm.is_some());
         for _ in 0..maximum_steps {
-            window.focus_next();
+            window.focus_next(cx);
             if !self.focus_scope.contains_focused(window, cx) {
-                last_internal.focus(window);
+                last_internal.focus(window, cx);
                 break;
             }
             if let Some(focused) = window.focused(cx) {
@@ -2661,7 +2661,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.hover_suppressed = true;
         self.hovered_row = None;
         self.pointer_anchor = window.mouse_position();
-        self.input.read(cx).focus_handle().focus(window);
+        self.input.read(cx).focus_handle().focus(window, cx);
         cx.notify();
         true
     }
@@ -2740,7 +2740,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             if reason.restores_focus()
                 && let Some(focus) = restore_focus.and_then(|focus| focus.upgrade())
             {
-                focus.focus(window);
+                focus.focus(window, cx);
             }
         }
         true
@@ -2907,7 +2907,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 overlay.child(
                     canvas(
                         |_, _, _| (),
-                        |_, _, window, _| window.set_window_cursor_style(CursorStyle::None),
+                        |_, _, window, _| window.set_window_cursor_style(CursorStyle::Arrow),
                     )
                     .absolute()
                     .inset_0(),
@@ -2956,7 +2956,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         crate::floating_surface::present(
             theme.shell.layer(true),
             anchored()
-                .anchor(Corner::TopLeft)
+                .anchor(Anchor::TopLeft)
                 .position(gpui::point(px(0.0), px(0.0)))
                 .snap_to_window()
                 .child(overlay),

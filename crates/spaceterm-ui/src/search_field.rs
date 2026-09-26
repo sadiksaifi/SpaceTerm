@@ -265,7 +265,7 @@ impl RenderOnce for SearchField {
         let clear_selector = self
             .clear_selector
             .unwrap_or_else(|| SharedString::from(format!("{}-clear", self.id)));
-        let clear_id = ElementId::NamedChild(Box::new(self.id.clone()), "clear".into());
+        let clear_id = ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "clear".into());
         let input = self.input.clone();
         let clear_focus = focus.clone();
         crate::field_frame::themed_field_frame(theme.frame, self.id, &focus, FieldState::default())
@@ -318,7 +318,7 @@ impl RenderOnce for SearchField {
                         input.update(cx, |input, cx| {
                             input.clear(cx);
                         });
-                        clear_focus.focus(window);
+                        clear_focus.focus(window, cx);
                     }),
                 )
             })

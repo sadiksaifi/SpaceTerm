@@ -494,7 +494,7 @@ fn open_palette(
     cx: &mut VisualTestContext,
 ) -> FocusHandle {
     let prior = root.read_with(cx, |root, _| root.other_focus.clone());
-    cx.update(|window, _| prior.focus(window));
+    cx.update(|window, cx| prior.focus(window, cx));
     cx.update(|window, cx| {
         palette.update(cx, |palette, cx| {
             palette.open(window, cx);
@@ -1437,9 +1437,9 @@ fn actions_menu_external_focus_should_close_the_palette(cx: &mut TestAppContext)
             cx.subscribe_in(
                 &palette,
                 window,
-                move |_, _, event: &CommandPaletteEvent<u8>, window, _| {
+                move |_, _, event: &CommandPaletteEvent<u8>, window, cx| {
                     if matches!(event, CommandPaletteEvent::MenuAction(_)) {
-                        intruder.focus(window);
+                        intruder.focus(window, cx);
                     }
                 },
             )
@@ -1620,7 +1620,7 @@ fn escape_should_close_after_focus_moves_to_a_header_action(cx: &mut TestAppCont
     cx.run_until_parked();
     open_palette(&root, &palette, cx);
 
-    cx.update(|window, _| window.focus_next());
+    cx.update(|window, cx| window.focus_next(cx));
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| {
         palette
@@ -2043,7 +2043,7 @@ fn implicit_dismissal_lock_should_retain_palette_until_explicit_completion(
     let outside = point(panel.left() - px(8.0), panel.bottom() + px(8.0));
     cx.simulate_click(outside, Modifiers::default());
     let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
-    cx.update(|window, _| intruder.focus(window));
+    cx.update(|window, cx| intruder.focus(window, cx));
     cx.deactivate_window();
     cx.run_until_parked();
 
@@ -2091,7 +2091,7 @@ fn focus_loss_should_dismiss_without_stealing_focus_from_the_new_owner(cx: &mut 
     open_palette(&root, &palette, cx);
     let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
 
-    cx.update(|window, _| intruder.focus(window));
+    cx.update(|window, cx| intruder.focus(window, cx));
     cx.run_until_parked();
 
     assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
@@ -2662,7 +2662,7 @@ fn modal_focus_scope_should_repair_direct_unauthorized_focus_theft(cx: &mut Test
     });
     cx.run_until_parked();
 
-    cx.update(|window, _| unauthorized.focus(window));
+    cx.update(|window, cx| unauthorized.focus(window, cx));
     cx.run_until_parked();
 
     assert!(cx.update(|window, cx| {
@@ -2866,7 +2866,7 @@ fn blocked_modal_resume_retains_generation_until_matching_palette_actually_focus
 
     cx.update(|window, cx| {
         modal.dismiss(window, cx).expect("modal should close");
-        newer_focus.focus(window);
+        newer_focus.focus(window, cx);
     });
     cx.run_until_parked();
 
@@ -2884,7 +2884,7 @@ fn blocked_modal_resume_retains_generation_until_matching_palette_actually_focus
     let editor = palette.read_with(cx, |palette, cx| {
         palette.input.read(cx).focus_handle().clone()
     });
-    cx.update(|window, _| editor.focus(window));
+    cx.update(|window, cx| editor.focus(window, cx));
     cx.update(|_, cx| retry_window_command_palette_modal_resume(window_id, cx));
     cx.run_until_parked();
 
@@ -2937,7 +2937,7 @@ fn replacing_a_palette_during_modal_suspension_should_resume_only_the_replacemen
 fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(cx: &mut TestAppContext) {
     let (root, palette, cx) = modal_palette_window(cx);
     let prior = root.read_with(cx, |root, _| root.prior_focus.clone());
-    cx.update(|window, _| prior.focus(window));
+    cx.update(|window, cx| prior.focus(window, cx));
     cx.update(|window, cx| {
         palette.update(cx, |palette, cx| {
             palette.open(window, cx);

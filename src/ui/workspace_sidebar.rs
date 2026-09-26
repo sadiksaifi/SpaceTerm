@@ -143,7 +143,7 @@ impl WorkspaceSidebar {
             window,
             |sidebar, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
-                    sidebar.focus.focus(window);
+                    sidebar.focus.focus(window, cx);
                     cx.emit(SidebarEvent::FocusChanged);
                 }
                 OverlayScrollbarEvent::OffsetRequested(offset) => {
@@ -191,7 +191,7 @@ impl WorkspaceSidebar {
 
     pub(super) fn dismiss_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename_is_focused(window) {
-            self.focus.focus(window);
+            self.focus.focus(window, cx);
         }
         self.rename = None;
         self.menu = None;
@@ -232,7 +232,7 @@ impl WorkspaceSidebar {
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
         let track_height_px = f32::from(self.scroll_handle.bounds().size.height);
-        let maximum_offset_px = f32::from(self.scroll_handle.max_offset().height);
+        let maximum_offset_px = f32::from(self.scroll_handle.max_offset().y);
         let offset_px = -f32::from(self.scroll_handle.offset().y);
         ScrollMetrics::for_pixels(0.0, track_height_px, maximum_offset_px, offset_px)
     }
@@ -260,7 +260,7 @@ impl WorkspaceSidebar {
         if !self.rows.iter().any(|row| row.workspace_id == workspace_id) {
             return false;
         }
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         self.rename = None;
         self.menu = Some(workspace_id);
         cx.emit(SidebarEvent::Activate {
@@ -409,7 +409,7 @@ impl WorkspaceSidebar {
                     let input = rename.input.clone();
                     let focus_handle = rename.focus_handle.clone();
                     input.update(cx, |input, cx| input.select_all(cx));
-                    focus_handle.focus(window);
+                    focus_handle.focus(window, cx);
                     cx.emit(SidebarEvent::FocusChanged);
                 });
             }
@@ -444,7 +444,7 @@ impl WorkspaceSidebar {
         }
         self.rename = None;
         if restore_sidebar_focus {
-            self.focus.focus(window);
+            self.focus.focus(window, cx);
         }
         cx.emit(SidebarEvent::FocusChanged);
 
@@ -718,7 +718,7 @@ impl WorkspaceSidebar {
                 self.reveal_row(index, cx);
             }
             cx.defer_in(window, |sidebar, window, cx| {
-                sidebar.focus.focus(window);
+                sidebar.focus.focus(window, cx);
                 cx.emit(SidebarEvent::FocusChanged);
                 cx.notify();
             });

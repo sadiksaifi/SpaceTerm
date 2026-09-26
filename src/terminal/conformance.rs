@@ -1084,6 +1084,7 @@ fn check_gpui_keyboard_adapter() -> Result<(), String> {
             key_char: Some("a".into()),
             modifiers: gpui::Modifiers::default(),
         },
+        prefer_character_input: false,
         is_held: false,
     });
     let KeyTranslation::Encoded(input) = translation else {

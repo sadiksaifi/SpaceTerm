@@ -560,7 +560,7 @@ impl AttentionRuntime {
                 cx.background_executor()
                     .timer(schedule.delay_from(Instant::now()))
                     .await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let Some(runtime) = weak.upgrade() else {
                         return;
                     };

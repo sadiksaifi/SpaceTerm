@@ -16,6 +16,7 @@
 //! GPUI's view hierarchy is reparented and no layer is mutated, so the backdrop keeps whatever
 //! appearance the Operating System defines for the material.
 
+#![allow(deprecated)]
 use cocoa::appkit::{NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindowOrderingMode};
 use cocoa::base::{NO, id, nil};
 use cocoa::foundation::{NSInteger, NSRect, NSString};

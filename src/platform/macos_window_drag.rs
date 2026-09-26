@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use super::window_movement::{OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform};
 use std::cell::RefCell;
 use std::marker::PhantomData;

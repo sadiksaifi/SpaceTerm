@@ -484,9 +484,9 @@ impl RenderOnce for ResizeHandle {
             )
         };
         if !enabled && focus_handle.is_focused(window) {
-            window.focus_next();
+            window.focus_next(cx);
             if focus_handle.is_focused(window) {
-                window.blur();
+                window.blur(cx);
             }
         }
         let focused = focus_handle.is_focused(window);
@@ -546,7 +546,7 @@ impl RenderOnce for ResizeHandle {
                             }
                             window.prevent_default();
                             down_state.update(cx, |state, cx| state.prepare_pointer_focus(cx));
-                            pointer_focus.focus(window);
+                            pointer_focus.focus(window, cx);
                             emit_events(
                                 reset_handler.clone(),
                                 vec![ResizeHandleEvent::ResetRequested {
@@ -564,7 +564,7 @@ impl RenderOnce for ResizeHandle {
                         let events = down_state
                             .update(cx, |state, cx| state.pointer_down(event.position, cx));
                         if !events.is_empty() {
-                            pointer_focus.focus(window);
+                            pointer_focus.focus(window, cx);
                             window.prevent_default();
                             emit_events(down_handler.clone(), events, window, cx);
                             cx.stop_propagation();
@@ -880,8 +880,11 @@ impl ResizeHandleState {
         self.handler = handler;
         self.focus_handle = self.focus_handle.clone().tab_stop(enabled && tab_stop);
         self.axis = axis;
-        self.current_value = finite_or_zero(current_value);
-        self.keyboard_value = self.current_value;
+        let current_value = finite_or_zero(current_value);
+        if self.current_value != current_value {
+            self.keyboard_value = current_value;
+        }
+        self.current_value = current_value;
         self.range = range;
         self.keyboard_step = keyboard_step;
         self.modified_keyboard_step = modified_keyboard_step;
@@ -1526,7 +1529,7 @@ mod tests {
     #[gpui::test]
     fn keyboard_should_use_axis_keys_and_shift_step(cx: &mut TestAppContext) {
         let (_, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.simulate_keystrokes("right shift-left down");
 
         let requests = events
@@ -1547,7 +1550,7 @@ mod tests {
     #[gpui::test]
     fn repeated_keyboard_input_should_accumulate_before_the_next_render(cx: &mut TestAppContext) {
         let (_, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
 
         cx.simulate_keystrokes("right right right");
 
@@ -1595,7 +1598,7 @@ mod tests {
     #[gpui::test]
     fn disabling_focused_handle_should_release_responder_focus(cx: &mut TestAppContext) {
         let (root, _, cx) = resize_window(cx, ResizeAxis::Horizontal);
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         assert!(cx.update(|window, cx| window.focused(cx).is_some()));
 
         root.update(cx, |root, cx| {
@@ -1719,7 +1722,7 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.simulate_keystrokes("right");
         assert!(events.borrow().is_empty());
 
@@ -1728,7 +1731,7 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.simulate_keystrokes("right");
         assert!(
             events
@@ -1804,6 +1807,11 @@ mod tests {
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
+        cx.simulate_mouse_move(
+            point(px(500.0), px(500.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         let target = cx
             .debug_bounds("paintless-resize-hitbox")
             .expect("the paintless hitbox was rendered");
@@ -1888,7 +1896,7 @@ mod tests {
             .debug_bounds("paintless-resize-hitbox")
             .expect("the paintless hitbox was rendered");
 
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.run_until_parked();
         let indicator = cx
             .debug_bounds("paintless-resize-keyboard-focus-indicator")
@@ -1903,6 +1911,11 @@ mod tests {
     #[gpui::test]
     fn hitbox_should_be_larger_than_visible_divider(cx: &mut TestAppContext) {
         let (_, _, cx) = resize_window(cx, ResizeAxis::Horizontal);
+        cx.simulate_mouse_move(
+            point(px(500.0), px(500.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         let root = cx.debug_bounds("test-resize").expect("root was rendered");
         let target = hitbox(cx);
         let divider = cx

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::{ffi::c_void, sync::OnceLock};
 
 use cocoa::base::{id, nil};

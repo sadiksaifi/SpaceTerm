@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 #[cfg(any(not(test), feature = "macos-native-tests"))]
 use std::ops::Range;
 

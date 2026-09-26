@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use gpui::{App, Menu, MenuItem, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
@@ -282,6 +283,7 @@ fn menus(application_name: &str) -> Vec<Menu> {
 
 fn application_menu(application_name: &str) -> Menu {
     Menu {
+        disabled: false,
         name: application_name.to_owned().into(),
         items: vec![
             MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
@@ -301,6 +303,7 @@ fn application_menu(application_name: &str) -> Menu {
 
 fn file_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
@@ -320,6 +323,7 @@ fn file_menu() -> Menu {
 
 fn edit_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Edit".into(),
         items: vec![
             MenuItem::action("Undo", EditUndo),
@@ -331,6 +335,7 @@ fn edit_menu() -> Menu {
             MenuItem::action("Select All", EditSelectAll),
             MenuItem::separator(),
             MenuItem::submenu(Menu {
+                disabled: false,
                 name: "Find".into(),
                 items: vec![
                     MenuItem::action("Find…", OpenTerminalFind),
@@ -344,6 +349,7 @@ fn edit_menu() -> Menu {
 
 fn view_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "View".into(),
         items: vec![
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
@@ -356,6 +362,7 @@ fn view_menu() -> Menu {
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),
             MenuItem::submenu(Menu {
+                disabled: false,
                 name: "Focus Pane".into(),
                 items: vec![
                     MenuItem::action("Left", FocusPaneLeft),
@@ -371,6 +378,7 @@ fn view_menu() -> Menu {
 
 fn window_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Window".into(),
         items: vec![
             MenuItem::action("Minimize", MinimizeWindow),
@@ -383,6 +391,7 @@ fn window_menu() -> Menu {
 
 fn help_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Help".into(),
         items: vec![
             MenuItem::action("SpaceTerm Help", OpenApplicationHelp),

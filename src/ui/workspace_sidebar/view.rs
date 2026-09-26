@@ -111,7 +111,7 @@ impl gpui::RenderOnce for WorkspaceRenameField {
         .chrome_text(text_style)
         .text_color(gpui_color(self.appearance.colors.text))
         .on_click(move |_, window, cx| {
-            focus_on_click.focus(window);
+            focus_on_click.focus(window, cx);
             cx.stop_propagation();
         })
         .child(self.input)

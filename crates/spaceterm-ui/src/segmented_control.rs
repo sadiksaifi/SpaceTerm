@@ -659,7 +659,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         });
         let focus_handle = state.read(cx).focus_handle.clone();
         if !enabled && focus_handle.is_focused(window) {
-            window.blur();
+            window.blur(cx);
         }
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);

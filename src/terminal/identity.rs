@@ -202,7 +202,9 @@ fn decode_hex_name(encoded: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     encoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_value(pair[0])?;
             let low = hex_value(pair[1])?;

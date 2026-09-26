@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use gpui::TestAppContext;
@@ -323,8 +323,8 @@ fn connect_should_own_a_ready_private_control_socket(cx: &mut TestAppContext) {
     let cancellation = SshCancellationToken::default();
 
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -352,8 +352,8 @@ fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut Tes
     let paths = directory.paths();
     let cancellation = SshCancellationToken::default();
     let first = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -364,8 +364,8 @@ fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut Tes
         ))
         .unwrap();
     let second = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -386,8 +386,8 @@ fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let cancellation = SshCancellationToken::default();
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -432,8 +432,8 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -483,8 +483,8 @@ fn connect_should_time_out_and_reap_the_master(cx: &mut TestAppContext) {
     let cancellation = SshCancellationToken::default();
 
     let error = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -520,8 +520,8 @@ fn connect_should_report_an_early_master_exit_as_reaped(cx: &mut TestAppContext)
     let cancellation = SshCancellationToken::default();
 
     let error = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -536,7 +536,7 @@ fn connect_should_report_an_early_master_exit_as_reaped(cx: &mut TestAppContext)
     assert!(matches!(
         &error,
         ControlConnectionError::MasterExited { exit, error_output: Some(output) }
-            if *exit == ProcessExit::unsuccessful(Some(7))
+            if exit == &ProcessExit::unsuccessful(Some(7))
                 && output.as_str() == "bad  config"
                 && !format!("{error:?}").contains("bad")
     ));
@@ -551,8 +551,8 @@ fn connect_should_cancel_during_readiness_and_cleanup(cx: &mut TestAppContext) {
     backend.state.lock().unwrap().cancel_on_delay = Some(cancellation.clone());
 
     let error = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -576,15 +576,17 @@ fn failed_connect_should_preserve_its_unregistered_socket(cx: &mut TestAppContex
     let unrelated = directory.0.join("unrelated");
     fs::write(&unrelated, b"keep").unwrap();
 
-    let _ = cx.executor().block(OpenSshControlConnection::connect(
-        &paths,
-        OpenSshExecutable::for_test(),
-        &MacosControlSocketProbe,
-        destination(),
-        Arc::clone(&backend),
-        &cancellation,
-        timing(),
-    ));
+    let _ = cx
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
+            &paths,
+            OpenSshExecutable::for_test(),
+            &MacosControlSocketProbe,
+            destination(),
+            Arc::clone(&backend),
+            &cancellation,
+            timing(),
+        ));
 
     let socket_path = backend.socket_path();
     assert!(socket_path.exists() && unrelated.exists());
@@ -627,8 +629,8 @@ fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppCon
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let cancellation = SshCancellationToken::default();
     let mut connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -640,8 +642,12 @@ fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppCon
         .unwrap();
     let socket_path = connection.control_path().to_path_buf();
 
-    cx.executor().block(connection.shutdown()).unwrap();
-    cx.executor().block(connection.shutdown()).unwrap();
+    cx.foreground_executor()
+        .block_test(connection.shutdown())
+        .unwrap();
+    cx.foreground_executor()
+        .block_test(connection.shutdown())
+        .unwrap();
 
     let exit_commands = backend
         .records()
@@ -664,8 +670,8 @@ fn hanging_readiness_check_should_obey_the_wall_clock_deadline_and_reap(cx: &mut
     backend.state.lock().unwrap().hang_readiness = true;
 
     let error = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -689,8 +695,8 @@ fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppCon
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let mut connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -702,7 +708,10 @@ fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppCon
         .unwrap();
     backend.state.lock().unwrap().hang_shutdown = true;
 
-    let error = cx.executor().block(connection.shutdown()).unwrap_err();
+    let error = cx
+        .foreground_executor()
+        .block_test(connection.shutdown())
+        .unwrap_err();
 
     assert!(
         matches!(
@@ -722,8 +731,8 @@ fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut Test
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let mut connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -739,7 +748,9 @@ fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut Test
         state.exit_on_signal = ProcessSignal::Kill;
     }
 
-    cx.executor().block(connection.shutdown()).unwrap();
+    cx.foreground_executor()
+        .block_test(connection.shutdown())
+        .unwrap();
 
     assert_eq!(
         backend.state.lock().unwrap().signals,
@@ -753,8 +764,8 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -787,7 +798,7 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
 
     assert_eq!(connection.state(), ControlConnectionState::Failed);
     assert_eq!(
-        cx.executor().block(lifecycle.terminal()),
+        cx.foreground_executor().block_test(lifecycle.terminal()),
         crate::ssh::live_connection::ControlConnectionTerminalState::Failed
     );
     assert!(matches!(
@@ -807,8 +818,8 @@ fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContex
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -823,7 +834,7 @@ fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContex
     drop(connection);
 
     assert_eq!(
-        cx.executor().block(lifecycle.terminal()),
+        cx.foreground_executor().block_test(lifecycle.terminal()),
         crate::ssh::live_connection::ControlConnectionTerminalState::Closed
     );
 }
@@ -834,8 +845,8 @@ fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut Te
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
     let connection = cx
-        .executor()
-        .block(OpenSshControlConnection::connect(
+        .foreground_executor()
+        .block_test(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
             &MacosControlSocketProbe,
@@ -890,8 +901,7 @@ fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socke
         &cancellation,
         timing(),
     ));
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
 
     assert!(matches!(
         Pin::as_mut(&mut future).poll(&mut context),
@@ -901,12 +911,6 @@ fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socke
 
     let socket_path = backend.socket_path();
     assert!(backend.reap_count() == 1 && socket_path.exists());
-}
-
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
 }
 
 #[test]
