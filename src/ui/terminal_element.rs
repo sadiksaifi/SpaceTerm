@@ -633,6 +633,8 @@ struct TerminalPaintBatch {
     cursor_text_overlay: Option<CursorTextOverlay>,
     graphics: GraphicsPaintPlan,
     blink_phase_visible: bool,
+    #[cfg(test)]
+    quad_paint_calls: Option<std::rc::Rc<std::cell::Cell<usize>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -730,7 +732,13 @@ impl TerminalPaintBatch {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), PaintBatchFailure> {
+        #[cfg(test)]
+        let counter = self.quad_paint_calls.as_deref();
         if let Some(surface) = &self.surface {
+            record_quad_paint(
+                #[cfg(test)]
+                counter,
+            );
             window.paint_quad(surface.clone());
         }
         window.with_content_mask(
@@ -743,6 +751,10 @@ impl TerminalPaintBatch {
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
                 for row in &self.rows {
                     for (_, background) in row.backgrounds_in_paint_order() {
+                        record_quad_paint(
+                            #[cfg(test)]
+                            counter,
+                        );
                         window.paint_quad(background.clone());
                     }
                 }
@@ -754,11 +766,15 @@ impl TerminalPaintBatch {
                         &row.stable.under_text_decorations,
                         self.blink_phase_visible,
                         window,
+                        #[cfg(test)]
+                        counter,
                     );
                     paint_prepared_decorations(
                         &row.hyperlink_hover_decorations,
                         self.blink_phase_visible,
                         window,
+                        #[cfg(test)]
+                        counter,
                     );
                     let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
                     match cursor_paint {
@@ -766,6 +782,8 @@ impl TerminalPaintBatch {
                             &row.stable.symbols,
                             self.blink_phase_visible,
                             window,
+                            #[cfg(test)]
+                            counter,
                         ),
                         CursorTextPaint::Exclude(bounds)
                         | CursorTextPaint::Recolor { bounds, .. } => {
@@ -774,6 +792,8 @@ impl TerminalPaintBatch {
                                 self.blink_phase_visible,
                                 bounds,
                                 window,
+                                #[cfg(test)]
+                                counter,
                             );
                             if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
                                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -781,6 +801,8 @@ impl TerminalPaintBatch {
                                         &row.cursor_symbols,
                                         self.blink_phase_visible,
                                         window,
+                                        #[cfg(test)]
+                                        counter,
                                     );
                                 });
                             }
@@ -797,6 +819,8 @@ impl TerminalPaintBatch {
                         &row.stable.over_text_decorations,
                         self.blink_phase_visible,
                         window,
+                        #[cfg(test)]
+                        counter,
                     );
                 }
                 self.graphics
@@ -806,6 +830,10 @@ impl TerminalPaintBatch {
                 for row in &self.rows {
                     if let Some(preedit) = &row.preedit {
                         for background in preedit.backgrounds.iter() {
+                            record_quad_paint(
+                                #[cfg(test)]
+                                counter,
+                            );
                             window.paint_quad(background.clone());
                         }
                         for text in preedit.text.iter() {
@@ -821,6 +849,10 @@ impl TerminalPaintBatch {
                                 .map_err(|_| PaintBatchFailure::Presentation)?;
                         }
                         if let Some(caret) = &preedit.caret {
+                            record_quad_paint(
+                                #[cfg(test)]
+                                counter,
+                            );
                             window.paint_quad(caret.clone());
                         }
                     }
@@ -1478,12 +1510,17 @@ fn paint_prepared_decorations(
     prepared: &PreparedDecorations,
     blink_phase_visible: bool,
     window: &mut Window,
+    #[cfg(test)] counter: Option<&std::cell::Cell<usize>>,
 ) {
     for prepared in prepared
         .quads
         .iter()
         .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
     {
+        record_quad_paint(
+            #[cfg(test)]
+            counter,
+        );
         window.paint_quad(prepared.quad.clone());
     }
     for prepared in prepared
@@ -1500,6 +1537,7 @@ fn paint_prepared_symbols_excluding_region(
     blink_phase_visible: bool,
     excluded_bounds: Bounds<Pixels>,
     window: &mut Window,
+    #[cfg(test)] counter: Option<&std::cell::Cell<usize>>,
 ) {
     debug_assert!(prepared.underlines.is_empty());
     for prepared in prepared
@@ -1507,7 +1545,18 @@ fn paint_prepared_symbols_excluding_region(
         .iter()
         .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
     {
+        record_quad_paint(
+            #[cfg(test)]
+            counter,
+        );
         window.paint_quad_excluding_region(prepared.quad.clone(), excluded_bounds);
+    }
+}
+
+fn record_quad_paint(#[cfg(test)] counter: Option<&std::cell::Cell<usize>>) {
+    #[cfg(test)]
+    if let Some(counter) = counter {
+        counter.set(counter.get() + 1);
     }
 }
 
@@ -1718,6 +1767,8 @@ impl Element for TerminalGridElement {
                 self.scale_factor,
             ),
             blink_phase_visible: self.blink_phase_visible,
+            #[cfg(test)]
+            quad_paint_calls: None,
         };
         let cursor = self.cursor_layer.as_ref().and_then(|_| {
             let position = self.cursor.as_ref()?.0;
@@ -1743,6 +1794,8 @@ impl Element for TerminalGridElement {
                 cursor_text_overlay,
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
+                #[cfg(test)]
+                quad_paint_calls: None,
             }))
         });
         let fallback = self.fallback.as_mut().map(|fallback| {
@@ -3269,7 +3322,6 @@ mod tests {
         cx.update(|window, _| {
             *capture.glyphs.borrow_mut() = painted_glyphs(window);
             let quads = window.painted_quads();
-            capture.quad_paint_calls.set(quads.len());
             *capture.quads.borrow_mut() = quads;
         });
     }
@@ -3346,6 +3398,7 @@ mod tests {
                 cursor_text_overlay: Some(overlay),
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
+                quad_paint_calls: None,
             }];
         }
 
@@ -3361,6 +3414,7 @@ mod tests {
                 cursor_text_overlay: None,
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
+                quad_paint_calls: None,
             },
             TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, rgba(0x0b_0b_0b_ff))),
@@ -3370,6 +3424,7 @@ mod tests {
                 cursor_text_overlay: Some(overlay),
                 graphics: GraphicsPaintPlan::default(),
                 blink_phase_visible: true,
+                quad_paint_calls: None,
             },
         ]
     }
@@ -4101,6 +4156,7 @@ mod tests {
     fn direct_block_cursor_visits_each_symbol_quad_once(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let capture = PaintCapture::default();
+        let quad_paint_calls = Rc::clone(&capture.quad_paint_calls);
         cx.draw(
             point(px(0.0), px(0.0)),
             size(px(80.0), px(60.0)),
@@ -4152,6 +4208,7 @@ mod tests {
                         }),
                         graphics: GraphicsPaintPlan::default(),
                         blink_phase_visible: true,
+                        quad_paint_calls: Some(Rc::clone(&quad_paint_calls)),
                     }],
                 }
             },
@@ -5483,6 +5540,7 @@ mod tests {
                             cursor_text_overlay: None,
                             graphics: GraphicsPaintPlan::default(),
                             blink_phase_visible: true,
+                            quad_paint_calls: None,
                         }],
                     }
                 },
