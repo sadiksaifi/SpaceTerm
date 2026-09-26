@@ -12,7 +12,6 @@ prepare_owned_target() {
     mkdir -p "$target"
     printf '%s\n' "$repo_dir" > "$target/.spaceterm-cargo-target-owner"
     printf '{}\n' > "$target/.rustc_info.json"
-    printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$target/CACHEDIR.TAG"
 }
 
 make_oversized_target() {
