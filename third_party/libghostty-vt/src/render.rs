@@ -64,6 +64,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 ///     cols: 40,
 ///     rows: 5,
 ///     max_scrollback: 10000,
+///     max_scrollback_bytes: 50_000_000,
 /// }).unwrap();
 ///
 /// let mut render_state = RenderState::new().unwrap();
@@ -86,6 +87,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 ///     cols: 80,
 ///     rows: 25,
 ///     max_scrollback: 10000,
+///     max_scrollback_bytes: 50_000_000,
 /// })?;
 /// let mut render_state = RenderState::new()?;
 ///
@@ -112,6 +114,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// #     cols: 80,
 /// #     rows: 25,
 /// #     max_scrollback: 10000,
+/// #     max_scrollback_bytes: 50_000_000,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -133,6 +136,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// #     cols: 80,
 /// #     rows: 25,
 /// #     max_scrollback: 10000,
+/// #     max_scrollback_bytes: 50_000_000,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -158,6 +162,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// #     cols: 80,
 /// #     rows: 25,
 /// #     max_scrollback: 10000,
+/// #     max_scrollback_bytes: 50_000_000,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -184,6 +189,7 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// #     cols: 80,
 /// #     rows: 25,
 /// #     max_scrollback: 10000,
+/// #     max_scrollback_bytes: 50_000_000,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new()?;
 /// use libghostty_vt::render::{RowIterator, CellIterator};
@@ -997,6 +1003,7 @@ mod tests {
             cols: 8,
             rows: 3,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .unwrap();
         let mut state = RenderState::new().unwrap();

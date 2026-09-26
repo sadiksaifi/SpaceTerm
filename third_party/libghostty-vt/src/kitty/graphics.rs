@@ -112,7 +112,8 @@
 //!     let mut terminal = Terminal::new(TerminalOptions {
 //!        cols: 80,
 //!        rows: 24,
-//!        max_scrollback: 0
+//!        max_scrollback: 0,
+//!        max_scrollback_bytes: 50_000_000,
 //!    })?;
 //!
 //!    // Set cell pixel dimensions so kitty graphics can compute grid sizes.
@@ -1149,6 +1150,7 @@ mod tests {
             cols: 10,
             rows: 6,
             max_scrollback: 32,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal initializes");
         terminal.resize(10, 6, 10, 20).expect("geometry updates");

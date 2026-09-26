@@ -32,6 +32,7 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 ///     cols: 80,
 ///     rows: 24,
 ///     max_scrollback: 0,
+///     max_scrollback_bytes: 50_000_000,
 /// }).unwrap();
 ///
 /// // Feed VT data into the terminal
@@ -114,6 +115,7 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 ///     cols: 80,
 ///     rows: 24,
 ///     max_scrollback: 0,
+///     max_scrollback_bytes: 50_000_000,
 /// })?;
 ///
 /// terminal
@@ -242,8 +244,10 @@ pub struct Options {
     /// Terminal height in cells. Must be greater than zero.
     pub rows: u16,
     /// Maximum number of lines to keep in scrollback history, subject to
-    /// Ghostty's page-granular pruning. No byte limit applies by default.
+    /// Ghostty's page-granular pruning.
     pub max_scrollback: usize,
+    /// Maximum number of bytes allocated for scrollback pages.
+    pub max_scrollback_bytes: usize,
 }
 
 /// Default visual style used when the cursor style is reset.
@@ -285,11 +289,11 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         let result =
             unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
-        let mut terminal = Self {
+        let terminal = Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),
         };
-        terminal.set_scrollback_max_bytes(None)?;
+        terminal.set(Opt::SCROLLBACK_MAX_BYTES, &opts.max_scrollback_bytes)?;
         terminal.set(Opt::SCROLLBACK_MAX_LINES, &opts.max_scrollback)?;
         Ok(terminal)
     }
@@ -687,13 +691,6 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///  The number of scrollback rows (total rows minus viewport rows).
     pub fn scrollback_rows(&self) -> Result<usize> {
         self.get(Data::SCROLLBACK_ROWS)
-    }
-
-    /// Set the scrollback byte limit. `None` removes the byte limit, leaving
-    /// the configured row count as the history bound.
-    pub fn set_scrollback_max_bytes(&mut self, max: Option<usize>) -> Result<&mut Self> {
-        self.set_optional(Opt::SCROLLBACK_MAX_BYTES, max.as_ref())?;
-        Ok(self)
     }
 
     /// The effective foreground color (override or default).
@@ -1943,6 +1940,7 @@ mod tests {
                 cols: initial_cols,
                 rows: 10,
                 max_scrollback: LIMIT,
+                max_scrollback_bytes: 50_000_000,
             })
             .unwrap();
 
@@ -1971,12 +1969,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn styled_ascii_history_fills_ten_thousand_rows_with_fifty_megabytes() {
+        for cols in [200, 400] {
+            let mut terminal = Terminal::new(Options {
+                cols,
+                rows: 2,
+                max_scrollback: 10_000,
+                max_scrollback_bytes: 50_000_000,
+            })
+            .unwrap();
+            let line = format!("\x1b[31m{}\x1b[0m\r\n", "x".repeat(usize::from(cols) - 2));
+            terminal.vt_write(line.repeat(10_001).as_bytes());
+
+            assert_eq!(
+                terminal.scrollback_rows().unwrap(),
+                10_000,
+                "{cols} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_hyperlinks_reach_the_byte_limit_before_the_row_limit() {
+        let options = Options {
+            cols: 400,
+            rows: 2,
+            max_scrollback: 1_200,
+            max_scrollback_bytes: 2_000_000,
+        };
+        let mut terminal = Terminal::new(options).unwrap();
+        let suffix = "x".repeat(1_950);
+        let mut line = Vec::new();
+        for column in 0..399 {
+            line.extend_from_slice(
+                format!("\x1b]8;;https://example.com/{column:03}/{suffix}\x07x\x1b]8;;\x07")
+                    .as_bytes(),
+            );
+        }
+        line.extend_from_slice(b"\r\n");
+
+        for row in 0..5 {
+            terminal.vt_write(&line);
+            if row == 0 {
+                let reference = terminal
+                    .grid_ref(Point::Active(PointCoordinate { x: 0, y: 0 }))
+                    .unwrap();
+                let mut uri = [0; 2_048];
+                let uri_len = reference.hyperlink_uri(&mut uri).unwrap();
+                assert!(uri_len > 1_950, "hyperlink URI length: {uri_len}");
+            }
+        }
+        // Move the dense page into history so it is eligible for pruning.
+        for _ in 0..300 {
+            terminal.vt_write(b"plain\r\n");
+        }
+
+        let mut plain = Terminal::new(options).unwrap();
+        for _ in 0..305 {
+            plain.vt_write(b"plain\r\n");
+        }
+        let plain_retained = plain.scrollback_rows().unwrap();
+        assert_eq!(plain_retained, 304);
+        let retained = terminal.scrollback_rows().unwrap();
+        assert!(
+            retained < 220,
+            "dense: {retained} rows, plain: {plain_retained} rows"
+        );
+    }
+
     #[inline(never)]
     fn build_terminal<'cb>(callback_count: &'cb RefCell<usize>) -> Terminal<'static, 'cb> {
         let mut terminal = Terminal::new(Options {
             cols: 80,
             rows: 24,
             max_scrollback: 1000,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
 
@@ -2054,6 +2122,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
 
@@ -2089,6 +2158,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
 
@@ -2116,6 +2186,7 @@ mod tests {
             cols: 10,
             rows: 3,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .unwrap();
         terminal
@@ -2142,6 +2213,7 @@ mod tests {
             cols: 10,
             rows: 3,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .unwrap();
         let equal = RgbColor { r: 1, g: 2, b: 3 };
@@ -2176,6 +2248,7 @@ mod tests {
             cols: 57,
             rows: 20,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .unwrap();
         terminal
@@ -2205,6 +2278,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
         terminal
@@ -2246,6 +2320,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
         terminal
@@ -2299,6 +2374,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
         let mut render_state = RenderState::new().expect("render state should initialize");
@@ -2333,6 +2409,7 @@ mod tests {
             cols: 80,
             rows: 24,
             max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
 
@@ -2362,6 +2439,7 @@ mod tests {
             cols: 8,
             rows: 3,
             max_scrollback: 100,
+            max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize")
     }
