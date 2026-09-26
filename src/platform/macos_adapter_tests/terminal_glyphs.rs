@@ -6,6 +6,92 @@ fn macos_text_system() -> gpui::WindowTextSystem {
     ))))
 }
 
+fn macos_painted_cluster(cluster: &'static str, wide: bool) -> Vec<PaintedGlyph> {
+    let mut cx = gpui::TestAppContext::build_with_text_system(
+        gpui::TestDispatcher::new(0),
+        None,
+        Arc::new(gpui_macos::MacTextSystem::new()),
+    );
+    let cx = cx.add_empty_window();
+    let capture = PaintCapture::default();
+    cx.draw(
+        point(px(0.0), px(0.0)),
+        size(px(120.0), px(80.0)),
+        move |window, _| {
+            let mut cells = vec![cell(cluster)];
+            if wide {
+                let mut tail = cell(" ");
+                tail.spacer_tail = true;
+                cells.push(tail);
+            }
+            let row = Arc::from(cells);
+            let input = prepare_row(&row, &colors(), &"Menlo".into());
+            let shaped = prepare_row_text(&input, px(18.0), window.text_system());
+            let mut key = prepared_row_key();
+            key.grid_left = px(20.0);
+            key.grid_right = px(100.0);
+            key.row_top = px(28.0);
+            key.row_bottom = px(52.0);
+            key.font_size = px(18.0);
+            key.cell_width = px(12.0);
+            key.line_height = px(24.0);
+            let stable = prepare_stable_row(&input, &shaped, key, &mut SymbolPlanCache::default());
+            PaintBatches {
+                batches: vec![TerminalPaintBatch {
+                    surface: None,
+                    grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(120.0), px(80.0))),
+                    line_height: key.line_height,
+                    rows: vec![PreparedFrameRow::new(Arc::new(stable))],
+                    cursor_text_overlay: None,
+                    graphics: GraphicsPaintPlan::default(),
+                    blink_phase_visible: true,
+                    quad_paint_calls: None,
+                }],
+            }
+        },
+    );
+    capture_frame(cx, &capture);
+    capture.glyphs.borrow().clone()
+}
+
+#[test]
+fn macos_vertical_line_above_paints_above_base() {
+    let glyphs = macos_painted_cluster("A\u{30d}", false);
+    assert_eq!(glyphs.len(), 2);
+    assert!(glyphs[1].visible_bounds.top() < glyphs[0].visible_bounds.top());
+    assert!(glyphs[1].visible_bounds.size.height > gpui::ScaledPixels(0.0));
+}
+
+#[test]
+fn macos_stacked_marks_paint_above_precomposed_base() {
+    let glyphs = macos_painted_cluster("A\u{301}\u{30d}", false);
+    assert_eq!(glyphs.len(), 2);
+    assert!(glyphs[1].visible_bounds.top() < glyphs[0].visible_bounds.top());
+}
+
+#[test]
+fn macos_fallback_mark_paints_above_fallback_base() {
+    let text_system = macos_text_system();
+    let input = prepare_row(&Arc::from([cell("界\u{30d}")]), &colors(), &"Menlo".into());
+    let shaped = prepare_row_text(&input, px(18.0), &text_system);
+    assert_eq!(shaped.text[0].line.runs.len(), 2);
+    assert_ne!(
+        shaped.text[0].line.runs[0].font_id,
+        shaped.text[0].line.runs[1].font_id
+    );
+
+    let glyphs = macos_painted_cluster("界\u{30d}", true);
+    assert_eq!(glyphs.len(), 2);
+    assert!(glyphs[1].visible_bounds.top() < glyphs[0].visible_bounds.top());
+}
+
+#[test]
+fn macos_wide_cell_stacked_mark_paints_above_base() {
+    let glyphs = macos_painted_cluster("界\u{301}\u{30d}", true);
+    assert!(glyphs.len() >= 2);
+    assert!(glyphs.last().unwrap().visible_bounds.top() < glyphs[0].visible_bounds.top());
+}
+
 #[test]
 fn macos_scope_guide_redraw_keeps_native_glyphs_on_exact_columns() {
     let text_system = macos_text_system();
