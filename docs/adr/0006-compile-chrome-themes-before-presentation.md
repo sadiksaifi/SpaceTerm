@@ -152,9 +152,9 @@ GPUI's rectangular descendant clipping requires terminal content to end above th
 corner arcs. A small bottom inset preserves those rounded edges without an opaque overpaint.
 The empty corner fillets and Split gaps each own one Chrome fill.
 Authored RGBA remains separate. Alpha replacement, opacity multiplication and source-over are
-distinct operations. GPUI 0.2.2 is locally patched because its macOS main and path-sprite
-pipelines add destination alpha while blending RGB with source-over. Correct destination-alpha
-attenuation is required for layered translucent surfaces; theme colors cannot compensate for it.
+distinct operations. The SpaceTerm GPUI fork corrects destination-alpha attenuation in its macOS
+main and path-sprite pipelines. Layered translucent surfaces require this composition; theme
+colors cannot compensate for incorrect alpha blending.
 
 Exports distinguish authored definitions from current effective portable copies. Effective exports
 include user overrides and fresh install identities, including copies of built-ins. Zed remains an

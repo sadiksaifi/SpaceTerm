@@ -282,6 +282,7 @@ fn menus(application_name: &str) -> Vec<Menu> {
 
 fn application_menu(application_name: &str) -> Menu {
     Menu {
+        disabled: false,
         name: application_name.to_owned().into(),
         items: vec![
             MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
@@ -301,6 +302,7 @@ fn application_menu(application_name: &str) -> Menu {
 
 fn file_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
@@ -320,6 +322,7 @@ fn file_menu() -> Menu {
 
 fn edit_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Edit".into(),
         items: vec![
             MenuItem::action("Undo", EditUndo),
@@ -331,6 +334,7 @@ fn edit_menu() -> Menu {
             MenuItem::action("Select All", EditSelectAll),
             MenuItem::separator(),
             MenuItem::submenu(Menu {
+                disabled: false,
                 name: "Find".into(),
                 items: vec![
                     MenuItem::action("Find…", OpenTerminalFind),
@@ -344,6 +348,7 @@ fn edit_menu() -> Menu {
 
 fn view_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "View".into(),
         items: vec![
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
@@ -356,6 +361,7 @@ fn view_menu() -> Menu {
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),
             MenuItem::submenu(Menu {
+                disabled: false,
                 name: "Focus Pane".into(),
                 items: vec![
                     MenuItem::action("Left", FocusPaneLeft),
@@ -371,6 +377,7 @@ fn view_menu() -> Menu {
 
 fn window_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Window".into(),
         items: vec![
             MenuItem::action("Minimize", MinimizeWindow),
@@ -383,6 +390,7 @@ fn window_menu() -> Menu {
 
 fn help_menu() -> Menu {
     Menu {
+        disabled: false,
         name: "Help".into(),
         items: vec![
             MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
@@ -405,12 +413,14 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
 
 #[cfg(not(test))]
 mod native {
-    use cocoa::appkit::{NSApp, NSEventModifierFlags};
-    use cocoa::base::{BOOL, YES, id, nil};
-    use cocoa::foundation::{
-        NSAutoreleasePool, NSDictionary, NSInteger, NSRange, NSString, NSUInteger,
+    use objc2::runtime::AnyObject;
+    use objc2::{AnyThread, MainThreadMarker, msg_send};
+    use objc2_app_kit::{
+        NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
+        NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSApplication,
+        NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSWorkspace,
     };
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
 
     use super::{
         ApplicationMenuCommand, ApplicationMenuError, MENU_ITEM_ICONS, MenuItemIcon,
@@ -418,124 +428,72 @@ mod native {
     };
 
     const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
-    const CENTER_TEXT_ALIGNMENT: NSInteger = 2;
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
-    #[link(name = "AppKit", kind = "framework")]
-    unsafe extern "C" {
-        #[link_name = "NSAboutPanelOptionApplicationIcon"]
-        static ABOUT_APPLICATION_ICON: id;
-        #[link_name = "NSAboutPanelOptionApplicationName"]
-        static ABOUT_APPLICATION_NAME: id;
-        #[link_name = "NSAboutPanelOptionApplicationVersion"]
-        static ABOUT_APPLICATION_VERSION: id;
-        #[link_name = "NSAboutPanelOptionCredits"]
-        static ABOUT_CREDITS: id;
-    }
-
     pub(super) fn decorate(application_name: &str) -> Result<(), ApplicationMenuError> {
-        if !main_thread() {
-            return Err(ApplicationMenuError::OffMainThread);
-        }
-
-        // SAFETY: The main-thread check confines all AppKit objects to AppKit's thread. GPUI has
-        // synchronously installed the main menu before this function runs, and every transient
-        // string is used before the local autorelease pool drains.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let result = decorate_main_menu(application_name);
-            pool.drain();
-            result
-        }
+        let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
+        decorate_main_menu(&NSApplication::sharedApplication(mtm), application_name)
     }
 
     pub(super) fn perform(
         command: ApplicationMenuCommand,
         application_name: &str,
     ) -> Result<(), ApplicationMenuError> {
-        if !main_thread() {
-            return Err(ApplicationMenuError::OffMainThread);
-        }
-
-        // SAFETY: The main-thread check confines all AppKit objects to AppKit's thread. Every
-        // transient object is used synchronously before the local autorelease pool drains.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let result = match command {
-                ApplicationMenuCommand::ShowAbout => show_about(application_name),
-                ApplicationMenuCommand::ZoomActiveWindow => zoom_active_window(),
-                ApplicationMenuCommand::BringAllWindowsToFront => bring_all_windows_to_front(),
-                ApplicationMenuCommand::OpenHelp => open_help(),
-            };
-            pool.drain();
-            result
+        let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
+        let application = NSApplication::sharedApplication(mtm);
+        match command {
+            ApplicationMenuCommand::ShowAbout => show_about(&application, application_name),
+            ApplicationMenuCommand::ZoomActiveWindow => zoom_active_window(&application),
+            ApplicationMenuCommand::BringAllWindowsToFront => {
+                application.arrangeInFront(None);
+                Ok(())
+            }
+            ApplicationMenuCommand::OpenHelp => open_help(),
         }
     }
 
-    unsafe fn show_about(application_name: &str) -> Result<(), ApplicationMenuError> {
-        let application = unsafe { NSApp() };
-        if application == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let name = unsafe {
-            NSString::alloc(nil)
-                .init_str(application_name)
-                .autorelease()
-        };
-        let version = unsafe {
-            NSString::alloc(nil)
-                .init_str(env!("CARGO_PKG_VERSION"))
-                .autorelease()
-        };
-        let description = unsafe {
-            NSString::alloc(nil)
-                .init_str(ABOUT_DESCRIPTION)
-                .autorelease()
-        };
-        let credits: id = unsafe { msg_send![class!(NSMutableAttributedString), alloc] };
-        let credits: id = unsafe { msg_send![credits, initWithString: description] };
-        let credits: id = unsafe { msg_send![credits, autorelease] };
-        let credits_length: NSUInteger = unsafe { msg_send![credits, length] };
+    fn show_about(
+        application: &NSApplication,
+        application_name: &str,
+    ) -> Result<(), ApplicationMenuError> {
+        let name = NSString::from_str(application_name);
+        let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+        let description = NSString::from_str(ABOUT_DESCRIPTION);
+        let credits = NSMutableAttributedString::initWithString(
+            NSMutableAttributedString::alloc(),
+            &description,
+        );
+        // SAFETY: AppKit implements this category method. The range spans this live string.
         let _: () = unsafe {
-            msg_send![credits, setAlignment: CENTER_TEXT_ALIGNMENT
-                                      range: NSRange::new(0, credits_length)]
+            msg_send![&*credits, setAlignment: NSTextAlignment::Center,
+                                 range: NSRange::new(0, credits.length())]
         };
-        let icon: id = unsafe { msg_send![application, applicationIconImage] };
-        if icon == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let values = [name, version, credits, icon];
+        let icon = application
+            .applicationIconImage()
+            .ok_or(ApplicationMenuError::Unavailable)?;
+        // SAFETY: AppKit exports these four immutable option keys.
         let keys = unsafe {
             [
-                ABOUT_APPLICATION_NAME,
-                ABOUT_APPLICATION_VERSION,
-                ABOUT_CREDITS,
-                ABOUT_APPLICATION_ICON,
+                NSAboutPanelOptionApplicationName,
+                NSAboutPanelOptionApplicationVersion,
+                NSAboutPanelOptionCredits,
+                NSAboutPanelOptionApplicationIcon,
             ]
         };
-        let options = unsafe {
-            NSDictionary::dictionaryWithObjects_forKeys_count_(
-                nil,
-                values.as_ptr(),
-                keys.as_ptr(),
-                values.len() as NSUInteger,
-            )
-        };
-        let _: () =
-            unsafe { msg_send![application, orderFrontStandardAboutPanelWithOptions: options] };
+        let values: [&AnyObject; 4] = [&name, &version, &credits, &icon];
+        let options = NSDictionary::from_slices(&keys, &values);
+        // SAFETY: Every dictionary value has the type AppKit expects for its corresponding key.
+        unsafe { application.orderFrontStandardAboutPanelWithOptions(&options) };
         Ok(())
     }
 
-    unsafe fn decorate_main_menu(application_name: &str) -> Result<(), ApplicationMenuError> {
-        let application = unsafe { NSApp() };
-        if application == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let main_menu: id = unsafe { msg_send![application, mainMenu] };
-        if main_menu == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-
+    fn decorate_main_menu(
+        application: &NSApplication,
+        application_name: &str,
+    ) -> Result<(), ApplicationMenuError> {
+        let main_menu = application
+            .mainMenu()
+            .ok_or(ApplicationMenuError::Unavailable)?;
         for (item_title, symbol) in super::application_menu_item_icons(application_name) {
             let decoration = MenuItemIcon {
                 menu: application_name,
@@ -543,144 +501,83 @@ mod native {
                 item: &item_title,
                 symbol,
             };
-            let item = unsafe { find_menu_item(main_menu, &decoration, application_name) }
+            let item = find_menu_item(&main_menu, &decoration, application_name)
                 .ok_or(ApplicationMenuError::Unavailable)?;
-            unsafe { set_symbol_image(item, decoration.symbol) }?;
+            set_symbol_image(&item, decoration.symbol)?;
         }
-
         for decoration in MENU_ITEM_ICONS {
-            let item = unsafe { find_menu_item(main_menu, decoration, application_name) }
+            let item = find_menu_item(&main_menu, decoration, application_name)
                 .ok_or(ApplicationMenuError::Unavailable)?;
-            unsafe { set_symbol_image(item, decoration.symbol) }?;
+            set_symbol_image(&item, decoration.symbol)?;
         }
-
         let zoom_decoration = MenuItemIcon {
             menu: "View",
             submenu: None,
             item: TOGGLE_PANE_ZOOM_TITLE,
             symbol: "",
         };
-        let zoom_item = unsafe { find_menu_item(main_menu, &zoom_decoration, application_name) }
+        let zoom_item = find_menu_item(&main_menu, &zoom_decoration, application_name)
             .ok_or(ApplicationMenuError::Unavailable)?;
-        let key_equivalent = unsafe { NSString::alloc(nil).init_str("\r").autorelease() };
-        let modifiers =
-            NSEventModifierFlags::NSCommandKeyMask | NSEventModifierFlags::NSShiftKeyMask;
-        let _: () = unsafe { msg_send![zoom_item, setKeyEquivalent: key_equivalent] };
-        let _: () = unsafe { msg_send![zoom_item, setKeyEquivalentModifierMask: modifiers] };
-        let installed_equivalent: id = unsafe { msg_send![zoom_item, keyEquivalent] };
-        let equivalent_matches: BOOL =
-            unsafe { msg_send![installed_equivalent, isEqualToString: key_equivalent] };
-        let installed_modifiers: NSUInteger =
-            unsafe { msg_send![zoom_item, keyEquivalentModifierMask] };
-        if equivalent_matches != YES || installed_modifiers != modifiers.bits() {
+        let key_equivalent = NSString::from_str("\r");
+        let modifiers = NSEventModifierFlags::Command | NSEventModifierFlags::Shift;
+        zoom_item.setKeyEquivalent(&key_equivalent);
+        zoom_item.setKeyEquivalentModifierMask(modifiers);
+        if zoom_item.keyEquivalent() != key_equivalent
+            || zoom_item.keyEquivalentModifierMask() != modifiers
+        {
             return Err(ApplicationMenuError::Unavailable);
         }
-
         Ok(())
     }
 
-    unsafe fn find_menu_item(
-        main_menu: id,
+    fn find_menu_item(
+        main_menu: &NSMenu,
         decoration: &MenuItemIcon<'_>,
         application_name: &str,
-    ) -> Option<id> {
-        let menu_title = unsafe { NSString::alloc(nil).init_str(decoration.menu).autorelease() };
-        let mut top_item: id = unsafe { msg_send![main_menu, itemWithTitle: menu_title] };
-        if top_item == nil && decoration.menu == application_name {
-            top_item = unsafe { msg_send![main_menu, itemAtIndex: 0_isize] };
-        }
-        if top_item == nil {
-            return None;
-        }
-
-        let mut menu: id = unsafe { msg_send![top_item, submenu] };
-        if menu == nil {
-            return None;
-        }
+    ) -> Option<objc2::rc::Retained<NSMenuItem>> {
+        let top_item = main_menu
+            .itemWithTitle(&NSString::from_str(decoration.menu))
+            .or_else(|| {
+                (decoration.menu == application_name)
+                    .then(|| main_menu.itemAtIndex(0))
+                    .flatten()
+            })?;
+        let mut menu = top_item.submenu()?;
         if let Some(submenu_title) = decoration.submenu {
-            let submenu_title =
-                unsafe { NSString::alloc(nil).init_str(submenu_title).autorelease() };
-            let submenu_item: id = unsafe { msg_send![menu, itemWithTitle: submenu_title] };
-            if submenu_item == nil {
-                return None;
-            }
-            menu = unsafe { msg_send![submenu_item, submenu] };
-            if menu == nil {
-                return None;
-            }
+            menu = menu
+                .itemWithTitle(&NSString::from_str(submenu_title))?
+                .submenu()?;
         }
-
-        let item_title = unsafe { NSString::alloc(nil).init_str(decoration.item).autorelease() };
-        let item: id = unsafe { msg_send![menu, itemWithTitle: item_title] };
-        (item != nil).then_some(item)
+        menu.itemWithTitle(&NSString::from_str(decoration.item))
     }
 
-    unsafe fn set_symbol_image(item: id, symbol: &str) -> Result<(), ApplicationMenuError> {
-        let symbol = unsafe { NSString::alloc(nil).init_str(symbol).autorelease() };
-        let image: id = unsafe {
-            msg_send![class!(NSImage), imageWithSystemSymbolName: symbol
-                                               accessibilityDescription: nil]
-        };
-        if image == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let _: () = unsafe { msg_send![item, setImage: image] };
-        let installed_image: id = unsafe { msg_send![item, image] };
-        if installed_image == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
+    fn set_symbol_image(item: &NSMenuItem, symbol: &str) -> Result<(), ApplicationMenuError> {
+        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(symbol),
+            None,
+        )
+        .ok_or(ApplicationMenuError::Unavailable)?;
+        item.setImage(Some(&image));
+        item.image().ok_or(ApplicationMenuError::Unavailable)?;
         Ok(())
     }
 
-    unsafe fn zoom_active_window() -> Result<(), ApplicationMenuError> {
-        let application = unsafe { NSApp() };
-        if application == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let mut window: id = unsafe { msg_send![application, keyWindow] };
-        if window == nil {
-            window = unsafe { msg_send![application, mainWindow] };
-        }
-        if window == nil {
-            return Err(ApplicationMenuError::MissingActiveWindow);
-        }
-        let _: () = unsafe { msg_send![window, performZoom: nil] };
+    fn zoom_active_window(application: &NSApplication) -> Result<(), ApplicationMenuError> {
+        let window = application
+            .keyWindow()
+            .or_else(|| application.mainWindow())
+            .ok_or(ApplicationMenuError::MissingActiveWindow)?;
+        window.performZoom(None);
         Ok(())
     }
 
-    unsafe fn bring_all_windows_to_front() -> Result<(), ApplicationMenuError> {
-        let application = unsafe { NSApp() };
-        if application == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let _: () = unsafe { msg_send![application, arrangeInFront: nil] };
-        Ok(())
-    }
-
-    unsafe fn open_help() -> Result<(), ApplicationMenuError> {
-        let string = unsafe { NSString::alloc(nil).init_str(HELP_URL).autorelease() };
-        let url: id = unsafe { msg_send![class!(NSURL), URLWithString: string] };
-        if url == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let workspace: id = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
-        if workspace == nil {
-            return Err(ApplicationMenuError::Unavailable);
-        }
-        let opened: BOOL = unsafe { msg_send![workspace, openURL: url] };
-        if opened == YES {
-            Ok(())
-        } else {
-            Err(ApplicationMenuError::Rejected)
-        }
-    }
-
-    fn main_thread() -> bool {
-        // SAFETY: `NSThread.isMainThread` is a process query with no object lifetime transfer.
-        unsafe {
-            let is_main: BOOL = msg_send![class!(NSThread), isMainThread];
-            is_main == YES
-        }
+    fn open_help() -> Result<(), ApplicationMenuError> {
+        let url = NSURL::URLWithString(&NSString::from_str(HELP_URL))
+            .ok_or(ApplicationMenuError::Unavailable)?;
+        NSWorkspace::sharedWorkspace()
+            .openURL(&url)
+            .then_some(())
+            .ok_or(ApplicationMenuError::Rejected)
     }
 }
 

@@ -195,7 +195,7 @@ impl TerminalGridPresentation {
                                 let (grid, draws) = cursor.counts.get();
                                 cursor.counts.set((grid, draws + 1));
                             }
-                            let _ = batch.submit(batch.grid_bounds, window, cx);
+                            let _ = batch.submit(batch.grid_bounds, true, window, cx);
                         }
                     },
                 )

@@ -32,6 +32,7 @@ pub(crate) fn resolve_wheel_phase(
             TouchPhase::Started => WheelPhase::GestureStarted,
             TouchPhase::Moved => WheelPhase::GestureChanged,
             TouchPhase::Ended => WheelPhase::GestureEnded,
+            TouchPhase::Cancelled => WheelPhase::GestureCancelled,
         },
     }
 }

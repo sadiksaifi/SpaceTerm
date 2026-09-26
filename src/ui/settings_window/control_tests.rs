@@ -118,9 +118,12 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);
     cx.update(|window, cx| {
-        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-            styles.borrow_mut().push(state.clone());
-            gpui::Empty
+        cx.register_inspector_element(move |_, _| {
+            let styles = Rc::clone(&styles);
+            move |_, state: &DivInspectorState, _, _| {
+                styles.borrow_mut().push(state.clone());
+                gpui::Empty
+            }
         });
         cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
             div()
@@ -355,11 +358,13 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     // Native focus transitions can occur after the press callback and before its click callback.
     // Neither a blur nor a focus notification is evidence that the keyboard caused the event.
     cx.update(|window, cx| {
-        settings.read(cx).focus_handle.focus(window);
+        let focus = settings.read(cx).focus_handle.clone();
+        focus.focus(window, cx);
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
-        settings.read(cx).navigation_focus.focus(window);
+        let focus = settings.read(cx).navigation_focus.clone();
+        focus.focus(window, cx);
     });
     cx.run_until_parked();
     assert!(!settings.read_with(cx, |settings, _| settings.navigation_focus_visible));

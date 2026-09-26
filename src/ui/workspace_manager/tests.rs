@@ -4611,6 +4611,7 @@ fn press_return(cx: &mut VisualTestContext) {
     let keystroke = Keystroke::parse("enter").unwrap_or_default();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent { keystroke });
@@ -5277,7 +5278,7 @@ fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut 
 
     let mut indicator = None;
     for _ in 0..64 {
-        cx.update(|window, _| window.focus_next());
+        cx.update(|window, cx| window.focus_next(cx));
         cx.run_until_parked();
         indicator = cx.debug_bounds("workspace-sidebar-resize-handle-keyboard-focus-indicator");
         if indicator.is_some() {
@@ -5454,9 +5455,9 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
         cx.update(|window, _| {
             let bounds = bounds.scale(window.scale_factor());
             window
-                .painted_quads_for_test()
+                .painted_quads()
                 .into_iter()
-                .find(|quad| quad.visible_bounds == bounds)
+                .find(|quad| quad.bounds.intersect(&quad.content_mask.bounds) == bounds)
                 .map(|quad| quad.background)
         })
     };
@@ -7597,9 +7598,12 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);
     cx.update(|window, cx| {
-        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-            styles.borrow_mut().push(state.clone());
-            gpui::Empty
+        cx.register_inspector_element(move |_, _| {
+            let styles = Rc::clone(&styles);
+            move |_, state: &DivInspectorState, _, _| {
+                styles.borrow_mut().push(state.clone());
+                gpui::Empty
+            }
         });
         cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
             div()
@@ -7750,7 +7754,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 
     let sidebar_focus =
         manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
-    cx.update(|window, _| sidebar_focus.focus(window));
+    cx.update(|window, cx| sidebar_focus.focus(window, cx));
     cx.run_until_parked();
 
     let rename_state = manager.read_with(cx, |manager, cx| {

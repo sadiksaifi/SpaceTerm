@@ -212,9 +212,13 @@ fn alert_suppression_paints_with_the_floating_toggle_theme(cx: &mut TestAppConte
     let backgrounds = cx.update(|window, _| {
         let indicator = indicator.scale(window.scale_factor());
         window
-            .painted_quads_for_test()
+            .painted_quads()
             .into_iter()
-            .filter(|quad| quad.visible_bounds.intersects(&indicator))
+            .filter(|quad| {
+                quad.bounds
+                    .intersect(&quad.content_mask.bounds)
+                    .intersects(&indicator)
+            })
             .map(|quad| quad.background)
             .collect::<Vec<_>>()
     });
@@ -844,7 +848,7 @@ fn alert_window(cx: &mut TestAppContext) -> AlertWindow<'_> {
     cx.update(|window, cx| {
         window.activate_window();
         let invoker = root.read(cx).invoker.clone();
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();
@@ -2283,6 +2287,7 @@ fn modal_initial_focus_and_space_activate_the_policy_target(cx: &mut TestAppCont
 
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("space").unwrap_or_default(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent {
@@ -2317,7 +2322,8 @@ fn destructive_alert_focuses_safe_cancel_and_return_activates_it(cx: &mut TestAp
     });
     cx.update(|window, cx| {
         window.activate_window();
-        root.read(cx).invoker.focus(window);
+        let focus = root.read(cx).invoker.clone();
+        focus.focus(window, cx);
         root.update(cx, |root, cx| {
             let outcome = root.outcome.clone();
             root.presentation = Some(
@@ -2380,7 +2386,8 @@ fn cancellable_progress_focuses_cancel_and_space_requests_cancellation(cx: &mut 
     });
     cx.update(|window, cx| {
         window.activate_window();
-        root.read(cx).invoker.focus(window);
+        let focus = root.read(cx).invoker.clone();
+        focus.focus(window, cx);
         root.update(cx, |_, cx| {
             ProgressDialog::new(
                 ModalId::new("cancellable-progress-focus"),
@@ -2563,7 +2570,7 @@ fn programmatic_progress_surface_owns_contained_focus_without_underlay_escape(
     let invoker = root.read_with(cx, |root, _| root.invoker.clone());
     let handle = cx.update(|window, cx| {
         window.activate_window();
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |_, cx| {
             ProgressDialog::<()>::new(
                 ModalId::new("programmatic-progress-focus"),
@@ -2818,7 +2825,7 @@ fn programmatic_progress_completion_restores_ordinary_predecessor_focus(cx: &mut
     let invoker = root.read_with(cx, |root, _| root.invoker.clone());
     let handle = cx.update(|window, cx| {
         window.activate_window();
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |_, cx| {
             ProgressDialog::<()>::new(
                 ModalId::new("predecessor-progress"),
@@ -2864,7 +2871,7 @@ fn inactive_modal_close_defers_exact_predecessor_restoration_until_reactivation(
     });
     let presentation = cx.update(|window, cx| {
         window.activate_window();
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
         root.read(cx)
             .presentation
@@ -2910,7 +2917,7 @@ fn removed_predecessor_is_not_restored_or_replaced_by_unrelated_focus(cx: &mut T
     let removed_invoker = invoker.downgrade();
     let presentation = cx.update(|window, cx| {
         window.activate_window();
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
         root.read(cx)
             .presentation
@@ -4686,6 +4693,7 @@ fn modal_tab_and_shift_tab_wrap_inside_the_action_ring(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("tab shift-tab");
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("space").unwrap_or_default(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent {
@@ -5793,7 +5801,7 @@ fn dialog_programmatic_completion_focuses_a_live_successor(cx: &mut TestAppConte
     let (invoker, successor) =
         root.read_with(cx, |root, _| (root.invoker.clone(), root.successor.clone()));
     cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();
@@ -5823,7 +5831,7 @@ fn queued_dialog_successor_is_restored_after_the_active_predecessor_closes(
     let (invoker, successor) =
         root.read_with(cx, |root, _| (root.invoker.clone(), root.successor.clone()));
     let (active, queued) = cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| {
             root.present(window, cx);
             let queued = root.queue_completion("queued-successor", window, cx);
@@ -5855,7 +5863,7 @@ fn queued_dialog_removed_successor_is_not_restored(cx: &mut TestAppContext) {
     let (invoker, successor) =
         root.read_with(cx, |root, _| (root.invoker.clone(), root.successor.clone()));
     let (active, queued) = cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| {
             root.present(window, cx);
             let queued = root.queue_completion("queued-removed-successor", window, cx);
@@ -5899,7 +5907,7 @@ fn later_active_dialog_successor_supersedes_a_queued_dialog_successor(cx: &mut T
         )
     });
     let (active, queued) = cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| {
             root.present(window, cx);
             let queued = root.queue_completion("queued-superseded-successor", window, cx);
@@ -5971,7 +5979,7 @@ fn dialog_programmatic_completion_ignores_a_removed_successor(cx: &mut TestAppCo
     let (invoker, successor) =
         root.read_with(cx, |root, _| (root.invoker.clone(), root.successor.clone()));
     cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();
@@ -6006,7 +6014,7 @@ fn dialog_programmatic_completion_does_not_steal_from_a_newer_focus_owner(cx: &m
         )
     });
     cx.update(|window, cx| {
-        invoker.focus(window);
+        invoker.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();
@@ -6018,7 +6026,7 @@ fn dialog_programmatic_completion_does_not_steal_from_a_newer_focus_owner(cx: &m
         completion
             .complete(window, Some(successor.clone()), cx)
             .expect("Dialog should complete");
-        newer_owner.focus(window);
+        newer_owner.focus(window, cx);
     });
     cx.run_until_parked();
 
@@ -6644,6 +6652,7 @@ fn press_space(cx: &mut VisualTestContext) {
     let keystroke = Keystroke::parse("space").unwrap_or_default();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent { keystroke });
@@ -6654,6 +6663,7 @@ fn press_return(cx: &mut VisualTestContext) {
     let keystroke = Keystroke::parse("enter").unwrap_or_default();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
+        prefer_character_input: false,
         is_held: false,
     });
     cx.simulate_event(KeyUpEvent { keystroke });
@@ -6711,7 +6721,8 @@ fn dialog_focus_window(
     });
     cx.update(|window, cx| {
         window.activate_window();
-        root.read(cx).invoker.focus(window);
+        let focus = root.read(cx).invoker.clone();
+        focus.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();
@@ -6748,7 +6759,8 @@ fn dialog_denial_refocuses_the_original_initial_field_without_mutating_values(
     });
     cx.update(|window, cx| {
         window.activate_window();
-        root.read(cx).invoker.focus(window);
+        let focus = root.read(cx).invoker.clone();
+        focus.focus(window, cx);
         root.update(cx, |root, cx| root.present(window, cx));
     });
     cx.run_until_parked();

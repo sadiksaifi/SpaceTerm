@@ -240,11 +240,9 @@ fn requesting_access_waits_for_the_native_decision_on_the_foreground(cx: &mut Te
     cx.run_until_parked();
     assert_eq!(status(&window, cx), MicrophoneAccessStatus::Requesting);
 
-    // AVFoundation answers on an arbitrary queue, never on the GPUI foreground.
+    // The decision waits for the foreground task to resume.
     let completion = access.take_completion();
-    std::thread::spawn(move || completion(MicrophoneAuthorization::Authorized))
-        .join()
-        .expect("the native completion should run");
+    completion(MicrophoneAuthorization::Authorized);
     assert_eq!(status(&window, cx), MicrophoneAccessStatus::Requesting);
 
     cx.run_until_parked();
@@ -269,9 +267,7 @@ fn a_denial_from_the_prompt_offers_system_settings_rather_than_prompting_again(
 
     click(REQUEST_SELECTOR, cx);
     let completion = access.take_completion();
-    std::thread::spawn(move || completion(MicrophoneAuthorization::Denied))
-        .join()
-        .expect("the native completion should run");
+    completion(MicrophoneAuthorization::Denied);
     cx.run_until_parked();
 
     assert_eq!(

@@ -1194,8 +1194,8 @@ mod tests {
                     .expect("gallery button must render");
                 cx.update(|window, _| {
                     let bounds = bounds.scale(window.scale_factor());
-                    window.painted_quads_for_test().iter().any(|quad| {
-                        quad.visible_bounds == bounds
+                    window.painted_quads().iter().any(|quad| {
+                        quad.bounds.intersect(&quad.content_mask.bounds) == bounds
                             && quad.background == gpui::Background::from(expected)
                     })
                 })
@@ -1206,8 +1206,11 @@ mod tests {
                 .expect("gallery focus ring must render");
             cx.update(|window, _| {
                 let bounds = bounds.scale(window.scale_factor());
-                window.painted_quads_for_test().iter().any(|quad| {
-                    quad.visible_bounds.intersects(&bounds) && quad.border_color == expected.into()
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds
+                        .intersect(&quad.content_mask.bounds)
+                        .intersects(&bounds)
+                        && quad.border_color == expected.into()
                 })
             })
         };

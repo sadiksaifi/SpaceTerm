@@ -509,7 +509,7 @@ fn render_surface(
         .child(
             div()
                 .min_w(px(0.0))
-                .flex_grow()
+                .flex_grow(1.0)
                 .whitespace_normal()
                 .text_size(metrics.primary_font_size)
                 .line_height(metrics.primary_line_height)
@@ -1475,9 +1475,8 @@ fn clamp_axis_origin(origin: Pixels, length: Pixels, minimum: Pixels, maximum: P
 #[cfg(test)]
 mod tests {
     use gpui::{
-        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, Modifiers,
-        MouseButton, Render, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, rgba,
-        size,
+        AppContext as _, Context, Entity, FocusHandle, Modifiers, MouseButton, Render,
+        TestAppContext, VisualTestContext, WindowBounds, WindowOptions, rgba, size,
     };
 
     use super::*;
@@ -1693,9 +1692,9 @@ mod tests {
             focus_handle: cx.focus_handle(),
         });
         let focus_handle = root.read_with(cx, |root, _| root.focus_handle.clone());
-        cx.update(|window, _| {
+        cx.update(|window, cx| {
             window.activate_window();
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
         });
         cx.run_until_parked();
         (root, cx)

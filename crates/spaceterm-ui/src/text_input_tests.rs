@@ -80,7 +80,7 @@ fn input<'a>(
     });
     cx.update(|window, cx| {
         window.activate_window();
-        input.read(cx).focus_handle().focus(window);
+        input.read(cx).focus_handle().focus(window, cx);
     });
     cx.run_until_parked();
     (input, cx)
@@ -98,7 +98,7 @@ fn obscured_input<'a>(
     });
     cx.update(|window, cx| {
         window.activate_window();
-        input.read(cx).focus_handle().focus(window);
+        input.read(cx).focus_handle().focus(window, cx);
     });
     cx.run_until_parked();
     (input, cx)
@@ -138,7 +138,7 @@ fn input_with_events<'a>(
         root.read_with(cx, |root, _| (root.input.clone(), root.other_focus.clone()));
     cx.update(|window, cx| {
         window.activate_window();
-        input.read(cx).focus_handle().focus(window);
+        input.read(cx).focus_handle().focus(window, cx);
     });
     cx.run_until_parked();
     events.borrow_mut().clear();
@@ -379,16 +379,16 @@ fn losing_focus_removes_the_caret_from_the_rendered_frame(cx: &mut TestAppContex
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
-        cx.update(|window, _| window.painted_quads_for_test().len()),
+        cx.update(|window, _| window.painted_quads().len()),
         1,
         "the focused empty input should paint its caret"
     );
 
-    cx.update(|window, _| other_focus.focus(window));
+    cx.update(|window, cx| other_focus.focus(window, cx));
     cx.run_until_parked();
 
     assert!(
-        cx.update(|window, _| window.painted_quads_for_test().is_empty()),
+        cx.update(|window, _| window.painted_quads().is_empty()),
         "the unfocused input must not retain a caret primitive"
     );
 }
@@ -400,16 +400,16 @@ fn losing_focus_removes_the_composition_underline_from_the_rendered_frame(cx: &m
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
-        cx.update(|window, _| window.painted_underline_bounds_for_test().len()),
+        cx.update(|window, _| window.painted_underlines().len()),
         1,
         "the active composition should paint its marked-text underline"
     );
 
-    cx.update(|window, _| other_focus.focus(window));
+    cx.update(|window, cx| other_focus.focus(window, cx));
     cx.run_until_parked();
 
     assert!(
-        cx.update(|window, _| window.painted_underline_bounds_for_test().is_empty()),
+        cx.update(|window, _| window.painted_underlines().is_empty()),
         "the unfocused input must not retain a composition underline"
     );
 }
@@ -1175,7 +1175,7 @@ fn lost_button_blur_disable_and_stale_generation_cancel_drag(cx: &mut TestAppCon
     assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_none()));
 
     cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
-    cx.update(|window, _| other_focus.focus(window));
+    cx.update(|window, cx| other_focus.focus(window, cx));
     cx.run_until_parked();
     assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_none()));
 
@@ -1396,7 +1396,7 @@ fn default_return_and_escape_behaviors_consume_before_parent(cx: &mut TestAppCon
             root.outer_cancel.clone(),
         )
     });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
 
     cx.simulate_keystrokes("enter escape");
 
@@ -1427,7 +1427,7 @@ fn propagated_return_and_escape_reach_parent_after_typed_events(cx: &mut TestApp
             root.outer_cancel.clone(),
         )
     });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
 
     cx.simulate_keystrokes("enter escape");
 
@@ -1453,7 +1453,7 @@ fn propagated_escape_consumes_composition_before_later_parent_cancel(cx: &mut Te
     let (input, cancel) = root.read_with(cx, |root, _| {
         (root.input.clone(), root.outer_cancel.clone())
     });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
     mark_text(&input, cx, "日");
 
     cx.simulate_keystrokes("escape");

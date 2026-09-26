@@ -22,6 +22,8 @@ MEASUREMENT_ATTEMPTS = 3
 MEASUREMENT_RETRY_SECONDS = 0.1
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 OWNER_FILE = ".spaceterm-cargo-target-owner"
+# Cargo only tags directories it creates, and `cargo clean` refuses an untagged target.
+CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55\n"
 
 
 class ArtifactMeasurementError(Exception):
@@ -218,6 +220,11 @@ class Supervisor:
                 "error: refusing to clean a Cargo target directory not owned by this repository",
                 file=sys.stderr,
             )
+            return 2
+        try:
+            (self.target_dir / "CACHEDIR.TAG").write_text(CACHEDIR_TAG, encoding="utf-8")
+        except OSError:
+            print("error: could not tag Cargo target directory", file=sys.stderr)
             return 2
         process = self._spawn_session(
             [

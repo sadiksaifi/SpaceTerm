@@ -602,7 +602,7 @@ enum LogicalFocusEntry {
 }
 
 #[cfg(test)]
-/// Logical facts retained because GPUI 0.2.2 cannot publish them as native accessibility nodes.
+/// Logical facts retained for deterministic modal behavior tests.
 ///
 /// This private value and the renderer's debug selectors support deterministic tests only. They
 /// are not VoiceOver, Narrator, Orca, or native accessibility-tree evidence.
@@ -1560,7 +1560,7 @@ impl ModalWindowOwner {
         }
     }
 
-    fn restore_focus_if_ready(&mut self, window: &mut Window, cx: &App) {
+    fn restore_focus_if_ready(&mut self, window: &mut Window, cx: &mut App) {
         if !self.focus_chain.restoration_pending
             || self.active.is_some()
             || !window.is_window_active()
@@ -1599,7 +1599,7 @@ impl ModalWindowOwner {
         if let (Some(target), Some(root)) = (target, root)
             && root.contains(&target, window)
         {
-            target.focus(window);
+            target.focus(window, cx);
         }
         self.focus_chain.restoration_pending = false;
         self.focus_chain.predecessor = None;
@@ -1840,8 +1840,7 @@ fn opened_effects(
             }
             let task = cx.spawn(async move |cx| {
                 cx.background_executor().timer(deadline).await;
-                let _ = cx
-                    .update(|cx| expire_programmatic_deadline(&owner, window_id, presentation, cx));
+                cx.update(|cx| expire_programmatic_deadline(&owner, window_id, presentation, cx));
             });
             task.detach();
         }));

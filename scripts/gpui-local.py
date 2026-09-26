@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Select a local Zed checkout for SpaceTerm's pinned GPUI dependencies."""
+
+import argparse
+from pathlib import Path
+import subprocess
+import tomllib
+
+
+FORK_URL = "https://github.com/sadiksaifi/zed"
+ROOT = Path(__file__).resolve().parent.parent
+CONFIG = ROOT / ".cargo" / "config.toml"
+BLOCK_START = "# BEGIN SpaceTerm local GPUI patches\n"
+BLOCK_START_WITH_SEPARATOR = "# BEGIN SpaceTerm local GPUI patches (added newline)\n"
+BLOCK_END = "# END SpaceTerm local GPUI patches\n"
+
+
+def without_owned_block(contents: str) -> tuple[str, bool]:
+    lines = contents.splitlines(keepends=True)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line in (BLOCK_START, BLOCK_START_WITH_SEPARATOR)
+    ]
+    ends = [index for index, line in enumerate(lines) if line == BLOCK_END]
+    if not starts and not ends:
+        return contents, False
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValueError("local GPUI patch markers are incomplete")
+    prefix = "".join(lines[: starts[0]])
+    if lines[starts[0]] == BLOCK_START_WITH_SEPARATOR:
+        prefix = prefix[:-1]
+    return prefix + "".join(lines[ends[0] + 1 :]), True
+
+
+def local_crates(checkout: Path) -> dict[str, Path]:
+    crates = {}
+    for directory in ("crates", "tooling"):
+        manifests = sorted((checkout / directory).glob("**/Cargo.toml"), key=lambda path: len(path.parts))
+        for manifest in manifests:
+            package = tomllib.loads(manifest.read_text()).get("package")
+            if package:
+                crates.setdefault(package["name"], manifest.parent)
+    return crates
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("on", "off"))
+    parser.add_argument("checkout", nargs="?", default="../zed")
+    args = parser.parse_args()
+    contents = CONFIG.read_text() if CONFIG.exists() else ""
+    try:
+        remaining, owned = without_owned_block(contents)
+    except ValueError as error:
+        parser.error(str(error))
+
+    if args.mode == "off":
+        if owned:
+            if remaining:
+                CONFIG.write_text(remaining)
+            else:
+                CONFIG.unlink()
+        return
+
+    if not owned and f'[patch."{FORK_URL}"]' in remaining:
+        parser.error("local GPUI patch table already exists outside the owned block")
+
+    checkout = (ROOT / args.checkout).resolve()
+    if not (checkout / "SPACETERM.md").is_file():
+        parser.error(f"not a SpaceTerm Zed checkout: {checkout}")
+
+    committed_lock = subprocess.run(
+        ["git", "show", "HEAD:Cargo.lock"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    lock = tomllib.loads(committed_lock)
+    names = sorted(
+        package["name"]
+        for package in lock["package"]
+        if package.get("source", "").startswith(f"git+{FORK_URL}")
+    )
+    crates = local_crates(checkout)
+    missing = sorted(set(names) - crates.keys())
+    if missing:
+        parser.error(f"fork crates missing from checkout: {', '.join(missing)}")
+
+    lines = [f'[patch."{FORK_URL}"]']
+    for name in names:
+        path = crates[name].as_posix().replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{name} = {{ path = "{path}" }}')
+    CONFIG.parent.mkdir(exist_ok=True)
+    separator = "\n" if remaining and not remaining.endswith("\n") else ""
+    marker = BLOCK_START_WITH_SEPARATOR if separator else BLOCK_START
+    CONFIG.write_text(remaining + separator + marker + "\n".join(lines) + "\n" + BLOCK_END)
+
+
+if __name__ == "__main__":
+    main()

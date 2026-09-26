@@ -6,9 +6,8 @@
 //! later key press confirms. Callers own the selected value and receive a change request; the
 //! control never retains a value of its own.
 //!
-//! GPUI 0.2.2 cannot publish radio-group roles or selected state to the native accessibility tree,
-//! so each option retains its label as its logical accessibility name without claiming native
-//! assistive-technology publication.
+//! Each option retains its label as its logical accessibility name. The control does not yet publish
+//! radio-group nodes or selected state to the native accessibility tree.
 
 use std::rc::Rc;
 
@@ -659,7 +658,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         });
         let focus_handle = state.read(cx).focus_handle.clone();
         if !enabled && focus_handle.is_focused(window) {
-            window.blur();
+            window.blur(cx);
         }
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);

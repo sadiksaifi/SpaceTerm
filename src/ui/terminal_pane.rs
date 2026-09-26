@@ -654,7 +654,7 @@ impl TerminalPane {
             window,
             |pane, _, event: &OverlayScrollbarEvent<u64>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
-                    pane.focus(window);
+                    pane.focus(window, cx);
                     cx.emit(TerminalPaneEvent::FocusRequested);
                 }
                 OverlayScrollbarEvent::OffsetRequested(rows) => {
@@ -795,16 +795,16 @@ impl TerminalPane {
         }
     }
 
-    pub(crate) fn focus(&self, window: &mut Window) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         self.advance_native_service_focus_epoch();
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
     }
 
-    fn focus_find(&mut self, window: &mut Window, cx: &App) {
+    fn focus_find(&mut self, window: &mut Window, cx: &mut App) {
         let Some(input) = &self.find_input else {
             return;
         };
-        input.read(cx).focus_handle().focus(window);
+        input.read(cx).focus_handle().focus(window, cx);
     }
 
     fn advance_native_service_focus_epoch(&self) {
@@ -921,8 +921,8 @@ impl TerminalPane {
                             let _ = pane.sync_terminal_input_focus(window, cx);
                             cx.notify();
                         }
-                        TextInputEvent::TabForwardRequested => window.focus_next(),
-                        TextInputEvent::TabBackwardRequested => window.focus_prev(),
+                        TextInputEvent::TabForwardRequested => window.focus_next(cx),
+                        TextInputEvent::TabBackwardRequested => window.focus_prev(cx),
                         TextInputEvent::FocusLost
                         | TextInputEvent::CompositionStarted
                         | TextInputEvent::CompositionCommitted
@@ -961,7 +961,7 @@ impl TerminalPane {
         }
         self.end_find_state();
         self.advance_native_service_focus_epoch();
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         let _ = self.sync_terminal_input_focus(window, cx);
         cx.notify();
     }
@@ -2440,7 +2440,7 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
-        self.focus(window);
+        self.focus(window, cx);
         self.clear_attention(cx);
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
@@ -2836,7 +2836,7 @@ impl TerminalPane {
         };
         self.pending_file_insertion = Some(insertion);
         window.activate_window();
-        self.focus(window);
+        self.focus(window, cx);
         cx.emit(TerminalPaneEvent::FocusRequested);
         cx.notify();
     }
@@ -2899,7 +2899,7 @@ impl TerminalPane {
         };
 
         self.pointer_modifiers = input_modifiers(modifiers);
-        self.focus(window);
+        self.focus(window, cx);
         self.clear_attention(cx);
         if !self.synchronize_terminal_input_focus(window, cx) {
             return false;
@@ -3215,7 +3215,7 @@ impl TerminalPane {
             return;
         };
         let receiver = session.resolve_paste(confirmation.id, decision);
-        self.focus(window);
+        self.focus(window, cx);
         cx.notify();
         cx.spawn(async move |this, cx| match receiver.recv().await {
             Ok(Ok(PasteResolution::Written)) => {
@@ -3340,11 +3340,11 @@ impl TerminalPane {
                         .key_context(TERMINAL_FIND_KEY_CONTEXT)
                         .tab_group()
                         .on_action(|_: &FocusNextTerminalFindControl, window, cx| {
-                            window.focus_next();
+                            window.focus_next(cx);
                             cx.stop_propagation();
                         })
                         .on_action(|_: &FocusPreviousTerminalFindControl, window, cx| {
-                            window.focus_prev();
+                            window.focus_prev(cx);
                             cx.stop_propagation();
                         })
                         .child(TerminalFindField {
@@ -3446,7 +3446,7 @@ impl gpui::RenderOnce for TerminalFindField {
         .w(appearance.spacing(120.0))
         .max_w_full()
         .min_w(px(0.0))
-        .flex_grow()
+        .flex_grow(1.0)
         .flex()
         .items_center()
         .px(appearance.spacing(5.0))

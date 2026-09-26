@@ -2,11 +2,11 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use block::ConcreteBlock;
-use cocoa::base::{BOOL, NO, nil};
-use cocoa::foundation::{NSAutoreleasePool, NSInteger, NSString};
-use objc::runtime::Class;
-use objc::{msg_send, sel, sel_impl};
+use block2::RcBlock;
+use objc2::MainThreadMarker;
+use objc2::runtime::Bool;
+use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
+use objc2_foundation::NSInteger;
 
 use super::microphone_access::{
     MicrophoneAccess, MicrophoneAccessError, MicrophoneAuthorization,
@@ -14,10 +14,6 @@ use super::microphone_access::{
 };
 use super::permission_recovery::{PermissionRecovery, PermissionRecoveryError};
 
-#[link(name = "AVFoundation", kind = "framework")]
-unsafe extern "C" {}
-
-const AV_MEDIA_TYPE_AUDIO: &str = "soun";
 const MICROPHONE_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone";
 const LEGACY_MICROPHONE_SETTINGS_URI: &str =
@@ -44,64 +40,47 @@ impl MacosMicrophoneAccess {
 
 impl MicrophoneAccess for MacosMicrophoneAccess {
     fn authorization(&self) -> Result<MicrophoneAuthorization, MicrophoneAccessError> {
-        if !main_thread() {
+        if MainThreadMarker::new().is_none() {
             return Err(MicrophoneAccessError::OffMainThread);
         }
-        let device =
-            Class::get("AVCaptureDevice").ok_or(MicrophoneAccessError::PlatformUnavailable)?;
-
-        // SAFETY: AVFoundation is linked into the application. The media-type string lives until
-        // the synchronous class query returns, and the autorelease pool drains on the AppKit thread.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let media_type = NSString::alloc(nil)
-                .init_str(AV_MEDIA_TYPE_AUDIO)
-                .autorelease();
-            let raw: NSInteger = msg_send![device, authorizationStatusForMediaType: media_type];
-            pool.drain();
-            authorization_from_raw(raw).ok_or(MicrophoneAccessError::PlatformUnavailable)
-        }
+        // SAFETY: AVFoundation exports this immutable audio media type when available.
+        let media_type =
+            unsafe { AVMediaTypeAudio }.ok_or(MicrophoneAccessError::PlatformUnavailable)?;
+        // SAFETY: AVMediaTypeAudio is a valid input for this AVCaptureDevice class method.
+        let raw: NSInteger =
+            unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) }.0;
+        authorization_from_raw(raw).ok_or(MicrophoneAccessError::PlatformUnavailable)
     }
 
     fn request_authorization(
         &self,
         completion: MicrophoneAuthorizationCompletion,
     ) -> Result<(), MicrophoneAccessError> {
-        if !main_thread() {
+        if MainThreadMarker::new().is_none() {
             return Err(MicrophoneAccessError::OffMainThread);
         }
-        let device =
-            Class::get("AVCaptureDevice").ok_or(MicrophoneAccessError::PlatformUnavailable)?;
+        // SAFETY: AVFoundation exports this immutable audio media type when available.
+        let media_type =
+            unsafe { AVMediaTypeAudio }.ok_or(MicrophoneAccessError::PlatformUnavailable)?;
         let completion = Mutex::new(Some(completion));
-
-        // SAFETY: AVFoundation copies the escaping block before this call returns. The block owns
-        // its Send callback and publishes only the closed authorization result from any native
-        // completion queue. The media-type string is consumed synchronously by the class method.
+        let completion = RcBlock::new(move |granted: Bool| {
+            let Some(completion) = completion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            else {
+                return;
+            };
+            completion(if !granted.as_bool() {
+                MicrophoneAuthorization::Denied
+            } else {
+                MicrophoneAuthorization::Authorized
+            });
+        });
+        // SAFETY: AVMediaTypeAudio is valid here. AVCaptureDevice copies the escaping block,
+        // which owns its Send callback and runs on an arbitrary completion queue.
         unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let media_type = NSString::alloc(nil)
-                .init_str(AV_MEDIA_TYPE_AUDIO)
-                .autorelease();
-            let completion = ConcreteBlock::new(move |granted: BOOL| {
-                let Some(completion) = completion
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                else {
-                    return;
-                };
-                completion(if granted == NO {
-                    MicrophoneAuthorization::Denied
-                } else {
-                    MicrophoneAuthorization::Authorized
-                });
-            })
-            .copy();
-            let _: () = msg_send![device,
-                requestAccessForMediaType: media_type
-                completionHandler: &*completion
-            ];
-            pool.drain();
+            AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &completion);
         }
         Ok(())
     }
@@ -130,17 +109,6 @@ impl From<PermissionRecoveryError> for MicrophoneAccessError {
             PermissionRecoveryError::PlatformUnavailable => Self::PlatformUnavailable,
             PermissionRecoveryError::PlatformRejected => Self::PlatformRejected,
         }
-    }
-}
-
-fn main_thread() -> bool {
-    let Some(thread) = Class::get("NSThread") else {
-        return false;
-    };
-    // SAFETY: `NSThread.isMainThread` is a process query with no object lifetime transfer.
-    unsafe {
-        let is_main: BOOL = msg_send![thread, isMainThread];
-        is_main != NO
     }
 }
 

@@ -2,14 +2,13 @@
 //!
 //! The Module owns provisional navigation and popup lifecycle. Callers own the committed value and
 //! receive acceptance only after the popup has closed. [`TextInput`] owns editing, clipboard,
-//! grapheme, and input-method behavior. GPUI 0.2.2 does not expose listbox roles or active-option
-//! relationships for ordinary elements, so this Module retains those facts without claiming native
-//! assistive-technology publication.
+//! grapheme, and input-method behavior. This control retains selection and active-option facts for
+//! its own behavior. It does not yet publish listbox nodes to the native accessibility tree.
 
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Corner, ElementId, Entity,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, ElementId, Entity,
     FocusHandle, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
@@ -1656,14 +1655,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
                 }
                 TextInputEvent::TabForwardRequested => {
                     if state.close(ComboBoxCloseReason::TabTraversal, false, Some(window), cx) {
-                        state.trigger_focus.focus(window);
-                        window.defer(cx, |window, _| window.focus_next());
+                        state.trigger_focus.focus(window, cx);
+                        window.defer(cx, |window, cx| window.focus_next(cx));
                     }
                 }
                 TextInputEvent::TabBackwardRequested => {
                     if state.close(ComboBoxCloseReason::TabTraversal, false, Some(window), cx) {
-                        state.trigger_focus.focus(window);
-                        window.defer(cx, |window, _| window.focus_prev());
+                        state.trigger_focus.focus(window, cx);
+                        window.defer(cx, |window, cx| window.focus_prev(cx));
                     }
                 }
                 TextInputEvent::ContextMenuOpened => {
@@ -1707,7 +1706,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
                     .filter(|(_, parent)| *parent == crate::modal::current_modal_parent(window, cx))
                     .and_then(|(focus, _)| focus.upgrade())
             {
-                focus.focus(window);
+                focus.focus(window, cx);
             }
         })
         .detach();
@@ -1721,8 +1720,8 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
                 state.open = false;
                 if let Some(focus) = state.restore_focus.take().and_then(|focus| focus.upgrade()) {
                     cx.defer(move |cx| {
-                        let _ = cx.update_window(release_window, |_, window, _| {
-                            focus.focus(window);
+                        let _ = cx.update_window(release_window, |_, window, cx| {
+                            focus.focus(window, cx);
                         });
                     });
                 }
@@ -1843,7 +1842,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
         self.repair_provisional();
         if self.open && disabled {
             self.close(ComboBoxCloseReason::Disabled, false, Some(window), cx);
-            window.defer(cx, |window, _| window.focus_next());
+            window.defer(cx, |window, cx| window.focus_next(cx));
         }
     }
 
@@ -2016,7 +2015,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             .or(menu_predecessor)
             .or(combo_predecessor)
             .or_else(|| window.focused(cx).map(|focus| focus.downgrade()));
-        self.input.read(cx).focus_handle().focus(window);
+        self.input.read(cx).focus_handle().focus(window, cx);
         self.emit_lifecycle(ComboBoxLifecycleEvent::Opened, cx);
         cx.notify();
         true
@@ -2044,7 +2043,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             && let (Some(window), Some(focus)) =
                 (window, predecessor.and_then(|focus| focus.upgrade()))
         {
-            focus.focus(window);
+            focus.focus(window, cx);
         }
         self.emit_lifecycle(ComboBoxLifecycleEvent::Closed(reason), cx);
         cx.notify();
@@ -3002,7 +3001,7 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         });
 
     let overlay = anchored()
-        .anchor(Corner::TopLeft)
+        .anchor(Anchor::TopLeft)
         .position(gpui::point(px(0.0), px(0.0)))
         .snap_to_window()
         .child(overlay);

@@ -1,16 +1,14 @@
 use std::rc::Rc;
 
-use block::ConcreteBlock;
-use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
+use block2::RcBlock;
 use gpui::Window;
-use objc::runtime::Object;
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::{NSView, NSWindow, NSWindowOcclusionState};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::window_visibility::{WindowVisibility, WindowVisibilityFactory, WindowVisibilitySource};
-
-const NS_WINDOW_OCCLUSION_STATE_VISIBLE: u64 = 1 << 1;
 
 pub(crate) struct MacosWindowVisibilityFactory;
 
@@ -24,86 +22,68 @@ impl WindowVisibilityFactory for MacosWindowVisibilityFactory {
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
             return None;
         };
-        let view = handle.ns_view.as_ptr().cast::<Object>();
-        // SAFETY: GPUI supplies this live NSView on the AppKit thread. Retaining its exact
-        // NSWindow preserves identity across application activation and other window changes.
-        unsafe {
-            let native_window: id = msg_send![view, window];
-            if native_window == nil {
-                return None;
-            }
-            let native_window: id = msg_send![native_window, retain];
-            let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
-            let mut source = MacosWindowVisibilitySource {
-                window: native_window,
-                center,
-                observers: Vec::with_capacity(5),
-                // Rc also ensures this native owner cannot leave the AppKit thread.
-                callback: Rc::from(changed),
-            };
-            for name in [
-                "NSWindowDidMiniaturizeNotification",
-                "NSWindowDidDeminiaturizeNotification",
-                "NSWindowDidChangeOcclusionStateNotification",
-                "NSWindowWillStartLiveResizeNotification",
-                "NSWindowDidEndLiveResizeNotification",
-            ] {
-                let callback = Rc::downgrade(&source.callback);
-                let block = ConcreteBlock::new(move |_: id| {
-                    if let Some(callback) = callback.upgrade() {
-                        callback();
-                    }
-                })
-                .copy();
-                let name = NSString::alloc(nil).init_str(name);
-                let observer: id = msg_send![center,
-                    addObserverForName: name
-                    object: native_window
-                    queue: nil
-                    usingBlock: &*block
-                ];
-                let _: () = msg_send![name, release];
-                if observer == nil {
-                    return None;
+        // SAFETY: GPUI owns this live NSView during the synchronous capture call.
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+        let native_window = view.window()?;
+        let center = NSNotificationCenter::defaultCenter();
+        let mut source = MacosWindowVisibilitySource {
+            window: native_window,
+            center,
+            observers: Vec::with_capacity(5),
+            callback: Rc::from(changed),
+        };
+        for name in [
+            "NSWindowDidMiniaturizeNotification",
+            "NSWindowDidDeminiaturizeNotification",
+            "NSWindowDidChangeOcclusionStateNotification",
+            "NSWindowWillStartLiveResizeNotification",
+            "NSWindowDidEndLiveResizeNotification",
+        ] {
+            let callback = Rc::downgrade(&source.callback);
+            let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
+                if let Some(callback) = callback.upgrade() {
+                    callback();
                 }
-                let observer: id = msg_send![observer, retain];
-                source.observers.push(observer);
-            }
-            Some(Box::new(source))
+            });
+            let name = NSString::from_str(name);
+            // SAFETY: AppKit posts these notifications on the owning window's UI thread. The
+            // source removes each observer before dropping its UI-thread-only callback.
+            let observer = unsafe {
+                source.center.addObserverForName_object_queue_usingBlock(
+                    Some(&name),
+                    Some(&source.window),
+                    None,
+                    &block,
+                )
+            };
+            source.observers.push(observer);
         }
+        Some(Box::new(source))
     }
 }
 
 struct MacosWindowVisibilitySource {
-    window: id,
-    center: id,
-    observers: Vec<id>,
+    window: Retained<NSWindow>,
+    center: Retained<NSNotificationCenter>,
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     callback: Rc<dyn Fn()>,
 }
 
 impl WindowVisibilitySource for MacosWindowVisibilitySource {
     fn current(&self) -> WindowVisibility {
-        // SAFETY: this source retains the exact NSWindow and is !Send/!Sync. All queries run
-        // synchronously on GPUI's AppKit thread, including bounded visibility sampling.
-        unsafe {
-            let minimized: bool = msg_send![self.window, isMiniaturized];
-            let occlusion_state: u64 = msg_send![self.window, occlusionState];
-            let live_resize: bool = msg_send![self.window, inLiveResize];
-            from_native(minimized, occlusion_state, live_resize)
-        }
+        from_native(
+            self.window.isMiniaturized(),
+            self.window.occlusionState().0 as u64,
+            self.window.inLiveResize(),
+        )
     }
 }
 
 impl Drop for MacosWindowVisibilitySource {
     fn drop(&mut self) {
-        // SAFETY: registration retained these tokens and this window. Unregister before releasing
-        // the window so callbacks cannot outlive their owner or follow a successor window.
-        unsafe {
-            for observer in self.observers.drain(..) {
-                let _: () = msg_send![self.center, removeObserver: observer];
-                let _: () = msg_send![observer, release];
-            }
-            let _: () = msg_send![self.window, release];
+        for observer in self.observers.drain(..) {
+            // SAFETY: This is the observer token returned by this center during registration.
+            unsafe { self.center.removeObserver((*observer).as_ref()) };
         }
     }
 }
@@ -111,7 +91,7 @@ impl Drop for MacosWindowVisibilitySource {
 fn from_native(minimized: bool, occlusion_state: u64, live_resize: bool) -> WindowVisibility {
     WindowVisibility {
         minimized,
-        occluded: occlusion_state & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0,
+        occluded: occlusion_state & NSWindowOcclusionState::Visible.bits() as u64 == 0,
         live_resize,
     }
 }
@@ -123,7 +103,7 @@ mod tests {
     #[test]
     fn native_minimize_and_occlusion_bits_are_independent() {
         assert_eq!(
-            from_native(false, NS_WINDOW_OCCLUSION_STATE_VISIBLE, false),
+            from_native(false, NSWindowOcclusionState::Visible.bits() as u64, false),
             WindowVisibility::default()
         );
         assert_eq!(

@@ -936,9 +936,9 @@ mod tests {
                             view.update(|window, _| {
                                 let bounds = bounds.scale(window.scale_factor());
                                 let hairline = px(1.0).scale(window.scale_factor());
-                                let quads = window.painted_quads_for_test();
+                                let quads = window.painted_quads();
                                 if quads.iter().any(|quad| {
-                                    let line = quad.visible_bounds;
+                                    let line = quad.bounds.intersect(&quad.content_mask.bounds);
                                     line.size.height == hairline && line.size.width > hairline * 2.0
                                         && line.left() > bounds.left() && line.right() < bounds.right()
                                         && line.bottom() <= bounds.bottom()

@@ -51,9 +51,90 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
     (settings, platform)
 }
 
-#[gpui::test]
-fn initial_fonts_match_the_complete_catalog_when_settings_requests_it(cx: &mut TestAppContext) {
-    start(cx);
+struct CatalogTextSystem(gpui::NoopTextSystem);
+
+impl gpui::PlatformTextSystem for CatalogTextSystem {
+    fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> gpui::Result<()> {
+        self.0.add_fonts(fonts)
+    }
+
+    fn all_font_names(&self) -> Vec<String> {
+        ["Arial", "Menlo", "lucide"].map(str::to_owned).into()
+    }
+
+    fn font_id(&self, descriptor: &gpui::Font) -> gpui::Result<gpui::FontId> {
+        self.0.font_id(descriptor)
+    }
+
+    fn font_metrics(&self, font_id: gpui::FontId) -> gpui::FontMetrics {
+        self.0.font_metrics(font_id)
+    }
+
+    fn typographic_bounds(
+        &self,
+        font_id: gpui::FontId,
+        glyph_id: gpui::GlyphId,
+    ) -> gpui::Result<gpui::Bounds<f32>> {
+        self.0.typographic_bounds(font_id, glyph_id)
+    }
+
+    fn advance(
+        &self,
+        font_id: gpui::FontId,
+        glyph_id: gpui::GlyphId,
+    ) -> gpui::Result<gpui::Size<f32>> {
+        self.0.advance(font_id, glyph_id)
+    }
+
+    fn glyph_for_char(&self, font_id: gpui::FontId, ch: char) -> Option<gpui::GlyphId> {
+        self.0.glyph_for_char(font_id, ch)
+    }
+
+    fn glyph_raster_bounds(
+        &self,
+        params: &gpui::RenderGlyphParams,
+    ) -> gpui::Result<gpui::Bounds<gpui::DevicePixels>> {
+        self.0.glyph_raster_bounds(params)
+    }
+
+    fn rasterize_glyph(
+        &self,
+        params: &gpui::RenderGlyphParams,
+        bounds: gpui::Bounds<gpui::DevicePixels>,
+    ) -> gpui::Result<(gpui::Size<gpui::DevicePixels>, Vec<u8>)> {
+        self.0.rasterize_glyph(params, bounds)
+    }
+
+    fn layout_line(
+        &self,
+        text: &str,
+        font_size: gpui::Pixels,
+        runs: &[gpui::FontRun],
+    ) -> gpui::LineLayout {
+        self.0.layout_line(text, font_size, runs)
+    }
+
+    fn recommended_rendering_mode(
+        &self,
+        font_id: gpui::FontId,
+        font_size: gpui::Pixels,
+    ) -> gpui::TextRenderingMode {
+        self.0.recommended_rendering_mode(font_id, font_size)
+    }
+}
+
+fn font_catalog_test_app() -> TestAppContext {
+    TestAppContext::build_with_text_system(
+        gpui::TestDispatcher::new(0),
+        None,
+        Arc::new(CatalogTextSystem(gpui::NoopTextSystem)),
+    )
+}
+
+#[test]
+fn initial_fonts_match_the_complete_catalog_when_settings_requests_it() {
+    let mut cx = font_catalog_test_app();
+    start(&mut cx);
     cx.update(|cx| {
         let before = current(cx);
         let initial = cx.global::<AppearanceRuntime>().fonts.clone();
@@ -65,9 +146,10 @@ fn initial_fonts_match_the_complete_catalog_when_settings_requests_it(cx: &mut T
     });
 }
 
-#[gpui::test]
-fn a_new_named_font_is_classified_before_appearance_resolution(cx: &mut TestAppContext) {
-    let (settings, _) = start(cx);
+#[test]
+fn a_new_named_font_is_classified_before_appearance_resolution() {
+    let mut cx = font_catalog_test_app();
+    let (settings, _) = start(&mut cx);
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
     document.preferences.chrome.typography.family = ChromeFontFamily::Named {

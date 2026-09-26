@@ -8,6 +8,8 @@ pub(crate) mod control_socket;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
 #[cfg(target_os = "macos")]
+mod macos_quick_look_window;
+#[cfg(target_os = "macos")]
 mod macos_selected_file;
 pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
@@ -172,3 +174,7 @@ pub(crate) mod macos_adapter_tests;
 
 #[cfg(test)]
 pub(crate) mod testing;
+
+#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[allow(dead_code)]
+pub(crate) mod native_main_thread_tests;

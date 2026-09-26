@@ -100,28 +100,18 @@ pub(crate) fn install(
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
-            if cx
-                .update(|cx| {
-                    let _ = refresh(cx);
-                })
-                .is_err()
-            {
-                break;
-            }
+            cx.update(|cx| {
+                let _ = refresh(cx);
+            });
         }
     })];
     let observation = observation.map(|observation| {
         tasks.push(cx.spawn(async move |cx| {
             while observation.changed.recv().await.is_ok() {
                 while observation.changed.try_recv().is_ok() {}
-                if cx
-                    .update(|cx| {
-                        let _ = refresh(cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+                cx.update(|cx| {
+                    let _ = refresh(cx);
+                });
             }
         }));
         observation.subscription
@@ -402,7 +392,7 @@ pub(crate) fn complete_font_catalog(cx: &mut App) {
     if !cx.has_global::<AppearanceRuntime>() {
         return;
     }
-    let Some(names) = cx
+    let Some(_) = cx
         .global_mut::<AppearanceRuntime>()
         .pending_font_names
         .take()
@@ -411,7 +401,8 @@ pub(crate) fn complete_font_catalog(cx: &mut App) {
     };
     let selected = cx.global::<AppearanceRuntime>().fonts.installed.clone();
     let text = cx.text_system().clone();
-    let installed = names
+    let installed = text
+        .all_font_names()
         .into_iter()
         .map(|family| {
             selected

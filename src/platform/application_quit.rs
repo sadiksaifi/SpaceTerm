@@ -18,8 +18,6 @@ pub(crate) enum ApplicationQuitError {
     DelegateUnavailable,
     #[error("the native application delegate already owns termination policy")]
     DelegateConflict,
-    #[error("the application quit handler could not be retained")]
-    HandlerUnavailable,
 }
 
 #[derive(Clone)]
@@ -41,9 +39,7 @@ impl ApplicationQuitHandler {
     }
 
     pub(crate) fn handle_native(&self) -> ApplicationQuitDecision {
-        self.app
-            .update(|cx| self.handle(cx))
-            .unwrap_or(ApplicationQuitDecision::Cancel)
+        self.app.update(|cx| self.handle(cx))
     }
 }
 

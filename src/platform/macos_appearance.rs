@@ -1,10 +1,13 @@
 use std::{ffi::c_void, sync::OnceLock};
 
-use cocoa::base::{id, nil};
-use cocoa::foundation::{NSInteger, NSString};
-use objc::declare::ClassDecl;
-use objc::runtime::{Class, Object, Sel};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::rc::Retained;
+use objc2::runtime::Bool;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{NSAppearance, NSApplication, NSWorkspace};
+use objc2_foundation::{
+    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSString, NSUserDefaults,
+};
 
 use super::appearance::{
     AccessibilityDisplayOptions, AppearancePlatform, SystemAppearanceObservation,
@@ -13,15 +16,12 @@ use super::appearance::{
 use crate::appearance::Appearance;
 
 const APPEARANCE_NOTIFICATION: &str = "AppleInterfaceThemeChangedNotification";
-const APPEARANCE_OBSERVER_CLASS: &str = "SpaceTermDistributedAppearanceObserver";
-const APPEARANCE_SENDER_IVAR: &str = "spaceTermAppearanceSender";
-const SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSInteger = 4;
 const ACCESSIBILITY_FRAMEWORK: &[u8] =
     b"/System/Library/Frameworks/Accessibility.framework/Accessibility\0";
 const SHOW_BORDERS_GETTER: &[u8] = b"AXShowBordersEnabled\0";
 const SHOW_BORDERS_NOTIFICATION: &[u8] = b"AXShowBordersEnabledStatusDidChangeNotification\0";
 
-type ShowBordersGetter = unsafe extern "C" fn() -> objc::runtime::BOOL;
+type ShowBordersGetter = unsafe extern "C" fn() -> Bool;
 
 #[derive(Clone, Copy)]
 struct ShowBordersSymbols {
@@ -34,8 +34,7 @@ static SHOW_BORDERS_SYMBOLS: OnceLock<Option<ShowBordersSymbols>> = OnceLock::ne
 
 fn show_borders_symbols() -> Option<ShowBordersSymbols> {
     *SHOW_BORDERS_SYMBOLS.get_or_init(|| {
-        // SAFETY: the path names Apple's public Accessibility framework. The retained handle keeps
-        // every resolved symbol and the exported notification object valid for the process.
+        // SAFETY: The retained public framework keeps its function and notification symbols live.
         unsafe {
             let framework = libc::dlopen(
                 ACCESSIBILITY_FRAMEWORK.as_ptr().cast(),
@@ -53,8 +52,8 @@ fn show_borders_symbols() -> Option<ShowBordersSymbols> {
             let notification = if notification.is_null() {
                 None
             } else {
-                let name = *notification.cast::<id>();
-                (name != nil).then_some(name as usize)
+                let name = *notification.cast::<*mut NSString>();
+                (!name.is_null()).then_some(name as usize)
             };
             Some(ShowBordersSymbols {
                 _framework: framework as usize,
@@ -67,9 +66,8 @@ fn show_borders_symbols() -> Option<ShowBordersSymbols> {
 
 fn show_borders_enabled(increase_contrast: bool) -> bool {
     let native = show_borders_symbols().map(|symbols| {
-        // SAFETY: symbol loading verifies the public C function is present and retains its
-        // framework. The function has no arguments and returns Objective-C BOOL.
-        unsafe { (symbols.getter)() != objc::runtime::NO }
+        // SAFETY: Symbol loading verified the public C function and retained its framework.
+        unsafe { (symbols.getter)().as_bool() }
     });
     resolve_show_borders(native, increase_contrast)
 }
@@ -81,149 +79,145 @@ const fn resolve_show_borders(native: Option<bool>, increase_contrast: bool) -> 
     }
 }
 
-fn show_borders_changed_notification() -> Option<id> {
-    show_borders_symbols()?
-        .notification
-        .map(|notification| notification as id)
+fn show_borders_changed_notification() -> Option<Retained<NSString>> {
+    let pointer = show_borders_symbols()?.notification? as *mut NSString;
+    // SAFETY: The retained Accessibility framework owns this NSString for the process lifetime.
+    unsafe { Retained::retain(pointer) }
 }
 
 pub(crate) struct MacosAppearancePlatform;
 
-impl AppearancePlatform for MacosAppearancePlatform {
-    fn prefers_reduced_motion(&self) -> bool {
-        // SAFETY: display accessibility preferences are queried on the AppKit thread.
-        unsafe {
-            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let reduce: objc::runtime::BOOL =
-                msg_send![workspace, accessibilityDisplayShouldReduceMotion];
-            reduce != objc::runtime::NO
-        }
-    }
-    fn supports_native_window_transparency(&self) -> bool {
-        true
-    }
-    fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
-        // SAFETY: display accessibility preferences are queried on the AppKit thread.
-        unsafe {
-            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let reduce: objc::runtime::BOOL =
-                msg_send![workspace, accessibilityDisplayShouldReduceTransparency];
-            let contrast: objc::runtime::BOOL =
-                msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
-            let differentiate: objc::runtime::BOOL = msg_send![
-                workspace,
-                accessibilityDisplayShouldDifferentiateWithoutColor
-            ];
-            AccessibilityDisplayOptions {
-                reduce_transparency: reduce != objc::runtime::NO,
-                increase_contrast: contrast != objc::runtime::NO,
-                show_borders: show_borders_enabled(contrast != objc::runtime::NO),
-                differentiate_without_color: differentiate != objc::runtime::NO,
-            }
-        }
-    }
-    fn apply_window_backdrop(&self, window: &gpui::Window, backdrop: WindowBackdrop) {
-        super::macos_window_backdrop::apply(window, backdrop);
-    }
-    fn system_appearance(&self) -> Option<Appearance> {
-        // SAFETY: the preference is read on the AppKit thread. It is the system preference,
-        // independent of NSApplication's effective appearance, which this Adapter may force.
-        unsafe {
-            let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-            if defaults == nil {
-                return None;
-            }
-            let key = NSString::alloc(nil).init_str("AppleInterfaceStyle");
-            let value: id = msg_send![defaults, stringForKey: key];
-            let _: () = msg_send![key, release];
-            if value == nil {
-                return Some(Appearance::Light);
-            }
-            let dark = NSString::alloc(nil).init_str("Dark");
-            let is_dark: objc::runtime::BOOL = msg_send![value, isEqualToString: dark];
-            let _: () = msg_send![dark, release];
-            Some(if is_dark != objc::runtime::NO {
-                Appearance::Dark
-            } else {
-                Appearance::Light
-            })
-        }
+impl MacosAppearancePlatform {
+    fn observe_with_marker(&self, mtm: MainThreadMarker) -> Option<SystemAppearanceObservation> {
+        observe_distributed(
+            NSDistributedNotificationCenter::defaultCenter(),
+            APPEARANCE_NOTIFICATION,
+            mtm,
+        )
     }
 
-    fn observe(&self) -> Option<SystemAppearanceObservation> {
-        // SAFETY: registration and teardown run on the AppKit thread. The selector observer is
-        // retained by the subscription because NSDistributedNotificationCenter does not retain
-        // selector observers.
-        unsafe {
-            let center: id = msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-            observe_distributed(center, APPEARANCE_NOTIFICATION)
-        }
-    }
-
-    fn apply_native_appearance(&self, appearance: Appearance) {
-        // SAFETY: NSApplication owns the selected appearance after this synchronous setter.
-        unsafe {
-            let application: id = msg_send![class!(NSApplication), sharedApplication];
-            let name = NSString::alloc(nil).init_str(match appearance {
-                Appearance::Light => "NSAppearanceNameAqua",
-                Appearance::Dark => "NSAppearanceNameDarkAqua",
-            });
-            let selected: id = msg_send![class!(NSAppearance), appearanceNamed: name];
-            let _: () = msg_send![name, release];
-            if selected != nil {
-                let _: () = msg_send![application, setAppearance: selected];
-            }
+    fn apply_native_appearance_with_marker(&self, appearance: Appearance, mtm: MainThreadMarker) {
+        let name = NSString::from_str(match appearance {
+            Appearance::Light => "NSAppearanceNameAqua",
+            Appearance::Dark => "NSAppearanceNameDarkAqua",
+        });
+        if let Some(selected) = NSAppearance::appearanceNamed(&name) {
+            NSApplication::sharedApplication(mtm).setAppearance(Some(&selected));
         }
     }
 }
 
-unsafe fn observe_distributed(
-    center: id,
-    notification_name: &str,
-) -> Option<SystemAppearanceObservation> {
-    if center == nil {
-        return None;
+impl AppearancePlatform for MacosAppearancePlatform {
+    fn prefers_reduced_motion(&self) -> bool {
+        NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     }
 
-    let (sender, changed) = async_channel::bounded(1);
-    let observer = unsafe { new_appearance_observer(sender)? };
-    let name = unsafe { NSString::alloc(nil).init_str(notification_name) };
-    if name == nil {
-        unsafe {
-            let _: () = msg_send![observer, release];
+    fn supports_native_window_transparency(&self) -> bool {
+        true
+    }
+
+    fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
+        AccessibilityDisplayOptions {
+            reduce_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+            increase_contrast: contrast,
+            show_borders: show_borders_enabled(contrast),
+            differentiate_without_color: workspace
+                .accessibilityDisplayShouldDifferentiateWithoutColor(),
         }
-        return None;
-    }
-    let center: id = unsafe { msg_send![center, retain] };
-
-    // NSApplication suspends ordinary distributed notification delivery while inactive. System
-    // appearance changes happen while another application is active, so this observer must opt
-    // into immediate delivery instead of inheriting the default coalescing suspension behavior.
-    unsafe {
-        let _: () = msg_send![center,
-            addObserver: observer
-            selector: sel!(appearanceChanged:)
-            name: name
-            object: nil
-            suspensionBehavior: SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY
-        ];
     }
 
-    // Accessibility changes use the workspace's local notification center. Both observations
-    // share the same coalescing wakeup and are removed with the application owner.
-    let workspace: id = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
-    let accessibility_center: id = unsafe { msg_send![workspace, notificationCenter] };
-    let accessibility_center: id = unsafe { msg_send![accessibility_center, retain] };
-    let accessibility_name = unsafe {
-        NSString::alloc(nil).init_str("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification")
-    };
-    unsafe {
-        let _: () = msg_send![accessibility_center,
-            addObserver: observer selector: sel!(appearanceChanged:) name: accessibility_name object: nil
-        ];
-        let _: () = msg_send![accessibility_name, release];
+    fn apply_window_backdrop(&self, window: &gpui::Window, backdrop: WindowBackdrop) {
+        super::macos_window_backdrop::apply(window, backdrop);
     }
-    let show_borders = unsafe { observe_show_borders(observer) };
+
+    fn system_appearance(&self) -> Option<Appearance> {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let value = defaults.stringForKey(&NSString::from_str("AppleInterfaceStyle"));
+        Some(if value.as_deref() == Some(&*NSString::from_str("Dark")) {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        })
+    }
+
+    fn observe(&self) -> Option<SystemAppearanceObservation> {
+        self.observe_with_marker(MainThreadMarker::new()?)
+    }
+
+    fn apply_native_appearance(&self, appearance: Appearance) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        self.apply_native_appearance_with_marker(appearance, mtm);
+    }
+}
+
+struct AppearanceObserverIvars {
+    sender: async_channel::Sender<()>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and define_class! drops the sender ivar.
+    #[unsafe(super(NSObject))]
+    #[name = "SpaceTermDistributedAppearanceObserver"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AppearanceObserverIvars]
+    struct AppearanceObserver;
+
+    impl AppearanceObserver {
+        #[unsafe(method(appearanceChanged:))]
+        fn appearance_changed(&self, _notification: &NSNotification) {
+            let _ = self.ivars().sender.try_send(());
+        }
+    }
+
+    unsafe impl NSObjectProtocol for AppearanceObserver {}
+);
+
+impl AppearanceObserver {
+    fn new(mtm: MainThreadMarker, sender: async_channel::Sender<()>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AppearanceObserverIvars { sender });
+        // SAFETY: NSObject's init is its designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+fn observe_distributed(
+    center: Retained<NSDistributedNotificationCenter>,
+    notification_name: &str,
+    mtm: MainThreadMarker,
+) -> Option<SystemAppearanceObservation> {
+    let (sender, changed) = async_channel::bounded(1);
+    let observer = AppearanceObserver::new(mtm, sender);
+    let name = NSString::from_str(notification_name);
+
+    // SAFETY: The selector belongs to this retained observer. Immediate delivery preserves
+    // changes while another application is active. The subscription removes the registration.
+    unsafe {
+        center.addObserver_selector_name_object_suspensionBehavior(
+            &observer,
+            sel!(appearanceChanged:),
+            Some(&name),
+            None,
+            NSNotificationSuspensionBehavior::DeliverImmediately,
+        );
+    }
+
+    let accessibility_center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let accessibility_name =
+        NSString::from_str("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification");
+    // SAFETY: The selector belongs to the retained observer and the subscription removes it.
+    unsafe {
+        accessibility_center.addObserver_selector_name_object(
+            &observer,
+            sel!(appearanceChanged:),
+            Some(&accessibility_name),
+            None,
+        );
+    }
+    let show_borders = observe_show_borders(&observer);
 
     Some(SystemAppearanceObservation {
         changed,
@@ -238,88 +232,30 @@ unsafe fn observe_distributed(
 }
 
 struct NativeNotificationRegistration {
-    center: id,
-    name: id,
+    center: Retained<NSNotificationCenter>,
+    name: Retained<NSString>,
 }
 
-/// SAFETY: called on the AppKit thread with a live selector observer.
-unsafe fn observe_show_borders(observer: id) -> Option<NativeNotificationRegistration> {
+fn observe_show_borders(observer: &AppearanceObserver) -> Option<NativeNotificationRegistration> {
     let name = show_borders_changed_notification()?;
-    let center: id = unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
-    if center == nil {
-        return None;
-    }
-    let center: id = unsafe { msg_send![center, retain] };
+    let center = NSNotificationCenter::defaultCenter();
+    // SAFETY: The selector belongs to the live observer and the subscription removes it.
     unsafe {
-        let _: () = msg_send![center,
-            addObserver: observer selector: sel!(appearanceChanged:) name: name object: nil
-        ];
+        center.addObserver_selector_name_object(
+            observer,
+            sel!(appearanceChanged:),
+            Some(&name),
+            None,
+        );
     }
     Some(NativeNotificationRegistration { center, name })
 }
 
-unsafe fn new_appearance_observer(sender: async_channel::Sender<()>) -> Option<id> {
-    let class = appearance_observer_class()?;
-    let observer: id = unsafe { msg_send![class, new] };
-    if observer == nil {
-        return None;
-    }
-    unsafe {
-        (*observer).set_ivar(
-            APPEARANCE_SENDER_IVAR,
-            Box::into_raw(Box::new(sender)).cast::<c_void>(),
-        );
-    }
-    Some(observer)
-}
-
-fn appearance_observer_class() -> Option<&'static Class> {
-    if let Some(class) = Class::get(APPEARANCE_OBSERVER_CLASS) {
-        return Some(class);
-    }
-    let mut declaration = ClassDecl::new(APPEARANCE_OBSERVER_CLASS, class!(NSObject))?;
-    declaration.add_ivar::<*mut c_void>(APPEARANCE_SENDER_IVAR);
-    // SAFETY: both functions match the Objective-C method encodings for their selectors.
-    unsafe {
-        declaration.add_method(
-            sel!(appearanceChanged:),
-            appearance_changed as extern "C" fn(&Object, Sel, id),
-        );
-        declaration.add_method(
-            sel!(dealloc),
-            dealloc_appearance_observer as extern "C" fn(&Object, Sel),
-        );
-    }
-    Some(declaration.register())
-}
-
-extern "C" fn appearance_changed(this: &Object, _: Sel, _: id) {
-    // SAFETY: new_appearance_observer installs exactly one boxed sender before registering this
-    // selector. The bounded channel coalesces bursts without inspecting notification contents.
-    unsafe {
-        let sender: *mut c_void = *this.get_ivar(APPEARANCE_SENDER_IVAR);
-        if !sender.is_null() {
-            let _ = (&*sender.cast::<async_channel::Sender<()>>()).try_send(());
-        }
-    }
-}
-
-extern "C" fn dealloc_appearance_observer(this: &Object, _: Sel) {
-    // SAFETY: the observer owns exactly one boxed sender, installed before it is registered.
-    unsafe {
-        let sender: *mut c_void = *this.get_ivar(APPEARANCE_SENDER_IVAR);
-        if !sender.is_null() {
-            drop(Box::from_raw(sender.cast::<async_channel::Sender<()>>()));
-        }
-        let _: () = msg_send![super(this, class!(NSObject)), dealloc];
-    }
-}
-
 struct MacosAppearanceSubscription {
-    center: id,
-    observer: id,
-    name: id,
-    accessibility_center: id,
+    center: Retained<NSDistributedNotificationCenter>,
+    observer: Retained<AppearanceObserver>,
+    name: Retained<NSString>,
+    accessibility_center: Retained<NSNotificationCenter>,
     show_borders: Option<NativeNotificationRegistration>,
 }
 
@@ -327,29 +263,25 @@ impl SystemAppearanceSubscription for MacosAppearanceSubscription {}
 
 impl Drop for MacosAppearanceSubscription {
     fn drop(&mut self) {
-        // SAFETY: NSDistributedNotificationCenter does not retain selector observers. Remove the
-        // observer while every registration argument is still alive, then release owned objects.
+        // SAFETY: The observer and names remain alive until all registrations are removed.
         unsafe {
-            if let Some(registration) = self.show_borders.as_ref() {
-                let _: () = msg_send![registration.center,
-                    removeObserver: self.observer name: registration.name object: nil
-                ];
-                let _: () = msg_send![registration.center, release];
+            if let Some(registration) = &self.show_borders {
+                registration.center.removeObserver_name_object(
+                    &self.observer,
+                    Some(&registration.name),
+                    None,
+                );
             }
-            let _: () = msg_send![self.accessibility_center, removeObserver: self.observer];
-            let _: () = msg_send![self.accessibility_center, release];
-            let _: () = msg_send![self.center,
-                removeObserver: self.observer name: self.name object: nil
-            ];
-            let _: () = msg_send![self.observer, release];
-            let _: () = msg_send![self.name, release];
-            let _: () = msg_send![self.center, release];
+            self.accessibility_center.removeObserver(&self.observer);
+            self.center
+                .removeObserver_name_object(&self.observer, Some(&self.name), None);
         }
     }
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use super::*;
 
     #[test]
@@ -360,74 +292,71 @@ mod tests {
         assert!(!resolve_show_borders(None, false));
     }
 
-    #[gpui::test]
-    fn forcing_native_chrome_does_not_change_the_system_preference(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn forcing_native_chrome_does_not_change_the_system_preference(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let platform = MacosAppearancePlatform;
             let system = platform.system_appearance();
-            // SAFETY: the test retains and restores this process's NSApplication appearance;
-            // it never writes the user's system preference.
-            unsafe {
-                let application: id = msg_send![class!(NSApplication), sharedApplication];
-                let previous: id = msg_send![application, appearance];
-                if previous != nil {
-                    let _: id = msg_send![previous, retain];
-                }
-                for appearance in [Appearance::Light, Appearance::Dark] {
-                    platform.apply_native_appearance(appearance);
-                    let effective: id = msg_send![application, appearance];
-                    assert_ne!(effective, nil);
-                    let expected = NSString::alloc(nil).init_str(match appearance {
-                        Appearance::Light => "NSAppearanceNameAqua",
-                        Appearance::Dark => "NSAppearanceNameDarkAqua",
-                    });
-                    let name: id = msg_send![effective, name];
-                    let matches: objc::runtime::BOOL = msg_send![name, isEqualToString: expected];
-                    let _: () = msg_send![expected, release];
-                    assert_ne!(matches, objc::runtime::NO);
-                    assert_eq!(platform.system_appearance(), system);
-                }
-                let observation = platform
-                    .observe()
-                    .expect("native appearance observation should be available");
-                drop(observation);
-                let _: () = msg_send![application, setAppearance: previous];
-                if previous != nil {
-                    let _: () = msg_send![previous, release];
-                }
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
+            let application = NSApplication::sharedApplication(mtm);
+            let previous = application.appearance();
+            for appearance in [Appearance::Light, Appearance::Dark] {
+                platform.apply_native_appearance_with_marker(appearance, mtm);
+                let effective = application.appearance().unwrap();
+                let expected = NSString::from_str(match appearance {
+                    Appearance::Light => "NSAppearanceNameAqua",
+                    Appearance::Dark => "NSAppearanceNameDarkAqua",
+                });
+                assert_eq!(&*effective.name(), &*expected);
+                assert_eq!(platform.system_appearance(), system);
             }
+            let observation = platform
+                .observe_with_marker(mtm)
+                .expect("native appearance observation should be available");
+            drop(observation);
+            application.setAppearance(previous.as_deref());
         });
     }
 
-    #[gpui::test]
-    fn native_observer_coalesces_wakeups_and_closes_with_its_owner(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn native_observer_coalesces_wakeups_and_closes_with_its_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let (sender, changed) = async_channel::bounded(1);
-            // SAFETY: the test owns the observer and directly exercises its content-free callback
-            // before releasing it on the AppKit thread.
+            let observer = AppearanceObserver::new(
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread"),
+                sender,
+            );
+            // SAFETY: The test supplies an immutable name and no source object.
+            let notification = unsafe {
+                NSNotification::notificationWithName_object(
+                    &NSString::from_str("SpaceTermTest"),
+                    None,
+                )
+            };
+            // SAFETY: This selector belongs to the live observer and receives a valid notification.
             unsafe {
-                let observer = new_appearance_observer(sender)
-                    .expect("native appearance observer should be available");
                 for _ in 0..32 {
-                    appearance_changed(&*observer, sel!(appearanceChanged:), nil);
+                    let _: () = msg_send![&*observer, appearanceChanged: &*notification];
                 }
-                assert_eq!(changed.len(), 1);
-                changed
-                    .try_recv()
-                    .expect("coalesced appearance wakeup should be available");
-                appearance_changed(&*observer, sel!(appearanceChanged:), nil);
-                changed
-                    .try_recv()
-                    .expect("observer should remain reusable after a wakeup");
-
-                let _: () = msg_send![observer, release];
-                assert!(changed.is_closed());
             }
+            assert_eq!(changed.len(), 1);
+            changed
+                .try_recv()
+                .expect("coalesced appearance wakeup should be available");
+            // SAFETY: This selector belongs to the live observer and receives a valid notification.
+            let _: () = unsafe { msg_send![&*observer, appearanceChanged: &*notification] };
+            changed
+                .try_recv()
+                .expect("observer should remain reusable after a wakeup");
+            drop(observer);
+            assert!(changed.is_closed());
         });
     }
 
-    #[gpui::test]
-    fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
+    pub(in crate::platform) fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -435,25 +364,26 @@ mod tests {
                 return;
             };
             let observation = MacosAppearancePlatform
-                .observe()
+                .observe_with_marker(
+                    objc2::MainThreadMarker::new()
+                        .expect("native test must run on the main thread"),
+                )
                 .expect("native appearance observation should be available");
             let SystemAppearanceObservation {
                 changed,
                 subscription,
             } = observation;
-            // SAFETY: the public notification name and the default center are live for the process,
-            // and notification delivery is synchronous on this AppKit thread.
+            let center = NSNotificationCenter::defaultCenter();
+            // SAFETY: This public name is retained and delivery is synchronous on the AppKit thread.
             unsafe {
-                let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
                 for _ in 0..32 {
-                    let _: () = msg_send![center, postNotificationName: name object: nil];
+                    center.postNotificationName_object(&name, None);
                 }
             }
             assert_eq!(changed.len(), 1);
             changed
                 .try_recv()
                 .expect("coalesced Show Borders wakeup should be available");
-
             drop(subscription);
             assert!(changed.is_closed());
         });

@@ -102,14 +102,16 @@ fn floating_shell_keeps_its_rounded_edge_without_a_straight_top_hairline(cx: &mu
             let top_strip_bottom = px(22.0).scale(window.scale_factor());
             let hairline = px(1.0).scale(window.scale_factor());
             let minimum_line_width = px(100.0).scale(window.scale_factor());
-            let quads = window.painted_quads_for_test();
+            let quads = window.painted_quads();
             let straight_top_edges: Vec<_> = quads
                 .iter()
                 .filter(|quad| {
-                    quad.visible_bounds.origin.y >= top
-                        && quad.visible_bounds.bottom() <= top_strip_bottom
-                        && quad.visible_bounds.size.height == hairline
-                        && quad.visible_bounds.size.width >= minimum_line_width
+                    quad.bounds.intersect(&quad.content_mask.bounds).origin.y >= top
+                        && quad.bounds.intersect(&quad.content_mask.bounds).bottom()
+                            <= top_strip_bottom
+                        && quad.bounds.intersect(&quad.content_mask.bounds).size.height == hairline
+                        && quad.bounds.intersect(&quad.content_mask.bounds).size.width
+                            >= minimum_line_width
                 })
                 .collect();
             assert!(
@@ -843,7 +845,7 @@ fn mounted_surface_should_resolve_retained_fields_and_all_phases_against_its_hos
     let input = root.read_with(cx, |root, cx| root.hosted.read(cx).input.clone());
     cx.update(|window, cx| {
         window.activate_window();
-        input.read(cx).focus_handle().focus(window);
+        input.read(cx).focus_handle().focus(window, cx);
     });
     cx.run_until_parked();
 
@@ -873,10 +875,10 @@ fn mounted_surface_should_resolve_retained_fields_and_all_phases_against_its_hos
     }
     assert!(
         cx.update(|window, _| {
-            window
-                .painted_quads_for_test()
-                .iter()
-                .any(|quad| quad.visible_bounds.size.width == px(6.0).scale(window.scale_factor()))
+            window.painted_quads().iter().any(|quad| {
+                quad.bounds.intersect(&quad.content_mask.bounds).size.width
+                    == px(6.0).scale(window.scale_factor())
+            })
         }),
         "the retained TextInput must paint its host's six-pixel caret"
     );
@@ -1257,14 +1259,13 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
         ControlHost::Card,
         ControlHost::Floating,
     ] {
-        cx.update(|window, _| window.reset_paint_call_counts_for_test());
         cx.draw(
             gpui::point(px(0.0), px(0.0)),
             gpui::size(px(100.0), px(100.0)),
             |_, _| host.mount(div().size_full()),
         );
         assert_eq!(
-            cx.update(|window, _| window.quad_paint_call_count_for_test()),
+            cx.update(|window, _| window.painted_quads().len()),
             0,
             "{host:?} must select control paints without adding fill, edge, shadow, or backdrop effects"
         );

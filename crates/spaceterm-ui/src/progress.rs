@@ -453,7 +453,7 @@ impl RenderOnce for FrameSpinner {
             ProgressMotion::Standard => {
                 let frame_selector = selector.clone();
                 root.with_animation(
-                    ElementId::NamedChild(Box::new(self.id), "frames".into()),
+                    ElementId::NamedChild(std::sync::Arc::new(self.id), "frames".into()),
                     Animation::new(SPINNER_FRAME_INTERVAL * SPINNER_FRAMES.len() as u32).repeat(),
                     move |spinner, delta| {
                         spinner.child(spinner_frame(
@@ -583,7 +583,10 @@ fn bar_fill(
                             .absolute()
                             .top_0()
                             .with_animation(
-                                ElementId::NamedChild(Box::new(id.clone()), "activity".into()),
+                                ElementId::NamedChild(
+                                    std::sync::Arc::new(id.clone()),
+                                    "activity".into(),
+                                ),
                                 Animation::new(BAR_CREST_PASS).repeat(),
                                 move |crest, delta| {
                                     crest.left(relative(crest_offset(delta, right_to_left)))

@@ -42,8 +42,7 @@ fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
         MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
         SshCancellationToken::default(),
     ));
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
 
     assert!(matches!(
         Pin::as_mut(&mut future).poll(&mut context),
@@ -527,12 +526,6 @@ fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
     .unwrap_err();
 
     assert!(matches!(error, RemoteUtilityRunError::TimedOut));
-}
-
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
 }
 
 struct ThreadWake(std::thread::Thread);

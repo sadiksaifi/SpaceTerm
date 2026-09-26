@@ -187,10 +187,10 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackendFactory
             cx.background_executor().clone(),
         );
         let cleanup = backend.cleanup.clone();
-        cx.on_app_quit(move |cx| {
+        cx.on_app_quit(move |_cx| {
             // GPUI only polls returned quit futures for 100 ms. Complete owned SSH cleanup
             // here, while its executor is alive, before permitting process exit.
-            cx.background_executor().block(cleanup.shutdown());
+            pollster::block_on(cleanup.shutdown());
             async {}
         })
         .detach();
@@ -1228,7 +1228,7 @@ mod tests {
             assert_eq!(terminated.load(Ordering::SeqCst), 1);
             assert_eq!(reaped.load(Ordering::SeqCst), 1);
             assert_eq!(artifacts_removed.load(Ordering::SeqCst), 1);
-            cx.executor().block(registry.shutdown());
+            cx.foreground_executor().block_test(registry.shutdown());
             assert_eq!(started.load(Ordering::SeqCst), 1);
         }
     }
@@ -1359,21 +1359,23 @@ mod tests {
                 },
                 scope,
             ));
-            let result = cx.executor().block(OpenSshControlConnection::connect(
-                &paths,
-                OpenSshExecutable::for_test(),
-                &RecordingControlSocketProbe(Arc::clone(&filesystem)),
-                SshDestination::new("fixture".to_owned()).unwrap(),
-                backend,
-                &cancellation,
-                ControlConnectionTiming::default(),
-            ));
+            let result = cx
+                .foreground_executor()
+                .block_test(OpenSshControlConnection::connect(
+                    &paths,
+                    OpenSshExecutable::for_test(),
+                    &RecordingControlSocketProbe(Arc::clone(&filesystem)),
+                    SshDestination::new("fixture".to_owned()).unwrap(),
+                    backend,
+                    &cancellation,
+                    ControlConnectionTiming::default(),
+                ));
             assert!(if cancel_on_spawn {
                 matches!(result, Err(ControlConnectionError::Cancelled))
             } else {
                 matches!(result, Err(ControlConnectionError::MasterStatus { .. }))
             });
-            cx.executor().block(started.recv()).unwrap();
+            cx.foreground_executor().block_test(started.recv()).unwrap();
             let (finished, completion) = async_channel::bounded::<()>(1);
             let quit = cx.executor().spawn(async move {
                 registry.shutdown().await;
@@ -1385,7 +1387,7 @@ mod tests {
             assert_eq!(reaped.load(Ordering::SeqCst), 0);
             assert!(!filesystem.events.lock().unwrap().contains(&"remove-owner"));
             release.try_send(()).unwrap();
-            cx.executor().block(quit);
+            cx.foreground_executor().block_test(quit);
             assert!(completion.is_closed());
             assert_eq!(reaped.load(Ordering::SeqCst), 1);
             assert!(filesystem.events.lock().unwrap().contains(&"remove-owner"));
@@ -1401,7 +1403,7 @@ mod tests {
     impl NativeCloseHarness {
         fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             self.session.take();
-            self.prior_focus.focus(window);
+            self.prior_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -1456,7 +1458,7 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let prior_focus = cx.focus_handle();
             let transient_focus = cx.focus_handle();
-            transient_focus.focus(window);
+            transient_focus.focus(window, cx);
             NativeCloseHarness {
                 session: Some(session),
                 prior_focus,
@@ -1541,7 +1543,7 @@ mod tests {
         let provider = owner.bind_terminal_channels(&login_shell).unwrap();
         assert!(provider.is_ready());
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 None
             )),
@@ -1598,7 +1600,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
             )),
@@ -1617,7 +1619,7 @@ mod tests {
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
 
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
             )),
@@ -1664,15 +1666,15 @@ mod tests {
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
         assert_eq!(
-            cx.executor()
-                .block(provider.revalidate(first.clone(), None)),
+            cx.foreground_executor()
+                .block_test(provider.revalidate(first.clone(), None)),
             Ok(())
         );
         assert!(provider.prepare(&second).is_err());
         assert!(provider.prepare(&first).is_err());
         assert_eq!(
-            cx.executor()
-                .block(provider.revalidate(second.clone(), None)),
+            cx.foreground_executor()
+                .block_test(provider.revalidate(second.clone(), None)),
             Ok(())
         );
         assert!(provider.prepare(&second).is_ok());
@@ -1705,7 +1707,7 @@ mod tests {
         };
 
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
             )),
@@ -1743,7 +1745,7 @@ mod tests {
         };
 
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
             )),
@@ -1795,7 +1797,7 @@ mod tests {
         };
 
         assert_eq!(
-            cx.executor().block(provider.revalidate(
+            cx.foreground_executor().block_test(provider.revalidate(
                 RemoteDirectory::new("/srv/project".to_owned()).unwrap(),
                 Some(RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap())
             )),

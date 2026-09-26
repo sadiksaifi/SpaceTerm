@@ -841,9 +841,12 @@ fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppCont
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);
     cx.update(|window, cx| {
-        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-            styles.borrow_mut().push(state.clone());
-            gpui::Empty
+        cx.register_inspector_element(move |_, _| {
+            let styles = Rc::clone(&styles);
+            move |_, state: &DivInspectorState, _, _| {
+                styles.borrow_mut().push(state.clone());
+                gpui::Empty
+            }
         });
         cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
             div()
@@ -870,11 +873,7 @@ fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppCont
             .borrow()
             .iter()
             .rev()
-            .find_map(|state| {
-                (state.bounds == label)
-                    .then(|| state.base_style.text.clone())
-                    .flatten()
-            })
+            .find_map(|state| (state.bounds == label).then(|| state.base_style.text.clone()))
             .expect("the inspector should expose the rendered label text style");
         text_style.color = None;
         text_style.background_color = None;
@@ -1627,9 +1626,12 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
             active: settings_active,
             inactive: settings_inactive,
         });
-        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-            observed_styles.borrow_mut().push(state.clone());
-            gpui::Empty
+        cx.register_inspector_element(move |_, _| {
+            let observed_styles = Rc::clone(&observed_styles);
+            move |_, state: &DivInspectorState, _, _| {
+                observed_styles.borrow_mut().push(state.clone());
+                gpui::Empty
+            }
         });
         cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
             div()
@@ -1679,7 +1681,7 @@ fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
                             == Some(super::controls::gpui_color(color).into())
                     })
                     && expected_foreground.is_none_or(|color| {
-                        state.base_style.text.as_ref().and_then(|text| text.color)
+                        state.base_style.text.color
                             == Some(super::controls::gpui_color(color).into())
                     })
             })
@@ -1848,9 +1850,9 @@ fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut T
         let divider =
             super::controls::gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
         let scale = window.scale_factor();
-        let quads = window.painted_quads_for_test();
+        let quads = window.painted_quads();
         assert!(quads.iter().any(|quad| {
-            quad.visible_bounds == separator.scale(scale)
+            quad.bounds.intersect(&quad.content_mask.bounds) == separator.scale(scale)
                 && quad.background == gpui::Background::from(divider)
         }));
     });
@@ -2708,11 +2710,9 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
 ) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-chrome-density-comfortable", cx);
-    let blocked = harness.storage.block_next_write();
-    let worker = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    let (job, finished) = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
-    blocked.wait_until_started();
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -2728,8 +2728,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 
-    blocked.release();
-    worker.join().unwrap();
+    finished.try_send(job.run()).unwrap();
     cx.run_until_parked();
 
     assert_eq!(
@@ -2799,11 +2798,9 @@ fn a_failed_application_quit_save_reports_failure(cx: &mut TestAppContext) {
 fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-chrome-density-comfortable", cx);
-    let blocked = harness.storage.block_next_write();
-    let worker = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    let (job, finished) = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
-    blocked.wait_until_started();
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -2829,8 +2826,7 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
         settings.close_after_save.as_ref(),
         Some(super::CloseIntent::Application(_))
     )));
-    blocked.release();
-    worker.join().unwrap();
+    finished.try_send(job.run()).unwrap();
     cx.run_until_parked();
 
     assert_eq!(
@@ -2874,11 +2870,9 @@ fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContex
 fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-chrome-density-comfortable", cx);
-    let blocked = harness.storage.block_next_write();
-    let worker = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_threaded_commit(cx))
+    let (job, finished) = cx.update(|_, cx| {
+        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
-    blocked.wait_until_started();
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -2887,11 +2881,10 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
             )
         })
     });
-    blocked.release();
-    worker.join().unwrap();
+    finished.try_send(job.run()).unwrap();
 
-    // GPUI's deterministic executor cannot park for an external OS thread. The storage result is
-    // ready, but neither GPUI's background result publication nor its foreground callback has run.
+    // The storage result is ready, but GPUI has not run its background result publication or
+    // foreground callback.
     cx.cx.update(|cx| cx.shutdown());
 
     assert_eq!(
@@ -2976,7 +2969,7 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
     set_query(&window, "terminal", cx);
     cx.update(|native, cx| {
         window.update(cx, |settings, cx| {
-            settings.search.read(cx).focus_handle().focus(native);
+            settings.search.read(cx).focus_handle().focus(native, cx);
             settings.set_appearance_mode(AppearanceMode::Light, cx);
         })
     });

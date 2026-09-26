@@ -154,9 +154,9 @@ fn public_dialog_focus_target_wraps_custom_controls_without_scroll_types(cx: &mu
     });
     let focus = body.read_with(cx, |body, _| body.focus.clone());
 
-    cx.update(|window, _| {
+    cx.update(|window, cx| {
         window.activate_window();
-        focus.focus(window);
+        focus.focus(window, cx);
     });
     cx.run_until_parked();
 

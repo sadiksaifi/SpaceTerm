@@ -111,7 +111,7 @@ impl gpui::RenderOnce for WorkspaceRenameField {
         .chrome_text(text_style)
         .text_color(gpui_color(self.appearance.colors.text))
         .on_click(move |_, window, cx| {
-            focus_on_click.focus(window);
+            focus_on_click.focus(window, cx);
             cx.stop_propagation();
         })
         .child(self.input)
@@ -630,11 +630,14 @@ impl WorkspaceSidebar {
         .paint_divider(false)
         .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)
-        .on_event(move |event, window, cx| {
+        .on_event_with_accepted_value(move |event, window, cx| {
             let event = *event;
-            let _ = sidebar.update(cx, |sidebar, cx| {
-                sidebar.handle_resize_event(event, window, cx);
-            });
+            sidebar
+                .update(cx, |sidebar, cx| {
+                    sidebar.handle_resize_event(event, window, cx)
+                })
+                .ok()
+                .flatten()
         });
         let wrapper = div()
             .absolute()

@@ -1114,7 +1114,10 @@ mod tests {
             "",
         ))]);
 
-        let metadata = cx.executor().block(client.discover_account()).unwrap();
+        let metadata = cx
+            .foreground_executor()
+            .block_test(client.discover_account())
+            .unwrap();
 
         assert_eq!(metadata.user(), "tester");
         assert_eq!(metadata.uid(), 501);
@@ -1145,7 +1148,10 @@ mod tests {
             "",
         ))]);
 
-        let metadata = cx.executor().block(client.discover_account()).unwrap();
+        let metadata = cx
+            .foreground_executor()
+            .block_test(client.discover_account())
+            .unwrap();
 
         assert_eq!(
             metadata.posix_sh_login_capability(),
@@ -1163,7 +1169,9 @@ mod tests {
         ))]);
 
         assert_eq!(
-            cx.executor().block(client.discover_account()).unwrap_err(),
+            cx.foreground_executor()
+                .block_test(client.discover_account())
+                .unwrap_err(),
             RemoteUtilityError::UnsupportedLoginShell
         );
     }
@@ -1181,8 +1189,8 @@ mod tests {
         let (client, _) = client([success(listing_response)]);
 
         let listing = cx
-            .executor()
-            .block(client.list_directories(remote_directory("/srv/projects")))
+            .foreground_executor()
+            .block_test(client.list_directories(remote_directory("/srv/projects")))
             .unwrap();
 
         assert_eq!(listing.names(), ["Space Term", "after hostile"]);
@@ -1195,8 +1203,8 @@ mod tests {
         let path = "/tmp/space ' $(touch should-not-run) `false`";
 
         let state = cx
-            .executor()
-            .block(client.probe_exact_path(remote_directory(path)))
+            .foreground_executor()
+            .block_test(client.probe_exact_path(remote_directory(path)))
             .unwrap();
 
         assert_eq!(state, RemoteDirectoryProbe::Missing);
@@ -1211,8 +1219,8 @@ mod tests {
         let accepted = format!("/{}", "'".repeat(MAXIMUM_REMOTE_PATH_BYTES - 1));
 
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory(&accepted)))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory(&accepted)))
                 .unwrap(),
             RemoteDirectoryProbe::Missing
         );
@@ -1221,8 +1229,8 @@ mod tests {
 
         let rejected = format!("/{}", "'".repeat(MAXIMUM_REMOTE_PATH_BYTES));
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory(&rejected)))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory(&rejected)))
                 .unwrap_err(),
             RemoteUtilityError::RequestTooLarge
         );
@@ -1262,17 +1270,17 @@ mod tests {
         let directory = remote_directory("/srv/project");
 
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(directory.clone()))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(directory.clone()))
                 .unwrap(),
             RemoteDirectoryProbe::ReadableDirectory
         );
-        cx.executor()
-            .block(client.create_directory_recursively(directory.clone()))
+        cx.foreground_executor()
+            .block_test(client.create_directory_recursively(directory.clone()))
             .unwrap();
         assert_eq!(
-            cx.executor()
-                .block(client.resolve_physical_directory(directory))
+            cx.foreground_executor()
+                .block_test(client.resolve_physical_directory(directory))
                 .unwrap(),
             "/srv/real project"
         );
@@ -1287,20 +1295,20 @@ mod tests {
         ]);
 
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory("/srv/missing")))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory("/srv/missing")))
                 .unwrap(),
             RemoteDirectoryProbe::Missing
         );
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory("/srv/file/child")))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory("/srv/file/child")))
                 .unwrap_err(),
             RemoteUtilityError::NotDirectory
         );
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory("/srv/private/child")))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory("/srv/private/child")))
                 .unwrap_err(),
             RemoteUtilityError::PermissionDenied
         );
@@ -1315,20 +1323,20 @@ mod tests {
         ]);
 
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory("/one")))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory("/one")))
                 .unwrap_err(),
             RemoteUtilityError::InvalidResponse
         );
         assert_eq!(
-            cx.executor()
-                .block(client.resolve_physical_directory(remote_directory("/two")))
+            cx.foreground_executor()
+                .block_test(client.resolve_physical_directory(remote_directory("/two")))
                 .unwrap_err(),
             RemoteUtilityError::InvalidResponse
         );
         assert_eq!(
-            cx.executor()
-                .block(client.probe_exact_path(remote_directory("/three")))
+            cx.foreground_executor()
+                .block_test(client.probe_exact_path(remote_directory("/three")))
                 .unwrap_err(),
             RemoteUtilityError::OutputTooLarge
         );
@@ -1340,8 +1348,8 @@ mod tests {
             Vec::new(),
         ))]);
         assert_eq!(
-            cx.executor()
-                .block(failed.probe_exact_path(remote_directory("/srv")))
+            cx.foreground_executor()
+                .block_test(failed.probe_exact_path(remote_directory("/srv")))
                 .unwrap_err(),
             RemoteUtilityError::CommandFailed(Some(255))
         );
@@ -1364,8 +1372,8 @@ mod tests {
         );
 
         assert_eq!(
-            cx.executor()
-                .block(cancelled.discover_account())
+            cx.foreground_executor()
+                .block_test(cancelled.discover_account())
                 .unwrap_err(),
             RemoteUtilityError::Cancelled
         );
@@ -1373,8 +1381,8 @@ mod tests {
 
         let (cancelled_by_runner, _) = client([Err(RemoteUtilityRunError::Cancelled)]);
         assert_eq!(
-            cx.executor()
-                .block(cancelled_by_runner.discover_account())
+            cx.foreground_executor()
+                .block_test(cancelled_by_runner.discover_account())
                 .unwrap_err(),
             RemoteUtilityError::Cancelled
         );

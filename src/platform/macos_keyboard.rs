@@ -1,10 +1,8 @@
-use std::ffi::CStr;
-
-use cocoa::appkit::{NSApp, NSEvent, NSEventModifierFlags, NSEventType};
-use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
 use gpui::{KeyDownEvent, KeyUpEvent, ModifiersChangedEvent};
-use objc::{msg_send, sel, sel_impl};
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSEventType};
+use objc2_foundation::NSString;
 
 use crate::terminal::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, InputModifiers, KeyAction,
@@ -44,99 +42,79 @@ pub(crate) struct NativeKeyEvent {
 }
 
 impl NativeKeyEvent {
-    #[allow(
-        unexpected_cfgs,
-        reason = "objc 0.2's msg_send macro probes its historical cargo-clippy cfg"
-    )]
     pub(crate) fn current_key(action: KeyAction) -> Option<Self> {
         let event_type = match action {
-            KeyAction::Press | KeyAction::Repeat => NSEventType::NSKeyDown,
-            KeyAction::Release => NSEventType::NSKeyUp,
+            KeyAction::Press | KeyAction::Repeat => NSEventType::KeyDown,
+            KeyAction::Release => NSEventType::KeyUp,
         };
         Self::current(action, event_type, true)
     }
 
     pub(crate) fn current_modifier() -> Option<Self> {
-        Self::current(KeyAction::Press, NSEventType::NSFlagsChanged, false)
+        Self::current(KeyAction::Press, NSEventType::FlagsChanged, false)
     }
 
-    #[allow(
-        unexpected_cfgs,
-        reason = "objc 0.2's msg_send macro probes its historical cargo-clippy cfg"
-    )]
     fn current(action: KeyAction, expected_type: NSEventType, include_text: bool) -> Option<Self> {
-        // SAFETY: GPUI invokes the bridge synchronously while AppKit is dispatching
-        // the corresponding NSEvent. All returned NSString values are copied before
-        // returning, so no Objective-C object escapes this call.
-        unsafe {
-            let application = NSApp();
-            if application == nil {
-                return None;
-            }
-            let event: id = msg_send![application, currentEvent];
-            if event == nil {
-                return None;
-            }
-            if event.eventType() != expected_type {
-                return None;
-            }
-
-            let raw_flags = event.modifierFlags().bits();
-            let unmodified: id = if include_text {
-                msg_send![event, charactersByApplyingModifiers: 0usize]
-            } else {
-                nil
-            };
-            let flags_without_option = raw_flags & !NSEventModifierFlags::NSAlternateKeyMask.bits();
-            let without_option: id = if include_text {
-                msg_send![event, charactersByApplyingModifiers: flags_without_option]
-            } else {
-                nil
-            };
-            let mut characters = include_text
-                .then(|| ns_string(event.characters()))
-                .flatten();
-            if characters.as_deref().is_some_and(is_single_control_text) {
-                let flags_without_control =
-                    raw_flags & !NSEventModifierFlags::NSControlKeyMask.bits();
-                let value: id =
-                    msg_send![event, charactersByApplyingModifiers: flags_without_control];
-                characters = ns_string(value);
-            }
-            let mut characters_without_option = ns_string(without_option);
-            if characters_without_option
-                .as_deref()
-                .is_some_and(is_single_control_text)
-            {
-                let flags_without_option_or_control =
-                    flags_without_option & !NSEventModifierFlags::NSControlKeyMask.bits();
-                let value: id = msg_send![event, charactersByApplyingModifiers: flags_without_option_or_control];
-                characters_without_option = ns_string(value);
-            }
-            Some(Self {
-                action,
-                native_key_code: event.keyCode(),
-                characters,
-                characters_ignoring_modifiers: include_text
-                    .then(|| ns_string(event.charactersIgnoringModifiers()))
-                    .flatten(),
-                unmodified_characters: ns_string(unmodified),
-                characters_without_option,
-                modifiers: NativeModifiers::from_raw_flags(raw_flags),
-            })
+        let mtm = MainThreadMarker::new()?;
+        let event = NSApplication::sharedApplication(mtm).currentEvent()?;
+        if event.r#type() != expected_type {
+            return None;
         }
+
+        let raw_flags = event.modifierFlags().bits();
+        let unmodified = include_text
+            .then(|| event.charactersByApplyingModifiers(NSEventModifierFlags::empty()))
+            .flatten();
+        let flags_without_option = raw_flags & !NSEventModifierFlags::Option.bits();
+        let without_option = include_text
+            .then(|| {
+                event.charactersByApplyingModifiers(NSEventModifierFlags::from_bits_retain(
+                    flags_without_option,
+                ))
+            })
+            .flatten();
+        let mut characters = include_text
+            .then(|| ns_string(event.characters()))
+            .flatten();
+        if characters.as_deref().is_some_and(is_single_control_text) {
+            let flags_without_control = raw_flags & !NSEventModifierFlags::Control.bits();
+            characters = ns_string(event.charactersByApplyingModifiers(
+                NSEventModifierFlags::from_bits_retain(flags_without_control),
+            ));
+        }
+        let mut characters_without_option = ns_string(without_option);
+        if characters_without_option
+            .as_deref()
+            .is_some_and(is_single_control_text)
+        {
+            let flags = flags_without_option & !NSEventModifierFlags::Control.bits();
+            characters_without_option = ns_string(
+                event.charactersByApplyingModifiers(NSEventModifierFlags::from_bits_retain(flags)),
+            );
+        }
+        Some(Self {
+            action,
+            native_key_code: event.keyCode(),
+            characters,
+            characters_ignoring_modifiers: include_text
+                .then(|| ns_string(event.charactersIgnoringModifiers()))
+                .flatten(),
+            unmodified_characters: ns_string(unmodified),
+            characters_without_option,
+            modifiers: NativeModifiers::from_raw_flags(raw_flags as u64),
+        })
     }
 }
 
 impl NativeModifiers {
     fn from_raw_flags(flags: u64) -> Self {
-        let contains = |flag: NSEventModifierFlags| flags & flag.bits() != 0;
+        let contains = |flag: NSEventModifierFlags| flags & flag.bits() as u64 != 0;
         Self {
-            shift: contains(NSEventModifierFlags::NSShiftKeyMask),
-            alt: contains(NSEventModifierFlags::NSAlternateKeyMask),
-            control: contains(NSEventModifierFlags::NSControlKeyMask),
-            platform: contains(NSEventModifierFlags::NSCommandKeyMask),
-            caps_lock: contains(NSEventModifierFlags::NSAlphaShiftKeyMask),
+            shift: contains(NSEventModifierFlags::Shift),
+            alt: contains(NSEventModifierFlags::Option),
+            control: contains(NSEventModifierFlags::Control),
+            platform: contains(NSEventModifierFlags::Command),
+            caps_lock: contains(NSEventModifierFlags::CapsLock),
             num_lock: false,
             shift_left: flags & 0x0002 != 0,
             shift_right: flags & 0x0004 != 0,
@@ -146,27 +124,13 @@ impl NativeModifiers {
             alt_right: flags & 0x0040 != 0,
             platform_left: flags & 0x0008 != 0,
             platform_right: flags & 0x0010 != 0,
-            function: contains(NSEventModifierFlags::NSFunctionKeyMask),
+            function: contains(NSEventModifierFlags::Function),
         }
     }
 }
 
-unsafe fn ns_string(value: id) -> Option<String> {
-    if value == nil {
-        return None;
-    }
-    // SAFETY: `value` is an NSString supplied by the current NSEvent, and
-    // UTF8String remains valid for the duration of this synchronous copy.
-    let utf8 = unsafe { value.UTF8String() };
-    if utf8.is_null() {
-        return None;
-    }
-    // SAFETY: NSString guarantees UTF8String is NUL-terminated valid UTF-8.
-    Some(
-        unsafe { CStr::from_ptr(utf8) }
-            .to_string_lossy()
-            .into_owned(),
-    )
+fn ns_string(value: Option<Retained<NSString>>) -> Option<String> {
+    value.map(|value| value.to_string())
 }
 
 pub(crate) struct MacosKeyboardBridge {

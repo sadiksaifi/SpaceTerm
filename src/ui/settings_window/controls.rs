@@ -404,7 +404,7 @@ impl SettingsRow {
                             div()
                                 .debug_selector(move || label_selector.clone())
                                 .flex_basis(label_width)
-                                .flex_shrink()
+                                .flex_shrink(1.0)
                                 .min_w_0()
                                 .chrome_text(appearance.typography.style(label_role))
                                 .text_color(gpui_color(foreground))

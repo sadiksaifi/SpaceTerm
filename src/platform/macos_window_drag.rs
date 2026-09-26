@@ -3,11 +3,10 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use cocoa::appkit::{NSApp, NSEvent, NSEventType};
-use cocoa::base::{id, nil};
 use gpui::Window;
-use objc::runtime::Object;
-use objc::{msg_send, sel, sel_impl};
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSEvent, NSEventType, NSView};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 pub(crate) struct MacosOperatingSystemWindowDragPlatform {
@@ -41,19 +40,20 @@ impl OperatingSystemWindowDragPlatform for MacosOperatingSystemWindowDragPlatfor
         let RawWindowHandle::AppKit(native_handle) = native_handle.as_raw() else {
             return Err(OperatingSystemWindowDragError::NativeView);
         };
-        let native_view = native_handle.ns_view.as_ptr().cast::<Object>();
-
-        // SAFETY: GPUI supplies a live NSView for this synchronous AppKit-thread call. AppKit owns
-        // the NSWindow returned by the view, and `event` retains the original primary mouse-down
-        // through the complete `performWindowDragWithEvent:` handoff.
-        unsafe {
-            let native_window: id = msg_send![native_view, window];
-            let event_window: id = msg_send![event.0, window];
-            if native_window == nil || native_window != event_window {
-                return Err(OperatingSystemWindowDragError::NativeWindow);
-            }
-            let _: () = msg_send![native_window, performWindowDragWithEvent: event.0];
+        let mtm = MainThreadMarker::new().ok_or(OperatingSystemWindowDragError::NativeWindow)?;
+        // SAFETY: GPUI owns this live NSView for the duration of the synchronous drag callback.
+        let native_view = unsafe { &*native_handle.ns_view.as_ptr().cast::<NSView>() };
+        let native_window = native_view
+            .window()
+            .ok_or(OperatingSystemWindowDragError::NativeWindow)?;
+        let event_window = event
+            .0
+            .window(mtm)
+            .ok_or(OperatingSystemWindowDragError::NativeWindow)?;
+        if !std::ptr::eq(&*native_window, &*event_window) {
+            return Err(OperatingSystemWindowDragError::NativeWindow);
         }
+        native_window.performWindowDragWithEvent(&event.0);
         Ok(())
     }
 
@@ -62,34 +62,18 @@ impl OperatingSystemWindowDragPlatform for MacosOperatingSystemWindowDragPlatfor
     }
 }
 
-struct RetainedMouseDownEvent(id);
+struct RetainedMouseDownEvent(Retained<NSEvent>);
 
 impl RetainedMouseDownEvent {
     fn current() -> Result<Self, OperatingSystemWindowDragError> {
-        // SAFETY: WindowDragRegion invokes this synchronously on GPUI's AppKit thread while AppKit
-        // dispatches the corresponding NSEvent. The explicit retain balances this type's Drop.
-        unsafe {
-            let application = NSApp();
-            if application == nil {
-                return Err(OperatingSystemWindowDragError::Application);
-            }
-            let event: id = msg_send![application, currentEvent];
-            if event == nil || event.eventType() != NSEventType::NSLeftMouseDown {
-                return Err(OperatingSystemWindowDragError::MouseDownEvent);
-            }
-            let event: id = msg_send![event, retain];
-            Ok(Self(event))
+        let mtm = MainThreadMarker::new().ok_or(OperatingSystemWindowDragError::Application)?;
+        let event = NSApplication::sharedApplication(mtm)
+            .currentEvent()
+            .ok_or(OperatingSystemWindowDragError::MouseDownEvent)?;
+        if event.r#type() != NSEventType::LeftMouseDown {
+            return Err(OperatingSystemWindowDragError::MouseDownEvent);
         }
-    }
-}
-
-impl Drop for RetainedMouseDownEvent {
-    fn drop(&mut self) {
-        // SAFETY: `current` stored one owned Objective-C retain and Drop runs on the GPUI thread
-        // because the platform adapter is application UI state and is deliberately !Send/!Sync.
-        unsafe {
-            let _: () = msg_send![self.0, release];
-        }
+        Ok(Self(event))
     }
 }
 

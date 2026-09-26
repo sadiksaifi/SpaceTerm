@@ -328,6 +328,7 @@ pub(crate) fn assert_common_adapter_contract(mut adapter: Box<dyn TerminalKeyInp
             key_char: Some("c".to_owned()),
             modifiers,
         },
+        prefer_character_input: false,
         is_held: false,
     });
     let repeat = adapter.key_down(&KeyDownEvent {
@@ -336,6 +337,7 @@ pub(crate) fn assert_common_adapter_contract(mut adapter: Box<dyn TerminalKeyInp
             key_char: None,
             modifiers: Modifiers::default(),
         },
+        prefer_character_input: false,
         is_held: true,
     });
     let release = adapter.key_up(&KeyUpEvent {
@@ -351,6 +353,7 @@ pub(crate) fn assert_common_adapter_contract(mut adapter: Box<dyn TerminalKeyInp
             key_char: Some("界".to_owned()),
             modifiers: Modifiers::default(),
         },
+        prefer_character_input: false,
         is_held: false,
     });
     let unsupported = adapter.key_down(&KeyDownEvent {
@@ -359,6 +362,7 @@ pub(crate) fn assert_common_adapter_contract(mut adapter: Box<dyn TerminalKeyInp
             key_char: None,
             modifiers: Modifiers::default(),
         },
+        prefer_character_input: false,
         is_held: false,
     });
     let input_method_commit = adapter.input_method_commit("日本語".to_owned());
@@ -441,6 +445,7 @@ mod tests {
                     ..Modifiers::default()
                 },
             },
+            prefer_character_input: false,
             is_held: false,
         });
 

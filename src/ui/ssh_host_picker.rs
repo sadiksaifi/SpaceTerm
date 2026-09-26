@@ -820,7 +820,8 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.activate_window();
-            harness.read(cx).prior_focus.focus(window);
+            let focus = harness.read(cx).prior_focus.clone();
+            focus.focus(window, cx);
             picker.update(cx, |picker, cx| {
                 picker.open(window, cx);
             });

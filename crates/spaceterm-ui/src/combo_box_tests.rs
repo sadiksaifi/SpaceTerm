@@ -218,7 +218,8 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
     });
     cx.update(|window, cx| {
         window.activate_window();
-        root.read(cx).predecessor.focus(window);
+        let focus = root.read(cx).predecessor.clone();
+        focus.focus(window, cx);
     });
     cx.run_until_parked();
     let dialog = cx.update(|window, cx| {
@@ -301,9 +302,9 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
         cx.update(|window, _| {
             let expected = panel_before_menu.scale(window.scale_factor());
             window
-                .painted_quads_for_test()
+                .painted_quads()
                 .iter()
-                .any(|quad| quad.visible_bounds == expected)
+                .any(|quad| quad.bounds.intersect(&quad.content_mask.bounds) == expected)
         }),
         "Dialog popup should paint its complete bounds before opening the editor menu"
     );
@@ -326,16 +327,16 @@ fn dialog_owned_combo_box_should_accept_and_retire_without_enabling_underlay(
     let (combo_order, menu_order) = cx.update(|window, _| {
         let combo = panel_during_menu.scale(window.scale_factor());
         let menu = menu_during_combo.scale(window.scale_factor());
-        let quads = window.painted_quads_for_test();
+        let quads = window.painted_quads();
         (
             quads
                 .iter()
-                .filter(|quad| quad.visible_bounds == combo)
+                .filter(|quad| quad.bounds.intersect(&quad.content_mask.bounds) == combo)
                 .map(|quad| quad.order)
                 .max(),
             quads
                 .iter()
-                .filter(|quad| quad.visible_bounds == menu)
+                .filter(|quad| quad.bounds.intersect(&quad.content_mask.bounds) == menu)
                 .map(|quad| quad.order)
                 .max(),
         )
@@ -970,8 +971,8 @@ fn open_by_pointer(cx: &mut VisualTestContext) {
 }
 
 fn focus_trigger(cx: &mut VisualTestContext) {
-    cx.update(|window, _| window.focus_next());
-    cx.update(|window, _| window.focus_next());
+    cx.update(|window, cx| window.focus_next(cx));
+    cx.update(|window, cx| window.focus_next(cx));
     cx.run_until_parked();
 }
 
@@ -1013,7 +1014,7 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
     let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    cx.update(|window, _| window.focus_next());
+    cx.update(|window, cx| window.focus_next(cx));
     cx.run_until_parked();
 
     let trigger = cx
@@ -1038,18 +1039,18 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
     );
     cx.update(|window, _| {
         let scale = window.scale_factor();
-        let quads = window.painted_quads_for_test();
+        let quads = window.painted_quads();
         let visible_border = |color: gpui::Rgba| {
             quads
                 .iter()
                 .filter(|quad| quad.border_color == color.into())
-                .map(|quad| quad.visible_bounds)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
                 .reduce(|bounds, next| bounds.union(&next))
         };
         let visible_background = quads
             .iter()
             .filter(|quad| quad.background == gpui::Background::from(background))
-            .map(|quad| quad.visible_bounds)
+            .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
             .reduce(|bounds, next| bounds.union(&next));
         assert_eq!(visible_background, None);
         assert_eq!(visible_border(ordinary), None);
@@ -1295,9 +1296,9 @@ fn combo_box_replacement_should_release_borrows_before_reentrant_lifecycle_deliv
     root.update(cx, |root, _| root.reentries = 0);
 
     cx.update(|window, cx| {
-        window.focus_next();
-        window.focus_next();
-        window.focus_next();
+        window.focus_next(cx);
+        window.focus_next(cx);
+        window.focus_next(cx);
         window.dispatch_keystroke(Keystroke::parse("enter").expect("valid keystroke"), cx);
     });
     cx.run_until_parked();
@@ -1327,7 +1328,7 @@ fn menu_replacement_should_close_combo_first_and_restore_its_predecessor(cx: &mu
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
-    cx.update(|window, _| prior_focus.focus(window));
+    cx.update(|window, cx| prior_focus.focus(window, cx));
     let combo_trigger = cx
         .debug_bounds("menu-replacement-combo-trigger")
         .expect("the ComboBox trigger should render")
@@ -1336,9 +1337,9 @@ fn menu_replacement_should_close_combo_first_and_restore_its_predecessor(cx: &mu
     cx.run_until_parked();
     events.borrow_mut().clear();
     cx.update(|window, cx| {
-        window.focus_next();
-        window.focus_next();
-        window.focus_next();
+        window.focus_next(cx);
+        window.focus_next(cx);
+        window.focus_next(cx);
         window.dispatch_keystroke(Keystroke::parse("enter").expect("valid keystroke"), cx);
     });
     cx.run_until_parked();
@@ -1375,7 +1376,7 @@ fn modal_should_replace_an_open_combo_box_and_inherit_its_predecessor(cx: &mut T
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
-    cx.update(|window, _| prior_focus.focus(window));
+    cx.update(|window, cx| prior_focus.focus(window, cx));
     let trigger = cx
         .debug_bounds("modal-replacement-combo-trigger")
         .expect("the ComboBox trigger should render")
@@ -2020,7 +2021,7 @@ fn moving_focus_out_should_close_with_the_focus_lost_reason(cx: &mut TestAppCont
     events.borrow_mut().clear();
     let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
 
-    cx.update(|window, _| other_focus.focus(window));
+    cx.update(|window, cx| other_focus.focus(window, cx));
     cx.run_until_parked();
 
     assert_eq!(
@@ -2035,7 +2036,7 @@ fn moving_focus_out_should_close_with_the_focus_lost_reason(cx: &mut TestAppCont
 fn deactivation_should_close_then_restore_the_predecessor_on_reactivation(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
     let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
-    cx.update(|window, _| before_focus.focus(window));
+    cx.update(|window, cx| before_focus.focus(window, cx));
     open_by_pointer(cx);
     events.borrow_mut().clear();
 
@@ -2057,7 +2058,7 @@ fn deactivation_should_close_then_restore_the_predecessor_on_reactivation(cx: &m
 fn removing_the_trigger_should_close_and_restore_focus(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
     let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
-    cx.update(|window, _| before_focus.focus(window));
+    cx.update(|window, cx| before_focus.focus(window, cx));
     open_by_pointer(cx);
     events.borrow_mut().clear();
 
@@ -3019,9 +3020,12 @@ fn custom_trigger_should_own_its_fill_while_the_wrapper_keeps_interaction(cx: &m
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let observed_styles = Rc::clone(&observed);
     cx.update(|window, cx| {
-        cx.register_inspector_element(move |_, state: &DivInspectorState, _, _| {
-            observed_styles.borrow_mut().push(state.clone());
-            gpui::Empty
+        cx.register_inspector_element(move |_, _| {
+            let observed_styles = Rc::clone(&observed_styles);
+            move |_, state: &DivInspectorState, _, _| {
+                observed_styles.borrow_mut().push(state.clone());
+                gpui::Empty
+            }
         });
         cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
             div()
@@ -3134,11 +3138,11 @@ fn disabled_custom_trigger_should_ignore_pointer_and_keyboard(cx: &mut TestAppCo
     });
     cx.run_until_parked();
     let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
-    cx.update(|window, _| before_focus.focus(window));
+    cx.update(|window, cx| before_focus.focus(window, cx));
     open_by_pointer(cx);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert!(cx.update(|window, _| before_focus.is_focused(window)));
-    cx.update(|window, _| window.focus_next());
+    cx.update(|window, cx| window.focus_next(cx));
     let after_focus = root.read_with(cx, |root, _| root.after_focus.clone());
     assert!(cx.update(|window, _| after_focus.is_focused(window)));
     cx.simulate_keystrokes("space down");
@@ -3149,12 +3153,12 @@ fn disabled_custom_trigger_should_ignore_pointer_and_keyboard(cx: &mut TestAppCo
 fn disabled_icon_trigger_should_ignore_pointer_and_be_skipped_by_keyboard(cx: &mut TestAppContext) {
     let (root, events, cx) = icon_trigger_window(cx, true);
     let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());
-    cx.update(|window, _| before_focus.focus(window));
+    cx.update(|window, cx| before_focus.focus(window, cx));
     open_by_pointer(cx);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
     assert!(cx.update(|window, _| before_focus.is_focused(window)));
 
-    cx.update(|window, _| window.focus_next());
+    cx.update(|window, cx| window.focus_next(cx));
     let after_focus = root.read_with(cx, |root, _| root.after_focus.clone());
     assert!(cx.update(|window, _| after_focus.is_focused(window)));
     cx.simulate_keystrokes("space down");
@@ -3223,7 +3227,8 @@ fn command_should_reject_a_pointer_release_after_query_changes(cx: &mut TestAppC
 fn handle_should_open_the_rendered_popup_and_restore_prior_focus(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, None, items(), false);
     let handle = cx.update(|_, cx| root.read(cx).handle.clone());
-    cx.update(|window, cx| root.read(cx).before_focus.focus(window));
+    let focus = root.read_with(cx, |root, _| root.before_focus.clone());
+    cx.update(|window, cx| focus.focus(window, cx));
     assert!(cx.update(|window, cx| handle.open(window, cx)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("combo-box-panel").is_some());
@@ -3267,7 +3272,8 @@ fn handle_run_command_should_use_normal_activation_without_highlight(cx: &mut Te
         cx.notify();
     });
     let handle = cx.update(|_, cx| root.read(cx).handle.clone());
-    cx.update(|window, cx| root.read(cx).before_focus.focus(window));
+    let focus = root.read_with(cx, |root, _| root.before_focus.clone());
+    cx.update(|window, cx| focus.focus(window, cx));
     assert!(cx.update(|window, cx| handle.open(window, cx)));
     cx.run_until_parked();
     assert!(cx.update(|window, cx| handle.run_command(&9, window, cx)));

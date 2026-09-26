@@ -302,7 +302,7 @@ impl SshHostForm {
                     Ok(None) => {}
                     Err(_) => form.backend_error = Some("The file chooser could not open. Enter the identity file path instead."),
                 }
-                form.identity_file.read(cx).focus_handle().focus(window);
+                form.identity_file.read(cx).focus_handle().focus(window, cx);
                 cx.notify();
             });
         }).detach();
@@ -826,7 +826,7 @@ fn form_field(
             .chrome_text(appearance.typography.style(TextRole::Body))
             .text_color(gpui_color(colors.text))
             .on_click(move |_, window, cx| {
-                input_focus.focus(window);
+                input_focus.focus(window, cx);
                 cx.stop_propagation();
             })
             .child(input),

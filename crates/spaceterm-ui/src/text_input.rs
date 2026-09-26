@@ -1449,7 +1449,7 @@ impl TextInput {
 
     fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.enabled {
-            window.focus_next();
+            window.focus_next(cx);
             return;
         }
         self.focused = true;
@@ -1902,14 +1902,14 @@ impl TextInput {
     }
     fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
         match self.tab_behavior {
-            TextInputTabBehavior::MoveFocus => window.focus_next(),
+            TextInputTabBehavior::MoveFocus => window.focus_next(cx),
             TextInputTabBehavior::Propagate => cx.emit(TextInputEvent::TabForwardRequested),
         }
         cx.stop_propagation();
     }
     fn focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, cx: &mut Context<Self>) {
         match self.tab_behavior {
-            TextInputTabBehavior::MoveFocus => window.focus_prev(),
+            TextInputTabBehavior::MoveFocus => window.focus_prev(cx),
             TextInputTabBehavior::Propagate => cx.emit(TextInputEvent::TabBackwardRequested),
         }
         cx.stop_propagation();
@@ -1935,7 +1935,7 @@ impl TextInput {
         if !self.enabled || event.button != MouseButton::Left {
             return;
         }
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         let offset = self.index_for_mouse_position(event.position);
         self.commit_composition(cx);
         match event.click_count {
@@ -2735,9 +2735,14 @@ impl Element for TextElement {
                     ),
                 ] {
                     window.with_content_mask(Some(ContentMask { bounds: outside }), |window| {
-                        _ = prepaint
-                            .line
-                            .paint(origin, window.line_height(), window, cx);
+                        _ = prepaint.line.paint(
+                            origin,
+                            window.line_height(),
+                            gpui::TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
                     });
                 }
                 window.with_content_mask(
@@ -2745,15 +2750,25 @@ impl Element for TextElement {
                         bounds: selection_bounds,
                     }),
                     |window| {
-                        _ = prepaint
-                            .selected_line
-                            .paint(origin, window.line_height(), window, cx);
+                        _ = prepaint.selected_line.paint(
+                            origin,
+                            window.line_height(),
+                            gpui::TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
                     },
                 );
             } else {
-                _ = prepaint
-                    .line
-                    .paint(origin, window.line_height(), window, cx);
+                _ = prepaint.line.paint(
+                    origin,
+                    window.line_height(),
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
             if let Some(caret) = prepaint.caret.take() {
                 window.paint_quad(caret);

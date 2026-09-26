@@ -191,9 +191,9 @@ fn full_width_track_distributes_all_available_width_between_options(cx: &mut Tes
                         (inset, inset),
                         "full-width track must have symmetric insets: {host:?}/{size:?}/rtl={right_to_left}/scale={scale}"
                     );
-                    cx.update(|window, _| {
+                    cx.update(|window, cx| {
                         window.activate_window();
-                        window.focus_next();
+                        window.focus_next(cx);
                     });
                     cx.run_until_parked();
                     assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
@@ -403,9 +403,9 @@ fn selection_keeps_segment_and_label_geometry_stable(cx: &mut TestAppContext) {
 fn focus_control(cx: &mut VisualTestContext) {
     // Advance the framework's tab-stop order so the control is reached the way keyboard traversal
     // reaches it, rather than by focusing an internal handle directly. The sibling stop is first.
-    cx.update(|window, _| {
-        window.focus_next();
-        window.focus_next();
+    cx.update(|window, cx| {
+        window.focus_next(cx);
+        window.focus_next(cx);
     });
     cx.run_until_parked();
 }
