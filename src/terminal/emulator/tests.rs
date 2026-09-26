@@ -697,12 +697,10 @@ fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
     rows
 }
 
-fn all_grid_content(emulator: &mut TerminalEmulator) -> String {
-    all_grid_rows(emulator)
-        .iter()
-        .flat_map(|row| row.chars())
-        .filter(|ch| !ch.is_whitespace())
-        .collect()
+fn assert_grid_equals_bytes(actual: &mut TerminalEmulator, size: (u16, u16), bytes: &[u8]) {
+    let mut reference = emulator(size.0, size.1);
+    reference.feed(bytes);
+    assert_eq!(all_grid_rows(actual), all_grid_rows(&mut reference));
 }
 
 #[test]
@@ -1445,7 +1443,7 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
 fn zsh_prompt_redraw_with_fewer_rows_than_old_offset_preserves_scrollback() {
     let prompt = format!("{}\r\n> ", "P".repeat(60));
     let rows = zsh_resize_rows((50, 5), (150, 2), &prompt, "", 2);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    assert_complete_zsh_redraw(&rows, &prompt, "", (150, 2));
 }
 
 fn zsh_resize_rows(
@@ -1477,56 +1475,63 @@ fn zsh_resize_rows(
     all_grid_rows(&mut emulator)
 }
 
-fn assert_complete_zsh_redraw(rows: &[String], prompt: &str, input: &str) {
-    let content = rows.iter().flat_map(|row| row.chars()).filter(|ch| !ch.is_whitespace()).collect::<String>();
-    let expected_prompt = prompt.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
-    assert_eq!(
-        content,
-        format!("echoMARKERQA_RESIZE_MARKER{expected_prompt}{input}"),
-        "the screen and scrollback must contain the output and exactly one redrawn prompt"
-    );
+fn assert_complete_zsh_redraw(rows: &[String], prompt: &str, input: &str, size: (u16, u16)) {
+    let mut reference = emulator(size.0, size.1);
+    reference.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    reference.feed(prompt.as_bytes());
+    reference.feed(b"\x1b]133;B\x07");
+    reference.feed(input.as_bytes());
+    assert_eq!(rows, all_grid_rows(&mut reference));
 }
 
 #[test]
 fn zsh_redraw_preserves_output_when_prompt_starts_in_scrollback_before_widening() {
     let prompt = format!("{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "", 5);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    assert_complete_zsh_redraw(&rows, &prompt, "", (100, 10));
 }
 
 #[test]
 fn zsh_redraw_preserves_output_when_old_prompt_exceeds_new_screen_height() {
     let prompt = format!("{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((20, 3), (100, 3), &prompt, "", 5);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    let mut reference = emulator(100, 3);
+    reference.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    reference.feed(prompt.as_bytes());
+    reference.feed(b"\x1b]133;B\x07");
+    let mut expected = all_grid_rows(&mut reference);
+    // Zsh's five-row cursor-up clamps to the three-row viewport and leaves
+    // one active row below the shorter redrawn prompt.
+    expected.push(" ".repeat(100));
+    assert_eq!(rows, expected);
 }
 
 #[test]
 fn zsh_redraw_clears_prompt_prefix_in_scrollback_after_shrinking() {
     let prompt = format!("{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((50, 20), (20, 3), &prompt, "", 2);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    assert_complete_zsh_redraw(&rows, &prompt, "", (20, 3));
 }
 
 #[test]
 fn zsh_redraw_keeps_output_when_prompt_starts_at_screen_bottom() {
     let prompt = format!("{}\r\n> ", "P".repeat(60));
     let rows = zsh_resize_rows((50, 5), (150, 5), &prompt, "", 2);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    assert_complete_zsh_redraw(&rows, &prompt, "", (150, 5));
 }
 
 #[test]
 fn zsh_redraw_preserves_partial_input_when_prompt_starts_in_scrollback() {
     let prompt = format!("{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "unfinished", 5);
-    assert_complete_zsh_redraw(&rows, &prompt, "unfinished");
+    assert_complete_zsh_redraw(&rows, &prompt, "unfinished", (100, 10));
 }
 
 #[test]
 fn zsh_redraw_clears_every_line_of_multiline_prompt_in_scrollback() {
     let prompt = format!("TOP\r\n{}\r\n> ", "P".repeat(100));
     let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "", 6);
-    assert_complete_zsh_redraw(&rows, &prompt, "");
+    assert_complete_zsh_redraw(&rows, &prompt, "", (100, 10));
 }
 
 #[test]
@@ -1545,7 +1550,7 @@ fn zsh_redraw_keeps_original_offset_across_two_resizes_before_sigwinch() {
     emulator.feed(prompt.as_bytes());
     emulator.feed(b"\x1b]133;B\x07");
 
-    assert_complete_zsh_redraw(&all_grid_rows(&mut emulator), &prompt, "");
+    assert_complete_zsh_redraw(&all_grid_rows(&mut emulator), &prompt, "", (150, 20));
 }
 
 #[test]
@@ -1572,9 +1577,67 @@ fn zsh_repeated_tall_prompt_redraw_has_one_prompt_and_right_prompt() {
         }
     }
 
+    let mut reference = self::emulator(20, 3);
+    reference.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    reference.feed(prompt.as_bytes());
+    reference.feed(b"\x1b]133;B\x07unfinished\x1b[K\x1b[2CRIGHT\x08\x08\x08\x08\x08\x08\x08");
+    assert_eq!(all_grid_rows(&mut emulator), all_grid_rows(&mut reference));
+}
+
+#[test]
+fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
+    let mut emulator = emulator(76, 27);
+    let prompt = format!("TOP\r\n{}\r\n> ", "P".repeat(300));
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt.as_bytes());
+    emulator.feed(b"\x1b]133;B\x07");
+
+    let mut first_round_trip = None;
+    for cycle in 0..5 {
+        for (cols, rows, up) in [(29, 10, 5), (76, 27, 12)] {
+            emulator.resize(geometry(cols, rows, 10.0, 20.0)).unwrap();
+            emulator.feed(format!("\r\r\x1b[{up}A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07").as_bytes());
+            emulator.feed(prompt.as_bytes());
+            emulator.feed(b"\x1b]133;B\x07");
+        }
+        let grid = all_grid_rows(&mut emulator);
+        if cycle == 0 {
+            let mut expected = vec![
+                format!("{:<76}", "QA_RESIZE_MARKER"),
+                format!("{:<76}", "TOP"),
+            ];
+            expected.extend(std::iter::repeat_n("P".repeat(76), 3));
+            expected.push(format!("{:<76}", "P".repeat(72)));
+            expected.push(format!("{:<76}", "> "));
+            expected.extend(std::iter::repeat_n(" ".repeat(76), 20));
+            assert_eq!(grid, expected, "one round trip left blank prompt rows");
+            first_round_trip = Some(grid);
+        } else {
+            assert_eq!(grid, first_round_trip.as_ref().unwrap().clone(), "cycle {cycle} changed screen or scrollback");
+        }
+    }
+}
+
+#[test]
+fn wrapped_bash_prompt_redraw_keeps_one_prompt_and_command_output() {
+    let mut emulator = emulator(76, 10);
+    let prompt = "BASH_ABCDEFGHIJKLMNOPQRSTUVWXYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ> ";
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=last\x07");
+    emulator.feed(prompt.as_bytes());
+    emulator.resize(geometry(29, 10, 10.0, 20.0)).unwrap();
+    // Captured from bash 3.2 readline after SIGWINCH at 29 columns.
+    emulator.feed(b"\r\x1b[KBASH_ABCDEFGHIJKLMNOPQRSTUVWXY\rYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ>\r> ");
+    emulator.resize(geometry(76, 10, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\x1b[K\x1b[A\x1b[ABASH_ABCDEFGHIJKLMNOPQRSTUVWXYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ> ");
+    emulator.feed(b"\r\n\x1b]133;C\x07QA_BASH_OUTPUT\r\n");
     let rows = all_grid_rows(&mut emulator);
-    let content = rows.iter().flat_map(|row| row.chars()).filter(|ch| !ch.is_whitespace()).collect::<String>();
-    assert_eq!(content, format!("echoMARKERQA_RESIZE_MARKER{}>unfinishedRIGHT", "P".repeat(100)));
+    let mut expected = vec![
+        format!("{:<76}", "QA_RESIZE_MARKER"),
+        format!("{prompt:<76}"),
+        format!("{:<76}", "QA_BASH_OUTPUT"),
+    ];
+    expected.extend(std::iter::repeat_n(" ".repeat(76), 7));
+    assert_eq!(rows, expected);
 }
 
 #[test]
@@ -1585,12 +1648,11 @@ fn bash_after_zsh_retains_first_line_of_multiline_prompt_on_resize() {
     emulator.resize(geometry(20, 20, 10.0, 20.0)).unwrap();
     // Bash readline only redraws its final prompt row on SIGWINCH.
     emulator.feed(b"\r\x1b[K> ");
-    let content = all_grid_rows(&mut emulator)
-        .iter()
-        .flat_map(|row| row.chars())
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    assert_eq!(content, "ZSH>bashQA_RESIZE_MARKERBASH_TOP>");
+    assert_grid_equals_bytes(
+        &mut emulator,
+        (20, 20),
+        b"ZSH> bash\r\nQA_RESIZE_MARKER\r\nBASH_TOP\r\n> ",
+    );
 }
 
 #[test]
@@ -1599,12 +1661,11 @@ fn unoptioned_prompt_start_resets_the_previous_shell_redraw_policy() {
     emulator.feed(b"\x1b]133;A;redraw=0\x07OLD> \x1b]133;B\x07run\r\nQA_RESIZE_MARKER\r\n");
     emulator.feed(b"\x1b]133;A\x07NEW_TOP\r\n> ");
     emulator.resize(geometry(20, 5, 10.0, 20.0)).unwrap();
-    let content = all_grid_rows(&mut emulator)
-        .iter()
-        .flat_map(|row| row.chars())
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    assert_eq!(content, "OLD>runQA_RESIZE_MARKER");
+    assert_grid_equals_bytes(
+        &mut emulator,
+        (20, 5),
+        b"OLD> run\r\nQA_RESIZE_MARKER\r\n",
+    );
 }
 
 fn pending_zsh_preexec_prompt() -> TerminalEmulator {
@@ -1626,17 +1687,16 @@ fn zsh_preexec_command_output_survives_another_resize_and_interrupt() {
         emulator.feed(format!("QA_LINE_{line}\r\n").as_bytes());
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
-    assert_eq!(
-        all_grid_content(&mut emulator),
-        "QA_PREPQA_LINE_1QA_LINE_2QA_LINE_3QA_LINE_4QA_LINE_5QA_LINE_6QA_LINE_7QA_LINE_8"
-    );
+    let mut expected = String::from("QA_PREP\r\n");
+    for line in 1..=8 {
+        expected.push_str(&format!("QA_LINE_{line}\r\n"));
+    }
+    assert_grid_equals_bytes(&mut emulator, (150, 12), expected.as_bytes());
 
     // Zsh's captured interrupt closes the command and prints a new prompt.
     emulator.feed(b"^C\r\n\x1b]133;D;130\x07\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07NEXT> \x1b]133;B\x07");
-    assert_eq!(
-        all_grid_content(&mut emulator),
-        "QA_PREPQA_LINE_1QA_LINE_2QA_LINE_3QA_LINE_4QA_LINE_5QA_LINE_6QA_LINE_7QA_LINE_8^CNEXT>"
-    );
+    expected.push_str("^C\r\nNEXT> ");
+    assert_grid_equals_bytes(&mut emulator, (150, 12), expected.as_bytes());
 }
 
 #[test]
@@ -1646,7 +1706,11 @@ fn exec_bash_output_survives_resize_after_zsh_preexec() {
     emulator.feed(b"\x1b]133;C;cmdline=exec%20bash%20--noprofile%20--norc\x07\r\nBASH_READY\r\nbash-3.2$ ");
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\x1b[Kbash-3.2$ ");
-    assert_eq!(all_grid_content(&mut emulator), "QA_PREPBASH_READYbash-3.2$");
+    assert_grid_equals_bytes(
+        &mut emulator,
+        (150, 12),
+        b"QA_PREP\r\n\r\nBASH_READY\r\nbash-3.2$ ",
+    );
 }
 
 #[test]
@@ -1658,10 +1722,12 @@ fn command_end_retires_pending_prompt_redraw() {
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"AFTER_D");
-    assert_eq!(
-        all_grid_content(&mut emulator),
-        "QA_PREPD_LINE_1D_LINE_2D_LINE_3D_LINE_4D_LINE_5D_LINE_6D_LINE_7D_LINE_8AFTER_D"
-    );
+    let mut expected = String::from("QA_PREP\r\n");
+    for line in 1..=8 {
+        expected.push_str(&format!("D_LINE_{line}\r\n"));
+    }
+    expected.push_str("AFTER_D");
+    assert_grid_equals_bytes(&mut emulator, (150, 12), expected.as_bytes());
 }
 
 #[test]
@@ -1677,10 +1743,12 @@ fn input_end_of_line_retires_pending_prompt_redraw() {
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"AFTER_EOL");
-    assert_eq!(
-        all_grid_content(&mut emulator),
-        "QA_PREPI_LINE_1I_LINE_2I_LINE_3I_LINE_4I_LINE_5I_LINE_6I_LINE_7I_LINE_8AFTER_EOL"
-    );
+    let mut expected = String::from("QA_PREP\r\n");
+    for line in 1..=8 {
+        expected.push_str(&format!("I_LINE_{line}\r\n"));
+    }
+    expected.push_str("AFTER_EOL");
+    assert_grid_equals_bytes(&mut emulator, (150, 12), expected.as_bytes());
 }
 
 #[test]
@@ -1688,10 +1756,11 @@ fn alternate_screen_retires_pending_prompt_redraw() {
     let mut emulator = pending_zsh_preexec_prompt();
     emulator.feed(b"\x1b[?1049hALT_CONTENT");
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
-    assert!(all_grid_content(&mut emulator).contains("ALT_CONTENT"));
+    assert_grid_equals_bytes(&mut emulator, (150, 12), b"\r\n\r\n\r\n\r\nALT_CONTENT");
     emulator.feed(b"\x1b[?1049lAFTER_ALT\r\n");
     emulator.resize(geometry(100, 12, 10.0, 20.0)).unwrap();
-    assert_eq!(all_grid_content(&mut emulator), "QA_PREPAFTER_ALT");
+    let expected = format!("QA_PREP\r\n{}AFTER_ALT\r\n", " ".repeat(60));
+    assert_grid_equals_bytes(&mut emulator, (100, 12), expected.as_bytes());
 }
 
 #[test]
@@ -1699,7 +1768,7 @@ fn full_reset_retires_pending_prompt_redraw() {
     let mut emulator = pending_zsh_preexec_prompt();
     emulator.feed(b"\x1bcAFTER_RESET\r\n");
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
-    assert_eq!(all_grid_content(&mut emulator), "AFTER_RESET");
+    assert_grid_equals_bytes(&mut emulator, (150, 12), b"AFTER_RESET\r\n");
 }
 
 #[test]

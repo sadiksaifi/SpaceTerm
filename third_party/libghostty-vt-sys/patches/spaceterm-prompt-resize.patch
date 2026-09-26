@@ -1,21 +1,58 @@
+diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
+index 746a6cf..fd63a29 100644
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -5199,6 +5199,26 @@ pub fn eraseRow(
+     page.resetRow(&rows[node.rows() - 1]);
+ }
+ 
++/// Remove a row in history and close the gap without leaving a blank row in
++/// history. The ordinary eraseRow shifts the suffix into a blank final row;
++/// dropping that row also moves the active boundary up by one.
++pub fn deleteHistoryRow(self: *PageList, pt: point.Point) !void {
++    const row_pin = self.pin(pt).?;
++    assert(!self.pinIsActive(row_pin));
++    try self.eraseRow(pt);
++
++    const last = self.pages.last.?;
++    const page = last.page();
++    self.invalidateNodeLayout(last);
++    page.size.rows -= 1;
++    self.total_rows -= 1;
++    if (page.size.rows == 0) self.erasePage(last);
++
++    self.viewport_pin_row_offset = null;
++    self.fixupViewport(0);
++    self.assertIntegrity();
++}
++
+ /// A variant of eraseRow that shifts only a bounded number of following
+ /// rows up, filling the space they leave behind with blank rows.
+ ///
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 208e276a2..e6a6edc26 100644
+index 007e727..14b0974 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
-@@ -83,6 +83,12 @@ else
+@@ -83,6 +83,18 @@ else
  /// Semantic prompt (OSC133) state.
  semantic_prompt: SemanticPrompt = .disabled,
  
 +/// Prompt redraw state machine: null is idle. A resize in redrawable prompt
 +/// or input content enters pending with the first physical cursor offset.
-+/// Further resizes retain that offset. A new A/N prompt mark, output transition,
++/// Further resizes retain that offset. A new A/N prompt mark, completed prompt,
++/// or output transition,
 +/// input end-of-line, screen switch, reset, or disabled redraw returns to idle.
-+pending_prompt_redraw: ?struct { start: *Pin, rows: u32 } = null,
++pending_prompt_redraw: ?struct {
++    start: *Pin,
++    rows: u32,
++    column: size.CellCountInt,
++    redraw: osc.semantic_prompt.Redraw,
++} = null,
 +
  /// Dirty flags for the renderer.
  dirty: Dirty = .{},
  
-@@ -351,9 +357,17 @@ pub fn deinit(self: *Screen) void {
+@@ -351,9 +363,66 @@ pub fn deinit(self: *Screen) void {
          self.kitty_images.deinit(self.alloc, self);
      }
      self.cursor.deinit(self.alloc);
@@ -30,10 +67,59 @@ index 208e276a2..e6a6edc26 100644
 +    }
 +}
 +
++pub fn retireLastPromptRedraw(self: *Screen) void {
++    if (self.pending_prompt_redraw) |pending| {
++        if (pending.redraw == .last) self.retirePendingPromptRedraw();
++    }
++}
++
++pub fn finishPendingPromptWithOutput(self: *Screen) void {
++    const pending = self.pending_prompt_redraw orelse return;
++    if (!pending.start.garbage) {
++        while (true) {
++            const start_y = self.pages.pointFromPin(.screen, pending.start.*).?.screen.y;
++            const cursor_y = self.pages.pointFromPin(.screen, self.cursor.page_pin.*).?.screen.y;
++            if (start_y >= cursor_y) break;
++
++            const page = pending.start.node.page();
++            const row = pending.start.rowAndCell().row;
++            for (page.getCells(row)) |cell| {
++                if (cell.hasText()) break;
++            } else {
++                const active_y = self.pages.pointFromPin(.screen, self.pages.getTopLeft(.active)).?.screen.y;
++                if (start_y < active_y) {
++                    self.pages.deleteHistoryRow(.{ .screen = .{ .y = start_y } }) catch break;
++                } else {
++                    self.pages.eraseRow(.{ .screen = .{ .y = start_y } }) catch break;
++                }
++                self.cursorReload();
++                continue;
++            }
++            break;
++        }
++    }
++    const cursor_page = self.cursor.page_pin.node.page();
++    for (cursor_page.getCells(self.cursor.page_row)) |cell| {
++        if (cell.hasText()) break;
++    } else {
++        self.cursorAbsolute(0, self.cursor.y);
++        const page = self.cursor.page_pin.node.page();
++        const row = self.cursor.page_row;
++        self.clearCells(page, row, page.getCells(row));
++        if (self.cursor.page_pin.up(1)) |previous| {
++            previous.rowAndCell().row.wrap = false;
++        }
++        row.wrap = false;
++        row.wrap_continuation = false;
++        self.cursor.pending_wrap = false;
++    }
++    self.retirePendingPromptRedraw();
++}
++
  /// Assert that the screen is in a consistent state. This doesn't check
  /// all pages in the page list because that is SO SLOW even just for
  /// tests. This only asserts the screen specific data so callers should
-@@ -403,6 +417,7 @@ pub fn assertIntegrity(self: *const Screen) void {
+@@ -403,6 +472,7 @@ pub fn assertIntegrity(self: *const Screen) void {
  /// - Disables protection mode
  ///
  pub fn reset(self: *Screen) void {
@@ -41,13 +127,13 @@ index 208e276a2..e6a6edc26 100644
      // Reset our pages
      self.pages.reset();
  
-@@ -2030,6 +2045,32 @@ pub inline fn resize(
+@@ -2038,6 +2108,45 @@ pub inline fn resize(
      const tw = resize_tw;
      defer self.assertIntegrity();
  
 +    // Output cannot inherit the cursor offset of a prompt that was cleared
 +    // by an earlier resize, even if its semantic transition was missed.
-+    if (opts.prompt_redraw != .true or self.cursor.semantic_content == .output) {
++    if (opts.prompt_redraw == .false or self.cursor.semantic_content == .output) {
 +        self.retirePendingPromptRedraw();
 +    }
 +
@@ -55,26 +141,39 @@ index 208e276a2..e6a6edc26 100644
 +    // Keep the offset from the first resize because reflowing cleared rows
 +    // does not preserve the row count that the shell will move up by.
 +    const new_prompt = self.pending_prompt_redraw == null;
-+    if (new_prompt and opts.prompt_redraw == .true and
++    if (new_prompt and opts.prompt_redraw != .false and
 +        self.cursor.semantic_content != .output)
 +    prompt: {
-+        var it = self.cursor.page_pin.promptIterator(.left_up, null);
-+        const start = it.next() orelse break :prompt;
++        const start = switch (opts.prompt_redraw) {
++            .false => unreachable,
++            .true => start: {
++                var it = self.cursor.page_pin.promptIterator(.left_up, null);
++                break :start it.next() orelse break :prompt;
++            },
++            .last => start: {
++                var pin = self.cursor.page_pin.*;
++                while (pin.rowAndCell().row.wrap_continuation) {
++                    pin = pin.up(1) orelse break;
++                }
++                break :start pin.left(pin.x);
++            },
++        };
 +        const position = self.pages.pointFromPin(.screen, start).?;
 +        const cursor_position = self.pages.pointFromPin(.screen, self.cursor.page_pin.*).?;
 +        if (position.screen.y > cursor_position.screen.y) break :prompt;
 +        self.pending_prompt_redraw = .{
 +            .start = try self.pages.trackPin(start),
 +            .rows = cursor_position.screen.y - position.screen.y,
++            .column = self.cursor.x,
++            .redraw = opts.prompt_redraw,
 +        };
 +    }
 +    errdefer if (new_prompt) self.retirePendingPromptRedraw();
 +    const prompt = self.pending_prompt_redraw;
-+
      // We need to insert a tracked pin for our saved cursor so we can
      // modify its X/Y for reflow. Do this before changing any state since
      // tracking the pin can fail.
-@@ -2128,10 +2169,48 @@ pub inline fn resize(
+@@ -2136,10 +2245,63 @@ pub inline fn resize(
      // state is correct.
      self.cursorReload();
  
@@ -112,6 +211,19 @@ index 208e276a2..e6a6edc26 100644
 +            p.start.* else null,
 +    );
 +
++    // When a tall cleared prompt begins in history, its old rows have no
++    // purpose after the shell redraws. Remove them now so repeated resizes
++    // cannot accumulate blank history between output and the new prompt.
++    if (prompt) |p| {
++        while (!p.start.garbage) {
++            const start_y = self.pages.pointFromPin(.screen, p.start.*).?.screen.y;
++            const active_y = self.pages.pointFromPin(.screen, self.pages.getTopLeft(.active)).?.screen.y;
++            if (start_y >= active_y) break;
++            self.pages.deleteHistoryRow(.{ .screen = .{ .y = start_y } }) catch break;
++        }
++        self.cursorReload();
++    }
++
 +    if (prompt) |p| {
 +        const target: size.CellCountInt = target: {
 +            if (p.start.garbage) break :target self.pages.rows - 1;
@@ -122,12 +234,14 @@ index 208e276a2..e6a6edc26 100644
 +            // active top while the cleared prompt prefix remains in history.
 +            break :target @intCast(@min(desired_y -| active_y, self.pages.rows - 1));
 +        };
-+        if (target != self.cursor.y) self.cursorAbsolute(self.cursor.x, target);
++        if (target != self.cursor.y or self.cursor.x != p.column) {
++            self.cursorAbsolute(@min(p.column, self.pages.cols - 1), target);
++        }
 +    }
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2227,6 +2306,7 @@ pub inline fn resize(
+@@ -2235,6 +2397,7 @@ pub inline fn resize(
  fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -135,28 +249,58 @@ index 208e276a2..e6a6edc26 100644
  ) void {
      // If our cursor is on a prompt or input line, clear it so the shell can
      // redraw it. This works with OSC 133 semantic prompts. We do this after
-@@ -2255,7 +2335,7 @@ fn clearPromptForRedraw(
-             },
+@@ -2253,17 +2416,17 @@ fn clearPromptForRedraw(
+         switch (redraw) {
+             .false => unreachable,
  
-             .true => {
+-            // For `.last`, only clear the current line where the cursor is.
+-            // For `.true`, clear all prompt lines starting from the beginning.
+-            .last => {
+-                const page = self.cursor.page_pin.node.page();
+-                const row = self.cursor.page_row;
+-                const cells = page.getCells(row);
+-                self.clearCells(page, row, cells);
+-            },
+-
+-            .true => {
 -                const start = start: {
++            // `.last` means the final logical line, including soft wraps.
++            // `.true` means all prompt lines from their semantic start.
++            .last, .true => {
 +                const start = tracked_start orelse start: {
++                    if (redraw == .last) {
++                        var pin = self.cursor.page_pin.*;
++                        while (pin.rowAndCell().row.wrap_continuation) {
++                            pin = pin.up(1) orelse break;
++                        }
++                        break :start pin.left(pin.x);
++                    }
                      var it = self.cursor.page_pin.promptIterator(
                          .left_up,
                          null,
-@@ -2842,6 +2922,7 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
+@@ -2862,6 +3025,7 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
  
      switch (t) {
          .output => {
-+            self.retirePendingPromptRedraw();
++            self.finishPendingPromptWithOutput();
              cursor.semantic_content = .output;
              cursor.semantic_content_clear_eol = false;
          },
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
-index e9cc3b8e6..cd34c6f2a 100644
+index 5e7dca5..231c0be 100644
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
-@@ -2093,6 +2093,7 @@ pub fn semanticPrompt(
+@@ -1824,6 +1824,9 @@ pub fn invokeCharset(
+ 
+ /// Carriage return moves the cursor to the first column.
+ pub fn carriageReturn(self: *Terminal) void {
++    // Readline starts its SIGWINCH redraw with CR. Its next resize uses the
++    // physical offset of the prompt it just wrote, not the earlier prompt.
++    self.screens.active.retireLastPromptRedraw();
+     // Always reset pending wrap state
+     self.screens.active.cursor.pending_wrap = false;
+ 
+@@ -2096,6 +2099,7 @@ pub fn semanticPrompt(
              try self.semanticPromptFreshLine();
  
              const screen: *Screen = self.screens.active;
@@ -164,7 +308,7 @@ index e9cc3b8e6..cd34c6f2a 100644
  
              // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
              // is a prompt string (as if followed by OSC 133;P;k=i\007)."
-@@ -2100,12 +2101,9 @@ pub fn semanticPrompt(
+@@ -2103,12 +2107,9 @@ pub fn semanticPrompt(
                  .prompt = cmd.readOption(.prompt_kind) orelse .initial,
              });
  
@@ -180,20 +324,30 @@ index e9cc3b8e6..cd34c6f2a 100644
  
              click: {
                  // Handle click_events as a priority over cl. click_events
-@@ -2331,6 +2329,7 @@ pub fn index(self: *Terminal) !void {
+@@ -2162,6 +2163,7 @@ pub fn semanticPrompt(
+         .end_prompt_start_input => {
+             // End of prompt and start of user input, terminated by a OSC
+             // "133;C" or another prompt (OSC "133;P").
++            self.screens.active.retirePendingPromptRedraw();
+             self.screens.active.cursorSetSemanticContent(.{
+                 .input = .clear_explicit,
+             });
+@@ -2334,6 +2336,7 @@ pub fn index(self: *Terminal) !void {
          // discover that there are more scenarios we should be unsetting
          // this we should document and test it.
          if (screen.cursor.semantic_content_clear_eol) {
-+            screen.retirePendingPromptRedraw();
++            screen.finishPendingPromptWithOutput();
              screen.cursor.semantic_content = .output;
              screen.cursor.semantic_content_clear_eol = false;
          } else {
-@@ -4766,6 +4765,11 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
+@@ -4769,6 +4772,13 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
      // The new screen should not have any hyperlinks set
      assert(new.cursor.hyperlink_id == 0);
  
-+    // A screen switch ends the shell's current prompt. Neither the screen
-+    // being left nor a previously used destination can keep its redraw pin.
++    // A screen switch ends the prompt. Retire both pins before changing
++    // semantic content so a dormant primary prompt is not compacted.
++    old.retirePendingPromptRedraw();
++    new.retirePendingPromptRedraw();
 +    old.cursorSetSemanticContent(.output);
 +    new.cursorSetSemanticContent(.output);
 +
