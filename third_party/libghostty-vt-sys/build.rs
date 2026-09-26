@@ -33,6 +33,10 @@ const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
         relative_path: "patches/spaceterm-clear-screen.patch",
         compiled_source: include_bytes!("patches/spaceterm-clear-screen.patch"),
     },
+    SpaceTermPatch {
+        relative_path: "patches/spaceterm-prompt-resize.patch",
+        compiled_source: include_bytes!("patches/spaceterm-prompt-resize.patch"),
+    },
 ];
 
 #[derive(Clone, Copy)]

@@ -375,6 +375,7 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
         .output()
         .unwrap();
     let completion = b"\x1b]133;D;7\x07";
+    let prompt_start = b"\x1b]133;A;redraw=1\x07";
     let prompt_marker = b"\x1b]133;B\x07";
     let literal_prompt_marker = br"\e]133;B\a";
     let reported_prior_status = output
@@ -385,6 +386,11 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
         .stdout
         .windows(prompt_marker.len())
         .filter(|window| *window == prompt_marker)
+        .count();
+    let redrawable_prompt_starts = output
+        .stdout
+        .windows(prompt_start.len())
+        .filter(|window| *window == prompt_start)
         .count();
     let rendered_literal_marker = output
         .stdout
@@ -397,11 +403,12 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
             output.status.success(),
             output.stderr.as_slice(),
             reported_prior_status,
+            redrawable_prompt_starts,
             rendered_prompt_markers,
             rendered_literal_marker,
             rendered_prompt_is_preserved,
         ),
-        (true, &[][..], true, 1, false, true),
+        (true, &[][..], true, 2, 1, false, true),
         "stdout: {:?}",
         String::from_utf8_lossy(&output.stdout),
     );

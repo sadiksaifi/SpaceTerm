@@ -1349,6 +1349,52 @@ fn grid_resize_reflows_logical_content_and_advances_the_presentation() {
 }
 
 #[test]
+fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
+    let mut emulator = emulator(50, 20);
+    let prompt = b"SpaceTerm on fix/resize-prompt-redraw is v0.0.0 via v1.98.1\r\n> ";
+    emulator.feed(b"\x1b]133;A;redraw=1\x07first prompt\r\n> ");
+    emulator.feed(b"\x1b]133;B\x07echo PREVIOUS_OUTPUT\x1b]133;C\x07");
+    emulator.feed(b"\r\nPREVIOUS_OUTPUT\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt);
+    emulator.feed(b"\x1b]133;B\x07echo QA_RESIZE_MARKER\x1b]133;C\x07");
+    emulator.feed(b"\r\nQA_RESIZE_MARKER\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
+    emulator.feed(prompt);
+    emulator.feed(b"\x1b]133;B\x07");
+
+    emulator.resize(geometry(150, 20, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
+    emulator.feed(prompt);
+    let snapshot = emulator.snapshot().unwrap().unwrap();
+
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+        "zsh must not erase the command output while redrawing its prompt"
+    );
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("PREVIOUS_OUTPUT")),
+        "resize must not clear earlier command output"
+    );
+
+    emulator.resize(geometry(50, 20, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
+    emulator.feed(prompt);
+    let shrunk = emulator.snapshot().unwrap().unwrap();
+    assert!(
+        shrunk
+            .rows
+            .iter()
+            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+        "zsh must not erase the command output when the prompt wraps again"
+    );
+}
+
+#[test]
 fn grid_resize_preserves_selection_anchors_across_reflow() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world");

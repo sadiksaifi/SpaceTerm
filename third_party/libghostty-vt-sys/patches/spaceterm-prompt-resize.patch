@@ -1,0 +1,63 @@
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 208e276a2..338dcbe08 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -2030,6 +2030,21 @@ pub inline fn resize(
+     const tw = resize_tw;
+     defer self.assertIntegrity();
+ 
++    // A shell redraws using the number of physical prompt rows it printed
++    // before SIGWINCH. Track the current prompt start through reflow because
++    // its row marker may move or merge with an earlier prompt row.
++    const prompt: ?struct { start: *Pin, rows: size.CellCountInt } = if (opts.prompt_redraw == .true and
++        self.cursor.semantic_content != .output)
++    prompt: {
++        var it = self.cursor.page_pin.promptIterator(.left_up, null);
++        const start = it.next() orelse break :prompt null;
++        const position = self.pages.pointFromPin(.active, start) orelse break :prompt null;
++        if (position.active.y > self.cursor.y) break :prompt null;
++        const rows = self.cursor.y - @as(size.CellCountInt, @intCast(position.active.y));
++        break :prompt .{ .start = try self.pages.trackPin(start), .rows = rows };
++    } else null;
++    defer if (prompt) |p| self.pages.untrackPin(p.start);
++
+     // We need to insert a tracked pin for our saved cursor so we can
+     // modify its X/Y for reflow. Do this before changing any state since
+     // tracking the pin can fail.
+@@ -2131,7 +2146,18 @@ pub inline fn resize(
+     // Clear any redrawable prompt after the fallible resize but before
+     // restoring the cursor style and hyperlink, so cleared cells retain the
+     // same default styling they had with the previous ordering.
+-    self.clearPromptForRedraw(opts.prompt_redraw);
++    self.clearPromptForRedraw(
++        opts.prompt_redraw,
++        if (prompt) |p| p.start.* else null,
++    );
++
++    if (prompt) |p| {
++        if (self.pages.pointFromPin(.active, p.start.*)) |position| {
++            const start_y: size.CellCountInt = @intCast(position.active.y);
++            const target = @min(start_y +| p.rows, self.pages.rows - 1);
++            if (target != self.cursor.y) self.cursorAbsolute(self.cursor.x, target);
++        }
++    }
+ 
+     // Restore the cursor style.
+     self.cursor.style = cursor_style;
+@@ -2227,6 +2253,7 @@ pub inline fn resize(
+ fn clearPromptForRedraw(
+     self: *Screen,
+     redraw: osc.semantic_prompt.Redraw,
++    tracked_start: ?Pin,
+ ) void {
+     // If our cursor is on a prompt or input line, clear it so the shell can
+     // redraw it. This works with OSC 133 semantic prompts. We do this after
+@@ -2255,7 +2282,7 @@ fn clearPromptForRedraw(
+             },
+ 
+             .true => {
+-                const start = start: {
++                const start = tracked_start orelse start: {
+                     var it = self.cursor.page_pin.promptIterator(
+                         .left_up,
+                         null,
