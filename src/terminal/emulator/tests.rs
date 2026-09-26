@@ -703,6 +703,63 @@ fn assert_grid_equals_bytes(actual: &mut TerminalEmulator, size: (u16, u16), byt
     assert_eq!(all_grid_rows(actual), all_grid_rows(&mut reference));
 }
 
+fn limited_prompt_terminal(output_rows: usize, prompt: &str) -> Terminal<'static, 'static> {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 10,
+        max_scrollback: 500,
+    })
+    .unwrap();
+    for row in 0..output_rows {
+        terminal.vt_write(format!("H{row:04}\r\n").as_bytes());
+    }
+    terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    terminal
+}
+
+fn all_limited_terminal_rows(terminal: &Terminal<'_, '_>, cols: u16) -> Vec<String> {
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+
+    let total_rows = terminal.total_rows().unwrap();
+    (0..total_rows)
+        .map(|y| {
+            (0..cols)
+                .map(|x| {
+                    let cell = terminal
+                        .grid_ref(Point::Screen(PointCoordinate {
+                            x,
+                            y: u32::try_from(y).unwrap(),
+                        }))
+                        .unwrap()
+                        .cell()
+                        .unwrap();
+                    match cell.codepoint().unwrap() {
+                        0 => ' ',
+                        codepoint => char::from_u32(codepoint).unwrap(),
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn assert_retained_numbered_output(rows: &[String], count: usize, cols: usize) {
+    assert!(
+        rows.len() >= count,
+        "retained {} rows, expected {count}",
+        rows.len()
+    );
+    for (row, actual) in rows[..count].iter().enumerate() {
+        assert_eq!(
+            actual,
+            &format!("{:<cols$}", format!("H{row:04}")),
+            "output row {row}"
+        );
+    }
+}
+
 #[test]
 fn vt_sequences_update_the_screen_without_leaking_escape_bytes() {
     let mut emulator = emulator(12, 3);
@@ -1615,6 +1672,115 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
         } else {
             assert_eq!(grid, first_round_trip.as_ref().unwrap().clone(), "cycle {cycle} changed screen or scrollback");
         }
+    }
+}
+
+#[test]
+fn prompt_padding_at_history_limit_keeps_output_with_two_row_prompt() {
+    let prompt = format!("{}\r\n> ", "P".repeat(300));
+    let mut terminal = limited_prompt_terminal(507, &prompt);
+    terminal.resize(160, 10, 10, 20).unwrap();
+    // Captured from zsh after SIGWINCH at 160 columns.
+    terminal.vt_write(b"\r\r\x1b[4A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let rows = all_limited_terminal_rows(&terminal, 160);
+    assert_eq!(rows.len(), 510);
+    assert_retained_numbered_output(&rows, 507, 160);
+    assert_eq!(rows[507], "P".repeat(160));
+    assert_eq!(rows[508], format!("{:<160}", "P".repeat(140)));
+    assert_eq!(rows[509], format!("{:<160}", "> "));
+
+    terminal.vt_write(b"\x1b]133;C\x07");
+    for row in 0..600 {
+        terminal.vt_write(format!("NEXT{row:04}\r\n").as_bytes());
+    }
+    assert!(
+        terminal.total_rows().unwrap() <= 510,
+        "normal history limit did not resume"
+    );
+}
+
+#[test]
+fn prompt_padding_at_history_limit_keeps_output_with_tall_prompt() {
+    let prompt = format!("{}\r\n> ", "P".repeat(2400));
+    let mut terminal = limited_prompt_terminal(480, &prompt);
+    terminal.resize(160, 10, 10, 20).unwrap();
+    // Captured from zsh after SIGWINCH at 160 columns.
+    terminal.vt_write(b"\r\r\x1b[30A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let rows = all_limited_terminal_rows(&terminal, 160);
+    assert_eq!(rows.len(), 496);
+    assert_retained_numbered_output(&rows, 480, 160);
+    assert_eq!(rows[480..495], vec!["P".repeat(160); 15]);
+    assert_eq!(rows[495], format!("{:<160}", "> "));
+
+    terminal.vt_write(b"\x1b]133;C\x07");
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), rows);
+}
+
+#[test]
+fn prompt_padding_at_history_limit_preserves_output_across_cycles() {
+    let prompt = format!("{}\r\n> ", "P".repeat(2400));
+    let mut terminal = limited_prompt_terminal(480, &prompt);
+    let mut first_round_trip = None;
+    for cycle in 0..3 {
+        for (cols, up) in [(160, 30), (80, 15)] {
+            terminal.resize(cols, 10, 10, 20).unwrap();
+            terminal.vt_write(
+                format!("\r\r\x1b[{up}A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07")
+                    .as_bytes(),
+            );
+            terminal.vt_write(prompt.as_bytes());
+            terminal.vt_write(b"\x1b]133;B\x07");
+        }
+        let rows = all_limited_terminal_rows(&terminal, 80);
+        assert_eq!(rows.len(), 511);
+        assert_retained_numbered_output(&rows, 480, 80);
+        assert_eq!(rows[480..510], vec!["P".repeat(80); 30]);
+        assert_eq!(rows[510], format!("{:<80}", "> "));
+        if let Some(first) = &first_round_trip {
+            assert_eq!(rows, *first, "cycle {cycle} changed screen or scrollback");
+        } else {
+            first_round_trip = Some(rows);
+        }
+    }
+    terminal.vt_write(b"\x1b]133;C\x07");
+    assert_eq!(
+        all_limited_terminal_rows(&terminal, 80),
+        first_round_trip.unwrap()
+    );
+}
+
+#[test]
+fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
+    let prompt = format!("{}\r\n> ", "P".repeat(2400));
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 55,
+        rows: 10,
+        max_scrollback: 500,
+    })
+    .unwrap();
+    for row in 0..450 {
+        terminal.vt_write(format!("H{row:04}\r\n").as_bytes());
+    }
+    terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+
+    for _ in 0..3 {
+        // Captured from zsh after a same-grid SIGWINCH in the source app.
+        terminal.resize(55, 10, 10, 20).unwrap();
+        terminal.vt_write(b"\r\r\x1b[44A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+        terminal.vt_write(prompt.as_bytes());
+        terminal.vt_write(b"\x1b]133;B\x07");
+        let rows = all_limited_terminal_rows(&terminal, 55);
+        assert_eq!(rows.len(), 495);
+        assert_retained_numbered_output(&rows, 450, 55);
+        assert_eq!(rows[450..493], vec!["P".repeat(55); 43]);
+        assert_eq!(rows[493], format!("{:<55}", "P".repeat(35)));
+        assert_eq!(rows[494], format!("{:<55}", "> "));
     }
 }
 

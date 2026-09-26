@@ -1,8 +1,61 @@
 diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
-index 746a6cf..fd63a29 100644
+index 746a6cf..6911343 100644
 --- a/src/terminal/PageList.zig
 +++ b/src/terminal/PageList.zig
-@@ -5199,6 +5199,26 @@ pub fn eraseRow(
+@@ -452,6 +452,10 @@ recycle_node: ?*List.Node = null,
+ /// Limits for scrollback.
+ limits: Limits,
+ 
++/// Prompt redraws can temporarily exceed history limits. Keep retained output
++/// until the shell leaves the prompt, after disposable rows are compacted.
++defer_history_enforcement: bool = false,
++
+ /// The total number of rows represented by this PageList. This is used
+ /// specifically for scrollbar information so we can have the total size.
+ total_rows: usize,
+@@ -862,7 +866,7 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
+ 
+     // A line limit may only be exceeded when the oldest page also contains
+     // active rows. Complete historical pages are always eligible for pruning.
+-    if (self.total_rows > self.rows) {
++    if (self.total_rows > self.rows and !self.defer_history_enforcement) {
+         const history_rows = self.total_rows - self.rows;
+         if (history_rows > self.limits.max(.lines) and
+             self.pages.first.? != self.getTopLeft(.active).node)
+@@ -983,6 +987,7 @@ pub fn deinit(self: *PageList) void {
+ /// memory to fit the active area.
+ pub fn reset(self: *PageList) void {
+     defer self.assertIntegrity();
++    self.defer_history_enforcement = false;
+ 
+     // Reset discards all scrollback, so there is nothing left to compress.
+     self.page_compression.reset();
+@@ -3946,6 +3951,14 @@ pub fn setMaxLines(self: *PageList, max: ?usize) void {
+     self.limits.enforce(self, .lines);
+ }
+ 
++/// Reserve a disposable prompt row without enforcing history limits.
++pub fn growForPromptRedraw(self: *PageList) Allocator.Error!?*List.Node {
++    const was_deferred = self.defer_history_enforcement;
++    self.defer_history_enforcement = true;
++    errdefer self.defer_history_enforcement = was_deferred;
++    return self.grow();
++}
++
+ /// Grow the active area by exactly one row.
+ ///
+ /// This may allocate, but also may not if our current page has more
+@@ -3996,7 +4009,8 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
+     // initial allocation.
+     if (self.pages.first != null and
+         self.pages.first != self.pages.last and
+-        self.page_size + PagePool.item_size > self.limits.max(.bytes))
++        self.page_size + PagePool.item_size > self.limits.max(.bytes) and
++        !self.defer_history_enforcement)
+     prune: {
+         const first = self.pages.popFirst().?;
+         assert(first != last);
+@@ -5199,6 +5213,70 @@ pub fn eraseRow(
      page.resetRow(&rows[node.rows() - 1]);
  }
  
@@ -26,11 +79,63 @@ index 746a6cf..fd63a29 100644
 +    self.assertIntegrity();
 +}
 +
++/// Remove disposable blank rows at the end of the page list after a prompt
++/// redraw has moved the cursor away from them. Keep history enforcement
++/// deferred while the shell remains at its prompt.
++pub fn finishPromptRedrawPadding(self: *PageList, cursor_pin: Pin) void {
++    if (!self.defer_history_enforcement) return;
++    while (self.total_rows > self.rows and
++        (self.limits.exceeded(self, .lines) or self.limits.exceeded(self, .bytes)))
++    {
++        const last = self.pages.last.?;
++        const page = last.page();
++        const final_y = last.rows() - 1;
++        if (cursor_pin.node == last and cursor_pin.y == final_y) break;
++        for (self.tracked_pins.keys()) |tracked| {
++            if (tracked.node == last and tracked.y == final_y) break;
++        } else {
++            const row = &page.rows.ptr(page.memory.ptr)[final_y];
++            for (page.getCells(row)) |cell| {
++                if (cell.hasText()) break;
++            } else {
++                self.invalidateNodeLayout(last);
++                page.resetRow(row);
++                page.size.rows -= 1;
++                self.total_rows -= 1;
++                if (page.size.rows == 0) self.erasePage(last);
++                self.viewport_pin_row_offset = null;
++                self.fixupViewport(0);
++                continue;
++            }
++        }
++        break;
++    }
++    self.assertIntegrity();
++}
++
++/// Prompt redraw padding is disposable only until command output begins.
++/// Resume the configured limits after the shell leaves the prompt.
++pub fn endPromptRedraw(self: *PageList) void {
++    if (!self.defer_history_enforcement) return;
++    self.defer_history_enforcement = false;
++    self.limits.enforce(self, .lines);
++    self.limits.enforce(self, .bytes);
++    self.assertIntegrity();
++}
++
  /// A variant of eraseRow that shifts only a bounded number of following
  /// rows up, filling the space they leave behind with blank rows.
  ///
+@@ -6937,6 +7015,7 @@ const Limits = struct {
+         pagelist: *PageList,
+         key: Key,
+     ) void {
++        if (pagelist.defer_history_enforcement) return;
+         if (!self.exceeded(pagelist, key)) return;
+ 
+         // A partially constructed clone can temporarily contain fewer rows than
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 007e727..14b0974 100644
+index 007e727..b3877b2 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
 @@ -83,6 +83,18 @@ else
@@ -52,15 +157,32 @@ index 007e727..14b0974 100644
  /// Dirty flags for the renderer.
  dirty: Dirty = .{},
  
-@@ -351,9 +363,66 @@ pub fn deinit(self: *Screen) void {
+@@ -350,10 +362,83 @@ pub fn deinit(self: *Screen) void {
+     if (comptime build_options.kitty_graphics) {
          self.kitty_images.deinit(self.alloc, self);
      }
-     self.cursor.deinit(self.alloc);
 +    self.retirePendingPromptRedraw();
+     self.cursor.deinit(self.alloc);
      self.pages.deinit();
  }
  
 +pub fn retirePendingPromptRedraw(self: *Screen) void {
++    self.untrackPendingPromptRedraw();
++    if (self.pages.defer_history_enforcement) {
++        self.pages.finishPromptRedrawPadding(self.cursor.page_pin.*);
++        self.cursorReload();
++    }
++}
++
++pub fn endPromptRedraw(self: *Screen) void {
++    self.retirePendingPromptRedraw();
++    self.pages.endPromptRedraw();
++    self.cursorReload();
++}
++
++/// The redraw's A mark starts another prompt. Keep temporary history
++/// protection until its B mark has written the replacement prompt.
++pub fn untrackPendingPromptRedraw(self: *Screen) void {
 +    if (self.pending_prompt_redraw) |pending| {
 +        self.pages.untrackPin(pending.start);
 +        self.pending_prompt_redraw = null;
@@ -113,13 +235,13 @@ index 007e727..14b0974 100644
 +        row.wrap_continuation = false;
 +        self.cursor.pending_wrap = false;
 +    }
-+    self.retirePendingPromptRedraw();
++    self.endPromptRedraw();
 +}
 +
  /// Assert that the screen is in a consistent state. This doesn't check
  /// all pages in the page list because that is SO SLOW even just for
  /// tests. This only asserts the screen specific data so callers should
-@@ -403,6 +472,7 @@ pub fn assertIntegrity(self: *const Screen) void {
+@@ -403,6 +488,7 @@ pub fn assertIntegrity(self: *const Screen) void {
  /// - Disables protection mode
  ///
  pub fn reset(self: *Screen) void {
@@ -127,7 +249,40 @@ index 007e727..14b0974 100644
      // Reset our pages
      self.pages.reset();
  
-@@ -2038,6 +2108,45 @@ pub inline fn resize(
+@@ -921,6 +1007,14 @@ pub fn cursorReload(self: *Screen) void {
+ /// Scroll the active area and keep the cursor at the bottom of the screen.
+ /// This is a very specialized function but it keeps it fast.
+ pub fn cursorDownScroll(self: *Screen) !void {
++    return self.cursorDownScrollImpl(false);
++}
++
++fn cursorDownScrollForPromptRedraw(self: *Screen) !void {
++    return self.cursorDownScrollImpl(true);
++}
++
++fn cursorDownScrollImpl(self: *Screen, prompt_padding: bool) !void {
+     assert(self.cursor.y == self.pages.rows - 1);
+     defer self.assertIntegrity();
+ 
+@@ -930,7 +1024,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
+     }
+ 
+     // If we have no scrollback, then we shift all our rows instead.
+-    if (self.no_scrollback) {
++    if (self.no_scrollback and !prompt_padding) {
+         // If we have a single-row screen, we have no rows to shift
+         // so our cursor is in the correct place we just have to clear
+         // the cells.
+@@ -976,7 +1070,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
+ 
+         // Grow our pages by one row. The PageList will handle if we need to
+         // allocate, prune scrollback, whatever.
+-        _ = try self.pages.grow();
++        _ = if (prompt_padding) try self.pages.growForPromptRedraw() else try self.pages.grow();
+ 
+         const new_pin = new_pin: {
+             // Calculate this before cursorChangePin because that function may
+@@ -2038,6 +2132,45 @@ pub inline fn resize(
      const tw = resize_tw;
      defer self.assertIntegrity();
  
@@ -173,7 +328,7 @@ index 007e727..14b0974 100644
      // We need to insert a tracked pin for our saved cursor so we can
      // modify its X/Y for reflow. Do this before changing any state since
      // tracking the pin can fail.
-@@ -2136,10 +2245,63 @@ pub inline fn resize(
+@@ -2136,10 +2269,62 @@ pub inline fn resize(
      // state is correct.
      self.cursorReload();
  
@@ -191,7 +346,7 @@ index 007e727..14b0974 100644
 +            if (rows_to_scroll > 0) {
 +                self.cursorAbsolute(self.cursor.x, last_y);
 +                for (0..rows_to_scroll) |_| {
-+                    self.cursorDownScroll() catch break;
++                    self.cursorDownScrollForPromptRedraw() catch break;
 +                    if (p.start.garbage) break;
 +                }
 +            }
@@ -223,7 +378,6 @@ index 007e727..14b0974 100644
 +        }
 +        self.cursorReload();
 +    }
-+
 +    if (prompt) |p| {
 +        const target: size.CellCountInt = target: {
 +            if (p.start.garbage) break :target self.pages.rows - 1;
@@ -241,7 +395,7 @@ index 007e727..14b0974 100644
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2235,6 +2397,7 @@ pub inline fn resize(
+@@ -2235,6 +2420,7 @@ pub inline fn resize(
  fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -249,7 +403,7 @@ index 007e727..14b0974 100644
  ) void {
      // If our cursor is on a prompt or input line, clear it so the shell can
      // redraw it. This works with OSC 133 semantic prompts. We do this after
-@@ -2253,17 +2416,17 @@ fn clearPromptForRedraw(
+@@ -2253,17 +2439,17 @@ fn clearPromptForRedraw(
          switch (redraw) {
              .false => unreachable,
  
@@ -278,16 +432,17 @@ index 007e727..14b0974 100644
                      var it = self.cursor.page_pin.promptIterator(
                          .left_up,
                          null,
-@@ -2862,6 +3025,7 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
+@@ -2862,6 +3048,8 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
  
      switch (t) {
          .output => {
 +            self.finishPendingPromptWithOutput();
++            self.endPromptRedraw();
              cursor.semantic_content = .output;
              cursor.semantic_content_clear_eol = false;
          },
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
-index 5e7dca5..231c0be 100644
+index 5e7dca5..0dbdecc 100644
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
 @@ -1824,6 +1824,9 @@ pub fn invokeCharset(
@@ -304,7 +459,7 @@ index 5e7dca5..231c0be 100644
              try self.semanticPromptFreshLine();
  
              const screen: *Screen = self.screens.active;
-+            screen.retirePendingPromptRedraw();
++            screen.untrackPendingPromptRedraw();
  
              // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
              // is a prompt string (as if followed by OSC 133;P;k=i\007)."
@@ -332,22 +487,50 @@ index 5e7dca5..231c0be 100644
              self.screens.active.cursorSetSemanticContent(.{
                  .input = .clear_explicit,
              });
-@@ -2334,6 +2336,7 @@ pub fn index(self: *Terminal) !void {
+@@ -2334,6 +2336,8 @@ pub fn index(self: *Terminal) !void {
          // discover that there are more scenarios we should be unsetting
          // this we should document and test it.
          if (screen.cursor.semantic_content_clear_eol) {
 +            screen.finishPendingPromptWithOutput();
++            screen.endPromptRedraw();
              screen.cursor.semantic_content = .output;
              screen.cursor.semantic_content_clear_eol = false;
          } else {
-@@ -4769,6 +4772,13 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
+@@ -4066,8 +4070,24 @@ pub fn resize(
+ 
+     self.modes.set(.synchronized_output, false);
+ 
+-    // If our cols/rows didn't change, skip grid work but still apply pixels.
+-    if (self.cols == opts.cols and self.rows == opts.rows) return;
++    // A pixel-only PTY resize still sends SIGWINCH. The shell may redraw a
++    // tall prompt even though the grid dimensions are unchanged, so prepare
++    // the semantic prompt before its cursor-up sequence arrives.
++    if (self.cols == opts.cols and self.rows == opts.rows) {
++        const primary = self.screens.get(.primary).?;
++        if (self.screens.active == primary and
++            self.flags.shell_redraws_prompt != .false and
++            primary.cursor.semantic_content != .output)
++        {
++            try primary.resize(.{
++                .cols = opts.cols,
++                .rows = opts.rows,
++                .reflow = self.modes.get(.wraparound),
++                .prompt_redraw = self.flags.shell_redraws_prompt,
++            });
++        }
++        return;
++    }
+ 
+     // Build replacement tabstops without touching the current table. Keep
+     // ownership here until every fallible resize operation has succeeded.
+@@ -4769,6 +4789,13 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
      // The new screen should not have any hyperlinks set
      assert(new.cursor.hyperlink_id == 0);
  
 +    // A screen switch ends the prompt. Retire both pins before changing
 +    // semantic content so a dormant primary prompt is not compacted.
-+    old.retirePendingPromptRedraw();
-+    new.retirePendingPromptRedraw();
++    old.endPromptRedraw();
++    new.endPromptRedraw();
 +    old.cursorSetSemanticContent(.output);
 +    new.cursorSetSemanticContent(.output);
 +
