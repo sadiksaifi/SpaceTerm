@@ -141,6 +141,10 @@ run = "cargo fmt --package spaceterm --package spaceterm-directories --package s
 description = "Run all tests with every feature for the current platform"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
+[tasks."test:scripts"]
+description = "Test shared repository scripts"
+run = "python3 scripts/test-gpui-local.py"
+
 [tasks."test:portable"]
 description = "Run shared tests without native features"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
@@ -178,7 +182,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py scripts/test-gpui-local.py
 '''
 
 [tasks."lint:diff"]
@@ -197,6 +201,7 @@ run = [
 description = "Run checks without native tooling"
 run = [
   { task = "artifacts:test" },
+  { task = "test:scripts" },
   { task = "fmt:check" },
   { task = "check:portable" },
   { task = "test:portable" },
@@ -208,6 +213,7 @@ run = [
 description = "Run the full validation gate for the current platform"
 run = [
   { task = "artifacts:test" },
+  { task = "test:scripts" },
   { task = "fmt:check" },
   { task = "check" },
   { task = "test" },

@@ -10,6 +10,19 @@ import tomllib
 FORK_URL = "https://github.com/sadiksaifi/zed"
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / ".cargo" / "config.toml"
+BLOCK_START = "# BEGIN SpaceTerm local GPUI patches\n"
+BLOCK_END = "# END SpaceTerm local GPUI patches\n"
+
+
+def without_owned_block(contents: str) -> tuple[str, bool]:
+    lines = contents.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if line == BLOCK_START]
+    ends = [index for index, line in enumerate(lines) if line == BLOCK_END]
+    if not starts and not ends:
+        return contents, False
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValueError("local GPUI patch markers are incomplete")
+    return "".join(lines[: starts[0]] + lines[ends[0] + 1 :]), True
 
 
 def local_crates(checkout: Path) -> dict[str, Path]:
@@ -28,10 +41,22 @@ def main() -> None:
     parser.add_argument("mode", choices=("on", "off"))
     parser.add_argument("checkout", nargs="?", default="../zed")
     args = parser.parse_args()
+    contents = CONFIG.read_text() if CONFIG.exists() else ""
+    try:
+        remaining, owned = without_owned_block(contents)
+    except ValueError as error:
+        parser.error(str(error))
 
     if args.mode == "off":
-        CONFIG.unlink(missing_ok=True)
+        if owned:
+            if remaining:
+                CONFIG.write_text(remaining)
+            else:
+                CONFIG.unlink()
         return
+
+    if not owned and f'[patch."{FORK_URL}"]' in remaining:
+        parser.error("local GPUI patch table already exists outside the owned block")
 
     checkout = (ROOT / args.checkout).resolve()
     if not (checkout / "SPACETERM.md").is_file():
@@ -60,7 +85,8 @@ def main() -> None:
         path = crates[name].as_posix().replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{name} = {{ path = "{path}" }}')
     CONFIG.parent.mkdir(exist_ok=True)
-    CONFIG.write_text("\n".join(lines) + "\n")
+    separator = "\n" if remaining and not remaining.endswith("\n") else ""
+    CONFIG.write_text(remaining + separator + BLOCK_START + "\n".join(lines) + "\n" + BLOCK_END)
 
 
 if __name__ == "__main__":
