@@ -593,11 +593,6 @@ impl GraphicsPaintPlan {
         Arc::ptr_eq(&self.paints, &other.paints)
     }
 
-    #[cfg(test)]
-    pub(crate) fn image_count(&self) -> usize {
-        self.paints.len()
-    }
-
     pub(crate) fn paint_layer(
         &self,
         layer: GraphicsLayer,
@@ -633,13 +628,6 @@ impl GraphicsPaintPlan {
         }
     }
 
-    pub(crate) fn preflight_layer(
-        &self,
-        layer: GraphicsLayer,
-        window: &mut Window,
-    ) -> Result<(), GraphicsResourceError> {
-        self.paint_layer(layer, window)
-    }
 }
 
 const fn layer_for_z(z: i32) -> GraphicsLayer {
@@ -662,6 +650,7 @@ mod tests {
     struct FailingImageAtlas {
         inner: gpui::HeadlessAtlas,
         image_lookups: AtomicUsize,
+        failed_image: gpui::ImageId,
     }
 
     impl gpui::PlatformAtlas for FailingImageAtlas {
@@ -670,15 +659,21 @@ mod tests {
             key: gpui::AtlasKey,
             build: &mut dyn FnMut() -> anyhow::Result<Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>>,
         ) -> anyhow::Result<Option<gpui::AtlasTile>> {
-            if matches!(key, gpui::AtlasKey::Image(_)) {
+            if let gpui::AtlasKey::Image(params) = &key {
                 self.image_lookups.fetch_add(1, Ordering::Relaxed);
-                anyhow::bail!("injected image atlas failure");
+                if params.image_id == self.failed_image {
+                    anyhow::bail!("injected image atlas failure");
+                }
             }
             self.inner.get_or_insert_with(key, build)
         }
 
         fn remove(&self, key: &gpui::AtlasKey) {
             self.inner.remove(key);
+        }
+
+        fn contains(&self, key: &gpui::AtlasKey) -> bool {
+            self.inner.contains(key)
         }
     }
 
@@ -722,8 +717,14 @@ mod tests {
                         Some(ContentMask {
                             bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
                         }),
-                        |window| plan.preflight_layer(GraphicsLayer::AboveText, window),
+                        |window| plan.paint_layer(GraphicsLayer::AboveText, window),
                     );
+                    if outcome.is_err() {
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(point(px(0.0), px(0.0)), size(px(40.0), px(20.0))),
+                            gpui::rgba(0x22_33_44_ff),
+                        ));
+                    }
                     *result.lock().unwrap() = Some(outcome);
                 },
             )
@@ -830,7 +831,7 @@ mod tests {
                             ),
                         }),
                         |window| {
-                            plan.preflight_layer(GraphicsLayer::AboveText, window)
+                            plan.paint_layer(GraphicsLayer::AboveText, window)
                                 .expect("image preparation should reach the atlas");
                         },
                     );
@@ -844,10 +845,21 @@ mod tests {
     }
 
     #[test]
-    fn image_atlas_failure_is_reported_during_preflight_without_scene_primitives() {
+    fn image_atlas_failure_during_preflight_paints_only_retained_surface() {
+        let prepared = prepared_graphics();
+        let (bounds, cell_width, line_height) = geometry();
+        let first_plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let first = first_plan.paints[0].clone();
+        let mut second = first.clone();
+        second.image = Arc::new(RenderImage::new(smallvec![Frame::new(RgbaImage::new(1, 1))]));
+        let failed_image = second.image.id;
+        let plan = GraphicsPaintPlan {
+            paints: Arc::from([first.clone(), second]),
+        };
         let atlas = Arc::new(FailingImageAtlas {
             inner: gpui::HeadlessAtlas::default(),
             image_lookups: AtomicUsize::new(0),
+            failed_image,
         });
         let mut cx = gpui::HeadlessAppContext::with_platform(
             Arc::new(gpui::NoopTextSystem),
@@ -857,9 +869,6 @@ mod tests {
                 move || Ok(Some(Box::new(FailingImageRenderer(Arc::clone(&atlas)))))
             },
         );
-        let prepared = prepared_graphics();
-        let (bounds, cell_width, line_height) = geometry();
-        let plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
         let result = Arc::new(std::sync::Mutex::new(None));
         let handle = cx
             .open_window(size(px(800.0), px(400.0)), {
@@ -870,10 +879,12 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
 
-        assert!(atlas.image_lookups.load(Ordering::Relaxed) > 0);
+        assert!(atlas.image_lookups.load(Ordering::Relaxed) >= 2);
         assert!(matches!(*result.lock().unwrap(), Some(Err(GraphicsResourceError::Paint))));
         cx.update_window(handle.into(), |_, window, _| {
+            assert!(window.has_image_atlas_entry(&first.image));
             assert!(window.painted_polychrome_sprites().is_empty());
+            assert_eq!(window.painted_quads().len(), 1);
         })
         .unwrap();
     }

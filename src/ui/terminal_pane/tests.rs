@@ -1,12 +1,11 @@
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use gpui::{
-    EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
-};
+use gpui::{EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::appearance::{Color, TerminalColors};
@@ -6320,19 +6319,110 @@ fn second_glyph_preflight_failure_submits_only_the_last_valid_generation(cx: &mu
     assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
 }
 
-#[gpui::test]
-fn second_image_preflight_failure_rolls_back_the_unpresented_generation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
+struct FailImageAtlas {
+    inner: gpui::HeadlessAtlas,
+    image_lookups: AtomicUsize,
+    fail_at_lookup: AtomicUsize,
+}
+
+impl gpui::PlatformAtlas for FailImageAtlas {
+    fn get_or_insert_with<'a>(
+        &self,
+        key: gpui::AtlasKey,
+        build: &mut dyn FnMut() -> anyhow::Result<Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> anyhow::Result<Option<gpui::AtlasTile>> {
+        if matches!(key, gpui::AtlasKey::Image(_)) {
+            let lookup = self.image_lookups.fetch_add(1, Ordering::Relaxed) + 1;
+            if lookup == self.fail_at_lookup.load(Ordering::Relaxed) {
+                anyhow::bail!("injected image atlas failure");
+            }
+        }
+        self.inner.get_or_insert_with(key, build)
+    }
+
+    fn remove(&self, key: &gpui::AtlasKey) {
+        self.inner.remove(key);
+    }
+
+    fn contains(&self, key: &gpui::AtlasKey) -> bool {
+        self.inner.contains(key)
+    }
+}
+
+struct FailImageRenderer(Arc<FailImageAtlas>);
+
+impl gpui::PlatformHeadlessRenderer for FailImageRenderer {
+    fn render_scene_to_image(
+        &mut self,
+        _scene: &gpui::Scene,
+        _size: gpui::Size<gpui::DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        Ok(image::RgbaImage::new(1, 1))
+    }
+
+    fn render_scene(
+        &mut self,
+        _scene: &gpui::Scene,
+        _size: gpui::Size<gpui::DevicePixels>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
+    let atlas = Arc::new(FailImageAtlas {
+        inner: gpui::HeadlessAtlas::default(),
+        image_lookups: AtomicUsize::new(0),
+        fail_at_lookup: AtomicUsize::new(0),
+    });
+    let mut cx = gpui::HeadlessAppContext::with_platform(
+        Arc::new(gpui::NoopTextSystem),
+        Arc::new(()),
+        {
+            let atlas = Arc::clone(&atlas);
+            move || Ok(Some(Box::new(FailImageRenderer(Arc::clone(&atlas)))))
+        },
+    );
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records.clone()));
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        session_factory,
+        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-image-test")),
+    );
+    let handle = cx
+        .open_window(gpui::size(gpui::px(800.0), gpui::px(600.0)), move |window, cx| {
+            cx.new(|cx| TerminalPane::new(session_factory, window, cx))
+        })
+        .unwrap();
+    handle
+        .update(&mut cx, |pane, window, cx| {
+            window.activate_window();
+            pane.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
     let events = records.last_event_sender().unwrap();
     events
         .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
-    let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let submissions_before = handle
+        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+        .unwrap();
 
-    pane.update(cx, |pane, _| {
-        pane.paint_fault = Some(PaintPreflightFault::Image(1));
-    });
+    let lookups_before = atlas.image_lookups.load(Ordering::Relaxed);
+    atlas
+        .fail_at_lookup
+        .store(lookups_before + 2, Ordering::Relaxed);
     events
         .try_send(SessionEvent::Screen(graphics_screen_with_images(
             2,
@@ -6340,31 +6430,27 @@ fn second_image_preflight_failure_rolls_back_the_unpresented_generation(cx: &mut
         )))
         .unwrap();
     cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
 
-    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
-    assert_eq!(
-        (
-            pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
-            pane.read_with(cx, |pane, _| {
-                pane.pane_state.failure().map(TerminalFailure::class)
-            }),
-            cache.read_with(cx, |cache, _| cache.cached_image_keys()),
-            cache.read_with(cx, |cache, _| cache.staged_image_keys()),
-        ),
-        (
-            crate::terminal::PresentationGeneration::test(1),
-            Some(crate::terminal::FailureClass::Resource),
-            vec![crate::terminal::ImageKey {
-                image_id: 1,
-                generation: 1,
-            }],
-            Vec::new(),
-        )
-    );
-    let submissions = pane.read_with(cx, |pane, _| {
-        pane.scene_submission_attempts[submissions_before..].to_vec()
-    });
+    assert!(atlas.image_lookups.load(Ordering::Relaxed) >= lookups_before + 2);
+    let (last_valid, failure, cached, staged, submissions) = handle
+        .read_with(&cx, |pane, cx| {
+            (
+                pane.last_valid_screen.generation,
+                pane.pane_state.failure().map(TerminalFailure::class),
+                pane.graphics_cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+                pane.graphics_cache.read_with(cx, |cache, _| cache.staged_image_keys()),
+                pane.scene_submission_attempts[submissions_before..].to_vec(),
+            )
+        })
+        .unwrap();
+    assert_eq!(last_valid, crate::terminal::PresentationGeneration::test(1));
+    assert_eq!(failure, Some(crate::terminal::FailureClass::Resource));
+    assert_eq!(cached, vec![crate::terminal::ImageKey { image_id: 1, generation: 1 }]);
+    assert!(staged.is_empty());
     assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    assert_eq!(submissions.last(), Some(&crate::terminal::PresentationGeneration::test(1)));
 }
 
 #[gpui::test]
