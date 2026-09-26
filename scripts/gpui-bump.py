@@ -27,14 +27,14 @@ EXPECTED = {
     ("dev-dependencies", "gpui"),
     ("dev-dependencies", "gpui_macos"),
 }
-TAG_PATTERN = re.compile(r"spaceterm-\d{4}-\d{2}-\d{2}\Z")
+TAG_PATTERN = re.compile(r"spaceterm-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[1-9][0-9]*)?\Z")
 FIELD_PATTERN = re.compile(r'(\btag\s*=\s*")([^"]*)(")')
 CHANNEL_PATTERN = re.compile(r'(?m)^([ \t]*channel[ \t]*=[ \t]*")([^"]*)("[^\n]*)$')
 CANCEL_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 class Failure(Enum):
-    INVALID_TAG = "expected a spaceterm-YYYY-MM-DD tag"
+    INVALID_TAG = "expected spaceterm-YYYY-MM-DD or spaceterm-YYYY-MM-DD.N (N is positive without leading zeros)"
     OVERRIDE_ACTIVE = "local GPUI override is active; run mise run gpui:local:off"
     CONFIG_INVALID = "local Cargo configuration is invalid"
     DEPENDENCIES_UNEXPECTED = "fork dependency set is unexpected"

@@ -90,8 +90,8 @@ class GpuiBumpTests(unittest.TestCase):
         self.updates.append((root, packages))
         (root / "Cargo.lock").write_text(lockfile(NEW_TAG))
 
-    def bump(self):
-        return MODULE.bump(self.root, NEW_TAG, self.remote, self.update)
+    def bump(self, tag=NEW_TAG):
+        return MODULE.bump(self.root, tag, self.remote, self.update)
 
     def snapshot(self):
         return tuple((self.root / name).read_bytes() for name in (
@@ -119,6 +119,37 @@ class GpuiBumpTests(unittest.TestCase):
             '[toolchain]\nchannel = "1.99.0"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n')
         self.assertEqual(self.updates, [(self.root, list(LOCK_NAMES))])
         self.assertEqual(self.remote.queries, [("tag", NEW_TAG), ("toolchain", NEW_TAG)])
+
+    def test_positive_numeric_suffixes_are_accepted(self):
+        for tag in (f"{OLD_TAG}.1", f"{OLD_TAG}.12"):
+            with self.subTest(tag=tag):
+                def update(root, packages):
+                    self.updates.append((root, packages))
+                    (root / "Cargo.lock").write_text(lockfile(tag))
+
+                self.update = update
+                result = self.bump(tag)
+                self.assertEqual(result.new_tag, tag)
+                self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(tag))
+                self.assertIn(f'tag = "{tag}"', (self.root / "Cargo.toml").read_text())
+
+    def test_invalid_suffixes_are_rejected_without_changes(self):
+        original = self.snapshot()
+        for tag in (
+            f"{OLD_TAG}.0", f"{OLD_TAG}.01", f"{OLD_TAG}.001",
+            f"{OLD_TAG}.-1", f"{OLD_TAG}.+1", f"{OLD_TAG}.1.2",
+            f"{OLD_TAG}.", f"{OLD_TAG}.1a", f"{OLD_TAG}.١",
+            "spaceterm-2026-9-26.1",
+        ):
+            with self.subTest(tag=tag):
+                with self.assertRaises(MODULE.BumpError) as raised:
+                    self.bump(tag)
+                self.assertEqual(raised.exception.kind, MODULE.Failure.INVALID_TAG)
+                self.assertIn(".N", str(raised.exception))
+                self.assertIn("without leading zeros", str(raised.exception))
+                self.assertEqual(self.snapshot(), original)
+        self.assertEqual(self.remote.queries, [])
+        self.assertEqual(self.updates, [])
 
     def test_missing_tag_preserves_tree(self):
         self.remote.exists = False

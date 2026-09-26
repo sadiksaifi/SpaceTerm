@@ -5,6 +5,8 @@ tag. The published GPUI crate is stale. Vendoring Zed into this repository or ad
 submodule would make updates and ownership harder to track. The patches live as commits on the
 fork's `spaceterm` branch. Each month, maintainers rebase that branch onto upstream Zed, validate
 the fork, create a new dated tag, and bump SpaceTerm to that tag.
+Tags use `spaceterm-YYYY-MM-DD`. Additional releases on the same date append `.1`, `.2`, and so
+on. The suffix is a positive integer without leading zeros. Published tags are immutable.
 SpaceTerm's Rust toolchain matches the fork's on each bump, because both build the same
 dependencies. Compiler issues in Zed's dependencies are fixed upstream, not patched here.
 
