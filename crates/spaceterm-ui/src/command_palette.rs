@@ -1,12 +1,12 @@
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, CursorStyle, Entity,
-    EventEmitter, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
-    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, Rgba, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, WeakFocusHandle,
-    Window, WindowId, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, EventEmitter, Global,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Render, Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
+    canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -2903,16 +2903,6 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .child(outside)
             .child(div().absolute().left(left).top(top).child(panel))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .when(self.pointer_suppressed, |overlay| {
-                overlay.child(
-                    canvas(
-                        |_, _, _| (),
-                        |_, _, window, _| window.set_window_cursor_style(CursorStyle::Arrow),
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-            })
             .on_action(cx.listener(|palette, _: &MoveUp, window, cx| {
                 palette.move_selection(-1, window, cx);
                 cx.stop_propagation();
