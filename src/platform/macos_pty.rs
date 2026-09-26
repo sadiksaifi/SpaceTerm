@@ -958,8 +958,11 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 mod tests {
     use std::collections::HashMap;
     use std::env;
+    use std::ffi::CString;
     use std::fmt;
     use std::io::{self, BufRead, BufReader};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::Instant;
@@ -1399,6 +1402,19 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&readiness);
         let _ = std::fs::remove_file(&replacement_report);
+        let report_name = CString::new(replacement_report.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: report_name is a live NUL-terminated path to this test's private FIFO.
+        assert_eq!(unsafe { libc::mkfifo(report_name.as_ptr(), 0o600) }, 0);
+        let mut report_reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&replacement_report)
+            .unwrap();
+        // Keep the FIFO writable so poll waits for the handler's report instead of seeing EOF.
+        let report_writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement_report)
+            .unwrap();
         let mut command = CommandBuilder::new("/bin/zsh");
         command.args(["-f", "-i"]);
         command.cwd(&working_directory);
@@ -1407,7 +1423,7 @@ mod tests {
         command.env("SPACETERM_HANDOFF_CHILD", &replacement_report);
         command.env(
             "SPACETERM_HANDOFF_TRAP",
-            "trap '' HUP; sleep 30 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exit 0",
+            "trap '' HUP; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exit 0",
         );
         let (mut pty, terminator) = spawn_command_in_pty(
             PtySize {
@@ -1422,30 +1438,41 @@ mod tests {
         let mut reader = BufReader::new(pty.take_reader().unwrap());
         read_output_marker(&mut reader, b"SPACETERM_READY");
         pty.write_all(
-            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; : > \"$SPACETERM_HANDOFF_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
+            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; sleep 30 & : > \"$SPACETERM_HANDOFF_READY\"; wait' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
         )
         .unwrap();
         pty.flush().unwrap();
 
         let (leader, _) = read_process_report(&mut reader, "SPACETERM_HANDOFF");
         std::fs::remove_file(&readiness).unwrap();
+        terminator.terminate().unwrap();
+        let mut event = libc::pollfd {
+            fd: report_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // The handler's FIFO write completes the handoff before shutdown scans the session.
+        // SAFETY: event points to one initialized pollfd and report_reader remains open.
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 2_000) }, 1);
+        assert_ne!(event.revents & libc::POLLIN, 0);
+        let mut report = String::new();
+        BufReader::new(&mut report_reader)
+            .read_line(&mut report)
+            .unwrap();
+        let replacement = report.trim().parse::<i32>().unwrap();
+        drop(report_writer);
+        drop(report_reader);
+        std::fs::remove_file(&replacement_report).unwrap();
         let drain = thread::spawn(move || {
             let mut sink = io::sink();
             io::copy(&mut reader, &mut sink)
         });
 
-        terminator.terminate().unwrap();
         pty.cleanup_child();
         assert!(pty.termination.forced.load(Ordering::Acquire));
         drop(pty);
         drain.join().unwrap().unwrap();
 
-        let replacement = std::fs::read_to_string(&replacement_report)
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
-        std::fs::remove_file(&replacement_report).unwrap();
         assert_ne!(replacement, leader);
         assert_process_disappears(leader);
         assert_process_disappears(replacement);
