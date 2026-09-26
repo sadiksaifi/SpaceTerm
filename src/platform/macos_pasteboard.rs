@@ -1,6 +1,6 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPasteboardTypeString};
-use objc2_foundation::{NSArray, NSString, NSUTF8StringEncoding};
+use objc2_foundation::{NSArray, NSString, NSURL, NSUTF8StringEncoding};
 use std::path::PathBuf;
 
 #[cfg(all(test, feature = "macos-native-tests"))]
@@ -30,25 +30,25 @@ pub(crate) struct MacosFileClipboard {
 }
 impl FileClipboard for MacosFileClipboard {
     fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
-        read_file_urls(self.paths).map_err(|_| ClipboardError::InvalidFiles)
+        read_file_urls(self.paths)
     }
 }
 
 pub(crate) fn read_file_urls(
     paths: crate::local_path::LocalPathSemantics,
-) -> Result<Vec<PathBuf>, String> {
-    MainThreadMarker::new().ok_or_else(|| "pasteboard unavailable".to_owned())?;
+) -> Result<Vec<PathBuf>, ClipboardError> {
+    MainThreadMarker::new().ok_or(ClipboardError::Unavailable)?;
     read_file_urls_from_pasteboard(&NSPasteboard::generalPasteboard(), paths)
 }
 
 fn read_file_urls_from_pasteboard(
     pasteboard: &NSPasteboard,
     paths: crate::local_path::LocalPathSemantics,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<PathBuf>, ClipboardError> {
     let Some(items) = pasteboard.pasteboardItems() else {
         return Ok(Vec::new());
     };
-    read_file_urls_from_items(&items, paths)
+    read_file_urls_from_items(&items, paths).map_err(|_| ClipboardError::InvalidFiles)
 }
 
 fn read_file_urls_from_items(
@@ -57,7 +57,8 @@ fn read_file_urls_from_items(
 ) -> Result<Vec<PathBuf>, String> {
     let file_url_type = NSString::from_str("public.file-url");
     let mut urls = Vec::new();
-    let mut bytes = 0usize;
+    let mut source_bytes = 0usize;
+    let mut resolved_bytes = 0usize;
     for index in 0..items.count() {
         let item = items.objectAtIndex(index);
         if !item.types().containsObject(&file_url_type) {
@@ -69,13 +70,29 @@ fn read_file_urls_from_items(
         let value = item
             .stringForType(&file_url_type)
             .ok_or_else(|| "file URL is unreadable".to_owned())?;
-        let text = read_file_url_text(
+        let source = read_file_url_text(
             &value,
-            MAX_FILE_INSERTION_BYTES.saturating_sub(bytes),
+            MAX_FILE_INSERTION_BYTES.saturating_sub(source_bytes),
             copy_file_url_utf8,
         )?;
-        bytes += text.len();
-        urls.push(text);
+        source_bytes += source.len();
+        parse_file_urls(paths, std::slice::from_ref(&source)).map_err(str::to_owned)?;
+        let url = NSURL::URLWithString(&value)
+            .ok_or_else(|| "file URL is unreadable".to_owned())?;
+        let path_url = url
+            .filePathURL()
+            .filter(|url| !url.isFileReferenceURL())
+            .ok_or_else(|| "file URL cannot be resolved".to_owned())?;
+        let path_url_text = path_url
+            .absoluteString()
+            .ok_or_else(|| "file URL is unreadable".to_owned())?;
+        let resolved = read_file_url_text(
+            &path_url_text,
+            MAX_FILE_INSERTION_BYTES.saturating_sub(resolved_bytes),
+            copy_file_url_utf8,
+        )?;
+        resolved_bytes += resolved.len();
+        urls.push(resolved);
     }
     parse_file_urls(paths, &urls).map_err(str::to_owned)
 }
@@ -153,8 +170,71 @@ fn write_selection_to_pasteboard(
 pub(in crate::platform) mod tests {
     use super::*;
     use objc2::msg_send;
-    use objc2_app_kit::NSPasteboardType;
-    use objc2_foundation::NSData;
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboardType, NSPasteboardWriting};
+    use objc2_foundation::{NSData, NSURL};
+
+    struct FileReferenceFixture {
+        path: PathBuf,
+    }
+
+    impl FileReferenceFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "spaceterm-file-reference-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("a b.txt");
+            std::fs::write(&path, b"file reference fixture").unwrap();
+            Self { path }
+        }
+
+        fn reference_url(&self) -> String {
+            let path = NSString::from_str(self.path.to_str().unwrap());
+            let url = NSURL::fileURLWithPath(&path);
+            let reference = url.fileReferenceURL().unwrap();
+            assert!(reference.isFileReferenceURL());
+            reference.absoluteString().unwrap().to_string()
+        }
+    }
+
+    impl Drop for FileReferenceFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(self.path.parent().unwrap());
+        }
+    }
+
+    struct PrivatePasteboard(objc2::rc::Retained<NSPasteboard>);
+
+    impl PrivatePasteboard {
+        fn with_file_urls(urls: &[&str]) -> Self {
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+            let file_type = file_type();
+            let items = urls
+                .iter()
+                .map(|url| item(url, &file_type))
+                .collect::<Vec<_>>();
+            let objects = items
+                .iter()
+                .map(|item| ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&**item))
+                .collect::<Vec<_>>();
+            assert!(pasteboard.writeObjects(&NSArray::from_slice(&objects)));
+            Self(pasteboard)
+        }
+    }
+
+    impl Drop for PrivatePasteboard {
+        fn drop(&mut self) {
+            // SAFETY: This fixture exclusively owns its named server-side pasteboard.
+            let _: () = unsafe { msg_send![&*self.0, releaseGlobally] };
+        }
+    }
 
     fn file_type() -> objc2::rc::Retained<NSString> {
         NSString::from_str("public.file-url")
@@ -235,6 +315,53 @@ pub(in crate::platform) mod tests {
             read_file_urls_from_items(&remote_items, crate::local_path::LocalPathSemantics::Posix)
                 .is_err()
         );
+    }
+
+    pub(in crate::platform) fn native_file_reference_url_inserts_resolved_path() {
+        let file = FileReferenceFixture::new();
+        let reference = file.reference_url();
+        let pasteboard = PrivatePasteboard::with_file_urls(&[&reference]);
+
+        let paths = read_file_urls_from_pasteboard(
+            &pasteboard.0,
+            crate::local_path::LocalPathSemantics::Posix,
+        )
+        .unwrap();
+        let insertion = crate::terminal::native_services::file_insertion::prepare_file_insertion(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+            &paths,
+        )
+        .unwrap();
+
+        assert_eq!(insertion.text, format!("'{}'", file.path.display()));
+    }
+
+    pub(in crate::platform) fn native_deleted_file_reference_url_returns_typed_failure() {
+        let file = FileReferenceFixture::new();
+        let reference = file.reference_url();
+        let pasteboard = PrivatePasteboard::with_file_urls(&[&reference]);
+        std::fs::remove_file(&file.path).unwrap();
+
+        let result = read_file_urls_from_pasteboard(
+            &pasteboard.0,
+            crate::local_path::LocalPathSemantics::Posix,
+        );
+
+        assert_eq!(result, Err(ClipboardError::InvalidFiles));
+    }
+
+    pub(in crate::platform) fn native_file_reference_and_path_urls_preserve_order() {
+        let file = FileReferenceFixture::new();
+        let reference = file.reference_url();
+        let pasteboard = PrivatePasteboard::with_file_urls(&[&reference, "file:///plain%20path"]);
+
+        let paths = read_file_urls_from_pasteboard(
+            &pasteboard.0,
+            crate::local_path::LocalPathSemantics::Posix,
+        )
+        .unwrap();
+
+        assert_eq!(paths, vec![file.path.clone(), PathBuf::from("/plain path")]);
     }
 
     #[test]

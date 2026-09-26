@@ -74,8 +74,11 @@ pub(crate) fn run() {
     native_test!(macos_pasteboard::tests::native_file_discovery_counts_only_file_representations);
     native_test!(macos_pasteboard::tests::native_file_discovery_rejects_unreadable_file_representation_with_text);
     native_test!(macos_pasteboard::tests::native_file_discovery_preserves_items_and_rejects_invalid_authority);
+    native_test!(macos_pasteboard::tests::native_file_reference_url_inserts_resolved_path);
+    native_test!(macos_pasteboard::tests::native_deleted_file_reference_url_returns_typed_failure);
+    native_test!(macos_pasteboard::tests::native_file_reference_and_path_urls_preserve_order);
     native_test!(
         macos_pasteboard::tests::native_write_declares_every_representation_before_publishing_data
     );
-    println!("25 native main-thread tests passed");
+    println!("28 native main-thread tests passed");
 }
