@@ -11,18 +11,26 @@ FORK_URL = "https://github.com/sadiksaifi/zed"
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / ".cargo" / "config.toml"
 BLOCK_START = "# BEGIN SpaceTerm local GPUI patches\n"
+BLOCK_START_WITH_SEPARATOR = "# BEGIN SpaceTerm local GPUI patches (added newline)\n"
 BLOCK_END = "# END SpaceTerm local GPUI patches\n"
 
 
 def without_owned_block(contents: str) -> tuple[str, bool]:
     lines = contents.splitlines(keepends=True)
-    starts = [index for index, line in enumerate(lines) if line == BLOCK_START]
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line in (BLOCK_START, BLOCK_START_WITH_SEPARATOR)
+    ]
     ends = [index for index, line in enumerate(lines) if line == BLOCK_END]
     if not starts and not ends:
         return contents, False
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         raise ValueError("local GPUI patch markers are incomplete")
-    return "".join(lines[: starts[0]] + lines[ends[0] + 1 :]), True
+    prefix = "".join(lines[: starts[0]])
+    if lines[starts[0]] == BLOCK_START_WITH_SEPARATOR:
+        prefix = prefix[:-1]
+    return prefix + "".join(lines[ends[0] + 1 :]), True
 
 
 def local_crates(checkout: Path) -> dict[str, Path]:
@@ -86,7 +94,8 @@ def main() -> None:
         lines.append(f'{name} = {{ path = "{path}" }}')
     CONFIG.parent.mkdir(exist_ok=True)
     separator = "\n" if remaining and not remaining.endswith("\n") else ""
-    CONFIG.write_text(remaining + separator + BLOCK_START + "\n".join(lines) + "\n" + BLOCK_END)
+    marker = BLOCK_START_WITH_SEPARATOR if separator else BLOCK_START
+    CONFIG.write_text(remaining + separator + marker + "\n".join(lines) + "\n" + BLOCK_END)
 
 
 if __name__ == "__main__":

@@ -56,9 +56,11 @@ class GpuiLocalTests(unittest.TestCase):
 
     def test_repeated_on_keeps_patch_after_lockfile_sources_change(self):
         self.run_script("on")
+        first = self.config.read_text()
         (self.root / "Cargo.lock").write_text(LOCK.replace(f'git+{FORK_URL}?tag=test#1234', ''))
         self.run_script("on")
-        self.assertIn('gpui = { path = ', self.config.read_text())
+        self.assertIn('gpui = { path = ', first)
+        self.assertEqual(self.config.read_text(), first)
 
     def test_on_switches_checkout_after_lockfile_sources_change(self):
         self.run_script("on")
@@ -80,6 +82,14 @@ class GpuiLocalTests(unittest.TestCase):
         self.config.parent.mkdir()
         original = '[build]\ntarget-dir = "target/custom"\n'
         self.config.write_text(original)
+        self.run_script("off")
+        self.assertEqual(self.config.read_text(), original)
+
+    def test_off_restores_configuration_without_final_newline(self):
+        self.config.parent.mkdir()
+        original = '[build]\ntarget-dir = "target/custom"'
+        self.config.write_text(original)
+        self.run_script("on")
         self.run_script("off")
         self.assertEqual(self.config.read_text(), original)
 
