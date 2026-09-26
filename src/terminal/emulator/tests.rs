@@ -703,11 +703,16 @@ fn assert_grid_equals_bytes(actual: &mut TerminalEmulator, size: (u16, u16), byt
     assert_eq!(all_grid_rows(actual), all_grid_rows(&mut reference));
 }
 
+/// Ghostty's former default byte limit. Prompt redraw tests use it to force
+/// page-granular pruning at the scrollback limit.
+const PRUNING_SCROLLBACK_BYTES: usize = 10_000;
+
 fn limited_prompt_terminal(output_rows: usize, prompt: &str) -> Terminal<'static, 'static> {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 10,
         max_scrollback: 500,
+        max_scrollback_bytes: PRUNING_SCROLLBACK_BYTES,
     })
     .unwrap();
     for row in 0..output_rows {
@@ -1695,6 +1700,7 @@ fn default_limit_prompt_after_redraw() -> Terminal<'static, 'static> {
         cols: 80,
         rows: 10,
         max_scrollback: 10_000,
+        max_scrollback_bytes: PRUNING_SCROLLBACK_BYTES,
     })
     .unwrap();
     for row in 0..600 {
@@ -1725,6 +1731,7 @@ fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
         cols: 80,
         rows: 10,
         max_scrollback: 10_000,
+        max_scrollback_bytes: PRUNING_SCROLLBACK_BYTES,
     })
     .unwrap();
     for row in 0..1600 {
@@ -1871,6 +1878,7 @@ fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
         cols: 55,
         rows: 10,
         max_scrollback: 500,
+        max_scrollback_bytes: PRUNING_SCROLLBACK_BYTES,
     })
     .unwrap();
     for row in 0..450 {
