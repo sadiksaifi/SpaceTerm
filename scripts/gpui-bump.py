@@ -9,10 +9,8 @@ import os
 from pathlib import Path
 import re
 import signal
-import stat
 import subprocess
 import sys
-import tempfile
 import tomllib
 from urllib.error import URLError
 from urllib.parse import quote
@@ -30,10 +28,12 @@ EXPECTED = {
 TAG_PATTERN = re.compile(r"spaceterm-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[1-9][0-9]*)?\Z")
 FIELD_PATTERN = re.compile(r'(\btag\s*=\s*")([^"]*)(")')
 CHANNEL_PATTERN = re.compile(r'(?m)^([ \t]*channel[ \t]*=[ \t]*")([^"]*)("[^\n]*)$')
-CANCEL_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+BUMP_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 
 
 class Failure(Enum):
+    DIRTY_INPUTS = "commit or stash changes to Cargo.toml, Cargo.lock, and rust-toolchain.toml before bumping"
+    GIT_CHECK_FAILED = "could not check GPUI bump files in Git"
     INVALID_TAG = "expected spaceterm-YYYY-MM-DD or spaceterm-YYYY-MM-DD.N (N is positive without leading zeros)"
     OVERRIDE_ACTIVE = "local GPUI override is active; run mise run gpui:local:off"
     CONFIG_INVALID = "local Cargo configuration is invalid"
@@ -47,7 +47,7 @@ class Failure(Enum):
     UPDATE_FAILED = "cargo update failed for the fork packages"
     FILE_READ_FAILED = "could not read a GPUI bump input file"
     FILE_WRITE_FAILED = "could not write a GPUI bump file"
-    RESTORE_FAILED = "could not restore the original GPUI bump files"
+    RESTORE_FAILED = "rollback failed; run git restore Cargo.toml Cargo.lock rust-toolchain.toml"
 
 
 class BumpError(Exception):
@@ -68,12 +68,6 @@ class BumpResult:
     new_channel: str
 
 
-@dataclass(frozen=True)
-class OriginalFile:
-    contents: bytes
-    mode: int
-
-
 def cancel_on_sigterm(signum, frame) -> None:
     raise BumpCancelled
 
@@ -86,35 +80,6 @@ def sigterm_cancellation():
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
-
-
-@contextmanager
-def defer_signals(block: bool = True):
-    received = []
-    previous_handlers = {signum: signal.getsignal(signum) for signum in CANCEL_SIGNALS}
-
-    def record(signum, frame):
-        received.append(signum)
-
-    previous_mask = None
-    try:
-        for signum in CANCEL_SIGNALS:
-            signal.signal(signum, record)
-        if block and hasattr(signal, "pthread_sigmask"):
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
-        yield received
-    finally:
-        try:
-            if previous_mask is not None:
-                try:
-                    for signum in signal.sigpending().intersection(CANCEL_SIGNALS):
-                        signal.sigwait({signum})
-                        received.append(signum)
-                finally:
-                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
 
 
 class ForkRemote:
@@ -146,52 +111,36 @@ def read_file(path: Path) -> str:
         raise BumpError(Failure.FILE_READ_FAILED) from error
 
 
-def read_originals(paths: tuple[Path, ...]) -> dict[Path, OriginalFile]:
+def require_clean_inputs(root: Path) -> None:
     try:
-        return {
-            path: OriginalFile(path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
-            for path in paths
-        }
+        result = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", *BUMP_FILES],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
     except OSError as error:
-        raise BumpError(Failure.FILE_READ_FAILED) from error
+        raise BumpError(Failure.GIT_CHECK_FAILED) from error
+    if result.returncode == 1:
+        raise BumpError(Failure.DIRTY_INPUTS)
+    if result.returncode != 0:
+        raise BumpError(Failure.GIT_CHECK_FAILED)
 
 
-def atomic_write(path: Path, contents: bytes, mode: int) -> None:
-    temporary = None
+def restore_from_head(root: Path) -> None:
     try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(contents)
-        os.chmod(temporary, mode)
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def restore_originals(originals: dict[Path, OriginalFile]) -> bool:
-    failed = False
-    with defer_signals() as received:
-        for path, original in originals.items():
-            for attempt in range(2):
-                try:
-                    if (
-                        not path.exists()
-                        or path.read_bytes() != original.contents
-                        or stat.S_IMODE(path.stat().st_mode) != original.mode
-                    ):
-                        atomic_write(path, original.contents, original.mode)
-                    break
-                except (KeyboardInterrupt, SystemExit, BumpCancelled):
-                    received.append(signal.SIGINT)
-                    if attempt == 1:
-                        failed = True
-                except BaseException:
-                    failed = True
-                    break
-    if failed:
+        result = subprocess.run(
+            ["git", "restore", "--source=HEAD", "--", *BUMP_FILES],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as error:
+        raise BumpError(Failure.RESTORE_FAILED) from error
+    if result.returncode != 0:
         raise BumpError(Failure.RESTORE_FAILED)
-    return bool(received)
 
 
 def fork_dependencies(contents: str, tag: str) -> tuple[str, str]:
@@ -281,29 +230,20 @@ def cargo_update(root: Path, packages: list[str]) -> None:
     command = ["cargo", "update"]
     for package in packages:
         command.extend(("--package", package))
-    process = None
     try:
-        # The child inherits the parent's mask, so record signals without blocking while it starts.
-        with defer_signals(block=False) as startup_signals:
-            process = subprocess.Popen(
-                command,
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=os.name == "posix",
-            )
-        if startup_signals:
-            raise BumpCancelled
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as error:
+        raise BumpError(Failure.UPDATE_FAILED) from error
+    try:
         returncode = process.wait()
-    except BaseException as error:
-        if process is not None:
-            try:
-                with defer_signals():
-                    stop_cargo_process(process)
-            except BaseException as stop_error:
-                raise BumpError(Failure.UPDATE_FAILED) from stop_error
-        if isinstance(error, OSError):
-            raise BumpError(Failure.UPDATE_FAILED) from error
+    except BaseException:
+        stop_cargo_process(process)
         raise
     if returncode != 0:
         raise BumpError(Failure.UPDATE_FAILED)
@@ -334,6 +274,7 @@ def stop_cargo_process(process: subprocess.Popen) -> None:
 
 
 def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpResult:
+    require_clean_inputs(root)
     if not TAG_PATTERN.fullmatch(tag):
         raise BumpError(Failure.INVALID_TAG)
     config = root / ".cargo" / "config.toml"
@@ -352,13 +293,9 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
     manifest_path = root / "Cargo.toml"
     toolchain_path = root / "rust-toolchain.toml"
     lock_path = root / "Cargo.lock"
-    originals = read_originals((manifest_path, toolchain_path, lock_path))
-    try:
-        manifest_contents = originals[manifest_path].contents.decode("utf-8")
-        toolchain_contents = originals[toolchain_path].contents.decode("utf-8")
-        lock_contents = originals[lock_path].contents.decode("utf-8")
-    except UnicodeError as error:
-        raise BumpError(Failure.FILE_READ_FAILED) from error
+    manifest_contents = read_file(manifest_path)
+    toolchain_contents = read_file(toolchain_path)
+    lock_contents = read_file(lock_path)
     old_tag, new_manifest = fork_dependencies(manifest_contents, tag)
     old_channel = channel(toolchain_contents)
     packages, lock_tags = fork_packages(lock_contents, old_tag, tag)
@@ -370,9 +307,9 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
     with sigterm_cancellation():
         try:
             if new_manifest != manifest_contents:
-                atomic_write(manifest_path, new_manifest.encode("utf-8"), originals[manifest_path].mode)
+                manifest_path.write_text(new_manifest)
             if new_toolchain != toolchain_contents:
-                atomic_write(toolchain_path, new_toolchain.encode("utf-8"), originals[toolchain_path].mode)
+                toolchain_path.write_text(new_toolchain)
             if old_tag != tag or lock_tags != {tag}:
                 try:
                     update(root, packages)
@@ -383,11 +320,9 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
                     raise BumpError(Failure.UPDATE_FAILED) from error
         except BaseException as error:
             try:
-                interrupted_during_restore = restore_originals(originals)
-            except BumpError as restore_error:
-                raise restore_error from error
-            if interrupted_during_restore:
-                raise BumpCancelled from error
+                restore_from_head(root)
+            except BaseException as restore_error:
+                raise BumpError(Failure.RESTORE_FAILED) from restore_error
             if isinstance(error, (BumpError, KeyboardInterrupt, SystemExit, BumpCancelled)):
                 raise
             raise BumpError(Failure.FILE_WRITE_FAILED) from error

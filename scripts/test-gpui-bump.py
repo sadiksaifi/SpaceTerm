@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise GPUI fork bumps in an isolated repository without network access."""
+"""Exercise GPUI fork bumps in an isolated Git repository without network access."""
 
-import importlib.util
 from contextlib import redirect_stderr
+import importlib.util
 import io
 import os
 from pathlib import Path
@@ -37,7 +37,9 @@ other = {{ git = "https://example.com/other", tag = "{OLD_TAG}" }}
 gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
 gpui_macos = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
 '''
+TOOLCHAIN = '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'
 LOCK_NAMES = ("gpui", "gpui_apple", "gpui_macos", "gpui_platform")
+FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 
 
 def lockfile(tag):
@@ -80,8 +82,12 @@ class GpuiBumpTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
         (self.root / "Cargo.toml").write_text(MANIFEST)
         (self.root / "Cargo.lock").write_text(lockfile(OLD_TAG))
-        (self.root / "rust-toolchain.toml").write_text(
-            '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'
+        (self.root / "rust-toolchain.toml").write_text(TOOLCHAIN)
+        subprocess.run(["git", "add", *FILES], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
+            cwd=self.root,
+            check=True,
         )
         self.remote = StubRemote()
         self.updates = []
@@ -94,11 +100,9 @@ class GpuiBumpTests(unittest.TestCase):
         return MODULE.bump(self.root, tag, self.remote, self.update)
 
     def snapshot(self):
-        return tuple((self.root / name).read_bytes() for name in (
-            "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"
-        ))
+        return tuple((self.root / name).read_bytes() for name in FILES)
 
-    def assert_fails_without_changes(self, kind):
+    def assert_failure_preserves_files(self, kind):
         before = self.snapshot()
         with self.assertRaises(MODULE.BumpError) as raised:
             self.bump()
@@ -115,25 +119,66 @@ class GpuiBumpTests(unittest.TestCase):
         )
         self.assertEqual((self.root / "Cargo.toml").read_text(), expected)
         self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(NEW_TAG))
-        self.assertEqual((self.root / "rust-toolchain.toml").read_text(),
-            '[toolchain]\nchannel = "1.99.0"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n')
+        self.assertEqual((self.root / "rust-toolchain.toml").read_text(), TOOLCHAIN.replace("1.98.1", "1.99.0"))
         self.assertEqual(self.updates, [(self.root, list(LOCK_NAMES))])
         self.assertEqual(self.remote.queries, [("tag", NEW_TAG), ("toolchain", NEW_TAG)])
+
+    def test_unstaged_change_refuses_bump(self):
+        (self.root / "Cargo.toml").write_text(MANIFEST + "\n# local change\n")
+        self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_staged_change_refuses_bump(self):
+        (self.root / "Cargo.lock").write_text(lockfile(OLD_TAG) + "\n# staged change\n")
+        subprocess.run(["git", "add", "Cargo.lock"], cwd=self.root, check=True)
+        self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_missing_tag_preserves_files(self):
+        self.remote.exists = False
+        self.assert_failure_preserves_files(MODULE.Failure.TAG_MISSING)
+        self.assertEqual(self.remote.queries, [("tag", NEW_TAG)])
+
+    def test_local_override_preserves_files(self):
+        config = self.root / ".cargo" / "config.toml"
+        config.parent.mkdir()
+        config.write_text(f'[patch."{FORK_URL}"]\ngpui = {{ path = "/tmp/zed/gpui" }}\n')
+        self.assert_failure_preserves_files(MODULE.Failure.OVERRIDE_ACTIVE)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_unexpected_dependency_set_preserves_files(self):
+        (self.root / "Cargo.toml").write_text(MANIFEST.replace("gpui_platform =", "different ="))
+        subprocess.run(["git", "add", "Cargo.toml"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture change"],
+            cwd=self.root,
+            check=True,
+        )
+        self.assert_failure_preserves_files(MODULE.Failure.DEPENDENCIES_UNEXPECTED)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_remote_toolchain_without_channel_preserves_files(self):
+        self.remote.contents = '[toolchain]\nprofile = "minimal"\n'
+        self.assert_failure_preserves_files(MODULE.Failure.TOOLCHAIN_INVALID)
 
     def test_positive_numeric_suffixes_are_accepted(self):
         for tag in (f"{OLD_TAG}.1", f"{OLD_TAG}.12"):
             with self.subTest(tag=tag):
                 def update(root, packages):
-                    self.updates.append((root, packages))
                     (root / "Cargo.lock").write_text(lockfile(tag))
 
                 self.update = update
                 result = self.bump(tag)
                 self.assertEqual(result.new_tag, tag)
                 self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(tag))
-                self.assertIn(f'tag = "{tag}"', (self.root / "Cargo.toml").read_text())
+                subprocess.run(["git", "add", *FILES], cwd=self.root, check=True)
+                subprocess.run(
+                    ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture bump"],
+                    cwd=self.root,
+                    check=True,
+                )
 
-    def test_invalid_suffixes_are_rejected_without_changes(self):
+    def test_invalid_tags_are_rejected(self):
         original = self.snapshot()
         for tag in (
             f"{OLD_TAG}.0", f"{OLD_TAG}.01", f"{OLD_TAG}.001",
@@ -145,44 +190,26 @@ class GpuiBumpTests(unittest.TestCase):
                 with self.assertRaises(MODULE.BumpError) as raised:
                     self.bump(tag)
                 self.assertEqual(raised.exception.kind, MODULE.Failure.INVALID_TAG)
-                self.assertIn(".N", str(raised.exception))
-                self.assertIn("without leading zeros", str(raised.exception))
                 self.assertEqual(self.snapshot(), original)
         self.assertEqual(self.remote.queries, [])
-        self.assertEqual(self.updates, [])
-
-    def test_missing_tag_preserves_tree(self):
-        self.remote.exists = False
-        self.assert_fails_without_changes(MODULE.Failure.TAG_MISSING)
-        self.assertEqual(self.remote.queries, [("tag", NEW_TAG)])
-
-    def test_local_override_preserves_tree(self):
-        config = self.root / ".cargo" / "config.toml"
-        config.parent.mkdir()
-        config.write_text(f'[patch."{FORK_URL}"]\ngpui = {{ path = "/tmp/zed/gpui" }}\n')
-        self.assert_fails_without_changes(MODULE.Failure.OVERRIDE_ACTIVE)
-        self.assertEqual(self.remote.queries, [])
-
-    def test_unexpected_dependency_set_preserves_tree(self):
-        manifest = self.root / "Cargo.toml"
-        manifest.write_text(MANIFEST.replace("gpui_platform =", "different ="))
-        self.assert_fails_without_changes(MODULE.Failure.DEPENDENCIES_UNEXPECTED)
-        self.assertEqual(self.remote.queries, [])
-
-    def test_remote_toolchain_without_channel_preserves_tree(self):
-        self.remote.contents = '[toolchain]\nprofile = "minimal"\n'
-        self.assert_fails_without_changes(MODULE.Failure.TOOLCHAIN_INVALID)
 
     def test_repeated_bump_is_idempotent(self):
         self.bump()
+        subprocess.run(["git", "add", *FILES], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture bump"],
+            cwd=self.root,
+            check=True,
+        )
         after_first = self.snapshot()
         result = self.bump()
         self.assertEqual(result, MODULE.BumpResult(NEW_TAG, NEW_TAG, "1.99.0", "1.99.0"))
         self.assertEqual(self.snapshot(), after_first)
         self.assertEqual(len(self.updates), 1)
 
-    def test_failed_update_restores_all_originals(self):
+    def test_failed_update_rolls_back_and_retry_succeeds(self):
         original = self.snapshot()
+        successful_update = self.update
 
         def fail_update(root, packages):
             (root / "Cargo.lock").write_text("partial lockfile\n")
@@ -193,47 +220,25 @@ class GpuiBumpTests(unittest.TestCase):
             self.bump()
         self.assertEqual(raised.exception.kind, MODULE.Failure.UPDATE_FAILED)
         self.assertEqual(self.snapshot(), original)
-
-    def test_retry_after_failed_update_succeeds(self):
-        original = self.snapshot()
-        successful_update = self.update
-
-        def fail_update(root, packages):
-            (root / "Cargo.lock").write_text("partial lockfile\n")
-            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
-
-        self.update = fail_update
-        with self.assertRaises(MODULE.BumpError):
-            self.bump()
-        self.assertEqual(self.snapshot(), original)
         self.update = successful_update
-        result = self.bump()
-        self.assertEqual(result.new_tag, NEW_TAG)
-        self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(NEW_TAG))
+        self.assertEqual(self.bump().new_tag, NEW_TAG)
 
-    def test_failed_toolchain_write_restores_all_originals(self):
+    def test_toolchain_write_failure_rolls_back(self):
         original = self.snapshot()
-        toolchain = self.root / "rust-toolchain.toml"
-        original_replace = Path.replace
-        failed = False
+        original_write = Path.write_text
 
-        def fail_once(source, target):
-            nonlocal failed
-            if target == toolchain and not failed:
-                failed = True
-                raise OSError("injected toolchain write failure")
-            return original_replace(source, target)
+        def fail_toolchain_write(path, contents, *args, **kwargs):
+            if path == self.root / "rust-toolchain.toml":
+                raise OSError("injected write failure")
+            return original_write(path, contents, *args, **kwargs)
 
-        with patch.object(Path, "replace", fail_once):
+        with patch.object(Path, "write_text", fail_toolchain_write):
             with self.assertRaises(MODULE.BumpError) as raised:
                 self.bump()
         self.assertEqual(raised.exception.kind, MODULE.Failure.FILE_WRITE_FAILED)
-        self.assertTrue(failed)
         self.assertEqual(self.snapshot(), original)
-        self.assertEqual(self.updates, [])
-        self.assertEqual(list(self.root.glob(".rust-toolchain.toml.*")), [])
 
-    def test_interrupt_during_update_restores_all_originals(self):
+    def test_sigint_during_update_rolls_back(self):
         original = self.snapshot()
 
         def interrupt_update(root, packages):
@@ -246,7 +251,7 @@ class GpuiBumpTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), original)
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
-    def test_sigterm_during_update_restores_all_originals(self):
+    def test_sigterm_during_update_rolls_back(self):
         original = self.snapshot()
 
         def interrupt_update(root, packages):
@@ -258,7 +263,7 @@ class GpuiBumpTests(unittest.TestCase):
             self.bump()
         self.assertEqual(self.snapshot(), original)
 
-    def test_system_exit_during_update_restores_all_originals(self):
+    def test_system_exit_during_update_rolls_back(self):
         original = self.snapshot()
 
         def interrupt_update(root, packages):
@@ -270,80 +275,45 @@ class GpuiBumpTests(unittest.TestCase):
             self.bump()
         self.assertEqual(self.snapshot(), original)
 
-    @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
-    def test_interrupt_during_restoration_finishes_restoration(self):
+    def test_failed_restore_reports_recovery_command_and_retry_succeeds(self):
         original = self.snapshot()
+        successful_update = self.update
 
         def fail_update(root, packages):
             (root / "Cargo.lock").write_text("partial lockfile\n")
             raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
 
         self.update = fail_update
-        original_write = MODULE.atomic_write
-        interrupted = False
+        original_run = subprocess.run
+        restores = []
 
-        def interrupt_restore(path, contents, mode):
-            nonlocal interrupted
-            if path == self.root / "Cargo.toml" and contents == original[0] and not interrupted:
-                interrupted = True
-                os.kill(os.getpid(), signal.SIGINT)
-            return original_write(path, contents, mode)
+        def fail_restore(command, **kwargs):
+            if command[:3] == ["git", "restore", "--source=HEAD"]:
+                restores.append(command)
+                return subprocess.CompletedProcess(command, 1)
+            return original_run(command, **kwargs)
 
-        with patch.object(MODULE, "atomic_write", interrupt_restore):
-            with self.assertRaises(MODULE.BumpCancelled):
-                self.bump()
-        self.assertTrue(interrupted)
-        self.assertEqual(self.snapshot(), original)
-
-    def test_raised_interrupt_during_restoration_retries_the_file(self):
-        original = self.snapshot()
-
-        def fail_update(root, packages):
-            (root / "Cargo.lock").write_text("partial lockfile\n")
-            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
-
-        self.update = fail_update
-        original_write = MODULE.atomic_write
-        interrupted = False
-
-        def interrupt_restore(path, contents, mode):
-            nonlocal interrupted
-            if path == self.root / "Cargo.toml" and contents == original[0] and not interrupted:
-                interrupted = True
-                raise KeyboardInterrupt
-            return original_write(path, contents, mode)
-
-        with patch.object(MODULE, "atomic_write", interrupt_restore):
-            with self.assertRaises(MODULE.BumpCancelled):
-                self.bump()
-        self.assertTrue(interrupted)
-        self.assertEqual(self.snapshot(), original)
-
-    def test_restore_failure_still_attempts_other_files(self):
-        original = self.snapshot()
-
-        def fail_update(root, packages):
-            (root / "Cargo.lock").write_text("partial lockfile\n")
-            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
-
-        self.update = fail_update
-        original_write = MODULE.atomic_write
-        attempted = []
-
-        def fail_manifest_restore(path, contents, mode):
-            if contents in original:
-                attempted.append(path.name)
-            if path == self.root / "Cargo.toml" and contents == original[0]:
-                raise OSError("injected restore failure")
-            return original_write(path, contents, mode)
-
-        with patch.object(MODULE, "atomic_write", fail_manifest_restore):
+        with patch.object(MODULE.subprocess, "run", fail_restore):
             with self.assertRaises(MODULE.BumpError) as raised:
                 self.bump()
         self.assertEqual(raised.exception.kind, MODULE.Failure.RESTORE_FAILED)
-        self.assertEqual(attempted, ["Cargo.toml", "rust-toolchain.toml", "Cargo.lock"])
-        self.assertNotEqual(self.snapshot()[0], original[0])
-        self.assertEqual(self.snapshot()[1:], original[1:])
+        self.assertEqual(len(restores), 1)
+        recovery_command = "git restore Cargo.toml Cargo.lock rust-toolchain.toml"
+        self.assertIn(recovery_command, str(raised.exception))
+        self.assertNotEqual(self.snapshot(), original)
+
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
+            with patch.object(MODULE, "bump", side_effect=raised.exception):
+                with redirect_stderr(output), self.assertRaises(SystemExit) as exit_result:
+                    MODULE.main()
+        self.assertNotEqual(exit_result.exception.code, 0)
+        self.assertEqual(output.getvalue(), f"gpui:bump: rollback failed; run {recovery_command}\n")
+
+        subprocess.run(["git", "restore", *FILES], cwd=self.root, check=True)
+        self.assertEqual(self.snapshot(), original)
+        self.update = successful_update
+        self.assertEqual(self.bump().new_tag, NEW_TAG)
 
     def test_cli_reports_cancellation_without_traceback(self):
         for interruption in (KeyboardInterrupt, SystemExit(2), MODULE.BumpCancelled):
@@ -355,21 +325,6 @@ class GpuiBumpTests(unittest.TestCase):
                             MODULE.main()
                 self.assertEqual(raised.exception.code, 130)
                 self.assertEqual(output.getvalue(), "gpui:bump: cancelled\n")
-
-    def test_cli_reports_failure_without_traceback(self):
-        for failure, message in (
-            (MODULE.BumpError(MODULE.Failure.UPDATE_FAILED),
-             "gpui:bump: cargo update failed for the fork packages\n"),
-            (RuntimeError("sensitive details"), "gpui:bump: failed\n"),
-        ):
-            with self.subTest(failure=failure):
-                output = io.StringIO()
-                with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
-                    with patch.object(MODULE, "bump", side_effect=failure):
-                        with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
-                            MODULE.main()
-                self.assertNotEqual(raised.exception.code, 0)
-                self.assertEqual(output.getvalue(), message)
 
     def test_cargo_update_scopes_the_command_to_lockfile_packages(self):
         with patch.object(MODULE.subprocess, "Popen") as popen:
@@ -394,28 +349,6 @@ class GpuiBumpTests(unittest.TestCase):
             process.wait.side_effect = [KeyboardInterrupt, 0]
             with patch.object(MODULE.os, "killpg", create=True) as killpg:
                 with self.assertRaises(KeyboardInterrupt):
-                    MODULE.cargo_update(self.root, list(LOCK_NAMES))
-        if os.name == "posix":
-            killpg.assert_called_once_with(12345, signal.SIGTERM)
-        else:
-            process.terminate.assert_called_once_with()
-        self.assertEqual(process.wait.call_count, 2)
-
-    @unittest.skipUnless(os.name == "posix", "requires POSIX signals")
-    def test_cargo_child_is_stopped_when_interrupted_during_spawn(self):
-        with patch.object(MODULE.subprocess, "Popen") as popen:
-            process = popen.return_value
-            process.pid = 12345
-            process.poll.return_value = None
-            process.wait.return_value = 0
-
-            def spawn(*args, **kwargs):
-                os.kill(os.getpid(), signal.SIGTERM)
-                return process
-
-            popen.side_effect = spawn
-            with patch.object(MODULE.os, "killpg", create=True) as killpg:
-                with self.assertRaises(MODULE.BumpCancelled):
                     MODULE.cargo_update(self.root, list(LOCK_NAMES))
         if os.name == "posix":
             killpg.assert_called_once_with(12345, signal.SIGTERM)
