@@ -1771,7 +1771,9 @@ fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
 
     for _ in 0..3 {
         // Captured from zsh after a same-grid SIGWINCH in the source app.
+        let before = all_limited_terminal_rows(&terminal, 55);
         terminal.resize(55, 10, 10, 20).unwrap();
+        assert_eq!(all_limited_terminal_rows(&terminal, 55), before);
         terminal.vt_write(b"\r\r\x1b[44A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
         terminal.vt_write(prompt.as_bytes());
         terminal.vt_write(b"\x1b]133;B\x07");
@@ -1782,6 +1784,28 @@ fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
         assert_eq!(rows[493], format!("{:<55}", "P".repeat(35)));
         assert_eq!(rows[494], format!("{:<55}", "> "));
     }
+}
+
+#[test]
+fn redundant_same_grid_resizes_keep_two_row_prompt_at_history_limit() {
+    let prompt = "~\r\n> ";
+    let mut terminal = limited_prompt_terminal(507, prompt);
+    let expected = all_limited_terminal_rows(&terminal, 80);
+    assert_eq!(expected.len(), 509);
+    assert_retained_numbered_output(&expected, 507, 80);
+    assert_eq!(expected[507], format!("{:<80}", "~"));
+    assert_eq!(expected[508], format!("{:<80}", "> "));
+
+    for _ in 0..3 {
+        terminal.resize(80, 10, 10, 20).unwrap();
+        assert_eq!(all_limited_terminal_rows(&terminal, 80), expected);
+    }
+
+    // Captured from zsh after a same-grid SIGWINCH in the source app.
+    terminal.vt_write(b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    assert_eq!(all_limited_terminal_rows(&terminal, 80), expected);
 }
 
 #[test]

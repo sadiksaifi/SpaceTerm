@@ -442,10 +442,37 @@ index 007e727..b3877b2 100644
              cursor.semantic_content_clear_eol = false;
          },
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
-index 5e7dca5..0dbdecc 100644
+index 5e7dca5..2f568d6 100644
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
-@@ -1824,6 +1824,9 @@ pub fn invokeCharset(
+@@ -63,6 +63,10 @@ cols: size.CellCountInt,
+ width_px: u32 = 0,
+ height_px: u32 = 0,
+ 
++/// A same-grid PTY resize may cause SIGWINCH. Wait for the shell's cursor-up
++/// before clearing its prompt, since redundant resizes may produce no redraw.
++same_grid_prompt_resize_pending: bool = false,
++
+ /// The current scrolling region.
+ scrolling_region: ScrollingRegion,
+ 
+@@ -540,6 +544,7 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
+ /// slower per-codepoint path. They're less common and this is optimized
+ /// for the aforementioned cases.
+ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
++    if (cps.len > 0) self.same_grid_prompt_resize_pending = false;
+     // Check if we can do the fast path up front. If we can't
+     // we need to go back to scalar `print`.
+     const fast = fast: {
+@@ -1202,6 +1207,7 @@ inline fn printSliceCheckExpected(style_id: style.Id) u64 {
+ }
+ 
+ pub fn print(self: *Terminal, c: u21) !void {
++    self.same_grid_prompt_resize_pending = false;
+     // log.debug("print={x} y={} x={}", .{ c, self.screens.active.cursor.y, self.screens.active.cursor.x });
+ 
+     // If we're not on the main display, do nothing for now
+@@ -1824,6 +1830,9 @@ pub fn invokeCharset(
  
  /// Carriage return moves the cursor to the first column.
  pub fn carriageReturn(self: *Terminal) void {
@@ -455,7 +482,34 @@ index 5e7dca5..0dbdecc 100644
      // Always reset pending wrap state
      self.screens.active.cursor.pending_wrap = false;
  
-@@ -2096,6 +2099,7 @@ pub fn semanticPrompt(
+@@ -1851,6 +1860,21 @@ pub fn backspace(self: *Terminal) void {
+ /// move distance then it is internally adjusted to the maximum. If amount is
+ /// 0, adjust it to 1.
+ pub fn cursorUp(self: *Terminal, count_req: usize) void {
++    if (self.same_grid_prompt_resize_pending) {
++        self.same_grid_prompt_resize_pending = false;
++        const primary = self.screens.get(.primary).?;
++        if (self.screens.active == primary and
++            self.flags.shell_redraws_prompt != .false and
++            primary.cursor.semantic_content != .output)
++        {
++            primary.resize(.{
++                .cols = self.cols,
++                .rows = self.rows,
++                .reflow = self.modes.get(.wraparound),
++                .prompt_redraw = self.flags.shell_redraws_prompt,
++            }) catch {};
++        }
++    }
+     // Always resets pending wrap
+     self.screens.active.cursor.pending_wrap = false;
+ 
+@@ -2092,10 +2116,12 @@ pub fn semanticPrompt(
+         .fresh_line => try self.semanticPromptFreshLine(),
+ 
+         .fresh_line_new_prompt => {
++            self.same_grid_prompt_resize_pending = false;
+             // "First do a fresh-line."
              try self.semanticPromptFreshLine();
  
              const screen: *Screen = self.screens.active;
@@ -463,7 +517,7 @@ index 5e7dca5..0dbdecc 100644
  
              // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
              // is a prompt string (as if followed by OSC 133;P;k=i\007)."
-@@ -2103,12 +2107,9 @@ pub fn semanticPrompt(
+@@ -2103,12 +2129,9 @@ pub fn semanticPrompt(
                  .prompt = cmd.readOption(.prompt_kind) orelse .initial,
              });
  
@@ -479,7 +533,7 @@ index 5e7dca5..0dbdecc 100644
  
              click: {
                  // Handle click_events as a priority over cl. click_events
-@@ -2162,6 +2163,7 @@ pub fn semanticPrompt(
+@@ -2162,6 +2185,7 @@ pub fn semanticPrompt(
          .end_prompt_start_input => {
              // End of prompt and start of user input, terminated by a OSC
              // "133;C" or another prompt (OSC "133;P").
@@ -487,7 +541,23 @@ index 5e7dca5..0dbdecc 100644
              self.screens.active.cursorSetSemanticContent(.{
                  .input = .clear_explicit,
              });
-@@ -2334,6 +2336,8 @@ pub fn index(self: *Terminal) !void {
+@@ -2175,6 +2199,7 @@ pub fn semanticPrompt(
+         },
+ 
+         .end_input_start_output => {
++            self.same_grid_prompt_resize_pending = false;
+             // "End of input, and start of output."
+             self.screens.active.cursorSetSemanticContent(.output);
+ 
+@@ -2195,6 +2220,7 @@ pub fn semanticPrompt(
+         },
+ 
+         .end_command => {
++            self.same_grid_prompt_resize_pending = false;
+             // From a terminal state perspective, this doesn't really do
+             // anything. Other terminals appear to do nothing here. I think
+             // its reasonable at this point to reset our semantic content
+@@ -2334,6 +2360,8 @@ pub fn index(self: *Terminal) !void {
          // discover that there are more scenarios we should be unsetting
          // this we should document and test it.
          if (screen.cursor.semantic_content_clear_eol) {
@@ -496,34 +566,36 @@ index 5e7dca5..0dbdecc 100644
              screen.cursor.semantic_content = .output;
              screen.cursor.semantic_content_clear_eol = false;
          } else {
-@@ -4066,8 +4070,24 @@ pub fn resize(
+@@ -4066,8 +4094,18 @@ pub fn resize(
  
      self.modes.set(.synchronized_output, false);
  
 -    // If our cols/rows didn't change, skip grid work but still apply pixels.
 -    if (self.cols == opts.cols and self.rows == opts.rows) return;
-+    // A pixel-only PTY resize still sends SIGWINCH. The shell may redraw a
-+    // tall prompt even though the grid dimensions are unchanged, so prepare
-+    // the semantic prompt before its cursor-up sequence arrives.
++    // A pixel-only PTY resize may send SIGWINCH, but duplicate size reports
++    // do not guarantee a shell redraw. Prepare the prompt only if the shell
++    // starts moving up to redraw it.
 +    if (self.cols == opts.cols and self.rows == opts.rows) {
 +        const primary = self.screens.get(.primary).?;
-+        if (self.screens.active == primary and
++        self.same_grid_prompt_resize_pending = self.screens.active == primary and
 +            self.flags.shell_redraws_prompt != .false and
-+            primary.cursor.semantic_content != .output)
-+        {
-+            try primary.resize(.{
-+                .cols = opts.cols,
-+                .rows = opts.rows,
-+                .reflow = self.modes.get(.wraparound),
-+                .prompt_redraw = self.flags.shell_redraws_prompt,
-+            });
-+        }
++            primary.cursor.semantic_content != .output;
 +        return;
 +    }
++
++    self.same_grid_prompt_resize_pending = false;
  
      // Build replacement tabstops without touching the current table. Keep
      // ownership here until every fallible resize operation has succeeded.
-@@ -4769,6 +4789,13 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
+@@ -4730,6 +4768,7 @@ test "Terminal: setTitle accepts its current value" {
+ /// currently a spec for this, but it is something I think might
+ /// be useful in the future.
+ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
++    self.same_grid_prompt_resize_pending = false;
+     // If we're already on the requested screen we do nothing.
+     if (self.screens.active_key == key) return null;
+     const old = self.screens.active;
+@@ -4769,6 +4808,13 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
      // The new screen should not have any hyperlinks set
      assert(new.cursor.hyperlink_id == 0);
  
@@ -537,3 +609,11 @@ index 5e7dca5..0dbdecc 100644
      // Bring our charset state with us
      new.charset = old.charset;
  
+@@ -4911,6 +4957,7 @@ pub fn plainStringUnwrapped(self: *Terminal, alloc: Allocator) ![]const u8 {
+ /// this will reuse the existing memory. In the latter case, memory may
+ /// be wasted (since its unused) but it isn't leaked.
+ pub fn fullReset(self: *Terminal) void {
++    self.same_grid_prompt_resize_pending = false;
+     // Ensure we're back on primary screen
+     self.screens.switchTo(.primary);
+     self.screens.remove(
