@@ -1500,7 +1500,16 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
 fn zsh_prompt_redraw_with_fewer_rows_than_old_offset_preserves_scrollback() {
     let prompt = format!("{}\r\n> ", "P".repeat(60));
     let rows = zsh_resize_rows((50, 5), (150, 2), &prompt, "", 2);
-    assert_complete_zsh_redraw(&rows, &prompt, "", (150, 2));
+    assert_eq!(
+        rows,
+        vec![
+            format!("{:<150}", "echo MARKER"),
+            format!("{:<150}", "QA_RESIZE_MARKER"),
+            " ".repeat(150),
+            format!("{:<150}", "P".repeat(60)),
+            format!("{:<150}", "> "),
+        ]
+    );
 }
 
 fn zsh_resize_rows(
@@ -1557,8 +1566,8 @@ fn zsh_redraw_preserves_output_when_old_prompt_exceeds_new_screen_height() {
     reference.feed(prompt.as_bytes());
     reference.feed(b"\x1b]133;B\x07");
     let mut expected = all_grid_rows(&mut reference);
-    // Zsh's five-row cursor-up clamps to the three-row viewport and leaves
-    // one active row below the shorter redrawn prompt.
+    expected.splice(2..2, std::iter::repeat_n(" ".repeat(100), 3));
+    // Zsh's five-row cursor-up clamps to the three-row viewport.
     expected.push(" ".repeat(100));
     assert_eq!(rows, expected);
 }
@@ -1675,59 +1684,166 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
     }
 }
 
+fn numbered_history(start: usize, end: usize, cols: usize) -> Vec<String> {
+    (start..end)
+        .map(|row| format!("{:<cols$}", format!("H{row:04}")))
+        .collect()
+}
+
+fn default_limit_prompt_after_redraw() -> Terminal<'static, 'static> {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 10,
+        max_scrollback: 10_000,
+    })
+    .unwrap();
+    for row in 0..600 {
+        terminal.vt_write(format!("H{row:04}\r\n").as_bytes());
+    }
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let before = terminal.total_rows().unwrap();
+    assert_eq!(before, 603);
+    terminal.resize(160, 10, 10, 20).unwrap();
+    assert!(terminal.total_rows().unwrap() <= before);
+    terminal.vt_write(b"\r\r\x1b[2A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let mut expected = numbered_history(0, 600, 160);
+    expected.push(format!("{:<160}", "P".repeat(100)));
+    expected.push(format!("{:<160}", "> "));
+    expected.push(" ".repeat(160));
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), expected);
+    terminal
+}
+
 #[test]
-fn prompt_padding_at_history_limit_keeps_output_with_two_row_prompt() {
+fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 10,
+        max_scrollback: 10_000,
+    })
+    .unwrap();
+    for row in 0..1600 {
+        terminal.vt_write(format!("H{row:04}\r\n").as_bytes());
+    }
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let mut expected_before = numbered_history(591, 1600, 80);
+    expected_before.push("P".repeat(80));
+    expected_before.push(format!("{:<80}", "P".repeat(20)));
+    expected_before.push(format!("{:<80}", "> "));
+    assert_eq!(all_limited_terminal_rows(&terminal, 80), expected_before);
+
+    terminal.resize(160, 10, 10, 20).unwrap();
+    assert_eq!(terminal.total_rows().unwrap(), expected_before.len());
+    terminal.vt_write(b"\r\r\x1b[2A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
+    terminal.vt_write(prompt.as_bytes());
+    terminal.vt_write(b"\x1b]133;B\x07");
+    let mut expected_after = numbered_history(591, 1600, 160);
+    expected_after.push(format!("{:<160}", "P".repeat(100)));
+    expected_after.push(format!("{:<160}", "> "));
+    expected_after.push(" ".repeat(160));
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), expected_after);
+    terminal.vt_write(b"\x1b]133;C\x07");
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), expected_after);
+}
+
+#[test]
+fn default_limit_prompt_redraw_does_not_prune_on_command_start() {
+    let mut terminal = default_limit_prompt_after_redraw();
+    let before = all_limited_terminal_rows(&terminal, 160);
+    terminal.vt_write(b"\x1b]133;C\x07");
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), before);
+}
+
+#[test]
+fn background_output_at_prompt_keeps_default_history_bounded() {
+    let mut terminal = default_limit_prompt_after_redraw();
+    for end in [1000, 11000] {
+        let start = if end == 1000 { 0 } else { 1000 };
+        for row in start..end {
+            terminal.vt_write(format!("BG{row:05}\r\n").as_bytes());
+        }
+        let rows = all_limited_terminal_rows(&terminal, 160);
+        let first = if end == 1000 { 290 } else { 10388 };
+        let mut expected: Vec<_> = (first..end)
+            .map(|row| format!("{:<160}", format!("BG{row:05}")))
+            .collect();
+        expected.push(" ".repeat(160));
+        assert_eq!(rows, expected);
+    }
+}
+
+#[test]
+fn pre_reflow_prompt_clear_loses_at_most_one_old_page_at_history_limit() {
     let prompt = format!("{}\r\n> ", "P".repeat(300));
     let mut terminal = limited_prompt_terminal(507, &prompt);
+    let before = all_limited_terminal_rows(&terminal, 80);
+    assert_eq!(before.len(), 512);
+    assert_eq!(before[..507], numbered_history(0, 507, 80));
     terminal.resize(160, 10, 10, 20).unwrap();
+    assert!(terminal.total_rows().unwrap() <= before.len());
     // Captured from zsh after SIGWINCH at 160 columns.
     terminal.vt_write(b"\r\r\x1b[4A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    assert_eq!(rows.len(), 510);
-    assert_retained_numbered_output(&rows, 507, 160);
-    assert_eq!(rows[507], "P".repeat(160));
-    assert_eq!(rows[508], format!("{:<160}", "P".repeat(140)));
-    assert_eq!(rows[509], format!("{:<160}", "> "));
+    let mut expected = numbered_history(297, 507, 160);
+    expected.push("P".repeat(160));
+    expected.push(format!("{:<160}", "P".repeat(140)));
+    expected.push(format!("{:<160}", "> "));
+    expected.extend(std::iter::repeat_n(" ".repeat(160), 2));
+    assert_eq!(rows, expected);
 
     terminal.vt_write(b"\x1b]133;C\x07");
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), expected);
     for row in 0..600 {
         terminal.vt_write(format!("NEXT{row:04}\r\n").as_bytes());
     }
-    assert!(
-        terminal.total_rows().unwrap() <= 510,
-        "normal history limit did not resume"
-    );
+    let output = all_limited_terminal_rows(&terminal, 160);
+    assert!(output.len() <= 510);
+    assert_eq!(output[output.len() - 2], format!("{:<160}", "NEXT0599"));
+    assert_eq!(output[output.len() - 1], " ".repeat(160));
 }
 
 #[test]
-fn prompt_padding_at_history_limit_keeps_output_with_tall_prompt() {
+fn tall_prompt_at_history_limit_only_prunes_oldest_page() {
     let prompt = format!("{}\r\n> ", "P".repeat(2400));
     let mut terminal = limited_prompt_terminal(480, &prompt);
+    let before = all_limited_terminal_rows(&terminal, 80);
+    assert_eq!(before[..480], numbered_history(0, 480, 80));
     terminal.resize(160, 10, 10, 20).unwrap();
+    assert!(terminal.total_rows().unwrap() <= before.len());
     // Captured from zsh after SIGWINCH at 160 columns.
     terminal.vt_write(b"\r\r\x1b[30A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    assert_eq!(rows.len(), 496);
-    assert_retained_numbered_output(&rows, 480, 160);
-    assert_eq!(rows[480..495], vec!["P".repeat(160); 15]);
-    assert_eq!(rows[495], format!("{:<160}", "> "));
+    let mut expected = numbered_history(297, 480, 160);
+    expected.extend(std::iter::repeat_n(" ".repeat(160), 21));
+    expected.extend(std::iter::repeat_n("P".repeat(160), 15));
+    expected.push(format!("{:<160}", "> "));
+    assert_eq!(rows, expected);
 
     terminal.vt_write(b"\x1b]133;C\x07");
-    assert_eq!(all_limited_terminal_rows(&terminal, 160), rows);
+    assert_eq!(all_limited_terminal_rows(&terminal, 160), expected);
 }
 
 #[test]
-fn prompt_padding_at_history_limit_preserves_output_across_cycles() {
+fn tall_prompt_cycles_keep_bounded_exact_scrollback() {
     let prompt = format!("{}\r\n> ", "P".repeat(2400));
     let mut terminal = limited_prompt_terminal(480, &prompt);
-    let mut first_round_trip = None;
     for cycle in 0..3 {
         for (cols, up) in [(160, 30), (80, 15)] {
+            let before = terminal.total_rows().unwrap();
             terminal.resize(cols, 10, 10, 20).unwrap();
+            assert!(terminal.total_rows().unwrap() <= before);
             terminal.vt_write(
                 format!("\r\r\x1b[{up}A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07")
                     .as_bytes(),
@@ -1736,21 +1852,16 @@ fn prompt_padding_at_history_limit_preserves_output_across_cycles() {
             terminal.vt_write(b"\x1b]133;B\x07");
         }
         let rows = all_limited_terminal_rows(&terminal, 80);
-        assert_eq!(rows.len(), 511);
-        assert_retained_numbered_output(&rows, 480, 80);
-        assert_eq!(rows[480..510], vec!["P".repeat(80); 30]);
-        assert_eq!(rows[510], format!("{:<80}", "> "));
-        if let Some(first) = &first_round_trip {
-            assert_eq!(rows, *first, "cycle {cycle} changed screen or scrollback");
-        } else {
-            first_round_trip = Some(rows);
-        }
+        let mut expected = numbered_history(297, 480, 80);
+        expected.extend(std::iter::repeat_n(" ".repeat(80), 27 * (cycle + 1)));
+        expected.extend(std::iter::repeat_n("P".repeat(80), 30));
+        expected.push(format!("{:<80}", "> "));
+        assert_eq!(rows, expected, "cycle {cycle}");
+        assert!(rows.len() <= 510);
     }
+    let before_command = all_limited_terminal_rows(&terminal, 80);
     terminal.vt_write(b"\x1b]133;C\x07");
-    assert_eq!(
-        all_limited_terminal_rows(&terminal, 80),
-        first_round_trip.unwrap()
-    );
+    assert_eq!(all_limited_terminal_rows(&terminal, 80), before_command);
 }
 
 #[test]
@@ -1769,20 +1880,22 @@ fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
 
-    for _ in 0..3 {
+    for cycle in 0..3 {
         // Captured from zsh after a same-grid SIGWINCH in the source app.
-        let before = all_limited_terminal_rows(&terminal, 55);
         terminal.resize(55, 10, 10, 20).unwrap();
-        assert_eq!(all_limited_terminal_rows(&terminal, 55), before);
+        let mut cleared = numbered_history(0, 450, 55);
+        cleared.extend(std::iter::repeat_n(" ".repeat(55), 35 * cycle + 45));
+        assert_eq!(all_limited_terminal_rows(&terminal, 55), cleared);
         terminal.vt_write(b"\r\r\x1b[44A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
         terminal.vt_write(prompt.as_bytes());
         terminal.vt_write(b"\x1b]133;B\x07");
         let rows = all_limited_terminal_rows(&terminal, 55);
-        assert_eq!(rows.len(), 495);
-        assert_retained_numbered_output(&rows, 450, 55);
-        assert_eq!(rows[450..493], vec!["P".repeat(55); 43]);
-        assert_eq!(rows[493], format!("{:<55}", "P".repeat(35)));
-        assert_eq!(rows[494], format!("{:<55}", "> "));
+        let mut expected = numbered_history(0, 450, 55);
+        expected.extend(std::iter::repeat_n(" ".repeat(55), 35 * (cycle + 1)));
+        expected.extend(std::iter::repeat_n("P".repeat(55), 43));
+        expected.push(format!("{:<55}", "P".repeat(35)));
+        expected.push(format!("{:<55}", "> "));
+        assert_eq!(rows, expected, "cycle {cycle}");
     }
 }
 
@@ -1798,7 +1911,9 @@ fn redundant_same_grid_resizes_keep_two_row_prompt_at_history_limit() {
 
     for _ in 0..3 {
         terminal.resize(80, 10, 10, 20).unwrap();
-        assert_eq!(all_limited_terminal_rows(&terminal, 80), expected);
+        let mut cleared = numbered_history(0, 507, 80);
+        cleared.extend(std::iter::repeat_n(" ".repeat(80), 2));
+        assert_eq!(all_limited_terminal_rows(&terminal, 80), cleared);
     }
 
     // Captured from zsh after a same-grid SIGWINCH in the source app.
@@ -1877,7 +1992,7 @@ fn zsh_preexec_command_output_survives_another_resize_and_interrupt() {
         emulator.feed(format!("QA_LINE_{line}\r\n").as_bytes());
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
-    let mut expected = String::from("QA_PREP\r\n");
+    let mut expected = String::from("QA_PREP\r\n\r\n\r\n\r\n");
     for line in 1..=8 {
         expected.push_str(&format!("QA_LINE_{line}\r\n"));
     }
@@ -1899,12 +2014,12 @@ fn exec_bash_output_survives_resize_after_zsh_preexec() {
     assert_grid_equals_bytes(
         &mut emulator,
         (150, 12),
-        b"QA_PREP\r\n\r\nBASH_READY\r\nbash-3.2$ ",
+        b"QA_PREP\r\n\r\n\r\n\r\n\r\nBASH_READY\r\nbash-3.2$ ",
     );
 }
 
 #[test]
-fn command_end_retires_pending_prompt_redraw() {
+fn command_end_keeps_output_after_pre_reflow_prompt_clear() {
     let mut emulator = pending_zsh_preexec_prompt();
     emulator.feed(b"\x1b]133;D;0\x07");
     for line in 1..=8 {
@@ -1912,7 +2027,7 @@ fn command_end_retires_pending_prompt_redraw() {
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"AFTER_D");
-    let mut expected = String::from("QA_PREP\r\n");
+    let mut expected = String::from("QA_PREP\r\n\r\n\r\n\r\n");
     for line in 1..=8 {
         expected.push_str(&format!("D_LINE_{line}\r\n"));
     }
@@ -1921,7 +2036,7 @@ fn command_end_retires_pending_prompt_redraw() {
 }
 
 #[test]
-fn input_end_of_line_retires_pending_prompt_redraw() {
+fn input_end_of_line_keeps_output_after_pre_reflow_prompt_clear() {
     let mut emulator = emulator(50, 12);
     emulator.feed(b"QA_PREP\r\n\x1b]133;A;redraw=1\x07");
     emulator.feed(format!("{}\r\n> ", "P".repeat(100)).as_bytes());
@@ -1933,7 +2048,7 @@ fn input_end_of_line_retires_pending_prompt_redraw() {
     }
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"AFTER_EOL");
-    let mut expected = String::from("QA_PREP\r\n");
+    let mut expected = String::from("QA_PREP\r\n\r\n\r\n\r\n");
     for line in 1..=8 {
         expected.push_str(&format!("I_LINE_{line}\r\n"));
     }
@@ -1942,19 +2057,23 @@ fn input_end_of_line_retires_pending_prompt_redraw() {
 }
 
 #[test]
-fn alternate_screen_retires_pending_prompt_redraw() {
+fn alternate_screen_keeps_command_output_after_prompt_clear() {
     let mut emulator = pending_zsh_preexec_prompt();
+    emulator.feed(b"\x1b]133;C\x07");
     emulator.feed(b"\x1b[?1049hALT_CONTENT");
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     assert_grid_equals_bytes(&mut emulator, (150, 12), b"\r\n\r\n\r\n\r\nALT_CONTENT");
     emulator.feed(b"\x1b[?1049lAFTER_ALT\r\n");
     emulator.resize(geometry(100, 12, 10.0, 20.0)).unwrap();
-    let expected = format!("QA_PREP\r\n{}AFTER_ALT\r\n", " ".repeat(60));
-    assert_grid_equals_bytes(&mut emulator, (100, 12), expected.as_bytes());
+    assert_grid_equals_bytes(
+        &mut emulator,
+        (100, 12),
+        b"QA_PREP\r\n\r\n\r\n\r\nAFTER_ALT\r\n",
+    );
 }
 
 #[test]
-fn full_reset_retires_pending_prompt_redraw() {
+fn full_reset_discards_cleared_prompt_rows() {
     let mut emulator = pending_zsh_preexec_prompt();
     emulator.feed(b"\x1bcAFTER_RESET\r\n");
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
