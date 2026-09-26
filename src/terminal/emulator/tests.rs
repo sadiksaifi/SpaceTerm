@@ -681,6 +681,22 @@ fn row_text(snapshot: &ScreenSnapshot, row: usize) -> String {
         .collect()
 }
 
+fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
+    emulator.scroll_to(0);
+    let first = emulator.snapshot().unwrap().unwrap();
+    let visible = first.rows.len();
+    let last_offset = first.scrollbar.total_rows.saturating_sub(visible as u64);
+    let mut rows = (0..visible).map(|row| row_text(&first, row)).collect::<Vec<_>>();
+
+    for offset in 1..=last_offset {
+        emulator.scroll_to(offset);
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        rows.push(row_text(&snapshot, visible - 1));
+    }
+
+    rows
+}
+
 #[test]
 fn vt_sequences_update_the_screen_without_leaking_escape_bytes() {
     let mut emulator = emulator(12, 3);
@@ -1419,20 +1435,90 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
 
 #[test]
 fn zsh_prompt_redraw_with_fewer_rows_than_old_offset_preserves_scrollback() {
-    let mut emulator = emulator(50, 5);
-    let prompt = b"SpaceTerm on fix/resize-prompt-redraw is v0.0.0 via v1.98.1\r\n> ";
-    emulator.feed(b"header\r\n\x1b]133;A;redraw=1\x07> \x1b]133;B\x07print_marker\x1b]133;C\x07");
-    emulator.feed(b"\r\nQA_RESIZE_MARKER\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
-    emulator.feed(prompt);
+    let prompt = format!("{}\r\n> ", "P".repeat(60));
+    let rows = zsh_resize_rows((50, 5), (150, 2), &prompt, "", 2);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+fn zsh_resize_rows(
+    old_size: (u16, u16),
+    new_size: (u16, u16),
+    prompt: &str,
+    input: &str,
+    old_prompt_offset: u16,
+) -> Vec<String> {
+    let mut emulator = emulator(old_size.0, old_size.1);
+    let marked_prompt = prompt.replace("\r\n", "\r\n\x1b]133;P;k=s\x07");
+    emulator.feed(b"echo MARKER\r\nQA_RESIZE_MARKER\r\n");
+    emulator.feed(b"\x1b]133;A;redraw=1\x07");
+    emulator.feed(marked_prompt.as_bytes());
     emulator.feed(b"\x1b]133;B\x07");
+    emulator.feed(input.as_bytes());
 
-    emulator.resize(geometry(150, 2, 10.0, 20.0)).unwrap();
-    emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
-    emulator.feed(prompt);
-    emulator.set_find_query(FindQueryGeneration::test(1), "QA_RESIZE_MARKER".to_owned());
+    emulator
+        .resize(geometry(new_size.0, new_size.1, 10.0, 20.0))
+        .unwrap();
+    emulator.feed(
+        format!("\r\r\x1b[{old_prompt_offset}A\x1b[0m\x1b[27m\x1b[24m\x1b[J").as_bytes(),
+    );
+    emulator.feed(b"\x1b]133;A;redraw=1\x07");
+    emulator.feed(marked_prompt.as_bytes());
+    emulator.feed(b"\x1b]133;B\x07");
+    emulator.feed(input.as_bytes());
 
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+    all_grid_rows(&mut emulator)
+}
+
+fn assert_complete_zsh_redraw(rows: &[String], prompt: &str, input: &str) {
+    let content = rows.iter().flat_map(|row| row.chars()).filter(|ch| !ch.is_whitespace()).collect::<String>();
+    let expected_prompt = prompt.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+    assert_eq!(
+        content,
+        format!("echoMARKERQA_RESIZE_MARKER{expected_prompt}{input}"),
+        "the screen and scrollback must contain the output and exactly one redrawn prompt"
+    );
+}
+
+#[test]
+fn zsh_redraw_preserves_output_when_prompt_starts_in_scrollback_before_widening() {
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "", 5);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+#[test]
+fn zsh_redraw_preserves_output_when_old_prompt_exceeds_new_screen_height() {
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    let rows = zsh_resize_rows((20, 3), (100, 3), &prompt, "", 5);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+#[test]
+fn zsh_redraw_clears_prompt_prefix_in_scrollback_after_shrinking() {
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    let rows = zsh_resize_rows((50, 20), (20, 3), &prompt, "", 2);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+#[test]
+fn zsh_redraw_keeps_output_when_prompt_starts_at_screen_bottom() {
+    let prompt = format!("{}\r\n> ", "P".repeat(60));
+    let rows = zsh_resize_rows((50, 5), (150, 5), &prompt, "", 2);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
+}
+
+#[test]
+fn zsh_redraw_preserves_partial_input_when_prompt_starts_in_scrollback() {
+    let prompt = format!("{}\r\n> ", "P".repeat(100));
+    let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "unfinished", 5);
+    assert_complete_zsh_redraw(&rows, &prompt, "unfinished");
+}
+
+#[test]
+fn zsh_redraw_clears_every_line_of_multiline_prompt_in_scrollback() {
+    let prompt = format!("TOP\r\n{}\r\n> ", "P".repeat(100));
+    let rows = zsh_resize_rows((20, 3), (100, 10), &prompt, "", 6);
+    assert_complete_zsh_redraw(&rows, &prompt, "");
 }
 
 #[test]
