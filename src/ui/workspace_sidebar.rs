@@ -583,7 +583,8 @@ impl WorkspaceSidebar {
         event: ResizeHandleEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<f32> {
+        let resize_request = matches!(event, ResizeHandleEvent::ResizeRequested { .. });
         match event {
             ResizeHandleEvent::InteractionStarted { source, .. } => {
                 self.begin_resize(source);
@@ -614,7 +615,7 @@ impl WorkspaceSidebar {
                     self.set_layout(origin.visible, origin.width, window, cx);
                 }
                 if !finished {
-                    return;
+                    return None;
                 }
                 cx.emit(SidebarEvent::FocusChanged);
                 cx.notify();
@@ -623,6 +624,7 @@ impl WorkspaceSidebar {
                 }
             }
         }
+        resize_request.then(|| f32::from(self.layout.width))
     }
 }
 

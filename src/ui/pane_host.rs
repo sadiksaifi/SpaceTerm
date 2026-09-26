@@ -1187,24 +1187,25 @@ impl PaneHost {
         axis: SplitAxis,
         requested_offset: f32,
         cx: &mut Context<Self>,
-    ) {
-        let Some(bounds) = self.split_bounds.get(&split_id).copied() else {
-            return;
-        };
+    ) -> Option<f32> {
+        let bounds = self.split_bounds.get(&split_id).copied()?;
         let gap = pane_gap(cx);
-        let Some(requested_ratio) = split_ratio_for_offset(axis, bounds, requested_offset, gap)
-        else {
-            return;
-        };
+        let requested_ratio = split_ratio_for_offset(axis, bounds, requested_offset, gap)?;
         let Ok(available_size) = pane_size(bounds) else {
-            return;
+            return None;
         };
         match self
             .terminal_tab
             .resize_split(split_id, available_size, gap, requested_ratio)
         {
-            Ok(_) => cx.notify(),
-            Err(error) => eprintln!("failed to resize split: {error}"),
+            Ok(accepted_ratio) => {
+                cx.notify();
+                split_content_extent(axis, bounds, gap).map(|extent| extent * accepted_ratio)
+            }
+            Err(error) => {
+                eprintln!("failed to resize split: {error}");
+                None
+            }
         }
     }
 
@@ -1232,12 +1233,13 @@ impl PaneHost {
         event: ResizeHandleEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<f32> {
         match event {
             ResizeHandleEvent::InteractionStarted { .. } => {
                 self.resizing_split_id = Some(split_id);
                 self.sync_terminal_focus(cx);
                 cx.notify();
+                None
             }
             ResizeHandleEvent::ResizeRequested {
                 requested_value, ..
@@ -1247,10 +1249,11 @@ impl PaneHost {
                 if source == ResizeInputSource::Pointer && self.active {
                     self.focus(window, cx);
                 }
+                None
             }
             ResizeHandleEvent::InteractionFinished { source, .. } => {
                 if self.resizing_split_id != Some(split_id) {
-                    return;
+                    return None;
                 }
                 self.resizing_split_id = None;
                 self.sync_terminal_focus(cx);
@@ -1258,6 +1261,7 @@ impl PaneHost {
                 if source == ResizeInputSource::Pointer && self.active {
                     self.focus(window, cx);
                 }
+                None
             }
         }
     }
@@ -2394,11 +2398,13 @@ fn render_split_resize_handle(
     .reset_on_double_click(true)
     .paint_divider(false)
     .debug_selector(format!("split-resize-{}", split_id.get()))
-    .on_event(move |event, window, cx| {
+    .on_event_with_accepted_value(move |event, window, cx| {
         let event = *event;
-        let _ = host.update(cx, |host, cx| {
-            host.handle_resize_event(split_id, axis, event, window, cx);
-        });
+        host.update(cx, |host, cx| {
+            host.handle_resize_event(split_id, axis, event, window, cx)
+        })
+        .ok()
+        .flatten()
     })
     .into_any_element()
 }
