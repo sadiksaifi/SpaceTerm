@@ -4,6 +4,7 @@
 from contextlib import redirect_stderr
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import signal
@@ -38,8 +39,20 @@ gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
 gpui_macos = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
 '''
 TOOLCHAIN = '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'
+MEMBER = "crates/fixture-ui/Cargo.toml"
+OTHER_MEMBER = "crates/fixture-core/Cargo.toml"
+MEMBER_MANIFEST = f'''[package]
+name = "fixture-ui"
+version = "0.1.0"
+
+[dependencies]
+gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
+
+[dev-dependencies]
+gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
+'''
 LOCK_NAMES = ("gpui", "gpui_apple", "gpui_macos", "gpui_platform")
-FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", OTHER_MEMBER, MEMBER)
 
 
 def lockfile(tag):
@@ -83,6 +96,10 @@ class GpuiBumpTests(unittest.TestCase):
         (self.root / "Cargo.toml").write_text(MANIFEST)
         (self.root / "Cargo.lock").write_text(lockfile(OLD_TAG))
         (self.root / "rust-toolchain.toml").write_text(TOOLCHAIN)
+        (self.root / MEMBER).parent.mkdir(parents=True)
+        (self.root / MEMBER).write_text(MEMBER_MANIFEST)
+        (self.root / OTHER_MEMBER).parent.mkdir(parents=True)
+        (self.root / OTHER_MEMBER).write_text('[package]\nname = "fixture-core"\nversion = "0.1.0"\n')
         subprocess.run(["git", "add", *FILES], cwd=self.root, check=True)
         subprocess.run(
             ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
@@ -97,7 +114,21 @@ class GpuiBumpTests(unittest.TestCase):
         (root / "Cargo.lock").write_text(lockfile(NEW_TAG))
 
     def bump(self, tag=NEW_TAG):
-        return MODULE.bump(self.root, tag, self.remote, self.update)
+        original_run = subprocess.run
+
+        def run(command, **kwargs):
+            if command[:2] == ["cargo", "metadata"]:
+                self.assertEqual(command, ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"])
+                packages = [
+                    {"id": path, "manifest_path": str(self.root / path)}
+                    for path in ("Cargo.toml", OTHER_MEMBER, MEMBER)
+                ]
+                metadata = {"packages": packages, "workspace_members": [item["id"] for item in packages]}
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps(metadata), stderr="")
+            return original_run(command, **kwargs)
+
+        with patch.object(MODULE.subprocess, "run", run):
+            return MODULE.bump(self.root, tag, self.remote, self.update)
 
     def snapshot(self):
         return tuple((self.root / name).read_bytes() for name in FILES)
@@ -118,6 +149,9 @@ class GpuiBumpTests(unittest.TestCase):
             f'git = "{FORK_URL}", tag = "{NEW_TAG}"',
         )
         self.assertEqual((self.root / "Cargo.toml").read_text(), expected)
+        self.assertEqual(
+            (self.root / MEMBER).read_text(), MEMBER_MANIFEST.replace(OLD_TAG, NEW_TAG)
+        )
         self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(NEW_TAG))
         self.assertEqual((self.root / "rust-toolchain.toml").read_text(), TOOLCHAIN.replace("1.98.1", "1.99.0"))
         self.assertEqual(self.updates, [(self.root, list(LOCK_NAMES))])
@@ -132,6 +166,22 @@ class GpuiBumpTests(unittest.TestCase):
         (self.root / "Cargo.lock").write_text(lockfile(OLD_TAG) + "\n# staged change\n")
         subprocess.run(["git", "add", "Cargo.lock"], cwd=self.root, check=True)
         self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_member_manifest_change_refuses_bump(self):
+        (self.root / MEMBER).write_text(MEMBER_MANIFEST + "\n# local change\n")
+        self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
+        self.assertEqual(self.remote.queries, [])
+
+    def test_disagreeing_manifest_tags_refuse_bump(self):
+        (self.root / MEMBER).write_text(MEMBER_MANIFEST.replace(OLD_TAG, OLD_TAG + ".1"))
+        subprocess.run(["git", "add", MEMBER], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "different member tag"],
+            cwd=self.root,
+            check=True,
+        )
+        self.assert_failure_preserves_files(MODULE.Failure.TAGS_INCONSISTENT)
         self.assertEqual(self.remote.queries, [])
 
     def test_missing_tag_preserves_files(self):
@@ -298,7 +348,7 @@ class GpuiBumpTests(unittest.TestCase):
                 self.bump()
         self.assertEqual(raised.exception.kind, MODULE.Failure.RESTORE_FAILED)
         self.assertEqual(len(restores), 1)
-        recovery_command = "git restore Cargo.toml Cargo.lock rust-toolchain.toml"
+        recovery_command = f"git restore -- {' '.join(FILES)}"
         self.assertIn(recovery_command, str(raised.exception))
         self.assertNotEqual(self.snapshot(), original)
 

@@ -5,6 +5,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+import json
 import os
 from pathlib import Path
 import re
@@ -28,17 +29,19 @@ EXPECTED = {
 TAG_PATTERN = re.compile(r"spaceterm-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[1-9][0-9]*)?\Z")
 FIELD_PATTERN = re.compile(r'(\btag\s*=\s*")([^"]*)(")')
 CHANNEL_PATTERN = re.compile(r'(?m)^([ \t]*channel[ \t]*=[ \t]*")([^"]*)("[^\n]*)$')
-BUMP_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+BASE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+DEPENDENCY_SECTIONS = ("dependencies", "dev-dependencies", "build-dependencies")
 
 
 class Failure(Enum):
-    DIRTY_INPUTS = "commit or stash changes to Cargo.toml, Cargo.lock, and rust-toolchain.toml before bumping"
+    DIRTY_INPUTS = "commit or stash changes to workspace manifests, Cargo.lock, and rust-toolchain.toml before bumping"
     GIT_CHECK_FAILED = "could not check GPUI bump files in Git"
+    METADATA_FAILED = "could not discover workspace manifests"
     INVALID_TAG = "expected spaceterm-YYYY-MM-DD or spaceterm-YYYY-MM-DD.N (N is positive without leading zeros)"
     OVERRIDE_ACTIVE = "local GPUI override is active; run mise run gpui:local:off"
     CONFIG_INVALID = "local Cargo configuration is invalid"
     DEPENDENCIES_UNEXPECTED = "fork dependency set is unexpected"
-    TAGS_INCONSISTENT = "fork tags in Cargo.toml are inconsistent"
+    TAGS_INCONSISTENT = "fork tags in workspace manifests are inconsistent"
     LOCK_INVALID = "fork entries in Cargo.lock are missing or inconsistent"
     TOOLCHAIN_INVALID = "Rust toolchain file has no channel"
     REMOTE_FAILED = "could not query the Zed fork remote"
@@ -47,13 +50,13 @@ class Failure(Enum):
     UPDATE_FAILED = "cargo update failed for the fork packages"
     FILE_READ_FAILED = "could not read a GPUI bump input file"
     FILE_WRITE_FAILED = "could not write a GPUI bump file"
-    RESTORE_FAILED = "rollback failed; run git restore Cargo.toml Cargo.lock rust-toolchain.toml"
+    RESTORE_FAILED = "rollback failed"
 
 
 class BumpError(Exception):
-    def __init__(self, kind: Failure):
+    def __init__(self, kind: Failure, message: str | None = None):
         self.kind = kind
-        super().__init__(kind.value)
+        super().__init__(message or kind.value)
 
 
 class BumpCancelled(BaseException):
@@ -111,10 +114,35 @@ def read_file(path: Path) -> str:
         raise BumpError(Failure.FILE_READ_FAILED) from error
 
 
-def require_clean_inputs(root: Path) -> None:
+def workspace_manifests(root: Path) -> tuple[str, ...]:
     try:
         result = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--", *BUMP_FILES],
+            ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        metadata = json.loads(result.stdout)
+        members = set(metadata["workspace_members"])
+        paths = {
+            Path(package["manifest_path"]).resolve().relative_to(root.resolve()).as_posix()
+            for package in metadata["packages"]
+            if package["id"] in members
+        }
+        if "Cargo.toml" not in paths or not paths or any(
+            Path(path).name != "Cargo.toml" for path in paths
+        ):
+            raise ValueError
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError) as error:
+        raise BumpError(Failure.METADATA_FAILED) from error
+    return ("Cargo.toml", *sorted(paths - {"Cargo.toml"}))
+
+
+def require_clean_inputs(root: Path, files: tuple[str, ...]) -> None:
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", *files],
             cwd=root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -128,57 +156,68 @@ def require_clean_inputs(root: Path) -> None:
         raise BumpError(Failure.GIT_CHECK_FAILED)
 
 
-def restore_from_head(root: Path) -> None:
+def restore_from_head(root: Path, files: tuple[str, ...]) -> None:
+    recovery = f"rollback failed; run git restore -- {' '.join(files)}"
     try:
         result = subprocess.run(
-            ["git", "restore", "--source=HEAD", "--", *BUMP_FILES],
+            ["git", "restore", "--source=HEAD", "--", *files],
             cwd=root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-    except OSError as error:
-        raise BumpError(Failure.RESTORE_FAILED) from error
+    except BaseException as error:
+        raise BumpError(Failure.RESTORE_FAILED, recovery) from error
     if result.returncode != 0:
-        raise BumpError(Failure.RESTORE_FAILED)
+        raise BumpError(Failure.RESTORE_FAILED, recovery)
 
 
-def fork_dependencies(contents: str, tag: str) -> tuple[str, str]:
+def fork_dependencies(contents: str, tag: str, root_manifest: bool = False) -> tuple[str | None, str]:
     try:
         manifest = tomllib.loads(contents)
     except tomllib.TOMLDecodeError as error:
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED) from error
-    sections = {name: manifest.get(name, {}) for name in ("dependencies", "dev-dependencies")}
+    sections = {name: manifest.get(name, {}) for name in DEPENDENCY_SECTIONS}
+    targets = manifest.get("target", {})
+    if not isinstance(targets, dict):
+        raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
+    for target, settings in targets.items():
+        if not isinstance(settings, dict):
+            raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
+        sections.update({
+            f"target.{target}.{name}": settings.get(name, {})
+            for name in DEPENDENCY_SECTIONS
+        })
     if any(not isinstance(dependencies, dict) for dependencies in sections.values()):
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
     found = {
-        (section, name)
+        (section, name): dependency
         for section, dependencies in sections.items()
         for name, dependency in dependencies.items()
         if isinstance(dependency, dict) and dependency.get("git") == FORK_URL
     }
-    if found != EXPECTED:
+    if root_manifest and set(found) != EXPECTED:
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
-    old_tags = [sections[section][name].get("tag") for section, name in EXPECTED]
-    if any(not isinstance(value, str) for value in old_tags) or len(set(old_tags)) != 1:
+    old_tags = [dependency.get("tag") for dependency in found.values()]
+    if any(not isinstance(value, str) for value in old_tags) or len(set(old_tags)) > 1:
         raise BumpError(Failure.TAGS_INCONSISTENT)
-    old_tag = old_tags[0]
+    old_tag = old_tags[0] if old_tags else None
 
     section = ""
-    replaced = set()
+    replaced = 0
     lines = []
     for line in contents.splitlines(keepends=True):
         if line.startswith("["):
             section = line.strip().strip("[]")
         match = re.match(r"^([ \t]*)([\w-]+)([ \t]*=[ \t]*\{)([^}\n]*)(\}[^\n]*)", line)
-        if match and (section, match[2]) in EXPECTED:
+        if match and section.split(".")[-1] in DEPENDENCY_SECTIONS and f'git = "{FORK_URL}"' in match[4]:
             body, count = FIELD_PATTERN.subn(lambda field: field[1] + tag + field[3], match[4])
-            if count != 1 or f'git = "{FORK_URL}"' not in body:
+            if count != 1:
                 raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
             line = line[: match.start(4)] + body + line[match.end(4) :]
-            replaced.add((section, match[2]))
+            replaced += 1
         lines.append(line)
-    if replaced != EXPECTED:
+    if replaced != len(found):
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
     return old_tag, "".join(lines)
 
@@ -274,7 +313,10 @@ def stop_cargo_process(process: subprocess.Popen) -> None:
 
 
 def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpResult:
-    require_clean_inputs(root)
+    require_clean_inputs(root, (*BASE_FILES, ":(glob)**/Cargo.toml"))
+    manifests = workspace_manifests(root)
+    files = (*BASE_FILES, *(path for path in manifests if path != "Cargo.toml"))
+    require_clean_inputs(root, files)
     if not TAG_PATTERN.fullmatch(tag):
         raise BumpError(Failure.INVALID_TAG)
     config = root / ".cargo" / "config.toml"
@@ -290,13 +332,21 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
         if "# BEGIN SpaceTerm local GPUI patches" in contents or FORK_URL in patches:
             raise BumpError(Failure.OVERRIDE_ACTIVE)
 
-    manifest_path = root / "Cargo.toml"
     toolchain_path = root / "rust-toolchain.toml"
     lock_path = root / "Cargo.lock"
-    manifest_contents = read_file(manifest_path)
+    manifest_contents = {path: read_file(root / path) for path in manifests}
     toolchain_contents = read_file(toolchain_path)
     lock_contents = read_file(lock_path)
-    old_tag, new_manifest = fork_dependencies(manifest_contents, tag)
+    changed_manifests = {}
+    old_tags = set()
+    for path, contents in manifest_contents.items():
+        old_tag, updated = fork_dependencies(contents, tag, path == "Cargo.toml")
+        if old_tag is not None:
+            old_tags.add(old_tag)
+            changed_manifests[path] = updated
+    if len(old_tags) != 1:
+        raise BumpError(Failure.TAGS_INCONSISTENT)
+    old_tag = old_tags.pop()
     old_channel = channel(toolchain_contents)
     packages, lock_tags = fork_packages(lock_contents, old_tag, tag)
     if not remote.has_tag(tag):
@@ -306,8 +356,9 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
 
     with sigterm_cancellation():
         try:
-            if new_manifest != manifest_contents:
-                manifest_path.write_text(new_manifest)
+            for path, updated in changed_manifests.items():
+                if updated != manifest_contents[path]:
+                    (root / path).write_text(updated)
             if new_toolchain != toolchain_contents:
                 toolchain_path.write_text(new_toolchain)
             if old_tag != tag or lock_tags != {tag}:
@@ -319,10 +370,7 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
                 except Exception as error:
                     raise BumpError(Failure.UPDATE_FAILED) from error
         except BaseException as error:
-            try:
-                restore_from_head(root)
-            except BaseException as restore_error:
-                raise BumpError(Failure.RESTORE_FAILED) from restore_error
+            restore_from_head(root, files)
             if isinstance(error, (BumpError, KeyboardInterrupt, SystemExit, BumpCancelled)):
                 raise
             raise BumpError(Failure.FILE_WRITE_FAILED) from error
