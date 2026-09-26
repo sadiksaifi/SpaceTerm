@@ -1,27 +1,29 @@
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 208e276a2..b3473701f 100644
+index 208e276a2..e6a6edc26 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
-@@ -83,6 +83,10 @@ else
+@@ -83,6 +83,12 @@ else
  /// Semantic prompt (OSC133) state.
  semantic_prompt: SemanticPrompt = .disabled,
  
-+/// A prompt cleared for a pending shell redraw. The shell's cursor-up count
-+/// still refers to the physical rows it drew before the first resize.
++/// Prompt redraw state machine: null is idle. A resize in redrawable prompt
++/// or input content enters pending with the first physical cursor offset.
++/// Further resizes retain that offset. A new A/N prompt mark, output transition,
++/// input end-of-line, screen switch, reset, or disabled redraw returns to idle.
 +pending_prompt_redraw: ?struct { start: *Pin, rows: u32 } = null,
 +
  /// Dirty flags for the renderer.
  dirty: Dirty = .{},
  
-@@ -351,9 +355,17 @@ pub fn deinit(self: *Screen) void {
+@@ -351,9 +357,17 @@ pub fn deinit(self: *Screen) void {
          self.kitty_images.deinit(self.alloc, self);
      }
      self.cursor.deinit(self.alloc);
-+    self.finishPromptRedraw();
++    self.retirePendingPromptRedraw();
      self.pages.deinit();
  }
  
-+pub fn finishPromptRedraw(self: *Screen) void {
++pub fn retirePendingPromptRedraw(self: *Screen) void {
 +    if (self.pending_prompt_redraw) |pending| {
 +        self.pages.untrackPin(pending.start);
 +        self.pending_prompt_redraw = null;
@@ -31,18 +33,24 @@ index 208e276a2..b3473701f 100644
  /// Assert that the screen is in a consistent state. This doesn't check
  /// all pages in the page list because that is SO SLOW even just for
  /// tests. This only asserts the screen specific data so callers should
-@@ -403,6 +415,7 @@ pub fn assertIntegrity(self: *const Screen) void {
+@@ -403,6 +417,7 @@ pub fn assertIntegrity(self: *const Screen) void {
  /// - Disables protection mode
  ///
  pub fn reset(self: *Screen) void {
-+    self.finishPromptRedraw();
++    self.retirePendingPromptRedraw();
      // Reset our pages
      self.pages.reset();
  
-@@ -2030,6 +2043,26 @@ pub inline fn resize(
+@@ -2030,6 +2045,32 @@ pub inline fn resize(
      const tw = resize_tw;
      defer self.assertIntegrity();
  
++    // Output cannot inherit the cursor offset of a prompt that was cleared
++    // by an earlier resize, even if its semantic transition was missed.
++    if (opts.prompt_redraw != .true or self.cursor.semantic_content == .output) {
++        self.retirePendingPromptRedraw();
++    }
++
 +    // SIGWINCH can arrive again before the shell writes its next prompt.
 +    // Keep the offset from the first resize because reflowing cleared rows
 +    // does not preserve the row count that the shell will move up by.
@@ -60,13 +68,13 @@ index 208e276a2..b3473701f 100644
 +            .rows = cursor_position.screen.y - position.screen.y,
 +        };
 +    }
-+    errdefer if (new_prompt) self.finishPromptRedraw();
++    errdefer if (new_prompt) self.retirePendingPromptRedraw();
 +    const prompt = self.pending_prompt_redraw;
 +
      // We need to insert a tracked pin for our saved cursor so we can
      // modify its X/Y for reflow. Do this before changing any state since
      // tracking the pin can fail.
-@@ -2128,10 +2161,48 @@ pub inline fn resize(
+@@ -2128,10 +2169,48 @@ pub inline fn resize(
      // state is correct.
      self.cursorReload();
  
@@ -119,7 +127,7 @@ index 208e276a2..b3473701f 100644
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2227,6 +2298,7 @@ pub inline fn resize(
+@@ -2227,6 +2306,7 @@ pub inline fn resize(
  fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -127,7 +135,7 @@ index 208e276a2..b3473701f 100644
  ) void {
      // If our cursor is on a prompt or input line, clear it so the shell can
      // redraw it. This works with OSC 133 semantic prompts. We do this after
-@@ -2255,7 +2327,7 @@ fn clearPromptForRedraw(
+@@ -2255,7 +2335,7 @@ fn clearPromptForRedraw(
              },
  
              .true => {
@@ -136,15 +144,23 @@ index 208e276a2..b3473701f 100644
                      var it = self.cursor.page_pin.promptIterator(
                          .left_up,
                          null,
+@@ -2842,6 +2922,7 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
+ 
+     switch (t) {
+         .output => {
++            self.retirePendingPromptRedraw();
+             cursor.semantic_content = .output;
+             cursor.semantic_content_clear_eol = false;
+         },
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
-index e9cc3b8e6..5aa8e835d 100644
+index e9cc3b8e6..cd34c6f2a 100644
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
 @@ -2093,6 +2093,7 @@ pub fn semanticPrompt(
              try self.semanticPromptFreshLine();
  
              const screen: *Screen = self.screens.active;
-+            screen.finishPromptRedraw();
++            screen.retirePendingPromptRedraw();
  
              // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
              // is a prompt string (as if followed by OSC 133;P;k=i\007)."
@@ -164,3 +180,23 @@ index e9cc3b8e6..5aa8e835d 100644
  
              click: {
                  // Handle click_events as a priority over cl. click_events
+@@ -2331,6 +2329,7 @@ pub fn index(self: *Terminal) !void {
+         // discover that there are more scenarios we should be unsetting
+         // this we should document and test it.
+         if (screen.cursor.semantic_content_clear_eol) {
++            screen.retirePendingPromptRedraw();
+             screen.cursor.semantic_content = .output;
+             screen.cursor.semantic_content_clear_eol = false;
+         } else {
+@@ -4766,6 +4765,11 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
+     // The new screen should not have any hyperlinks set
+     assert(new.cursor.hyperlink_id == 0);
+ 
++    // A screen switch ends the shell's current prompt. Neither the screen
++    // being left nor a previously used destination can keep its redraw pin.
++    old.cursorSetSemanticContent(.output);
++    new.cursorSetSemanticContent(.output);
++
+     // Bring our charset state with us
+     new.charset = old.charset;
+ 

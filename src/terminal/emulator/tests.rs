@@ -697,6 +697,14 @@ fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
     rows
 }
 
+fn all_grid_content(emulator: &mut TerminalEmulator) -> String {
+    all_grid_rows(emulator)
+        .iter()
+        .flat_map(|row| row.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
 #[test]
 fn vt_sequences_update_the_screen_without_leaking_escape_bytes() {
     let mut emulator = emulator(12, 3);
@@ -1597,6 +1605,101 @@ fn unoptioned_prompt_start_resets_the_previous_shell_redraw_policy() {
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
     assert_eq!(content, "OLD>runQA_RESIZE_MARKER");
+}
+
+fn pending_zsh_preexec_prompt() -> TerminalEmulator {
+    let mut emulator = emulator(50, 12);
+    emulator.feed(b"QA_PREP\r\n\x1b]133;A;redraw=1\x07");
+    emulator.feed(format!("{}\r\n> ", "P".repeat(100)).as_bytes());
+    emulator.feed(b"\x1b]133;B\x07run\r\n");
+    emulator.resize(geometry(20, 12, 10.0, 20.0)).unwrap();
+    emulator
+}
+
+#[test]
+fn zsh_preexec_command_output_survives_another_resize_and_interrupt() {
+    let mut emulator = pending_zsh_preexec_prompt();
+    // Captured after a zsh preexec hook returned. The hook ran during the
+    // first resize, before SpaceTerm's preexec hook emitted OSC 133;C.
+    emulator.feed(b"\x1b]133;C;cmdline=for%20i%20in%20%7B1..8%7D%3B%20do%20print%20-r%20--%20QA_LINE_%24i%3B%20done%3B%20sleep%205\x07");
+    for line in 1..=8 {
+        emulator.feed(format!("QA_LINE_{line}\r\n").as_bytes());
+    }
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    assert_eq!(
+        all_grid_content(&mut emulator),
+        "QA_PREPQA_LINE_1QA_LINE_2QA_LINE_3QA_LINE_4QA_LINE_5QA_LINE_6QA_LINE_7QA_LINE_8"
+    );
+
+    // Zsh's captured interrupt closes the command and prints a new prompt.
+    emulator.feed(b"^C\r\n\x1b]133;D;130\x07\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07NEXT> \x1b]133;B\x07");
+    assert_eq!(
+        all_grid_content(&mut emulator),
+        "QA_PREPQA_LINE_1QA_LINE_2QA_LINE_3QA_LINE_4QA_LINE_5QA_LINE_6QA_LINE_7QA_LINE_8^CNEXT>"
+    );
+}
+
+#[test]
+fn exec_bash_output_survives_resize_after_zsh_preexec() {
+    let mut emulator = pending_zsh_preexec_prompt();
+    // Zsh emits C before replacing itself. Bare bash then emits no OSC 133.
+    emulator.feed(b"\x1b]133;C;cmdline=exec%20bash%20--noprofile%20--norc\x07\r\nBASH_READY\r\nbash-3.2$ ");
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\x1b[Kbash-3.2$ ");
+    assert_eq!(all_grid_content(&mut emulator), "QA_PREPBASH_READYbash-3.2$");
+}
+
+#[test]
+fn command_end_retires_pending_prompt_redraw() {
+    let mut emulator = pending_zsh_preexec_prompt();
+    emulator.feed(b"\x1b]133;D;0\x07");
+    for line in 1..=8 {
+        emulator.feed(format!("D_LINE_{line}\r\n").as_bytes());
+    }
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    emulator.feed(b"AFTER_D");
+    assert_eq!(
+        all_grid_content(&mut emulator),
+        "QA_PREPD_LINE_1D_LINE_2D_LINE_3D_LINE_4D_LINE_5D_LINE_6D_LINE_7D_LINE_8AFTER_D"
+    );
+}
+
+#[test]
+fn input_end_of_line_retires_pending_prompt_redraw() {
+    let mut emulator = emulator(50, 12);
+    emulator.feed(b"QA_PREP\r\n\x1b]133;A;redraw=1\x07");
+    emulator.feed(format!("{}\r\n> ", "P".repeat(100)).as_bytes());
+    emulator.feed(b"\x1b]133;I\x07run");
+    emulator.resize(geometry(20, 12, 10.0, 20.0)).unwrap();
+    emulator.feed(b"\r\n");
+    for line in 1..=8 {
+        emulator.feed(format!("I_LINE_{line}\r\n").as_bytes());
+    }
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    emulator.feed(b"AFTER_EOL");
+    assert_eq!(
+        all_grid_content(&mut emulator),
+        "QA_PREPI_LINE_1I_LINE_2I_LINE_3I_LINE_4I_LINE_5I_LINE_6I_LINE_7I_LINE_8AFTER_EOL"
+    );
+}
+
+#[test]
+fn alternate_screen_retires_pending_prompt_redraw() {
+    let mut emulator = pending_zsh_preexec_prompt();
+    emulator.feed(b"\x1b[?1049hALT_CONTENT");
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    assert!(all_grid_content(&mut emulator).contains("ALT_CONTENT"));
+    emulator.feed(b"\x1b[?1049lAFTER_ALT\r\n");
+    emulator.resize(geometry(100, 12, 10.0, 20.0)).unwrap();
+    assert_eq!(all_grid_content(&mut emulator), "QA_PREPAFTER_ALT");
+}
+
+#[test]
+fn full_reset_retires_pending_prompt_redraw() {
+    let mut emulator = pending_zsh_preexec_prompt();
+    emulator.feed(b"\x1bcAFTER_RESET\r\n");
+    emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
+    assert_eq!(all_grid_content(&mut emulator), "AFTER_RESET");
 }
 
 #[test]
