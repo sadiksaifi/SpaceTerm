@@ -582,7 +582,14 @@ struct PreparedPreeditRow {
 #[derive(Clone)]
 struct PreparedPreeditText {
     text: PreparedText,
-    underline: UnderlineStyle,
+    underline: Option<PreparedPreeditUnderline>,
+}
+
+#[derive(Clone)]
+struct PreparedPreeditUnderline {
+    origin: gpui::Point<Pixels>,
+    width: Pixels,
+    style: UnderlineStyle,
 }
 
 impl PreparedFrameRow {
@@ -924,13 +931,8 @@ fn paint_preedit_text(
         Bounds::new(text.origin, size(layout.width, line_height)),
         |window| {
             paint_terminal_text(text, line_height, CursorTextPaint::Unchanged, window)?;
-            if let Some(first_glyph) = text.glyph_origins.first() {
-                let underline_origin = point(
-                    first_glyph.x,
-                    text.origin.y
-                        + gpui::underline_y_offset(line_height, layout.ascent, layout.descent),
-                );
-                window.paint_underline(underline_origin, layout.width, &preedit.underline);
+            if let Some(underline) = &preedit.underline {
+                window.paint_underline(underline.origin, underline.width, &underline.style);
             }
             Ok(())
         },
@@ -1260,7 +1262,7 @@ impl TerminalGridCache {
                 let origin = point(cluster_left, row_top);
                 let mut previous = gpui::Point::default();
                 let mut position = origin;
-                let glyph_origins = line
+                let glyph_origins: Arc<[gpui::Point<Pixels>]> = line
                     .runs
                     .iter()
                     .flat_map(|run| &run.glyphs)
@@ -1270,6 +1272,33 @@ impl TerminalGridCache {
                         position
                     })
                     .collect();
+                let underline = line.runs.last().and_then(|last_run| {
+                    let first_glyph = glyph_origins.first()?;
+                    let (underline_x, width) = if line.width == px(0.0) {
+                        let half_width = window
+                            .text_system()
+                            .bounding_box(last_run.font_id, font_size)
+                            .size
+                            .width
+                            / 2.0;
+                        (first_glyph.x - half_width, half_width)
+                    } else {
+                        (first_glyph.x, line.width)
+                    };
+                    Some(PreparedPreeditUnderline {
+                        origin: point(
+                            underline_x,
+                            origin.y
+                                + gpui::underline_y_offset(
+                                    line_height,
+                                    line.ascent,
+                                    line.descent,
+                                ),
+                        ),
+                        width,
+                        style: underline,
+                    })
+                });
                 text.push(PreparedPreeditText {
                     text: PreparedText {
                         line,
@@ -3242,6 +3271,9 @@ mod tests {
             runs: &[gpui::FontRun],
         ) -> gpui::LineLayout {
             let mut layout = self.base.layout_line(text, font_size, runs);
+            if matches!(text, "\u{200b}" | "\u{200d}") {
+                layout.width = px(0.0);
+            }
             for glyph in layout.runs.iter_mut().flat_map(|run| &mut run.glyphs) {
                 glyph.id = gpui::GlyphId(text[glyph.index..].chars().next().unwrap() as u32);
             }
@@ -3803,6 +3835,63 @@ mod tests {
         assert!(!actual.0.is_empty());
         assert_ne!(actual.1, "[]");
         assert_eq!(actual, paint(true));
+    }
+
+    #[test]
+    fn zero_width_preedit_underline_matches_shaped_line_at_nonzero_column() {
+        let paint = |reference: bool| {
+            let mut cx = recording_test_app(Arc::new(RasterObservation::default()));
+            let cx = cx.add_empty_window();
+            cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
+                let layout = layout_preedit("\u{200b}", 0, 3, 10, 1);
+                let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+                let rows = TerminalGridCache::new()
+                    .prepare_preedit(
+                        Some(&layout),
+                        2,
+                        bounds,
+                        &terminal_cell_font(&"Menlo".into(), false, false),
+                        px(18.0),
+                        px(8.375),
+                        px(14.0),
+                        Color::rgb(0xff_ff_ff),
+                        Color::rgb(0),
+                        Color::rgb(0xff_ff_ff),
+                        window.scale_factor(),
+                        window,
+                    )
+                    .unwrap();
+                let preedit = rows[0].text[0].clone();
+                assert_eq!(preedit.text.line.width, px(0.0));
+                assert!(preedit.text.origin.x > px(0.0));
+                gpui::canvas(
+                    move |_, _, _| preedit,
+                    move |_, preedit, window, cx| {
+                        if reference {
+                            preedit
+                                .text
+                                .line
+                                .paint(
+                                    preedit.text.origin,
+                                    px(14.0),
+                                    gpui::TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                                .unwrap();
+                        } else {
+                            paint_preedit_text(&preedit, px(14.0), window).unwrap();
+                        }
+                    },
+                )
+                .size_full()
+            });
+            cx.update(|window, _| format!("{:?}", window.painted_underlines()))
+        };
+        let expected = paint(true);
+        assert_ne!(expected, "[]");
+        assert_eq!(paint(false), expected);
     }
 
     #[test]
