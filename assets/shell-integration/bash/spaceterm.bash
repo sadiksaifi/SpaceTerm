@@ -52,7 +52,7 @@ if [[ $- == *i* && "$SPACETERM_SHELL_INTEGRATION_VERSION" == 1 && -z "${_SPACETE
         if (( _spaceterm_command_active )); then
             printf '\e]133;D;%d\a' "$status"
         fi
-        printf '\e]7;file://localhost%s\a\e]133;A\a' "$(_spaceterm_encode "$PWD")"
+        printf '\e]7;file://localhost%s\a\e]133;A;redraw=last\a' "$(_spaceterm_encode "$PWD")"
         _spaceterm_command_active=1
     }
     PROMPT_COMMAND="_spaceterm_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"

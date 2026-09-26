@@ -1326,7 +1326,20 @@ impl TerminalEmulator {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn resize(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
+        self.resize_for_pty(geometry, true)
+    }
+
+    pub(crate) fn geometry(&self) -> TerminalGeometry {
+        self.geometry
+    }
+
+    pub(crate) fn resize_for_pty(
+        &mut self,
+        geometry: TerminalGeometry,
+        winsize_changed: bool,
+    ) -> Result<(), Error> {
         self.end_synchronized_output()?;
         self.selection_gesture.reset(&self.terminal);
         self.active_pointer = None;
@@ -1334,8 +1347,13 @@ impl TerminalEmulator {
         self.pointer_mapping_invalidated = false;
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
-        self.terminal
-            .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+        if winsize_changed {
+            self.terminal
+                .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+        } else {
+            debug_assert_eq!(grid, self.geometry.grid());
+            debug_assert_eq!(cell, self.geometry.backing_cell_size());
+        }
         self.find.invalidate();
         self.geometry = geometry;
         Ok(())

@@ -1,0 +1,157 @@
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 007e727..b706a30 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -2107,14 +2107,29 @@ pub inline fn resize(
+         self.cursor.hyperlink = null;
+     }
+ 
+-    // Perform the resize operation.
+     try tw.check(.pages);
++
++    // Clear the prompt while its physical rows still have their old width.
++    // Each cleared row becomes a hard line, so reflow preserves the number
++    // of rows the shell will move up when it redraws the prompt.
++    const old_cursor_x = self.cursor.x;
++    const cleared_prompt = self.clearPromptForRedraw(opts.prompt_redraw);
++    if (cleared_prompt) {
++        // A tracked cursor beyond column zero would make the blank row
++        // reflow into new physical rows just to preserve blank cells.
++        self.cursor.page_pin.x = 0;
++    }
++    errdefer {
++        if (cleared_prompt) self.cursor.page_pin.x = old_cursor_x;
++    }
++
++    // Perform the resize operation.
+     try self.pages.resize(.{
+         .rows = opts.rows,
+         .cols = opts.cols,
+         .reflow = opts.reflow,
+         .cursor = .{
+-            .x = self.cursor.x,
++            .x = if (cleared_prompt) 0 else self.cursor.x,
+             .y = self.cursor.y,
+             .pin = self.cursor.page_pin,
+         },
+@@ -2135,11 +2150,7 @@ pub inline fn resize(
+     // If our cursor was updated, we do a full reload so all our cursor
+     // state is correct.
+     self.cursorReload();
+-
+-    // Clear any redrawable prompt after the fallible resize but before
+-    // restoring the cursor style and hyperlink, so cleared cells retain the
+-    // same default styling they had with the previous ordering.
+-    self.clearPromptForRedraw(opts.prompt_redraw);
++    if (cleared_prompt) self.cursorHorizontalAbsolute(@min(old_cursor_x, opts.cols - 1));
+ 
+     // Restore the cursor style.
+     self.cursor.style = cursor_style;
+@@ -2232,13 +2243,12 @@ pub inline fn resize(
+     }
+ }
+ 
+-fn clearPromptForRedraw(
++pub fn clearPromptForRedraw(
+     self: *Screen,
+     redraw: osc.semantic_prompt.Redraw,
+-) void {
+-    // If our cursor is on a prompt or input line, clear it so the shell can
+-    // redraw it. This works with OSC 133 semantic prompts. We do this after
+-    // the fallible resize so an error leaves the original prompt untouched.
++) bool {
++    // If our cursor is on a prompt or input line, clear the rows the shell
++    // will redraw before reflow can merge or split them.
+     //
+     // We check cursor.semantic_content rather than page_row.semantic_prompt
+     // because some shells (e.g., Nu) mark input areas with OSC 133 B but don't
+@@ -2253,13 +2263,14 @@ fn clearPromptForRedraw(
+         switch (redraw) {
+             .false => unreachable,
+ 
+-            // For `.last`, only clear the current line where the cursor is.
+-            // For `.true`, clear all prompt lines starting from the beginning.
++            // Readline redraws its final logical line, including all of its
++            // physical wrap rows. Zsh redraws from the prompt's first row.
+             .last => {
+-                const page = self.cursor.page_pin.node.page();
+-                const row = self.cursor.page_row;
+-                const cells = page.getCells(row);
+-                self.clearCells(page, row, cells);
++                var first = self.cursor.page_pin.*;
++                while (first.rowAndCell().row.wrap_continuation) {
++                    first = first.up(1) orelse break;
++                }
++                self.clearPromptRows(first);
+             },
+ 
+             .true => {
+@@ -2277,19 +2288,25 @@ fn clearPromptForRedraw(
+                     };
+                 };
+ 
+-                // Clear cells from our start down. We replace it with spaces,
+-                // and do not physically erase the rows (eraseRows) because the
+-                // shell is going to expect this space to be available.
+-                var it = start.rowIterator(.right_down, null);
+-                while (it.next()) |pin| {
+-                    const page = pin.node.page();
+-                    const row = pin.rowAndCell().row;
+-                    const cells = page.getCells(row);
+-                    self.clearCells(page, row, cells);
+-                }
++                self.clearPromptRows(start);
+             },
+         }
++        return true;
+     }
++    return false;
++}
++
++fn clearPromptRows(self: *Screen, first: Pin) void {
++    var it = first.rowIterator(.right_down, self.cursor.page_pin.*);
++    while (it.next()) |pin| {
++        const page = pin.node.page();
++        const row = pin.rowAndCell().row;
++        self.clearCells(page, row, page.getCells(row));
++        row.wrap = false;
++        row.wrap_continuation = false;
++        row.dirty = true;
++    }
++    self.cursor.pending_wrap = false;
+ }
+ 
+ /// Set a style attribute for the current cursor.
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index 5e7dca5..f127020 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -2103,12 +2103,8 @@ pub fn semanticPrompt(
+                 .prompt = cmd.readOption(.prompt_kind) orelse .initial,
+             });
+ 
+-            // This is a kitty-specific flag that notes that the shell
+-            // is NOT capable of redraw. Redraw defaults to true so this
+-            // usually just disables it, but either is possible.
+-            if (cmd.readOption(.redraw)) |v| {
+-                self.flags.shell_redraws_prompt = v;
+-            }
++            // A redraw policy belongs to this prompt, not an earlier shell.
++            self.flags.shell_redraws_prompt = cmd.readOption(.redraw) orelse .true;
+ 
+             click: {
+                 // Handle click_events as a priority over cl. click_events
+@@ -4067,7 +4063,12 @@ pub fn resize(
+     self.modes.set(.synchronized_output, false);
+ 
+     // If our cols/rows didn't change, skip grid work but still apply pixels.
+-    if (self.cols == opts.cols and self.rows == opts.rows) return;
++    if (self.cols == opts.cols and self.rows == opts.rows) {
++        if (self.screens.active_key == .primary) {
++            _ = self.screens.active.clearPromptForRedraw(self.flags.shell_redraws_prompt);
++        }
++        return;
++    }
+ 
+     // Build replacement tabstops without touching the current table. Keep
+     // ownership here until every fallible resize operation has succeeded.

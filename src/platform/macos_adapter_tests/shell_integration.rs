@@ -98,7 +98,7 @@ fn bash_reports_reserved_and_unicode_directory_without_losing_exit_status() {
     let reports = osc_reports(&output.stdout);
     assert_eq!(reports.len(), 3);
     assert_eq!(reports[0], "133;D;7");
-    assert_eq!(reports[2], "133;A");
+    assert_eq!(reports[2], "133;A;redraw=last");
     let mut tracker = MetadataTracker::new(
         LocalPathSemantics::Posix,
         "/initial",
@@ -357,6 +357,12 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             script.contains("SPACETERM_SHELL_INTEGRATION_VERSION"),
             "{relative} must verify the resource handshake"
         );
+        let redraw = if relative.starts_with("bash/") {
+            "133;A;redraw=last"
+        } else {
+            "133;A;redraw=1"
+        };
+        assert!(script.contains(redraw), "{relative} must state its prompt redraw policy");
     }
 }
 
@@ -367,7 +373,7 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
         .args([
             "-dfi",
             "-c",
-            r#"PS1='SPACE> '; builtin source -- "$1"; _spaceterm_command_active=1; (builtin exit 7); "$precmd_functions[-1]"; "$precmd_functions[-1]"; builtin print -nrP -- "$PS1""#,
+            r#"PS1='SPACE> '; builtin source -- "$1"; _spaceterm_command_active=1; (builtin exit 7); "$precmd_functions[-1]"; "$precmd_functions[-1]"; builtin print -nrP -- "$PS1"; builtin print -nrP -- "$PS1""#,
             "spaceterm",
         ])
         .arg(integration)
@@ -375,6 +381,7 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
         .output()
         .unwrap();
     let completion = b"\x1b]133;D;7\x07";
+    let prompt_start = b"\x1b]133;A;redraw=1\x07";
     let prompt_marker = b"\x1b]133;B\x07";
     let literal_prompt_marker = br"\e]133;B\a";
     let reported_prior_status = output
@@ -386,22 +393,30 @@ fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_promp
         .windows(prompt_marker.len())
         .filter(|window| *window == prompt_marker)
         .count();
+    let redrawable_prompt_starts = output
+        .stdout
+        .windows(prompt_start.len())
+        .filter(|window| *window == prompt_start)
+        .count();
     let rendered_literal_marker = output
         .stdout
         .windows(literal_prompt_marker.len())
         .any(|window| window == literal_prompt_marker);
-    let rendered_prompt_is_preserved = output.stdout.ends_with(b"SPACE> \x1b]133;B\x07");
+    let rendered_prompt_is_preserved = output.stdout.ends_with(
+        b"\x1b]133;A;redraw=1\x07SPACE> \x1b]133;B\x07\x1b]133;A;redraw=1\x07SPACE> \x1b]133;B\x07",
+    );
 
     assert_eq!(
         (
             output.status.success(),
             output.stderr.as_slice(),
             reported_prior_status,
+            redrawable_prompt_starts,
             rendered_prompt_markers,
             rendered_literal_marker,
             rendered_prompt_is_preserved,
         ),
-        (true, &[][..], true, 1, false, true),
+        (true, &[][..], true, 2, 2, false, true),
         "stdout: {:?}",
         String::from_utf8_lossy(&output.stdout),
     );
