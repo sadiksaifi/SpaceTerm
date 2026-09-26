@@ -656,68 +656,9 @@ impl TerminalPaintBatch {
         let preflight_mask = ContentMask {
             bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
         };
-        let submission_mask = window.content_mask().bounds.intersect(&self.grid_bounds);
         window.with_content_mask(Some(preflight_mask), |window| {
-            self.submit(self.grid_bounds, false, window, _cx)?;
-            self.prepare_recolor_tiles(submission_mask, window)?;
-            self.prepare_preedit_tiles(window)
+            self.submit(self.grid_bounds, false, window, _cx)
         })
-    }
-
-    fn prepare_recolor_tiles(
-        &self,
-        submission_mask: Bounds<Pixels>,
-        window: &mut Window,
-    ) -> Result<(), PaintBatchFailure> {
-        // GPUI skips the second Recolor lookup when the content mask is empty.
-        // Load that color's tile explicitly so submission only reads cached tiles.
-        for (row_index, row) in self.rows.iter().enumerate() {
-            let CursorTextPaint::Recolor { bounds, color } =
-                cursor_text_paint(self.cursor_text_overlay, row_index)
-            else {
-                continue;
-            };
-            if !bounds.intersects(&submission_mask) {
-                continue;
-            }
-            for text in row
-                .stable
-                .text
-                .iter()
-                .filter(|text| text_fragment_visible(text.blinking, self.blink_phase_visible))
-            {
-                let layout = &*text.line;
-                let baseline =
-                    (self.line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
-                for (font_id, glyph, glyph_origin) in text.positioned_glyphs() {
-                    if !glyph.is_emoji {
-                        window
-                            .paint_glyph(
-                                glyph_origin + point(px(0.0), baseline),
-                                font_id,
-                                glyph.id,
-                                layout.font_size,
-                                color,
-                            )
-                            .map_err(|_| PaintBatchFailure::Presentation)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn prepare_preedit_tiles(&self, window: &mut Window) -> Result<(), PaintBatchFailure> {
-        // ShapedLine::paint skips glyph lookups outside its content mask.
-        for row in &self.rows {
-            if let Some(preedit) = &row.preedit {
-                for text in preedit.text.iter() {
-                    paint_terminal_text(text, self.line_height, CursorTextPaint::Unchanged, window)
-                        .map_err(|_| PaintBatchFailure::Presentation)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     fn injected_failure(&self, fault: Option<PaintPreflightFault>) -> Option<PaintBatchFailure> {
@@ -3123,7 +3064,6 @@ mod tests {
     use std::{
         borrow::Cow,
         cell::{Cell, RefCell},
-        collections::HashSet,
         rc::Rc,
         sync::{Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}},
     };
@@ -3362,16 +3302,35 @@ mod tests {
     struct GlyphKeyPaint {
         atlas: Arc<GlyphKeyAtlas>,
         comparisons: Arc<AtomicUsize>,
+        matching_dilation: bool,
     }
 
     impl gpui::Render for GlyphKeyPaint {
         fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
             let atlas = Arc::clone(&self.atlas);
             let comparisons = Arc::clone(&self.comparisons);
+            let matching_dilation = self.matching_dilation;
             gpui::canvas(
-                move |_, window, _| cursor_render_batches(window, false).remove(0),
-                move |_, batch, window, cx| {
+                move |_, window, _| {
+                    let mut batch = cursor_render_batches(window, false).remove(0);
+                    if matching_dilation {
+                        batch.cursor_text_overlay.as_mut().unwrap().color = rgba(0x00_00_00_ff).into();
+                    }
+                    let baseline = matching_dilation.then(|| {
+                        let mut baseline = cursor_render_batches(window, false).remove(0);
+                        baseline.cursor_text_overlay = None;
+                        baseline
+                    });
+                    (batch, baseline)
+                },
+                move |_, (batch, baseline), window, cx| {
                     atlas.requested.lock().unwrap().clear();
+                    let baseline = if let Some(baseline) = baseline {
+                        baseline.preflight(None, window, cx).unwrap();
+                        Some(std::mem::take(&mut *atlas.requested.lock().unwrap()))
+                    } else {
+                        None
+                    };
                     batch.preflight(None, window, cx).unwrap();
                     let prepared = std::mem::take(&mut *atlas.requested.lock().unwrap());
                     batch.submit(batch.grid_bounds, true, window, cx).unwrap();
@@ -3382,12 +3341,16 @@ mod tests {
                                 gpui::AtlasKey::Glyph(params) => Some(params),
                                 _ => None,
                             })
-                            .collect::<HashSet<_>>()
+                            .collect::<Vec<_>>()
                     };
                     let prepared = glyph_keys(prepared);
                     let submitted = glyph_keys(submitted);
                     assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 0));
-                    assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 4));
+                    if let Some(baseline) = baseline {
+                        assert_eq!(prepared, glyph_keys(baseline));
+                    } else {
+                        assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 4));
+                    }
                     assert_eq!(prepared, submitted);
                     comparisons.fetch_add(1, Ordering::Relaxed);
                 },
@@ -3611,6 +3574,15 @@ mod tests {
 
     #[test]
     fn preflight_and_submission_request_identical_atlas_keys_for_cursor_recolor() {
+        assert_cursor_atlas_keys_match(false);
+    }
+
+    #[test]
+    fn matching_dilation_cursor_row_makes_no_extra_atlas_lookups() {
+        assert_cursor_atlas_keys_match(true);
+    }
+
+    fn assert_cursor_atlas_keys_match(matching_dilation: bool) {
         use gpui::AppContext as _;
 
         let atlas = Arc::new(GlyphKeyAtlas::default());
@@ -3634,7 +3606,7 @@ mod tests {
             .open_window(size(px(80.0), px(28.0)), {
                 let atlas = Arc::clone(&atlas);
                 let comparisons = Arc::clone(&comparisons);
-                move |_, cx| cx.new(|_| GlyphKeyPaint { atlas, comparisons })
+                move |_, cx| cx.new(|_| GlyphKeyPaint { atlas, comparisons, matching_dilation })
             })
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
@@ -3652,6 +3624,40 @@ mod tests {
             gpui::canvas(
                 move |_, _, _| batch,
                 move |_, batch, window, cx| batch.preflight(None, window, cx).unwrap(),
+            )
+            .size_full()
+        });
+        cx.update(|window, _| {
+            assert!(painted_glyphs(window).is_empty());
+            assert!(window.painted_quads().is_empty());
+        });
+    }
+
+    #[test]
+    fn fractional_cursor_preflight_at_scale_two_adds_no_primitives() {
+        let observation = Arc::new(RasterObservation::default());
+        let mut cx = recording_test_app(observation);
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
+            let mut batch = cursor_render_batches(window, false).remove(0);
+            batch.cursor_text_overlay.as_mut().unwrap().bounds = Bounds::new(
+                point(px(8.125), px(14.125)),
+                size(px(8.375), px(14.)),
+            );
+            gpui::canvas(
+                move |_, _, _| batch,
+                move |_, batch, window, cx| {
+                    assert_eq!(window.scale_factor(), 2.);
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: Bounds::new(
+                                point(px(8.125), px(14.125)),
+                                size(px(71.875), px(13.875)),
+                            ),
+                        }),
+                        |window| batch.preflight(None, window, cx).unwrap(),
+                    );
+                },
             )
             .size_full()
         });
