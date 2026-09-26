@@ -146,6 +146,58 @@ class GpuiBumpTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), after_first)
         self.assertEqual(len(self.updates), 1)
 
+    def test_failed_update_restores_all_originals(self):
+        original = self.snapshot()
+
+        def fail_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
+
+        self.update = fail_update
+        with self.assertRaises(MODULE.BumpError) as raised:
+            self.bump()
+        self.assertEqual(raised.exception.kind, MODULE.Failure.UPDATE_FAILED)
+        self.assertEqual(self.snapshot(), original)
+
+    def test_retry_after_failed_update_succeeds(self):
+        original = self.snapshot()
+        successful_update = self.update
+
+        def fail_update(root, packages):
+            (root / "Cargo.lock").write_text("partial lockfile\n")
+            raise MODULE.BumpError(MODULE.Failure.UPDATE_FAILED)
+
+        self.update = fail_update
+        with self.assertRaises(MODULE.BumpError):
+            self.bump()
+        self.assertEqual(self.snapshot(), original)
+        self.update = successful_update
+        result = self.bump()
+        self.assertEqual(result.new_tag, NEW_TAG)
+        self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(NEW_TAG))
+
+    def test_failed_toolchain_write_restores_all_originals(self):
+        original = self.snapshot()
+        toolchain = self.root / "rust-toolchain.toml"
+        original_replace = Path.replace
+        failed = False
+
+        def fail_once(source, target):
+            nonlocal failed
+            if target == toolchain and not failed:
+                failed = True
+                raise OSError("injected toolchain write failure")
+            return original_replace(source, target)
+
+        with patch.object(Path, "replace", fail_once):
+            with self.assertRaises(MODULE.BumpError) as raised:
+                self.bump()
+        self.assertEqual(raised.exception.kind, MODULE.Failure.FILE_WRITE_FAILED)
+        self.assertTrue(failed)
+        self.assertEqual(self.snapshot(), original)
+        self.assertEqual(self.updates, [])
+        self.assertEqual(list(self.root.glob(".rust-toolchain.toml.*")), [])
+
     def test_cargo_update_scopes_the_command_to_lockfile_packages(self):
         with patch.object(MODULE.subprocess, "run") as run:
             MODULE.cargo_update(self.root, list(LOCK_NAMES))

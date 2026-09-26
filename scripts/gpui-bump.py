@@ -4,9 +4,12 @@
 import argparse
 from dataclasses import dataclass
 from enum import Enum
+import os
 from pathlib import Path
 import re
+import stat
 import subprocess
+import tempfile
 import tomllib
 from urllib.error import URLError
 from urllib.parse import quote
@@ -40,6 +43,7 @@ class Failure(Enum):
     UPDATE_FAILED = "cargo update failed for the fork packages"
     FILE_READ_FAILED = "could not read a GPUI bump input file"
     FILE_WRITE_FAILED = "could not write a GPUI bump file"
+    RESTORE_FAILED = "could not restore the original GPUI bump files"
 
 
 class BumpError(Exception):
@@ -54,6 +58,12 @@ class BumpResult:
     new_tag: str
     old_channel: str
     new_channel: str
+
+
+@dataclass(frozen=True)
+class OriginalFile:
+    contents: bytes
+    mode: int
 
 
 class ForkRemote:
@@ -83,6 +93,45 @@ def read_file(path: Path) -> str:
         return path.read_text()
     except (OSError, UnicodeError) as error:
         raise BumpError(Failure.FILE_READ_FAILED) from error
+
+
+def read_originals(paths: tuple[Path, ...]) -> dict[Path, OriginalFile]:
+    try:
+        return {
+            path: OriginalFile(path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+            for path in paths
+        }
+    except OSError as error:
+        raise BumpError(Failure.FILE_READ_FAILED) from error
+
+
+def atomic_write(path: Path, contents: bytes, mode: int) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(contents)
+        os.chmod(temporary, mode)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def restore_originals(originals: dict[Path, OriginalFile]) -> None:
+    failed = False
+    for path, original in originals.items():
+        try:
+            if (
+                not path.exists()
+                or path.read_bytes() != original.contents
+                or stat.S_IMODE(path.stat().st_mode) != original.mode
+            ):
+                atomic_write(path, original.contents, original.mode)
+        except Exception:
+            failed = True
+    if failed:
+        raise BumpError(Failure.RESTORE_FAILED)
 
 
 def fork_dependencies(contents: str, tag: str) -> tuple[str, str]:
@@ -196,23 +245,43 @@ def bump(root: Path, tag: str, remote: ForkRemote, update=cargo_update) -> BumpR
 
     manifest_path = root / "Cargo.toml"
     toolchain_path = root / "rust-toolchain.toml"
-    old_tag, new_manifest = fork_dependencies(read_file(manifest_path), tag)
-    toolchain_contents = read_file(toolchain_path)
+    lock_path = root / "Cargo.lock"
+    originals = read_originals((manifest_path, toolchain_path, lock_path))
+    try:
+        manifest_contents = originals[manifest_path].contents.decode("utf-8")
+        toolchain_contents = originals[toolchain_path].contents.decode("utf-8")
+        lock_contents = originals[lock_path].contents.decode("utf-8")
+    except UnicodeError as error:
+        raise BumpError(Failure.FILE_READ_FAILED) from error
+    old_tag, new_manifest = fork_dependencies(manifest_contents, tag)
     old_channel = channel(toolchain_contents)
-    packages, lock_tags = fork_packages(read_file(root / "Cargo.lock"), old_tag, tag)
+    packages, lock_tags = fork_packages(lock_contents, old_tag, tag)
     if not remote.has_tag(tag):
         raise BumpError(Failure.TAG_MISSING)
     new_channel = channel(remote.toolchain(tag))
     _, new_toolchain = set_channel(toolchain_contents, new_channel)
 
-    if old_tag != tag or old_channel != new_channel:
+    try:
+        if new_manifest != manifest_contents:
+            atomic_write(manifest_path, new_manifest.encode("utf-8"), originals[manifest_path].mode)
+        if new_toolchain != toolchain_contents:
+            atomic_write(toolchain_path, new_toolchain.encode("utf-8"), originals[toolchain_path].mode)
+        if old_tag != tag or lock_tags != {tag}:
+            try:
+                update(root, packages)
+                _, updated_tags = fork_packages(read_file(lock_path), tag, tag)
+                if updated_tags != {tag}:
+                    raise BumpError(Failure.UPDATE_FAILED)
+            except Exception as error:
+                raise BumpError(Failure.UPDATE_FAILED) from error
+    except Exception as error:
         try:
-            manifest_path.write_text(new_manifest)
-            toolchain_path.write_text(new_toolchain)
-        except OSError as error:
-            raise BumpError(Failure.FILE_WRITE_FAILED) from error
-    if old_tag != tag or lock_tags != {tag}:
-        update(root, packages)
+            restore_originals(originals)
+        except BumpError as restore_error:
+            raise restore_error from error
+        if isinstance(error, BumpError):
+            raise
+        raise BumpError(Failure.FILE_WRITE_FAILED) from error
     return BumpResult(old_tag, tag, old_channel, new_channel)
 
 
