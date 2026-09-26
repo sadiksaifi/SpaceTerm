@@ -279,7 +279,8 @@ impl ServicesRegistration for NativeServicesRegistration {
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{AnyThread, msg_send};
@@ -294,8 +295,9 @@ mod tests {
         NSString::from_str(LEGACY_STRING_PASTEBOARD_TYPE)
     }
 
-    #[gpui::test]
-    fn service_type_classifies_nil_and_empty_nsstring_as_absent(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn service_type_classifies_nil_and_empty_nsstring_as_absent(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let empty = NSString::from_str("");
             let unsupported = NSString::from_str("public.html");
@@ -318,8 +320,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn nsstring_decode_enforces_the_paste_limit_before_copying(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn nsstring_decode_enforces_the_paste_limit_before_copying(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let at_limit = NSString::from_str(&"x".repeat(MAX_PASTE_BYTES));
             let over_limit = NSString::from_str(&"x".repeat(MAX_PASTE_BYTES + 1));
@@ -331,16 +334,18 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn nsstring_decode_rejects_embedded_nul_without_truncation(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn nsstring_decode_rejects_embedded_nul_without_truncation(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let value = NSString::from_str("before\0after");
             assert_eq!(read_nsstring_text(&value), None);
         });
     }
 
-    #[gpui::test]
-    fn nsstring_decode_rejects_nonempty_failed_utf8_conversion(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn nsstring_decode_rejects_nonempty_failed_utf8_conversion(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let invalid_utf16 = [0xd800u16];
             // SAFETY: The pointer names one live UTF-16 code unit for this initializer.
@@ -355,8 +360,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn service_pasteboard_round_trip_uses_only_public_utf8_text(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn service_pasteboard_round_trip_uses_only_public_utf8_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let board = IsolatedPasteboard::new();
             assert!(write_service_text(&board.0, "service text\n"));
@@ -373,7 +379,8 @@ mod tests {
 
     impl NativeObject {
         fn requestor(endpoint: Rc<dyn ServiceEndpoint>) -> Rc<Self> {
-            let mtm = super::super::native_test_marker();
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
             let responder = ServicesResponder::new(mtm, Rc::new(ServiceRequests::new(endpoint)));
             Rc::new(Self(Cell::new(Retained::into_raw(responder).cast())))
         }
@@ -549,8 +556,7 @@ mod tests {
         )
     }
 
-    #[gpui::test]
-    fn native_selectors_publish_selection_and_accept_exactly_one_return(
+    pub(in crate::platform) fn native_selectors_publish_selection_and_accept_exactly_one_return(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -575,8 +581,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_selectors_reject_stale_validation_and_stale_return(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn native_selectors_reject_stale_validation_and_stale_return(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let _serial = NATIVE_REQUESTOR_TEST_LOCK
                 .lock()
@@ -601,8 +608,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_requestors_keep_overlapping_window_equivalent_owners_isolated(
+    pub(in crate::platform) fn native_requestors_keep_overlapping_window_equivalent_owners_isolated(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -636,8 +642,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_validation_survives_requestor_deallocation_inside_status(
+    pub(in crate::platform) fn native_validation_survives_requestor_deallocation_inside_status(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -670,8 +675,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_selection_survives_operation_and_owner_deallocation_without_publishing(
+    pub(in crate::platform) fn native_selection_survives_operation_and_owner_deallocation_without_publishing(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -707,8 +711,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_return_survives_operation_and_owner_deallocation_inside_status(
+    pub(in crate::platform) fn native_return_survives_operation_and_owner_deallocation_inside_status(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -744,8 +747,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback(
+    pub(in crate::platform) fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -781,8 +783,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_modern_validation_accepts_legacy_only_write_types_once(
+    pub(in crate::platform) fn native_modern_validation_accepts_legacy_only_write_types_once(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {

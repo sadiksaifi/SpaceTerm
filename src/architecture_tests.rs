@@ -193,6 +193,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![
         root.join("main.rs"),
+        root.join("application_modules.rs"),
         root.join("app.rs"),
         root.join("desktop_profile.rs"),
         root.join("desktop_profile/keybindings.rs"),
@@ -710,7 +711,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
     }
     let pasteboard = std::fs::read_to_string(root.join("platform/macos_pasteboard.rs")).unwrap();
     let production = pasteboard
-        .split("#[cfg(all(test, feature = \"macos-native-tests\"))]\nmod tests")
+        .split("#[cfg(all(test, feature = \"macos-native-tests\"))]")
         .next()
         .unwrap();
     assert!(!production.contains("LocalPathSemantics::Posix"));
@@ -726,6 +727,24 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         assert!(
             !production.contains(forbidden),
             "picker embeds path dialect: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn native_sources_do_not_fabricate_main_thread_authority() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for directory in ["src", "crates", "tests"] {
+        collect_rust_sources(&root.join(directory), &mut files);
+    }
+    let forbidden = ["MainThreadMarker::new", "_unchecked"].concat();
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !source.contains(&forbidden),
+            "{} fabricates main-thread authority",
+            path.display()
         );
     }
 }

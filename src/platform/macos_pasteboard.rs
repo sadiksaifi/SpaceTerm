@@ -149,7 +149,8 @@ fn write_selection_to_pasteboard(
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use super::*;
     use objc2::msg_send;
     use objc2_app_kit::NSPasteboardType;
@@ -165,8 +166,7 @@ mod tests {
         item
     }
 
-    #[test]
-    fn oversized_file_url_is_rejected_before_conversion() {
+    pub(in crate::platform) fn oversized_file_url_is_rejected_before_conversion() {
         let value = NSString::from_str("file:///large");
         let result = read_file_url_text(&value, 1, |_, _| {
             panic!("oversized file URL reached conversion")
@@ -174,8 +174,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), "clipboard files exceed the size limit");
     }
 
-    #[test]
-    fn native_file_discovery_counts_only_file_representations() {
+    pub(in crate::platform) fn native_file_discovery_counts_only_file_representations() {
         let file_type = file_type();
         // SAFETY: AppKit exports this immutable pasteboard type constant.
         let text_type = unsafe { NSPasteboardTypeString };
@@ -203,8 +202,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn native_file_discovery_rejects_unreadable_file_representation_with_text() {
+    pub(in crate::platform) fn native_file_discovery_rejects_unreadable_file_representation_with_text()
+     {
         let file_type = file_type();
         let item = NSPasteboardItem::new();
         assert!(item.setData_forType(&NSData::with_bytes(&[0xff]), &file_type));
@@ -221,8 +220,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_file_discovery_preserves_items_and_rejects_invalid_authority() {
+    pub(in crate::platform) fn native_file_discovery_preserves_items_and_rejects_invalid_authority()
+    {
         let file_type = file_type();
         let items = NSArray::from_retained_slice(&[
             item("file:///a%20b", &file_type),
@@ -273,8 +272,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_write_declares_every_representation_before_publishing_data() {
+    pub(in crate::platform) fn native_write_declares_every_representation_before_publishing_data() {
         let pasteboard = NSPasteboard::pasteboardWithUniqueName();
         write_selection_to_pasteboard(
             &pasteboard,

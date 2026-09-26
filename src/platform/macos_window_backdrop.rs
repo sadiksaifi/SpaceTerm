@@ -112,25 +112,32 @@ fn install(content_view: &NSView, material: NSVisualEffectMaterial, mtm: MainThr
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use super::*;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     fn apply_to_content_view(content_view: &NSView, material: Option<NSVisualEffectMaterial>) {
-        super::apply_to_content_view(content_view, material, super::super::native_test_marker());
+        super::apply_to_content_view(
+            content_view,
+            material,
+            objc2::MainThreadMarker::new().expect("native test must run on the main thread"),
+        );
     }
 
     struct ContentView(Retained<NSView>);
 
     impl ContentView {
         fn new(size: NSSize) -> Self {
-            let mtm = super::super::native_test_marker();
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
             Self(NSView::initWithFrame(NSView::alloc(mtm), frame))
         }
 
         fn add_renderer(&self) -> Retained<NSView> {
-            let mtm = super::super::native_test_marker();
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
             let renderer = NSView::initWithFrame(NSView::alloc(mtm), self.0.bounds());
             self.0.addSubview(&renderer);
             renderer
@@ -149,8 +156,9 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn backdrop_installation_is_ordered_idempotent_and_reversible(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn backdrop_installation_is_ordered_idempotent_and_reversible(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let content = ContentView::new(NSSize::new(320.0, 180.0));
             let renderer = content.add_renderer();
@@ -177,8 +185,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn backdrop_tracks_content_bounds_through_appkit_autoresizing(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn backdrop_tracks_content_bounds_through_appkit_autoresizing(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let content = ContentView::new(NSSize::new(300.0, 160.0));
             content.add_renderer();
@@ -203,8 +212,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn changing_tone_replaces_the_material_in_place(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn changing_tone_replaces_the_material_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let content = ContentView::new(NSSize::new(320.0, 180.0));
             content.add_renderer();

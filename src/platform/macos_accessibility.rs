@@ -394,8 +394,8 @@ mod native {
                 parent,
             });
             let pointer = state.as_mut() as *mut AccessibilityElementState;
-            // SAFETY: GPUI creates this adapter on the AppKit main thread.
-            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let mtm = MainThreadMarker::new()
+                .expect("GPUI must create native accessibility on the main thread");
             let element = PaneAccessibilityElement::new(mtm, pointer);
             Self { element, state }
         }

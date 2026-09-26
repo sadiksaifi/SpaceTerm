@@ -219,7 +219,8 @@ unsafe extern "C-unwind" fn should_terminate(
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use gpui::TestAppContext;
     use objc2::ClassType;
 
@@ -234,8 +235,9 @@ mod tests {
         unsafe impl NSObjectProtocol for TestDelegate {}
     );
 
-    #[gpui::test]
-    fn native_hook_cancels_policy_then_consumes_one_confirmation(cx: &mut TestAppContext) {
+    pub(in crate::platform) fn native_hook_cancels_policy_then_consumes_one_confirmation(
+        cx: &mut TestAppContext,
+    ) {
         let adapter = MacosApplicationQuitAdapter::new();
         let requests = Rc::new(Cell::new(0));
         let recorded_requests = Rc::clone(&requests);
@@ -251,7 +253,11 @@ mod tests {
         // SAFETY: NSObject's new selector returns one owned test delegate.
         let delegate: Retained<TestDelegate> = unsafe { msg_send![TestDelegate::class(), new] };
         adapter
-            .install_on_delegate_with_marker(&delegate, handler, super::super::native_test_marker())
+            .install_on_delegate_with_marker(
+                &delegate,
+                handler,
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread"),
+            )
             .expect("native quit hook should install");
         assert_eq!(Rc::strong_count(&adapter.state), 2);
 

@@ -280,7 +280,8 @@ impl Drop for MacosAppearanceSubscription {
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+#[allow(dead_code)]
+pub(in crate::platform) mod tests {
     use super::*;
 
     #[test]
@@ -291,12 +292,14 @@ mod tests {
         assert!(!resolve_show_borders(None, false));
     }
 
-    #[gpui::test]
-    fn forcing_native_chrome_does_not_change_the_system_preference(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn forcing_native_chrome_does_not_change_the_system_preference(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let platform = MacosAppearancePlatform;
             let system = platform.system_appearance();
-            let mtm = super::super::native_test_marker();
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
             let application = NSApplication::sharedApplication(mtm);
             let previous = application.appearance();
             for appearance in [Appearance::Light, Appearance::Dark] {
@@ -317,11 +320,15 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_observer_coalesces_wakeups_and_closes_with_its_owner(cx: &mut gpui::TestAppContext) {
+    pub(in crate::platform) fn native_observer_coalesces_wakeups_and_closes_with_its_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|_| {
             let (sender, changed) = async_channel::bounded(1);
-            let observer = AppearanceObserver::new(super::super::native_test_marker(), sender);
+            let observer = AppearanceObserver::new(
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread"),
+                sender,
+            );
             // SAFETY: The test supplies an immutable name and no source object.
             let notification = unsafe {
                 NSNotification::notificationWithName_object(
@@ -349,8 +356,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
+    pub(in crate::platform) fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -358,7 +364,10 @@ mod tests {
                 return;
             };
             let observation = MacosAppearancePlatform
-                .observe_with_marker(super::super::native_test_marker())
+                .observe_with_marker(
+                    objc2::MainThreadMarker::new()
+                        .expect("native test must run on the main thread"),
+                )
                 .expect("native appearance observation should be available");
             let SystemAppearanceObservation {
                 changed,
