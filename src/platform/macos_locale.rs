@@ -1,24 +1,20 @@
-use cocoa::appkit::NSApplication;
-use cocoa::base::nil;
-use cocoa::foundation::NSInteger;
-use objc::{msg_send, sel, sel_impl};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSUserInterfaceLayoutDirection};
 use spaceterm_ui::TextDirection;
-
-const NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT: NSInteger = 1;
 
 /// Resolves the logical direction AppKit selected for the current application locale.
 pub(crate) fn current_text_direction() -> TextDirection {
-    // SAFETY: UI initialization runs on GPUI's AppKit thread. NSApplication owns the shared
-    // application, and userInterfaceLayoutDirection returns a scalar with no transferred lifetime.
-    let native_direction = unsafe {
-        let application = NSApplication::sharedApplication(nil);
-        msg_send![application, userInterfaceLayoutDirection]
+    let Some(mtm) = MainThreadMarker::new() else {
+        return TextDirection::LeftToRight;
     };
+    let native_direction = NSApplication::sharedApplication(mtm).userInterfaceLayoutDirection();
     text_direction_from_native(native_direction)
 }
 
-const fn text_direction_from_native(native_direction: NSInteger) -> TextDirection {
-    if native_direction == NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT {
+const fn text_direction_from_native(
+    native_direction: NSUserInterfaceLayoutDirection,
+) -> TextDirection {
+    if native_direction.0 == NSUserInterfaceLayoutDirection::RightToLeft.0 {
         TextDirection::RightToLeft
     } else {
         TextDirection::LeftToRight
@@ -40,8 +36,8 @@ mod tests {
     fn native_layout_direction_maps_to_bounded_locale_behavior() {
         assert_eq!(
             (
-                text_direction_from_native(0),
-                text_direction_from_native(NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT),
+                text_direction_from_native(NSUserInterfaceLayoutDirection::LeftToRight),
+                text_direction_from_native(NSUserInterfaceLayoutDirection::RightToLeft),
             ),
             (TextDirection::LeftToRight, TextDirection::RightToLeft)
         );

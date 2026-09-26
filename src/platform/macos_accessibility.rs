@@ -72,7 +72,7 @@ struct AccessibilityElementState {
     #[cfg(all(target_os = "macos", not(test)))]
     demand_sender: Option<AccessibilityDemandSender>,
     #[cfg(all(target_os = "macos", not(test)))]
-    parent: cocoa::base::id,
+    parent: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,21 +150,26 @@ impl AccessibilityElementState {
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod native {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
-    use std::ffi::{CStr, c_void};
     use std::ops::Range;
-    use std::sync::OnceLock;
 
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::{
-        NSArray, NSAutoreleasePool, NSDictionary, NSInteger, NSPoint, NSRect, NSSize, NSString,
-        NSUInteger,
-    };
     use gpui::{Bounds, Pixels, Window};
-    use objc::declare::ClassDecl;
-    use objc::runtime::{BOOL, Class, NO, Object, Sel, YES};
-    use objc::{Encode, Encoding, class, msg_send, sel, sel_impl};
+    use objc2::rc::{Retained, Weak};
+    use objc2::runtime::AnyObject;
+    use objc2::{
+        AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    };
+    use objc2_app_kit::{
+        NSAccessibilityElement, NSAccessibilityFontFamilyKey, NSAccessibilityFontNameKey,
+        NSAccessibilityFontSizeKey, NSAccessibilityFontTextAttribute,
+        NSAccessibilityPostNotification, NSAccessibilityVisibleNameKey, NSFont, NSFontManager,
+        NSFontTraitMask, NSView,
+    };
+    use objc2_foundation::{
+        NSArray, NSAttributedString, NSDictionary, NSInteger, NSNumber, NSObjectProtocol, NSPoint,
+        NSRange, NSRect, NSSize, NSString,
+    };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
@@ -174,54 +179,193 @@ mod native {
         normalized_font_point_size, notification_name,
     };
 
-    const STATE_IVAR: &str = "spacetermAccessibilityState";
     const LAYOUT_CHANGED: &str = "AXLayoutChanged";
-
-    #[link(name = "AppKit", kind = "framework")]
-    unsafe extern "C" {
-        #[link_name = "NSAccessibilityFontTextAttribute"]
-        static AX_FONT_TEXT_ATTRIBUTE: id;
-        #[link_name = "NSAccessibilityFontNameKey"]
-        static AX_FONT_NAME_KEY: id;
-        #[link_name = "NSAccessibilityFontFamilyKey"]
-        static AX_FONT_FAMILY_KEY: id;
-        #[link_name = "NSAccessibilityVisibleNameKey"]
-        static AX_VISIBLE_NAME_KEY: id;
-        #[link_name = "NSAccessibilityFontSizeKey"]
-        static AX_FONT_SIZE_KEY: id;
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug)]
-    struct NSRange {
-        location: NSUInteger,
-        length: NSUInteger,
-    }
-
-    unsafe impl Encode for NSRange {
-        fn encode() -> Encoding {
-            let encoding = format!(
-                "{{NSRange={}{}}}",
-                NSUInteger::encode().as_str(),
-                NSUInteger::encode().as_str()
-            );
-            // SAFETY: This is the platform ABI encoding for two consecutive NSUInteger fields.
-            unsafe { Encoding::from_str(&encoding) }
-        }
-    }
 
     thread_local! {
         static CHILDREN: RefCell<HashMap<usize, Vec<Child>>> = RefCell::new(HashMap::new());
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct Child {
-        element: id,
+        element: Weak<PaneAccessibilityElement>,
+        identity: usize,
         order: usize,
     }
 
+    struct AccessibilityIvars {
+        state: Cell<*mut AccessibilityElementState>,
+    }
+
+    define_class!(
+        // SAFETY: NSAccessibilityElement has no additional subclassing requirements. The owner
+        // clears the borrowed state pointer before releasing this native element.
+        #[unsafe(super(NSAccessibilityElement))]
+        #[name = "SpaceTermPaneAccessibilityElement"]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = AccessibilityIvars]
+        struct PaneAccessibilityElement;
+
+        impl PaneAccessibilityElement {
+            #[unsafe(method(isAccessibilityElement))]
+            fn is_accessibility_element(&self) -> bool {
+                state(self).is_some_and(|state| state.visible)
+            }
+
+            #[unsafe(method_id(accessibilityRole))]
+            fn accessibility_role(&self) -> Retained<NSString> {
+                NSString::from_str(TEXT_AREA_ROLE)
+            }
+
+            #[unsafe(method_id(accessibilityLabel))]
+            fn accessibility_label(&self) -> Retained<NSString> {
+                NSString::from_str("Terminal Pane")
+            }
+
+            #[unsafe(method_id(accessibilityValue))]
+            fn accessibility_value(&self) -> Option<Retained<NSString>> {
+                semantic_state(self).map(|state| NSString::from_str(state.model.text()))
+            }
+
+            #[unsafe(method(accessibilityFrame))]
+            fn accessibility_frame(&self) -> NSRect {
+                state(self)
+                    .filter(|state| state.visible)
+                    .map_or_else(empty_rect, |state| ns_rect(state.frame))
+            }
+
+            #[unsafe(method_id(accessibilityParent))]
+            fn accessibility_parent(&self) -> Option<Retained<NSView>> {
+                state(self)
+                    .filter(|state| state.visible && state.registered)
+                    .and_then(|state| state.parent.clone())
+            }
+
+            #[unsafe(method(isAccessibilityFocused))]
+            fn is_accessibility_focused(&self) -> bool {
+                state(self).is_some_and(|state| state.focused)
+            }
+
+            #[unsafe(method(accessibilityNumberOfCharacters))]
+            fn accessibility_number_of_characters(&self) -> NSInteger {
+                semantic_state(self).map_or(0, |state| {
+                    NSInteger::try_from(state.model.len_utf16()).unwrap_or(NSInteger::MAX)
+                })
+            }
+
+            #[unsafe(method(accessibilityVisibleCharacterRange))]
+            fn accessibility_visible_character_range(&self) -> NSRange {
+                semantic_state(self)
+                    .map_or_else(invalid_range, |state| ns_range(state.model.visible_range()))
+            }
+
+            #[unsafe(method(accessibilitySelectedTextRange))]
+            fn accessibility_selected_text_range(&self) -> NSRange {
+                semantic_state(self).map_or_else(invalid_range, |state| ns_range(state.selected_range()))
+            }
+
+            #[unsafe(method(setAccessibilitySelectedTextRange:))]
+            fn set_accessibility_selected_text_range(&self, range: NSRange) {
+                let Some((sender, request)) = semantic_state(self)
+                    .filter(|state| state.visible && state.registered)
+                    .and_then(|state| {
+                        Some((
+                            state.selection_sender.clone()?,
+                            state.model.selection_request(rust_range(range)?)?,
+                        ))
+                    })
+                else {
+                    return;
+                };
+                sender.request(request);
+            }
+
+            #[unsafe(method_id(accessibilitySelectedText))]
+            fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
+                semantic_state(self)
+                    .and_then(AccessibilityElementState::selected_text)
+                    .map(|text| NSString::from_str(&text))
+            }
+
+            #[unsafe(method_id(accessibilityStringForRange:))]
+            fn accessibility_string_for_range(&self, range: NSRange) -> Option<Retained<NSString>> {
+                semantic_state(self)
+                    .and_then(|state| state.string_for_range(rust_range(range)?))
+                    .map(|text| NSString::from_str(&text))
+            }
+
+            #[unsafe(method_id(accessibilityAttributedStringForRange:))]
+            fn accessibility_attributed_string_for_range(
+                &self,
+                range: NSRange,
+            ) -> Option<Retained<NSAttributedString>> {
+                semantic_state(self)
+                    .and_then(|state| state.attributed_text_for_range(rust_range(range)?))
+                    .map(|text| ns_attributed_string(&text))
+            }
+
+            #[unsafe(method(accessibilityRangeForLine:))]
+            fn accessibility_range_for_line(&self, line: NSInteger) -> NSRange {
+                semantic_state(self)
+                    .and_then(|state| state.model.range_for_line(usize::try_from(line).ok()?))
+                    .map_or_else(invalid_range, ns_range)
+            }
+
+            #[unsafe(method(accessibilityLineForIndex:))]
+            fn accessibility_line_for_index(&self, index: NSInteger) -> NSInteger {
+                semantic_state(self)
+                    .and_then(|state| state.model.line_for_index(usize::try_from(index).ok()?))
+                    .and_then(|line| NSInteger::try_from(line).ok())
+                    .unwrap_or(-1)
+            }
+
+            #[unsafe(method(accessibilityRangeForIndex:))]
+            fn accessibility_range_for_index(&self, index: NSInteger) -> NSRange {
+                semantic_state(self)
+                    .and_then(|state| state.model.range_for_index(usize::try_from(index).ok()?))
+                    .map_or_else(invalid_range, ns_range)
+            }
+
+            #[unsafe(method(accessibilityRangeForPosition:))]
+            fn accessibility_range_for_position(&self, point: NSPoint) -> NSRange {
+                semantic_state(self)
+                    .and_then(|state| state.range_for_screen_point(point.x, point.y))
+                    .map_or_else(invalid_range, ns_range)
+            }
+
+            #[unsafe(method(accessibilityFrameForRange:))]
+            fn accessibility_frame_for_range(&self, range: NSRange) -> NSRect {
+                semantic_state(self)
+                    .and_then(|state| state.screen_bounds_for_range(rust_range(range)?))
+                    .map_or_else(empty_rect, ns_rect)
+            }
+
+            #[unsafe(method_id(accessibilityHitTest:))]
+            fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+                if state(self).is_some_and(|state| state.visible && state.frame.contains(point.x, point.y)) {
+                    // SAFETY: The callback receiver remains live throughout this native method.
+                    unsafe { Retained::retain((self as *const Self).cast_mut()) }
+                        .map(|element| element.into_super().into_super().into_super())
+                } else {
+                    None
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for PaneAccessibilityElement {}
+    );
+
+    impl PaneAccessibilityElement {
+        fn new(mtm: MainThreadMarker, state: *mut AccessibilityElementState) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(AccessibilityIvars {
+                state: Cell::new(state),
+            });
+            // SAFETY: NSAccessibilityElement's init is its designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
     pub(crate) struct MacosAccessibilityElement {
-        element: id,
+        element: Retained<PaneAccessibilityElement>,
         state: Box<AccessibilityElementState>,
     }
 
@@ -232,8 +376,7 @@ mod native {
             font: &crate::appearance::ResolvedFontDescriptor,
             font_size: Pixels,
         ) -> Self {
-            let parent = native_view(window).unwrap_or(nil);
-            retain(parent);
+            let parent = native_view(window);
             let mut state = Box::new(AccessibilityElementState {
                 model,
                 font: resolve_font_metadata(font, f32::from(font_size)),
@@ -250,18 +393,10 @@ mod native {
                 demand_sender: None,
                 parent,
             });
-            // SAFETY: The registered Objective-C class uses the same pointer-sized ivar. The Box
-            // keeps the state at a stable address until Drop first removes the element from its
-            // parent, clears the ivar, and releases the Objective-C object.
-            let element = unsafe {
-                let element: id = msg_send![accessibility_class(), alloc];
-                let element: id = msg_send![element, init];
-                (*element).set_ivar(
-                    STATE_IVAR,
-                    state.as_mut() as *mut AccessibilityElementState as *mut c_void,
-                );
-                element
-            };
+            let pointer = state.as_mut() as *mut AccessibilityElementState;
+            // SAFETY: GPUI creates this adapter on the AppKit main thread.
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let element = PaneAccessibilityElement::new(mtm, pointer);
             Self { element, state }
         }
 
@@ -279,9 +414,13 @@ mod native {
             self.state.focused &= presented;
             if self.state.registered && !presented {
                 self.state.registered = false;
-                unregister_child(self.state.parent, self.element);
-            } else if self.state.registered {
-                register_child(self.state.parent, self.element, order);
+                if let Some(parent) = &self.state.parent {
+                    unregister_child(parent, &self.element);
+                }
+            } else if self.state.registered
+                && let Some(parent) = &self.state.parent
+            {
+                register_child(parent, &self.element, order);
             }
         }
 
@@ -303,14 +442,14 @@ mod native {
                 demand_sender,
             } = update;
             let was_focused = self.state.focused;
-            let parent = native_view(window).unwrap_or(nil);
-            if parent != self.state.parent {
+            let parent = native_view(window);
+            if !same_parent(&parent, &self.state.parent) {
                 if self.state.registered {
                     self.state.registered = false;
-                    unregister_child(self.state.parent, self.element);
+                    if let Some(old_parent) = &self.state.parent {
+                        unregister_child(old_parent, &self.element);
+                    }
                 }
-                retain(parent);
-                release(self.state.parent);
                 self.state.parent = parent;
             }
             if !self.state.model.shares_snapshot(model) {
@@ -333,7 +472,12 @@ mod native {
             {
                 self.state.font = resolve_font_metadata(font, point_size);
             }
-            let bounds = bounds.and_then(|bounds| screen_rect(parent, bounds));
+            let bounds = bounds.and_then(|bounds| {
+                self.state
+                    .parent
+                    .as_deref()
+                    .and_then(|parent| screen_rect(parent, bounds))
+            });
             self.state.visible = self.state.presented && bounds.is_some();
             self.state.focused = self.state.visible && focused;
             if let Some(bounds) = bounds.filter(|_| self.state.visible) {
@@ -345,10 +489,14 @@ mod native {
             }
             if self.state.visible && !self.state.registered {
                 self.state.registered = true;
-                register_child(self.state.parent, self.element, self.state.order);
+                if let Some(parent) = &self.state.parent {
+                    register_child(parent, &self.element, self.state.order);
+                }
             } else if !self.state.visible && self.state.registered {
                 self.state.registered = false;
-                unregister_child(self.state.parent, self.element);
+                if let Some(parent) = &self.state.parent {
+                    unregister_child(parent, &self.element);
+                }
             }
 
             let focus_gained = !was_focused && self.state.focused;
@@ -361,7 +509,7 @@ mod native {
                     native_notifications.insert(AccessibilityNotification::Focus);
                 }
                 if !native_notifications.is_empty() {
-                    post_notifications(self.element, native_notifications.iter());
+                    post_notifications(&self.element, native_notifications.iter());
                 }
                 AccessibilityNotifications::default()
             } else {
@@ -374,213 +522,84 @@ mod native {
         fn drop(&mut self) {
             if self.state.registered {
                 self.state.registered = false;
-                unregister_child(self.state.parent, self.element);
+                if let Some(parent) = &self.state.parent {
+                    unregister_child(parent, &self.element);
+                }
             }
-            release(self.state.parent);
-            // SAFETY: The element was allocated and retained by this handle. It is no longer
-            // reachable through its parent before the borrowed Rust state pointer is cleared.
-            unsafe {
-                (*self.element).set_ivar(STATE_IVAR, std::ptr::null_mut::<c_void>());
-                let _: () = msg_send![self.element, release];
-            }
+            self.element.ivars().state.set(std::ptr::null_mut());
         }
     }
 
-    fn accessibility_class() -> &'static Class {
-        static CLASS: OnceLock<&'static Class> = OnceLock::new();
-        CLASS.get_or_init(|| {
-            let mut class = ClassDecl::new(
-                "SpaceTermPaneAccessibilityElement",
-                Class::get("NSAccessibilityElement").expect("AppKit accessibility class exists"),
-            )
-            .expect("SpaceTerm accessibility class is registered once");
-            class.add_ivar::<*mut c_void>(STATE_IVAR);
-            // SAFETY: Every registered function uses the Objective-C ABI and the exact argument
-            // and return representation declared by its AppKit selector.
-            unsafe {
-                class.add_method(
-                    sel!(isAccessibilityElement),
-                    is_accessibility_element as extern "C" fn(&Object, Sel) -> BOOL,
-                );
-                class.add_method(
-                    sel!(accessibilityRole),
-                    accessibility_role as extern "C" fn(&Object, Sel) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityLabel),
-                    accessibility_label as extern "C" fn(&Object, Sel) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityValue),
-                    accessibility_value as extern "C" fn(&Object, Sel) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityFrame),
-                    accessibility_frame as extern "C" fn(&Object, Sel) -> NSRect,
-                );
-                class.add_method(
-                    sel!(accessibilityParent),
-                    accessibility_parent as extern "C" fn(&Object, Sel) -> id,
-                );
-                class.add_method(
-                    sel!(isAccessibilityFocused),
-                    is_accessibility_focused as extern "C" fn(&Object, Sel) -> BOOL,
-                );
-                class.add_method(
-                    sel!(accessibilityNumberOfCharacters),
-                    accessibility_number_of_characters as extern "C" fn(&Object, Sel) -> NSInteger,
-                );
-                class.add_method(
-                    sel!(accessibilityVisibleCharacterRange),
-                    accessibility_visible_character_range as extern "C" fn(&Object, Sel) -> NSRange,
-                );
-                class.add_method(
-                    sel!(accessibilitySelectedTextRange),
-                    accessibility_selected_text_range as extern "C" fn(&Object, Sel) -> NSRange,
-                );
-                class.add_method(
-                    sel!(setAccessibilitySelectedTextRange:),
-                    set_accessibility_selected_text_range as extern "C" fn(&Object, Sel, NSRange),
-                );
-                class.add_method(
-                    sel!(accessibilitySelectedText),
-                    accessibility_selected_text as extern "C" fn(&Object, Sel) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityStringForRange:),
-                    accessibility_string_for_range as extern "C" fn(&Object, Sel, NSRange) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityAttributedStringForRange:),
-                    accessibility_attributed_string_for_range
-                        as extern "C" fn(&Object, Sel, NSRange) -> id,
-                );
-                class.add_method(
-                    sel!(accessibilityRangeForLine:),
-                    accessibility_range_for_line
-                        as extern "C" fn(&Object, Sel, NSInteger) -> NSRange,
-                );
-                class.add_method(
-                    sel!(accessibilityLineForIndex:),
-                    accessibility_line_for_index
-                        as extern "C" fn(&Object, Sel, NSInteger) -> NSInteger,
-                );
-                class.add_method(
-                    sel!(accessibilityRangeForIndex:),
-                    accessibility_range_for_index
-                        as extern "C" fn(&Object, Sel, NSInteger) -> NSRange,
-                );
-                class.add_method(
-                    sel!(accessibilityRangeForPosition:),
-                    accessibility_range_for_position
-                        as extern "C" fn(&Object, Sel, NSPoint) -> NSRange,
-                );
-                class.add_method(
-                    sel!(accessibilityFrameForRange:),
-                    accessibility_frame_for_range as extern "C" fn(&Object, Sel, NSRange) -> NSRect,
-                );
-                class.add_method(
-                    sel!(accessibilityHitTest:),
-                    accessibility_hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id,
-                );
-            }
-            class.register()
-        })
+    fn same_parent(a: &Option<Retained<NSView>>, b: &Option<Retained<NSView>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => std::ptr::eq(&**a, &**b),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
-    fn native_view(window: &Window) -> Option<id> {
+    fn native_view(window: &Window) -> Option<Retained<NSView>> {
         let handle = HasWindowHandle::window_handle(window).ok()?;
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
             return None;
         };
-        Some(handle.ns_view.as_ptr().cast())
+        // SAFETY: GPUI owns this live NSView through the synchronous WindowHandle call.
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
     }
 
-    fn screen_rect(view: id, bounds: Bounds<Pixels>) -> Option<ScreenRect> {
-        if view == nil {
-            return None;
-        }
-        // SAFETY: `view` comes from GPUI's live AppKit WindowHandle. Coordinate conversion is
-        // synchronous on AppKit's main thread, where TerminalPane renders.
-        unsafe {
-            let view_bounds: NSRect = msg_send![view, bounds];
-            let view_rect = NSRect::new(
-                NSPoint::new(
-                    f64::from(bounds.origin.x),
-                    view_bounds.size.height
-                        - f64::from(bounds.origin.y)
-                        - f64::from(bounds.size.height),
-                ),
-                NSSize::new(f64::from(bounds.size.width), f64::from(bounds.size.height)),
-            );
-            let window_rect: NSRect = msg_send![view, convertRect:view_rect toView:nil];
-            let window: id = msg_send![view, window];
-            if window == nil {
-                return None;
-            }
-            let screen: NSRect = msg_send![window, convertRectToScreen:window_rect];
-            Some(ScreenRect {
-                x: screen.origin.x,
-                y: screen.origin.y,
-                width: screen.size.width,
-                height: screen.size.height,
-            })
-        }
+    fn screen_rect(view: &NSView, bounds: Bounds<Pixels>) -> Option<ScreenRect> {
+        let view_bounds = view.bounds();
+        let view_rect = NSRect::new(
+            NSPoint::new(
+                f64::from(bounds.origin.x),
+                view_bounds.size.height
+                    - f64::from(bounds.origin.y)
+                    - f64::from(bounds.size.height),
+            ),
+            NSSize::new(f64::from(bounds.size.width), f64::from(bounds.size.height)),
+        );
+        let window_rect = view.convertRect_toView(view_rect, None);
+        let screen = view.window()?.convertRectToScreen(window_rect);
+        Some(ScreenRect {
+            x: screen.origin.x,
+            y: screen.origin.y,
+            width: screen.size.width,
+            height: screen.size.height,
+        })
     }
 
-    fn retain(object: id) {
-        if object == nil {
-            return;
-        }
-        // SAFETY: The AppKit object is live when obtained from GPUI's WindowHandle. Retaining it
-        // keeps the parent valid until the Pane element unregisters itself.
-        unsafe {
-            let _: id = msg_send![object, retain];
-        }
-    }
-
-    fn release(object: id) {
-        if object == nil {
-            return;
-        }
-        // SAFETY: Every non-nil parent stored in state owns exactly one retain from this handle.
-        unsafe {
-            let _: () = msg_send![object, release];
-        }
-    }
-
-    fn register_child(parent: id, child: id, order: usize) {
-        if parent == nil {
-            return;
-        }
+    fn register_child(parent: &NSView, child: &Retained<PaneAccessibilityElement>, order: usize) {
+        let identity = Retained::as_ptr(child) as usize;
         let siblings = CHILDREN.with(|children| {
             let mut children = children.borrow_mut();
-            let siblings = children.entry(parent as usize).or_default();
-            if let Some(existing) = siblings.iter_mut().find(|entry| entry.element == child) {
+            let siblings = children
+                .entry(parent as *const NSView as usize)
+                .or_default();
+            if let Some(existing) = siblings.iter_mut().find(|entry| entry.identity == identity) {
                 existing.order = order;
             } else {
                 siblings.push(Child {
-                    element: child,
+                    element: Weak::from_retained(child),
+                    identity,
                     order,
                 });
             }
-            siblings.sort_by_key(|entry| (entry.order, entry.element as usize));
+            siblings.sort_by_key(|entry| (entry.order, entry.identity));
             siblings.clone()
         });
         reconcile_children(parent, &siblings);
     }
 
-    fn unregister_child(parent: id, child: id) {
-        if parent == nil {
-            return;
-        }
+    fn unregister_child(parent: &NSView, child: &Retained<PaneAccessibilityElement>) {
+        let identity = Retained::as_ptr(child) as usize;
         let siblings = CHILDREN.with(|children| {
             let mut children = children.borrow_mut();
-            if let Some(siblings) = children.get_mut(&(parent as usize)) {
-                siblings.retain(|candidate| candidate.element != child);
+            let key = parent as *const NSView as usize;
+            if let Some(siblings) = children.get_mut(&key) {
+                siblings.retain(|candidate| candidate.identity != identity);
                 let snapshot = siblings.clone();
                 if siblings.is_empty() {
-                    children.remove(&(parent as usize));
+                    children.remove(&key);
                 }
                 snapshot
             } else {
@@ -590,113 +609,88 @@ mod native {
         reconcile_children(parent, &siblings);
     }
 
-    fn reconcile_children(parent: id, children: &[Child]) {
-        if parent == nil {
-            return;
-        }
-        // SAFETY: All Objective-C calls are synchronous on AppKit's main thread. The registry's
-        // RefCell borrow ended before this function, so setters may reenter without a Rust panic.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let current: id = msg_send![parent, accessibilityChildren];
-            let navigation_setter = sel!(setAccessibilityChildrenInNavigationOrder:);
-            let supports_navigation_order: BOOL =
-                msg_send![parent, respondsToSelector:navigation_setter];
-            let current_navigation: id = if !matches!(supports_navigation_order, NO) {
-                msg_send![parent, accessibilityChildrenInNavigationOrder]
-            } else {
-                nil
-            };
-            let count: NSUInteger = if current == nil {
-                0
-            } else {
-                msg_send![current, count]
-            };
-            let mut reconciled = Vec::with_capacity(count as usize + children.len());
-            for index in 0..count {
-                let candidate: id = msg_send![current, objectAtIndex:index];
-                let managed: BOOL = msg_send![candidate, isKindOfClass:accessibility_class()];
-                if matches!(managed, NO) {
-                    reconciled.push(candidate);
-                }
-            }
-            reconciled.extend(children.iter().map(|child| child.element));
-            let navigation = if !matches!(supports_navigation_order, NO) {
-                let navigation_source = if current_navigation == nil {
-                    current
-                } else {
-                    current_navigation
-                };
-                let navigation_count: NSUInteger = if navigation_source == nil {
-                    0
-                } else {
-                    msg_send![navigation_source, count]
-                };
-                let mut navigation = Vec::with_capacity(navigation_count as usize + children.len());
-                for index in 0..navigation_count {
-                    let candidate: id = msg_send![navigation_source, objectAtIndex:index];
-                    let managed: BOOL = msg_send![candidate, isKindOfClass:accessibility_class()];
-                    if matches!(managed, NO) {
-                        navigation.push(candidate);
-                    }
-                }
-                navigation.extend(children.iter().map(|child| child.element));
-                Some(navigation)
-            } else {
-                None
-            };
-            let children_array = NSArray::arrayWithObjects(nil, &reconciled);
-            let navigation_array = navigation
-                .as_ref()
-                .map(|navigation| NSArray::arrayWithObjects(nil, navigation));
-            let _: () = msg_send![parent, setAccessibilityChildren:children_array];
-            if let Some(navigation_array) = navigation_array {
-                let _: () =
-                    msg_send![parent, setAccessibilityChildrenInNavigationOrder:navigation_array];
-            }
-            post_native_notification(parent, LAYOUT_CHANGED);
-            pool.drain();
-        }
+    fn unmanaged_children(source: Option<&NSArray<AnyObject>>) -> Vec<Retained<AnyObject>> {
+        let Some(source) = source else {
+            return Vec::new();
+        };
+        (0..source.count())
+            .map(|index| source.objectAtIndex(index))
+            .filter(|candidate| {
+                candidate
+                    .downcast_ref::<PaneAccessibilityElement>()
+                    .is_none()
+            })
+            .collect()
     }
 
-    fn post_native_notification(element: id, name: &str) {
-        #[link(name = "AppKit", kind = "framework")]
-        unsafe extern "C" {
-            fn NSAccessibilityPostNotification(element: id, notification: id);
+    fn reconcile_children(parent: &NSView, children: &[Child]) {
+        // SAFETY: NSView implements these accessibility selectors. objc2 retains the returned arrays.
+        let current: Option<Retained<NSArray<AnyObject>>> =
+            unsafe { msg_send![parent, accessibilityChildren] };
+        let supports_navigation_order =
+            parent.respondsToSelector(sel!(setAccessibilityChildrenInNavigationOrder:));
+        let current_navigation: Option<Retained<NSArray<AnyObject>>> = if supports_navigation_order
+        {
+            // SAFETY: The selector is present on this NSView and returns an NSArray or nil.
+            unsafe { msg_send![parent, accessibilityChildrenInNavigationOrder] }
+        } else {
+            None
+        };
+        let mut reconciled = unmanaged_children(current.as_deref());
+        reconciled.extend(
+            children
+                .iter()
+                .filter_map(|child| child.element.load())
+                .map(|child| child.into_super().into_super().into_super()),
+        );
+        let navigation = if supports_navigation_order {
+            let source = current_navigation.as_deref().or(current.as_deref());
+            let mut navigation = unmanaged_children(source);
+            navigation.extend(
+                children
+                    .iter()
+                    .filter_map(|child| child.element.load())
+                    .map(|child| child.into_super().into_super().into_super()),
+            );
+            Some(navigation)
+        } else {
+            None
+        };
+        let children_array = NSArray::from_retained_slice(&reconciled);
+        // SAFETY: NSView accepts this array of live accessibility child objects.
+        let _: () = unsafe { msg_send![parent, setAccessibilityChildren: &*children_array] };
+        if let Some(navigation) = navigation {
+            let navigation_array = NSArray::from_retained_slice(&navigation);
+            // SAFETY: The selector is present and accepts this array of live child objects.
+            let _: () = unsafe {
+                msg_send![parent, setAccessibilityChildrenInNavigationOrder: &*navigation_array]
+            };
         }
-        // SAFETY: The caller owns an autorelease pool and `element` remains retained throughout
-        // the synchronous accessibility notification.
-        unsafe {
-            let name = NSString::alloc(nil).init_str(name).autorelease();
-            NSAccessibilityPostNotification(element, name);
-        }
+        post_native_notification(parent, LAYOUT_CHANGED);
+    }
+
+    fn post_native_notification(element: &AnyObject, name: &str) {
+        let name = NSString::from_str(name);
+        // SAFETY: This is a live AppKit accessibility element and a valid notification name.
+        unsafe { NSAccessibilityPostNotification(element, &name) };
     }
 
     fn post_notifications(
-        element: id,
+        element: &PaneAccessibilityElement,
         notifications: impl Iterator<Item = AccessibilityNotification>,
     ) {
-        // SAFETY: The element is retained by MacosAccessibilityElement and every notification
-        // name is an autoreleased NSString used only by the synchronous AppKit call.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            for notification in notifications {
-                post_native_notification(element, notification_name(notification));
-            }
-            pool.drain();
+        for notification in notifications {
+            post_native_notification(element, notification_name(notification));
         }
     }
 
-    fn state(this: &Object) -> Option<&AccessibilityElementState> {
-        // SAFETY: The ivar is installed from a live boxed state before the element is registered
-        // with AppKit and cleared only after the element is removed from its parent.
-        unsafe {
-            let state = *this.get_ivar::<*mut c_void>(STATE_IVAR);
-            state.cast::<AccessibilityElementState>().as_ref()
-        }
+    fn state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
+        // SAFETY: The owner keeps its Box stable until it unregisters the element and clears the
+        // pointer in Drop. Native callbacks use it only during that registered lifetime.
+        unsafe { this.ivars().state.get().as_ref() }
     }
 
-    fn semantic_state(this: &Object) -> Option<&AccessibilityElementState> {
+    fn semantic_state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
         let state = state(this)?;
         if state.visible
             && state.registered
@@ -708,16 +702,12 @@ mod native {
     }
 
     fn ns_range(range: Range<usize>) -> NSRange {
-        NSRange {
-            location: range.start as NSUInteger,
-            length: range.len() as NSUInteger,
-        }
+        NSRange::new(range.start, range.len())
     }
 
     fn rust_range(range: NSRange) -> Option<Range<usize>> {
-        let start = usize::try_from(range.location).ok()?;
-        let length = usize::try_from(range.length).ok()?;
-        Some(start..start.checked_add(length)?)
+        let start = range.location;
+        Some(start..start.checked_add(range.length)?)
     }
 
     fn ns_rect(rect: ScreenRect) -> NSRect {
@@ -732,52 +722,41 @@ mod native {
     }
 
     fn invalid_range() -> NSRange {
-        NSRange {
-            location: NSInteger::MAX as NSUInteger,
-            length: 0,
+        NSRange::new(NSInteger::MAX as usize, 0)
+    }
+
+    fn ns_attributed_string(
+        value: &AccessibilityAttributedText<'_>,
+    ) -> Retained<NSAttributedString> {
+        let font_name = NSString::from_str(&value.font.name);
+        let point_size = NSNumber::numberWithDouble(f64::from(value.font.point_size));
+        // SAFETY: AppKit exports these immutable accessibility attribute keys.
+        let mut font_keys = unsafe { vec![NSAccessibilityFontNameKey, NSAccessibilityFontSizeKey] };
+        let mut font_values: Vec<&AnyObject> = vec![&font_name, &point_size];
+        let family = value.font.family.as_deref().map(NSString::from_str);
+        if let Some(family) = &family {
+            // SAFETY: AppKit exports this immutable accessibility attribute key.
+            font_keys.push(unsafe { NSAccessibilityFontFamilyKey });
+            font_values.push(family);
         }
-    }
-
-    fn ns_string(value: &str) -> id {
-        // SAFETY: The autoreleased NSString survives the synchronous accessibility query under
-        // AppKit's surrounding autorelease pool.
-        unsafe { NSString::alloc(nil).init_str(value).autorelease() }
-    }
-
-    fn ns_attributed_string(value: &AccessibilityAttributedText<'_>) -> id {
-        // SAFETY: AppKit owns the surrounding autorelease pool for this synchronous callback. The
-        // returned object is autoreleased, and its dictionaries retain every transient value.
+        let visible_name = value.font.visible_name.as_deref().map(NSString::from_str);
+        if let Some(visible_name) = &visible_name {
+            // SAFETY: AppKit exports this immutable accessibility attribute key.
+            font_keys.push(unsafe { NSAccessibilityVisibleNameKey });
+            font_values.push(visible_name);
+        }
+        let font_attributes = NSDictionary::from_slices(&font_keys, &font_values);
+        // SAFETY: AppKit exports this immutable attributed-string key.
+        let font_key = unsafe { NSAccessibilityFontTextAttribute };
+        let attributes = NSDictionary::from_slices(&[font_key], &[&font_attributes as &AnyObject]);
+        let string = NSString::from_str(&value.text);
+        // SAFETY: The nested dictionaries contain the types AppKit requires for AX font data.
         unsafe {
-            let font_name = ns_string(&value.font.name);
-            let point_size: id = msg_send![class!(NSNumber),
-                numberWithDouble:f64::from(value.font.point_size)
-            ];
-            let mut font_values = vec![font_name, point_size];
-            let mut font_keys = vec![AX_FONT_NAME_KEY, AX_FONT_SIZE_KEY];
-            if let Some(family) = value.font.family.as_deref() {
-                font_values.push(ns_string(family));
-                font_keys.push(AX_FONT_FAMILY_KEY);
-            }
-            if let Some(visible_name) = value.font.visible_name.as_deref() {
-                font_values.push(ns_string(visible_name));
-                font_keys.push(AX_VISIBLE_NAME_KEY);
-            }
-            let font_attributes = NSDictionary::dictionaryWithObjects_forKeys_count_(
-                nil,
-                font_values.as_ptr(),
-                font_keys.as_ptr(),
-                font_values.len() as NSUInteger,
-            );
-            let attributes = NSDictionary::dictionaryWithObject_forKey_(
-                nil,
-                font_attributes,
-                AX_FONT_TEXT_ATTRIBUTE,
-            );
-            let string = ns_string(&value.text);
-            let attributed: id = msg_send![class!(NSAttributedString), alloc];
-            let attributed: id = msg_send![attributed, initWithString:string attributes:attributes];
-            let attributed: id = msg_send![attributed, autorelease];
-            attributed
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &string,
+                Some(&attributes),
+            )
         }
     }
 
@@ -787,235 +766,52 @@ mod native {
     ) -> Option<AccessibilityFontMetadata> {
         let requested_family = normalized_font_family(&descriptor.primary_family);
         let point_size = normalized_font_point_size(point_size);
-        // SAFETY: This path runs with the other synchronous AppKit updates on the main thread.
-        // Every borrowed NSFont name is copied into Rust before the local pool is drained.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let requested = NSString::alloc(nil)
-                .init_str(requested_family)
-                .autorelease();
-            let manager: id = msg_send![class!(NSFontManager), sharedFontManager];
-            let traits = match descriptor.style {
-                crate::appearance::FontStyle::Normal => 0x0100_0000_u64,
-                crate::appearance::FontStyle::Italic => 0x0000_0001_u64,
-            } as NSUInteger;
-            let weight = match descriptor.weight {
-                100..=199 => 1,
-                200..=299 => 2,
-                300..=399 => 3,
-                400..=499 => 5,
-                500..=599 => 6,
-                600..=699 => 8,
-                700..=799 => 9,
-                800..=899 => 10,
-                _ => 12,
-            } as NSInteger;
-            let mut font: id = msg_send![manager,
-                fontWithFamily:requested
-                traits:traits
-                weight:weight
-                size:f64::from(point_size)
-            ];
-            if font == nil {
-                font = msg_send![class!(NSFont), fontWithName:requested size:f64::from(point_size)];
-            }
-            if font == nil {
-                let menlo = NSString::alloc(nil).init_str("Menlo").autorelease();
-                font = msg_send![manager,
-                    fontWithFamily:menlo
-                    traits:traits
-                    weight:weight
-                    size:f64::from(point_size)
-                ];
-            }
-            if font == nil {
-                font = msg_send![class!(NSFont),
-                    monospacedSystemFontOfSize:f64::from(point_size)
-                    weight:0.0_f64
-                ];
-            }
-
-            let metadata = if font == nil {
-                None
-            } else {
-                let name: id = msg_send![font, fontName];
-                let family: id = msg_send![font, familyName];
-                let visible_name: id = msg_send![font, displayName];
-                let resolved_size: f64 = msg_send![font, pointSize];
-                copy_ns_string(name).map(|name| AccessibilityFontMetadata {
-                    requested_descriptor: descriptor.clone(),
-                    requested_family: requested_family.to_owned(),
-                    requested_point_size: point_size,
-                    name,
-                    family: copy_ns_string(family),
-                    visible_name: copy_ns_string(visible_name),
-                    point_size: resolved_size as f32,
-                })
-            };
-            pool.drain();
-            metadata
-        }
-    }
-
-    unsafe fn copy_ns_string(value: id) -> Option<String> {
-        if value == nil {
-            return None;
-        }
-        // SAFETY: `value` is an NSString borrowed from a live NSFont. UTF8String remains valid
-        // until the caller copies it and drains its local autorelease pool.
-        let pointer = unsafe { value.UTF8String() };
-        (!pointer.is_null()).then(|| {
-            unsafe { CStr::from_ptr(pointer) }
-                .to_string_lossy()
-                .into_owned()
-        })
-    }
-
-    extern "C" fn is_accessibility_element(this: &Object, _: Sel) -> BOOL {
-        if state(this).is_some_and(|state| state.visible) {
-            YES
-        } else {
-            NO
-        }
-    }
-
-    extern "C" fn accessibility_role(_: &Object, _: Sel) -> id {
-        ns_string(TEXT_AREA_ROLE)
-    }
-
-    extern "C" fn accessibility_label(_: &Object, _: Sel) -> id {
-        ns_string("Terminal Pane")
-    }
-
-    extern "C" fn accessibility_value(this: &Object, _: Sel) -> id {
-        semantic_state(this).map_or(nil, |state| ns_string(state.model.text()))
-    }
-
-    extern "C" fn accessibility_frame(this: &Object, _: Sel) -> NSRect {
-        state(this)
-            .filter(|state| state.visible)
-            .map_or_else(empty_rect, |state| ns_rect(state.frame))
-    }
-
-    extern "C" fn accessibility_parent(this: &Object, _: Sel) -> id {
-        state(this)
-            .filter(|state| state.visible && state.registered)
-            .map_or(nil, |state| state.parent)
-    }
-
-    extern "C" fn is_accessibility_focused(this: &Object, _: Sel) -> BOOL {
-        if state(this).is_some_and(|state| state.focused) {
-            YES
-        } else {
-            NO
-        }
-    }
-
-    extern "C" fn accessibility_number_of_characters(this: &Object, _: Sel) -> NSInteger {
-        semantic_state(this).map_or(0, |state| {
-            NSInteger::try_from(state.model.len_utf16()).unwrap_or(NSInteger::MAX)
-        })
-    }
-
-    extern "C" fn accessibility_visible_character_range(this: &Object, _: Sel) -> NSRange {
-        semantic_state(this)
-            .map_or_else(invalid_range, |state| ns_range(state.model.visible_range()))
-    }
-
-    extern "C" fn accessibility_selected_text_range(this: &Object, _: Sel) -> NSRange {
-        semantic_state(this).map_or_else(invalid_range, |state| ns_range(state.selected_range()))
-    }
-
-    extern "C" fn set_accessibility_selected_text_range(this: &Object, _: Sel, range: NSRange) {
-        let Some((sender, request)) = semantic_state(this)
-            .filter(|state| state.visible && state.registered)
-            .and_then(|state| {
-                Some((
-                    state.selection_sender.as_ref()?,
-                    state.model.selection_request(rust_range(range)?)?,
-                ))
-            })
-        else {
-            return;
+        let mtm = MainThreadMarker::new()?;
+        let requested = NSString::from_str(requested_family);
+        let manager = NSFontManager::sharedFontManager(mtm);
+        let traits = match descriptor.style {
+            crate::appearance::FontStyle::Normal => NSFontTraitMask::UnitalicFontMask,
+            crate::appearance::FontStyle::Italic => NSFontTraitMask::ItalicFontMask,
         };
-        sender.request(request);
-    }
-
-    extern "C" fn accessibility_selected_text(this: &Object, _: Sel) -> id {
-        semantic_state(this)
-            .and_then(AccessibilityElementState::selected_text)
-            .map_or(nil, |text| ns_string(&text))
-    }
-
-    extern "C" fn accessibility_string_for_range(this: &Object, _: Sel, range: NSRange) -> id {
-        semantic_state(this)
-            .and_then(|state| state.string_for_range(rust_range(range)?))
-            .map_or(nil, |text| ns_string(&text))
-    }
-
-    extern "C" fn accessibility_attributed_string_for_range(
-        this: &Object,
-        _: Sel,
-        range: NSRange,
-    ) -> id {
-        semantic_state(this)
-            .and_then(|state| state.attributed_text_for_range(rust_range(range)?))
-            .map_or(nil, |text| ns_attributed_string(&text))
-    }
-
-    extern "C" fn accessibility_range_for_line(this: &Object, _: Sel, line: NSInteger) -> NSRange {
-        semantic_state(this)
-            .and_then(|state| state.model.range_for_line(usize::try_from(line).ok()?))
-            .map_or_else(invalid_range, ns_range)
-    }
-
-    extern "C" fn accessibility_line_for_index(
-        this: &Object,
-        _: Sel,
-        index: NSInteger,
-    ) -> NSInteger {
-        semantic_state(this)
-            .and_then(|state| state.model.line_for_index(usize::try_from(index).ok()?))
-            .and_then(|line| NSInteger::try_from(line).ok())
-            .unwrap_or(-1)
-    }
-
-    extern "C" fn accessibility_range_for_index(
-        this: &Object,
-        _: Sel,
-        index: NSInteger,
-    ) -> NSRange {
-        semantic_state(this)
-            .and_then(|state| state.model.range_for_index(usize::try_from(index).ok()?))
-            .map_or_else(invalid_range, ns_range)
-    }
-
-    extern "C" fn accessibility_range_for_position(
-        this: &Object,
-        _: Sel,
-        point: NSPoint,
-    ) -> NSRange {
-        semantic_state(this)
-            .and_then(|state| state.range_for_screen_point(point.x, point.y))
-            .map_or_else(invalid_range, ns_range)
-    }
-
-    extern "C" fn accessibility_frame_for_range(this: &Object, _: Sel, range: NSRange) -> NSRect {
-        semantic_state(this)
-            .and_then(|state| state.screen_bounds_for_range(rust_range(range)?))
-            .map_or_else(empty_rect, ns_rect)
-    }
-
-    extern "C" fn accessibility_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
-        if state(this).is_some_and(|state| state.visible && state.frame.contains(point.x, point.y))
-        {
-            this as *const Object as id
-        } else {
-            nil
-        }
+        let weight = match descriptor.weight {
+            100..=199 => 1,
+            200..=299 => 2,
+            300..=399 => 3,
+            400..=499 => 5,
+            500..=599 => 6,
+            600..=699 => 8,
+            700..=799 => 9,
+            800..=899 => 10,
+            _ => 12,
+        };
+        let font = manager
+            .fontWithFamily_traits_weight_size(&requested, traits, weight, f64::from(point_size))
+            .or_else(|| NSFont::fontWithName_size(&requested, f64::from(point_size)))
+            .or_else(|| {
+                manager.fontWithFamily_traits_weight_size(
+                    &NSString::from_str("Menlo"),
+                    traits,
+                    weight,
+                    f64::from(point_size),
+                )
+            })
+            .or_else(|| {
+                Some(NSFont::monospacedSystemFontOfSize_weight(
+                    f64::from(point_size),
+                    0.0,
+                ))
+            })?;
+        Some(AccessibilityFontMetadata {
+            requested_descriptor: descriptor.clone(),
+            requested_family: requested_family.to_owned(),
+            requested_point_size: point_size,
+            name: font.fontName().to_string(),
+            family: font.familyName().map(|name| name.to_string()),
+            visible_name: font.displayName().map(|name| name.to_string()),
+            point_size: font.pointSize() as f32,
+        })
     }
 }
-
 #[cfg(any(not(test), feature = "macos-native-tests"))]
 fn normalized_font_family(family: &str) -> &str {
     if family.trim().is_empty() {

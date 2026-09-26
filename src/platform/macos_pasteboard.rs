@@ -1,9 +1,6 @@
-use cocoa::appkit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
-use cocoa::base::{YES, nil};
-use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString};
-use objc::{msg_send, sel, sel_impl};
-#[cfg(all(test, feature = "macos-native-tests"))]
-use std::ffi::CStr;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPasteboardTypeString};
+use objc2_foundation::{NSArray, NSString};
 use std::path::PathBuf;
 
 #[cfg(all(test, feature = "macos-native-tests"))]
@@ -40,83 +37,55 @@ impl FileClipboard for MacosFileClipboard {
 pub(crate) fn read_file_urls(
     paths: crate::local_path::LocalPathSemantics,
 ) -> Result<Vec<PathBuf>, String> {
-    // SAFETY: values are copied from the general pasteboard during this synchronous AppKit call.
-    unsafe {
-        let pool = NSAutoreleasePool::new(nil);
-        let pasteboard = NSPasteboard::generalPasteboard(nil);
-        let result = read_file_urls_from_pasteboard(pasteboard, paths);
-        pool.drain();
-        result
-    }
+    MainThreadMarker::new().ok_or_else(|| "pasteboard unavailable".to_owned())?;
+    read_file_urls_from_pasteboard(&NSPasteboard::generalPasteboard(), paths)
 }
 
 fn read_file_urls_from_pasteboard(
-    pasteboard: cocoa::base::id,
+    pasteboard: &NSPasteboard,
     paths: crate::local_path::LocalPathSemantics,
 ) -> Result<Vec<PathBuf>, String> {
-    // SAFETY: The caller owns the pasteboard and an autorelease pool for this synchronous read.
-    unsafe {
-        let items: cocoa::base::id = msg_send![pasteboard, pasteboardItems];
-        read_file_urls_from_items(items, paths)
-    }
+    let Some(items) = pasteboard.pasteboardItems() else {
+        return Ok(Vec::new());
+    };
+    read_file_urls_from_items(&items, paths)
 }
 
 fn read_file_urls_from_items(
-    items: cocoa::base::id,
+    items: &NSArray<NSPasteboardItem>,
     paths: crate::local_path::LocalPathSemantics,
 ) -> Result<Vec<PathBuf>, String> {
-    // SAFETY: The caller retains the NSArray and its NSPasteboardItems for this synchronous read.
-    unsafe {
-        let count: usize = msg_send![items, count];
-        let file_url_type = NSString::alloc(nil)
-            .init_str("public.file-url")
-            .autorelease();
-        let mut urls = Vec::new();
-        let mut bytes = 0usize;
-        for index in 0..count {
-            let item: cocoa::base::id = msg_send![items, objectAtIndex: index];
-            let types: cocoa::base::id = msg_send![item, types];
-            let has_file_url: bool = msg_send![types, containsObject: file_url_type];
-            if !has_file_url {
-                continue;
-            }
-            if urls.len() >= MAX_FILE_ITEMS {
-                return Err("too many clipboard files".to_owned());
-            }
-            let value: cocoa::base::id = msg_send![item, stringForType: file_url_type];
-            if value == nil {
-                return Err("file URL is unreadable".to_owned());
-            }
-            let length: usize = msg_send![value, lengthOfBytesUsingEncoding: 4_usize];
-            if length > MAX_FILE_INSERTION_BYTES.saturating_sub(bytes) {
-                return Err("clipboard files exceed the size limit".to_owned());
-            }
-            bytes += length;
-            let utf8: *const std::os::raw::c_char = msg_send![value, UTF8String];
-            if utf8.is_null() {
-                return Err("file URL is not valid UTF-8".to_owned());
-            }
-            let raw = std::slice::from_raw_parts(utf8.cast::<u8>(), length);
-            let text =
-                std::str::from_utf8(raw).map_err(|_| "file URL is not valid UTF-8".to_owned())?;
-            urls.push(text.to_owned());
+    let file_url_type = NSString::from_str("public.file-url");
+    let mut urls = Vec::new();
+    let mut bytes = 0usize;
+    for index in 0..items.count() {
+        let item = items.objectAtIndex(index);
+        if !item.types().containsObject(&file_url_type) {
+            continue;
         }
-        parse_file_urls(paths, &urls).map_err(str::to_owned)
+        if urls.len() >= MAX_FILE_ITEMS {
+            return Err("too many clipboard files".to_owned());
+        }
+        let value = item
+            .stringForType(&file_url_type)
+            .ok_or_else(|| "file URL is unreadable".to_owned())?;
+        let text = value.to_string();
+        if text.len() > MAX_FILE_INSERTION_BYTES.saturating_sub(bytes) {
+            return Err("clipboard files exceed the size limit".to_owned());
+        }
+        bytes += text.len();
+        urls.push(text);
     }
+    parse_file_urls(paths, &urls).map_err(str::to_owned)
 }
 
 pub(crate) fn write_selection(plain_text: &str, html: Option<&str>) -> Result<(), String> {
-    unsafe {
-        let pool = NSAutoreleasePool::new(nil);
-        let pasteboard = NSPasteboard::generalPasteboard(nil);
-        let result = write_selection_to_pasteboard(pasteboard, plain_text, html);
-        pool.drain();
-        result
-    }
+    MainThreadMarker::new().ok_or_else(|| "pasteboard unavailable".to_owned())?;
+    write_selection_to_pasteboard(&NSPasteboard::generalPasteboard(), plain_text, html)
 }
 
 fn write_selection_to_pasteboard(
-    pasteboard: cocoa::base::id,
+    pasteboard: &NSPasteboard,
     plain_text: &str,
     html: Option<&str>,
 ) -> Result<(), String> {
@@ -124,31 +93,30 @@ fn write_selection_to_pasteboard(
         .into_iter()
         .map(|representation| {
             let pasteboard_type = match representation.mime {
+                // SAFETY: AppKit exports these immutable pasteboard type constants.
                 PLAIN_TEXT_MIME => unsafe { NSPasteboardTypeString },
+                // SAFETY: AppKit exports these immutable pasteboard type constants.
                 HTML_MIME => unsafe { NSPasteboardTypeHTML },
                 _ => unreachable!("selection pasteboard MIME types are closed"),
             };
             (representation, pasteboard_type)
         })
         .collect::<Vec<_>>();
-    let types = representations
-        .iter()
-        .map(|(_, pasteboard_type)| *pasteboard_type)
-        .collect::<Vec<_>>();
-
-    unsafe {
-        let types = NSArray::arrayWithObjects(nil, &types);
-        let _: NSInteger = pasteboard.declareTypes_owner(types, nil);
-        for (representation, pasteboard_type) in representations {
-            let value = NSString::alloc(nil)
-                .init_str(representation.text)
-                .autorelease();
-            if pasteboard.setString_forType(value, pasteboard_type) != YES {
-                return Err(format!(
-                    "macOS refused terminal selection representation {}",
-                    representation.mime
-                ));
-            }
+    let types = NSArray::from_slice(
+        &representations
+            .iter()
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>(),
+    );
+    // SAFETY: A nil owner needs no NSPasteboardOwner protocol implementation.
+    unsafe { pasteboard.declareTypes_owner(&types, None) };
+    for (representation, pasteboard_type) in representations {
+        if !pasteboard.setString_forType(&NSString::from_str(representation.text), pasteboard_type)
+        {
+            return Err(format!(
+                "macOS refused terminal selection representation {}",
+                representation.mime
+            ));
         }
     }
     Ok(())
@@ -157,119 +125,82 @@ fn write_selection_to_pasteboard(
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
     use super::*;
+    use objc2::msg_send;
+    use objc2_app_kit::NSPasteboardType;
+    use objc2_foundation::NSData;
+
+    fn file_type() -> objc2::rc::Retained<NSString> {
+        NSString::from_str("public.file-url")
+    }
+
+    fn item(value: &str, ty: &NSPasteboardType) -> objc2::rc::Retained<NSPasteboardItem> {
+        let item = NSPasteboardItem::new();
+        assert!(item.setString_forType(&NSString::from_str(value), ty));
+        item
+    }
 
     #[test]
     fn native_file_discovery_counts_only_file_representations() {
-        use cocoa::base::id;
-        use objc::class;
-        // SAFETY: Each case owns its local item array and autoreleases its items.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let file_type = NSString::alloc(nil)
-                .init_str("public.file-url")
-                .autorelease();
-            let text = NSString::alloc(nil).init_str("ordinary text").autorelease();
-            let url = NSString::alloc(nil).init_str("file:///a").autorelease();
-            for (text_count, file_count) in [
-                (MAX_FILE_ITEMS + 1, 0),
-                (1, MAX_FILE_ITEMS),
-                (0, MAX_FILE_ITEMS + 1),
-            ] {
-                let mut items = Vec::new();
-                for index in 0..text_count + file_count {
-                    let item: id = msg_send![class!(NSPasteboardItem), new];
-                    let item: id = msg_send![item, autorelease];
-                    let (value, item_type) = if index < text_count {
-                        (text, NSPasteboardTypeString)
-                    } else {
-                        (url, file_type)
-                    };
-                    let written: bool = msg_send![item, setString: value forType: item_type];
-                    assert!(written);
-                    items.push(item);
-                }
-                let items = NSArray::arrayWithObjects(nil, &items);
-                let result =
-                    read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix);
-                if file_count > MAX_FILE_ITEMS {
-                    assert!(result.is_err());
+        let file_type = file_type();
+        // SAFETY: AppKit exports this immutable pasteboard type constant.
+        let text_type = unsafe { NSPasteboardTypeString };
+        for (text_count, file_count) in [
+            (MAX_FILE_ITEMS + 1, 0),
+            (1, MAX_FILE_ITEMS),
+            (0, MAX_FILE_ITEMS + 1),
+        ] {
+            let mut items = Vec::new();
+            for index in 0..text_count + file_count {
+                items.push(if index < text_count {
+                    item("ordinary text", text_type)
                 } else {
-                    assert_eq!(result.unwrap(), vec![PathBuf::from("/a"); file_count]);
-                }
+                    item("file:///a", &file_type)
+                });
             }
-            pool.drain();
+            let items = NSArray::from_retained_slice(&items);
+            let result =
+                read_file_urls_from_items(&items, crate::local_path::LocalPathSemantics::Posix);
+            if file_count > MAX_FILE_ITEMS {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), vec![PathBuf::from("/a"); file_count]);
+            }
         }
     }
 
     #[test]
     fn native_file_discovery_rejects_unreadable_file_representation_with_text() {
-        use cocoa::base::id;
-        use objc::class;
-        // SAFETY: This test owns the local item array and autoreleases its item and data.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let file_type = NSString::alloc(nil)
-                .init_str("public.file-url")
-                .autorelease();
-            let invalid_utf8 = [0xff_u8];
-            let data: id = msg_send![class!(NSData),
-                dataWithBytes: invalid_utf8.as_ptr() length: invalid_utf8.len()];
-            let item: id = msg_send![class!(NSPasteboardItem), new];
-            let item: id = msg_send![item, autorelease];
-            let written: bool = msg_send![item, setData: data forType: file_type];
-            assert!(written);
-            let text = NSString::alloc(nil)
-                .init_str("alternate text")
-                .autorelease();
-            let written: bool = msg_send![item, setString: text forType: NSPasteboardTypeString];
-            assert!(written);
-            let items = NSArray::arrayWithObjects(nil, &[item]);
-            let result =
-                read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix);
-            pool.drain();
-            assert!(result.is_err());
-        }
+        let file_type = file_type();
+        let item = NSPasteboardItem::new();
+        assert!(item.setData_forType(&NSData::with_bytes(&[0xff]), &file_type));
+        // SAFETY: AppKit exports this immutable pasteboard type constant.
+        assert!(
+            item.setString_forType(&NSString::from_str("alternate text"), unsafe {
+                NSPasteboardTypeString
+            })
+        );
+        let items = NSArray::from_retained_slice(&[item]);
+        assert!(
+            read_file_urls_from_items(&items, crate::local_path::LocalPathSemantics::Posix)
+                .is_err()
+        );
     }
 
     #[test]
     fn native_file_discovery_preserves_items_and_rejects_invalid_authority() {
-        use cocoa::base::id;
-        use objc::class;
-        // SAFETY: This test owns its local item arrays and balances all retained objects.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let file_type = NSString::alloc(nil)
-                .init_str("public.file-url")
-                .autorelease();
-            let first: id = msg_send![class!(NSPasteboardItem), new];
-            let second: id = msg_send![class!(NSPasteboardItem), new];
-            let a = NSString::alloc(nil).init_str("file:///a%20b").autorelease();
-            let b = NSString::alloc(nil).init_str("file:///c").autorelease();
-            let _: bool = msg_send![first, setString: a forType: file_type];
-            let _: bool = msg_send![second, setString: b forType: file_type];
-            let items = NSArray::arrayWithObjects(nil, &[first, second]);
-            let paths =
-                read_file_urls_from_items(items, crate::local_path::LocalPathSemantics::Posix)
-                    .unwrap();
-            assert!(paths == vec![PathBuf::from("/a b"), PathBuf::from("/c")]);
-            let remote = NSString::alloc(nil)
-                .init_str("file://remote/a")
-                .autorelease();
-            let remote_item: id = msg_send![class!(NSPasteboardItem), new];
-            let _: bool = msg_send![remote_item, setString: remote forType: file_type];
-            let remote_items = NSArray::arrayWithObjects(nil, &[remote_item]);
-            assert!(
-                read_file_urls_from_items(
-                    remote_items,
-                    crate::local_path::LocalPathSemantics::Posix,
-                )
+        let file_type = file_type();
+        let items = NSArray::from_retained_slice(&[
+            item("file:///a%20b", &file_type),
+            item("file:///c", &file_type),
+        ]);
+        let paths = read_file_urls_from_items(&items, crate::local_path::LocalPathSemantics::Posix)
+            .unwrap();
+        assert_eq!(paths, vec![PathBuf::from("/a b"), PathBuf::from("/c")]);
+        let remote_items = NSArray::from_retained_slice(&[item("file://remote/a", &file_type)]);
+        assert!(
+            read_file_urls_from_items(&remote_items, crate::local_path::LocalPathSemantics::Posix)
                 .is_err()
-            );
-            let _: () = msg_send![first, release];
-            let _: () = msg_send![second, release];
-            let _: () = msg_send![remote_item, release];
-            pool.drain();
-        }
+        );
     }
 
     #[test]
@@ -309,31 +240,24 @@ mod tests {
 
     #[test]
     fn native_write_declares_every_representation_before_publishing_data() {
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
-
-            write_selection_to_pasteboard(
-                pasteboard,
-                "native selection",
-                Some("<pre>native selection</pre>"),
-            )
-            .unwrap();
-
-            let types = pasteboard.types();
-            let has_plain_text: bool = msg_send![types, containsObject: NSPasteboardTypeString];
-            let has_html: bool = msg_send![types, containsObject: NSPasteboardTypeHTML];
-            let plain_text = pasteboard.stringForType(NSPasteboardTypeString);
-            let plain_text = CStr::from_ptr(NSString::UTF8String(plain_text))
-                .to_string_lossy()
-                .into_owned();
-            pasteboard.releaseGlobally();
-            pool.drain();
-
-            assert_eq!(
-                (has_plain_text, has_html, plain_text),
-                (true, true, "native selection".to_owned())
-            );
-        }
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        write_selection_to_pasteboard(
+            &pasteboard,
+            "native selection",
+            Some("<pre>native selection</pre>"),
+        )
+        .unwrap();
+        let types = pasteboard.types().unwrap();
+        // SAFETY: AppKit exports these immutable pasteboard type constants.
+        let (plain_type, html_type) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
+        let has_plain_text = types.containsObject(plain_type);
+        let has_html = types.containsObject(html_type);
+        let plain_text = pasteboard.stringForType(plain_type).unwrap().to_string();
+        // SAFETY: This unique test pasteboard supports releaseGlobally and no other code holds it.
+        let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
+        assert_eq!(
+            (has_plain_text, has_html, plain_text),
+            (true, true, "native selection".to_owned())
+        );
     }
 }

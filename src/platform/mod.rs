@@ -8,12 +8,21 @@ pub(crate) mod control_socket;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
 #[cfg(target_os = "macos")]
+mod macos_quick_look_window;
+#[cfg(target_os = "macos")]
 mod macos_selected_file;
 pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
+
+#[cfg(all(target_os = "macos", test, feature = "macos-native-tests"))]
+fn native_test_marker() -> objc2::MainThreadMarker {
+    // SAFETY: Native adapter tests keep each AppKit fixture on one test thread, do not attach
+    // it to a displayed window, and complete its lifetime before that thread exits.
+    unsafe { objc2::MainThreadMarker::new_unchecked() }
+}
 
 pub(crate) mod local_filesystem;
 #[cfg(target_os = "macos")]

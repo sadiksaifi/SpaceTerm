@@ -1,8 +1,6 @@
-use cocoa::appkit::{NSApp, NSEvent, NSEventType};
-use cocoa::base::{id, nil};
 use gpui::Window;
-use objc::runtime::Object;
-use objc::{msg_send, sel, sel_impl};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSEventType, NSView};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::terminal::wheel_phase::{WheelPhaseDetail, WheelPhaseEnrichment};
@@ -19,27 +17,19 @@ impl WheelPhaseEnrichment for MacosWheelPhaseEnrichment {
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
             return None;
         };
-        let view = handle.ns_view.as_ptr().cast::<Object>();
-        // SAFETY: this synchronous GPUI wheel callback runs on AppKit's thread. The current
-        // event is accepted only when it belongs to this exact GPUI-backed NSWindow.
-        unsafe {
-            let application = NSApp();
-            if application == nil {
-                return None;
-            }
-            let event: id = msg_send![application, currentEvent];
-            if event == nil || event.eventType() != NSEventType::NSScrollWheel {
-                return None;
-            }
-            let native_window: id = msg_send![view, window];
-            let event_window: id = msg_send![event, window];
-            if native_window == nil || event_window != native_window {
-                return None;
-            }
-            let momentum: u64 = msg_send![event, momentumPhase];
-            let gesture: u64 = msg_send![event, phase];
-            classify_detail(gesture, momentum)
+        let mtm = MainThreadMarker::new()?;
+        // SAFETY: GPUI owns this live NSView for the duration of the synchronous wheel callback.
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+        let event = NSApplication::sharedApplication(mtm).currentEvent()?;
+        if event.r#type() != NSEventType::ScrollWheel {
+            return None;
         }
+        let native_window = view.window()?;
+        let event_window = event.window(mtm)?;
+        if !std::ptr::eq(&*native_window, &*event_window) {
+            return None;
+        }
+        classify_detail(event.phase().0 as u64, event.momentumPhase().0 as u64)
     }
 }
 

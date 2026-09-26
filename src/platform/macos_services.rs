@@ -1,60 +1,54 @@
 //! AppKit Services responder registration and native pasteboard conversion.
 //!
-//! GPUI 0.2.2 can install the Services menu but exposes neither its requestor callbacks nor
-//! access to a Service's supplied pasteboard. Request policy and lifetime authority live in
-//! the portable Services owner; this adapter only connects those operations to AppKit.
+//! Request policy and lifetime authority live in the portable Services owner. This adapter
+//! connects those operations to AppKit's responder chain and supplied pasteboard.
 
-#![allow(deprecated)]
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use super::services_registration::{ServicesRegistration, ServicesRegistrationError};
-use cocoa::appkit::NSApp;
-use cocoa::appkit::{NSPasteboardTypeString, NSStringPboardType};
-use cocoa::base::{BOOL, NO, YES, id, nil};
-use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInteger};
 use gpui::Window;
-use objc::declare::ClassDecl;
-use objc::runtime::{Class, Object, Protocol, Sel};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::AnyObject;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::{
+    NSApplication, NSPasteboard, NSPasteboardTypeString, NSResponder, NSServicesMenuRequestor,
+    NSView,
+};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSString, NSUTF8StringEncoding};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use super::services_registration::{ServicesRegistration, ServicesRegistrationError};
 use crate::terminal::native_services::services::{
     ServiceDataType, ServiceEndpoint, ServiceOperation, ServicePasteboardIdentity, ServiceRequests,
     bounded_service_text_byte_len, decode_service_text_bytes,
 };
 
-const SERVICES_RESPONDER_CLASS: &str = "SpaceTermServicesResponder";
-const SERVICES_STATE_IVAR: &str = "spaceTermServicesState";
-const SERVICES_OPERATION_RESPONDER_CLASS: &str = "SpaceTermServicesOperationResponder";
-const SERVICES_OPERATION_STATE_IVAR: &str = "spaceTermServicesOperationState";
+const LEGACY_STRING_PASTEBOARD_TYPE: &str = "NSStringPboardType";
 const OBJC_ASSOCIATION_RETAIN_NONATOMIC: usize = 1;
-const NS_UTF8_STRING_ENCODING: NSUInteger = 4;
 static SERVICES_RESPONDER_ASSOCIATION: u8 = 0;
 
 unsafe extern "C" {
-    fn objc_getAssociatedObject(object: id, key: *const c_void) -> id;
-    fn objc_setAssociatedObject(object: id, key: *const c_void, value: id, policy: usize);
+    fn objc_getAssociatedObject(object: *const AnyObject, key: *const c_void) -> *mut AnyObject;
+    fn objc_setAssociatedObject(
+        object: *const AnyObject,
+        key: *const c_void,
+        value: *const AnyObject,
+        policy: usize,
+    );
+}
+
+fn association_key() -> *const c_void {
+    (&raw const SERVICES_RESPONDER_ASSOCIATION).cast::<c_void>()
 }
 
 pub(crate) fn register() -> Result<(), ServicesRegistrationError> {
-    // SAFETY: SpaceTerm initializes its application on AppKit's main thread. The array is used only
-    // for this synchronous registration call, and AppKit retains the registered type strings.
-    unsafe {
-        let pool = NSAutoreleasePool::new(nil);
-        let application = NSApp();
-        if application == nil {
-            pool.drain();
-            return Err(ServicesRegistrationError::ApplicationUnavailable);
-        }
-        let string_types = NSArray::arrayWithObject(nil, NSPasteboardTypeString);
-        let _: () = msg_send![application,
-            registerServicesMenuSendTypes: string_types
-            returnTypes: string_types
-        ];
-        pool.drain();
-    }
+    let mtm = MainThreadMarker::new().ok_or(ServicesRegistrationError::ApplicationUnavailable)?;
+    let application = NSApplication::sharedApplication(mtm);
+    // SAFETY: AppKit exports this immutable modern string pasteboard type.
+    let string_type = unsafe { NSPasteboardTypeString };
+    let string_types = NSArray::from_slice(&[string_type]);
+    application.registerServicesMenuSendTypes_returnTypes(&string_types, &string_types);
     Ok(())
 }
 
@@ -67,295 +61,205 @@ pub(crate) fn install(
     let RawWindowHandle::AppKit(native_handle) = native_handle.as_raw() else {
         return Err(ServicesRegistrationError::NativeViewUnavailable);
     };
-    let native_view = native_handle.ns_view.as_ptr().cast::<Object>();
-
-    // SAFETY: GPUI's AppKit raw-window handle guarantees a live NSView for the lifetime of this
-    // call. Installation runs on AppKit's main thread. The associated object retains the custom
-    // responder exactly as long as the view, while its unretained nextResponder link preserves the
-    // original responder chain. The responder owns the boxed Rust state and drops it from dealloc.
+    let mtm = MainThreadMarker::new().ok_or(ServicesRegistrationError::ApplicationUnavailable)?;
+    // SAFETY: GPUI owns this live NSView for the synchronous installation call.
+    let native_view = unsafe { &*native_handle.ns_view.as_ptr().cast::<NSView>() };
+    // SAFETY: This unique association key belongs to the view and the view is live.
+    if !unsafe {
+        objc_getAssociatedObject((native_view as *const NSView).cast(), association_key())
+    }
+    .is_null()
+    {
+        return Ok(());
+    }
+    let responder = ServicesResponder::new(mtm, Rc::new(ServiceRequests::new(endpoint)));
+    // SAFETY: The previous responder outlives this link as part of AppKit's responder chain.
+    let previous = unsafe { native_view.nextResponder() };
+    // SAFETY: AppKit's responder chain keeps the previous responder live for the view's lifetime.
+    unsafe { responder.setNextResponder(previous.as_deref()) };
+    // SAFETY: The runtime retains the responder under the view's unique key. The view's
+    // nextResponder link is unretained, so the association owns its lifetime.
     unsafe {
-        let association_key = (&raw const SERVICES_RESPONDER_ASSOCIATION).cast::<c_void>();
-        if objc_getAssociatedObject(native_view, association_key) != nil {
-            return Ok(());
-        }
-
-        let responder_class = services_responder_class()?;
-        let responder: id = msg_send![responder_class, alloc];
-        let responder: id = msg_send![responder, init];
-        if responder == nil {
-            return Err(ServicesRegistrationError::ResponderAllocationFailed);
-        }
-
-        let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
-        (*responder).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
-
-        let previous_responder: id = msg_send![native_view, nextResponder];
-        let _: () = msg_send![responder, setNextResponder: previous_responder];
         objc_setAssociatedObject(
-            native_view,
-            association_key,
-            responder,
+            (native_view as *const NSView).cast(),
+            association_key(),
+            Retained::as_ptr(&responder).cast(),
             OBJC_ASSOCIATION_RETAIN_NONATOMIC,
         );
-        let _: () = msg_send![native_view, setNextResponder: responder];
-        let _: () = msg_send![responder, release];
+        native_view.setNextResponder(Some(&responder));
     }
     Ok(())
 }
 
-fn services_responder_class() -> Result<&'static Class, ServicesRegistrationError> {
-    if let Some(class) = Class::get(SERVICES_RESPONDER_CLASS) {
-        return Ok(class);
-    }
-    let Some(mut declaration) = ClassDecl::new(SERVICES_RESPONDER_CLASS, class!(NSResponder))
-    else {
-        return Err(ServicesRegistrationError::ResponderClassUnavailable);
-    };
-    declaration.add_ivar::<*mut c_void>(SERVICES_STATE_IVAR);
-    if let Some(protocol) = Protocol::get("NSServicesMenuRequestor") {
-        declaration.add_protocol(protocol);
-    }
-    // SAFETY: Each selector uses AppKit's documented NSServicesMenuRequestor ABI, and the
-    // registered function signatures exactly match those Objective-C method encodings.
-    unsafe {
-        declaration.add_method(
-            sel!(dealloc),
-            dealloc_services_responder as extern "C" fn(&Object, Sel),
-        );
-        declaration.add_method(
-            sel!(validRequestorForSendType:returnType:),
-            valid_requestor as extern "C" fn(&Object, Sel, id, id) -> id,
-        );
-    }
-    Ok(declaration.register())
+struct ServicesResponderIvars {
+    state: Rc<ServiceRequests>,
+    mtm: MainThreadMarker,
 }
 
-fn services_operation_responder_class() -> Result<&'static Class, ServicesRegistrationError> {
-    if let Some(class) = Class::get(SERVICES_OPERATION_RESPONDER_CLASS) {
-        return Ok(class);
+impl Drop for ServicesResponderIvars {
+    fn drop(&mut self) {
+        self.state.retire();
     }
-    let Some(mut declaration) =
-        ClassDecl::new(SERVICES_OPERATION_RESPONDER_CLASS, class!(NSResponder))
-    else {
-        return Err(ServicesRegistrationError::ResponderClassUnavailable);
-    };
-    declaration.add_ivar::<*mut c_void>(SERVICES_OPERATION_STATE_IVAR);
-    if let Some(protocol) = Protocol::get("NSServicesMenuRequestor") {
-        declaration.add_protocol(protocol);
-    }
-    // SAFETY: These selectors use AppKit's documented NSServicesMenuRequestor ABI. Each operation
-    // responder owns exactly one request state and is autoreleased under Cocoa naming rules.
-    unsafe {
-        declaration.add_method(
-            sel!(dealloc),
-            dealloc_services_operation_responder as extern "C" fn(&Object, Sel),
-        );
-        declaration.add_method(
-            sel!(writeSelectionToPasteboard:types:),
-            write_selection_to_pasteboard as extern "C" fn(&Object, Sel, id, id) -> BOOL,
-        );
-        declaration.add_method(
-            sel!(readSelectionFromPasteboard:),
-            read_selection_from_pasteboard as extern "C" fn(&Object, Sel, id) -> BOOL,
-        );
-    }
-    Ok(declaration.register())
 }
 
-extern "C" fn dealloc_services_responder(this: &Object, _: Sel) {
-    // SAFETY: install stores exactly one Box pointer in this ivar before the responder enters the
-    // chain. AppKit calls dealloc once after releasing the view's retained association.
-    unsafe {
-        let state: *mut c_void = *this.get_ivar(SERVICES_STATE_IVAR);
-        if !state.is_null() {
-            let state = Box::from_raw(state.cast::<Rc<ServiceRequests>>());
-            state.retire();
-            drop(state);
+define_class!(
+    // SAFETY: NSResponder has no additional subclassing requirements. define_class! drops the
+    // ivars, whose Drop retires operations before the last Rc clone can leave a callback.
+    #[unsafe(super(NSResponder))]
+    #[name = "SpaceTermServicesResponder"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ServicesResponderIvars]
+    struct ServicesResponder;
+
+    impl ServicesResponder {
+        #[unsafe(method_id(validRequestorForSendType:returnType:))]
+        fn valid_requestor(
+            &self,
+            send_type: Option<&NSString>,
+            return_type: Option<&NSString>,
+        ) -> Option<Retained<AnyObject>> {
+            let state = Rc::clone(&self.ivars().state);
+            let operation = catch_unwind(AssertUnwindSafe(|| {
+                state.operation(service_data_type(send_type), service_data_type(return_type))
+                    .and_then(|operation| create_services_operation(operation, self.ivars().mtm))
+            })).ok().flatten();
+            if let Some(operation) = operation {
+                Some(operation.into_super().into_super().into_super())
+            } else if state.is_retired() {
+                None
+            } else {
+                // SAFETY: NSResponder continues the previous responder chain for unsupported types.
+                unsafe { msg_send![super(self), validRequestorForSendType: send_type, returnType: return_type] }
+            }
         }
-        let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
+    }
+
+    unsafe impl NSObjectProtocol for ServicesResponder {}
+    unsafe impl NSServicesMenuRequestor for ServicesResponder {}
+);
+
+impl ServicesResponder {
+    fn new(mtm: MainThreadMarker, state: Rc<ServiceRequests>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ServicesResponderIvars { state, mtm });
+        // SAFETY: NSResponder's init is its designated initializer.
+        unsafe { msg_send![super(this), init] }
     }
 }
 
-extern "C" fn dealloc_services_operation_responder(this: &Object, _: Sel) {
-    // SAFETY: create_services_operation stores one Box pointer before returning the responder.
-    unsafe {
-        let state: *mut c_void = *this.get_ivar(SERVICES_OPERATION_STATE_IVAR);
-        if !state.is_null() {
-            drop(Box::from_raw(state.cast::<Rc<ServiceOperation>>()));
+struct ServicesOperationResponderIvars {
+    state: Rc<ServiceOperation>,
+}
+
+define_class!(
+    // SAFETY: NSResponder has no additional subclassing requirements, and define_class! drops
+    // the operation Rc when the native responder is deallocated.
+    #[unsafe(super(NSResponder))]
+    #[name = "SpaceTermServicesOperationResponder"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ServicesOperationResponderIvars]
+    struct ServicesOperationResponder;
+
+    unsafe impl NSObjectProtocol for ServicesOperationResponder {}
+
+    #[allow(non_snake_case)]
+    unsafe impl NSServicesMenuRequestor for ServicesOperationResponder {
+        #[unsafe(method(writeSelectionToPasteboard:types:))]
+        fn writeSelectionToPasteboard_types(
+            &self,
+            pasteboard: &NSPasteboard,
+            types: &NSArray<NSString>,
+        ) -> bool {
+            catch_unwind(AssertUnwindSafe(|| {
+                // SAFETY: AppKit exports this immutable modern string pasteboard type.
+                let modern = unsafe { NSPasteboardTypeString };
+                let legacy = NSString::from_str(LEGACY_STRING_PASTEBOARD_TYPE);
+                if !types.containsObject(modern) && !types.containsObject(&legacy) {
+                    return false;
+                }
+                let state = Rc::clone(&self.ivars().state);
+                state.write_selection(
+                    ServicePasteboardIdentity::new(pasteboard as *const _ as usize),
+                    |text| write_service_text(pasteboard, text),
+                )
+            }))
+            .unwrap_or(false)
         }
-        let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
-    }
-}
 
-extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type: id) -> id {
-    let state = unsafe { services_state(this) };
-    let operation = catch_unwind(AssertUnwindSafe(|| {
-        let send_type = unsafe { service_data_type(send_type) };
-        let return_type = unsafe { service_data_type(return_type) };
-        let operation = state.as_ref()?.operation(send_type, return_type)?;
-        unsafe { create_services_operation(operation) }
-    }))
-    .ok()
-    .flatten();
-    if let Some(operation) = operation {
-        return operation;
-    }
-
-    if state.is_some_and(|state| state.is_retired()) {
-        // A callback destroyed the native responder. Its retained Rust owner remains safe, but
-        // the old Objective-C object can no longer continue the responder chain.
-        return nil;
-    }
-
-    // SAFETY: NSResponder's implementation continues the pre-existing responder chain when
-    // SpaceTerm cannot satisfy the requested types or current terminal state.
-    unsafe {
-        msg_send![super(this, class!(NSResponder)),
-            validRequestorForSendType: send_type
-            returnType: return_type
-        ]
-    }
-}
-
-unsafe fn create_services_operation(state: ServiceOperation) -> Option<id> {
-    let responder_class = services_operation_responder_class().ok()?;
-    let responder: id = unsafe { msg_send![responder_class, alloc] };
-    let responder: id = unsafe { msg_send![responder, init] };
-    if responder == nil {
-        return None;
-    }
-    let state = Box::new(Rc::new(state));
-    unsafe {
-        (*responder).set_ivar(
-            SERVICES_OPERATION_STATE_IVAR,
-            Box::into_raw(state).cast::<c_void>(),
-        );
-    }
-    let responder: id = unsafe { msg_send![responder, autorelease] };
-    Some(responder)
-}
-
-extern "C" fn write_selection_to_pasteboard(
-    this: &Object,
-    _: Sel,
-    pasteboard: id,
-    types: id,
-) -> BOOL {
-    catch_unwind(AssertUnwindSafe(|| {
-        if pasteboard == nil || types == nil {
-            return NO;
+        #[unsafe(method(readSelectionFromPasteboard:))]
+        fn readSelectionFromPasteboard(&self, pasteboard: &NSPasteboard) -> bool {
+            catch_unwind(AssertUnwindSafe(|| {
+                let state = Rc::clone(&self.ivars().state);
+                state.read_selection(
+                    ServicePasteboardIdentity::new(pasteboard as *const _ as usize),
+                    || read_service_text(pasteboard),
+                )
+            }))
+            .unwrap_or(false)
         }
-        // SAFETY: AppKit supplies NSPasteboard and NSArray objects for this synchronous callback.
-        let contains_string: BOOL =
-            unsafe { msg_send![types, containsObject: NSPasteboardTypeString] };
-        // AppKit may validate modern text but pass the legacy type in this array (FB11838671).
-        // Both names describe the same text representation; publication remains modern UTF-8.
-        let contains_legacy_string: BOOL =
-            unsafe { msg_send![types, containsObject: NSStringPboardType] };
-        if contains_string == NO && contains_legacy_string == NO {
-            return NO;
-        }
-        let Some(state) = (unsafe { services_operation_state(this) }) else {
-            return NO;
-        };
-        let wrote = state.write_selection(
-            ServicePasteboardIdentity::new(pasteboard as usize),
-            |text| unsafe { write_service_text(pasteboard, text) },
-        );
-        if wrote { YES } else { NO }
-    }))
-    .unwrap_or(NO)
+    }
+);
+
+impl ServicesOperationResponder {
+    fn new(mtm: MainThreadMarker, state: ServiceOperation) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ServicesOperationResponderIvars {
+            state: Rc::new(state),
+        });
+        // SAFETY: NSResponder's init is its designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
-extern "C" fn read_selection_from_pasteboard(this: &Object, _: Sel, pasteboard: id) -> BOOL {
-    catch_unwind(AssertUnwindSafe(|| {
-        let Some(state) = (unsafe { services_operation_state(this) }) else {
-            return NO;
-        };
-        let inserted = state.read_selection(
-            ServicePasteboardIdentity::new(pasteboard as usize),
-            || unsafe { read_service_text(pasteboard) },
-        );
-        if inserted { YES } else { NO }
-    }))
-    .unwrap_or(NO)
+fn create_services_operation(
+    state: ServiceOperation,
+    mtm: MainThreadMarker,
+) -> Option<Retained<ServicesOperationResponder>> {
+    Some(ServicesOperationResponder::new(mtm, state))
 }
 
-unsafe fn services_state(this: &Object) -> Option<Rc<ServiceRequests>> {
-    let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_STATE_IVAR) };
-    // Clone before any callback can reentrantly destroy the native responder and its ivar.
-    unsafe { state.cast::<Rc<ServiceRequests>>().as_ref() }.cloned()
-}
-
-unsafe fn services_operation_state(this: &Object) -> Option<Rc<ServiceOperation>> {
-    let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_OPERATION_STATE_IVAR) };
-    unsafe { state.cast::<Rc<ServiceOperation>>().as_ref() }.cloned()
-}
-
-unsafe fn service_data_type(value: id) -> ServiceDataType {
-    if value == nil {
+fn service_data_type(value: Option<&NSString>) -> ServiceDataType {
+    let Some(value) = value.filter(|value| value.length() != 0) else {
         return ServiceDataType::Absent;
-    }
-    // SAFETY: AppKit documents both arguments as NSString pasteboard types and may represent an
-    // omitted side of the Service contract with an empty string instead of nil.
-    let character_len: NSUInteger = unsafe { msg_send![value, length] };
-    if character_len == 0 {
-        return ServiceDataType::Absent;
-    }
-    let is_string: BOOL = unsafe { msg_send![value, isEqualToString: NSPasteboardTypeString] };
-    let is_legacy_string: BOOL = unsafe { msg_send![value, isEqualToString: NSStringPboardType] };
-    if is_string == YES || is_legacy_string == YES {
+    };
+    // SAFETY: AppKit exports this immutable modern string pasteboard type.
+    let modern = unsafe { NSPasteboardTypeString };
+    let legacy = NSString::from_str(LEGACY_STRING_PASTEBOARD_TYPE);
+    if value == modern || value == &*legacy {
         ServiceDataType::String
     } else {
         ServiceDataType::Unsupported
     }
 }
 
-unsafe fn write_service_text(pasteboard: id, text: &str) -> bool {
-    if pasteboard == nil {
-        return false;
-    }
-    let pool = unsafe { NSAutoreleasePool::new(nil) };
-    let types = unsafe { NSArray::arrayWithObject(nil, NSPasteboardTypeString) };
-    let _: NSInteger = unsafe { msg_send![pasteboard, declareTypes: types owner: nil] };
-    let value = unsafe { NSString::alloc(nil).init_str(text).autorelease() };
-    let result: BOOL =
-        unsafe { msg_send![pasteboard, setString: value forType: NSPasteboardTypeString] };
-    unsafe { pool.drain() };
-    result == YES
+fn write_service_text(pasteboard: &NSPasteboard, text: &str) -> bool {
+    autoreleasepool(|_| {
+        // SAFETY: AppKit exports this immutable modern string pasteboard type.
+        let modern = unsafe { NSPasteboardTypeString };
+        let types = NSArray::from_slice(&[modern]);
+        // SAFETY: A nil owner requires no NSPasteboardOwner protocol implementation.
+        unsafe { pasteboard.declareTypes_owner(&types, None) };
+        pasteboard.setString_forType(&NSString::from_str(text), modern)
+    })
 }
 
-unsafe fn read_service_text(pasteboard: id) -> Option<String> {
-    if pasteboard == nil {
-        return None;
-    }
-    let types: id = unsafe { msg_send![pasteboard, types] };
-    let contains_string: BOOL = unsafe { msg_send![types, containsObject: NSPasteboardTypeString] };
-    if contains_string == NO {
-        return None;
-    }
-    let value: id = unsafe { msg_send![pasteboard, stringForType: NSPasteboardTypeString] };
-    unsafe { read_nsstring_text(value) }
+fn read_service_text(pasteboard: &NSPasteboard) -> Option<String> {
+    // SAFETY: AppKit exports this immutable modern string pasteboard type.
+    let modern = unsafe { NSPasteboardTypeString };
+    pasteboard.types()?.containsObject(modern).then_some(())?;
+    let value = pasteboard.stringForType(modern)?;
+    read_nsstring_text(&value)
 }
 
-unsafe fn read_nsstring_text(value: id) -> Option<String> {
-    if value == nil {
-        return None;
-    }
-    let character_len: NSUInteger = unsafe { msg_send![value, length] };
-    let byte_len: NSUInteger =
-        unsafe { msg_send![value, lengthOfBytesUsingEncoding: NS_UTF8_STRING_ENCODING] };
+fn read_nsstring_text(value: &NSString) -> Option<String> {
     let byte_len = bounded_service_text_byte_len(
-        usize::try_from(character_len).ok()?,
-        usize::try_from(byte_len).ok()?,
+        value.length(),
+        value.lengthOfBytesUsingEncoding(NSUTF8StringEncoding),
     )?;
-    let utf8: *const c_char = unsafe { msg_send![value, UTF8String] };
+    let utf8 = value.UTF8String();
     if utf8.is_null() {
         return None;
     }
-    // SAFETY: The pointer is consumed immediately, before another Objective-C call or autorelease
-    // pool drain can shorten NSString's documented UTF8String lifetime. The byte count comes from
-    // the same object and was rejected before this slice can exceed Paste Payload's hard limit.
+    // SAFETY: NSString keeps this UTF8String pointer live through the synchronous copy. Its
+    // byte count was bounded against Paste Payload's limit before constructing the slice.
     let bytes = unsafe { std::slice::from_raw_parts(utf8.cast::<u8>(), byte_len) };
     decode_service_text_bytes(bytes)
 }
@@ -376,165 +280,102 @@ impl ServicesRegistration for NativeServicesRegistration {
 
 #[cfg(all(test, feature = "macos-native-tests"))]
 mod tests {
-    use cocoa::appkit::NSPasteboard;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{AnyThread, msg_send};
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+    use std::cell::Cell;
 
     use super::*;
     use crate::terminal::MAX_PASTE_BYTES;
 
-    #[test]
-    fn service_type_classifies_nil_and_empty_nsstring_as_absent() {
-        // SAFETY: The NSStrings remain live for these synchronous Objective-C comparisons and the
-        // local autorelease pool is drained afterward.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let empty = NSString::alloc(nil).init_str("").autorelease();
-            let unsupported = NSString::alloc(nil).init_str("public.html").autorelease();
+    fn legacy_string_type() -> Retained<NSString> {
+        NSString::from_str(LEGACY_STRING_PASTEBOARD_TYPE)
+    }
 
-            assert_eq!(service_data_type(nil), ServiceDataType::Absent);
-            assert_eq!(service_data_type(empty), ServiceDataType::Absent);
+    #[gpui::test]
+    fn service_type_classifies_nil_and_empty_nsstring_as_absent(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            let empty = NSString::from_str("");
+            let unsupported = NSString::from_str("public.html");
+            // SAFETY: AppKit exports this immutable modern string pasteboard type.
+            let modern = unsafe { NSPasteboardTypeString };
+            let legacy = legacy_string_type();
+            assert_eq!(service_data_type(None), ServiceDataType::Absent);
+            assert_eq!(service_data_type(Some(&empty)), ServiceDataType::Absent);
+            assert_eq!(service_data_type(Some(modern)), ServiceDataType::String);
+            assert_eq!(service_data_type(Some(&legacy)), ServiceDataType::String);
             assert_eq!(
-                service_data_type(NSPasteboardTypeString),
-                ServiceDataType::String
-            );
-            assert_eq!(
-                service_data_type(NSStringPboardType),
-                ServiceDataType::String
-            );
-            assert_eq!(service_data_type(unsupported), ServiceDataType::Unsupported);
-            let generic_plain_text = NSString::alloc(nil)
-                .init_str("public.plain-text")
-                .autorelease();
-            assert_eq!(
-                service_data_type(generic_plain_text),
+                service_data_type(Some(&unsupported)),
                 ServiceDataType::Unsupported
             );
-
-            pool.drain();
-        }
+            let generic_plain_text = NSString::from_str("public.plain-text");
+            assert_eq!(
+                service_data_type(Some(&generic_plain_text)),
+                ServiceDataType::Unsupported
+            );
+        });
     }
 
-    #[test]
-    fn nsstring_decode_enforces_the_paste_limit_before_copying() {
-        // SAFETY: Each NSString is initialized from a live byte slice, decoded synchronously, and
-        // released before the local autorelease pool is drained.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let at_limit = vec![b'x'; MAX_PASTE_BYTES];
-            let over_limit = vec![b'x'; MAX_PASTE_BYTES + 1];
-            let at_limit_value: id = msg_send![class!(NSString), alloc];
-            let at_limit_value: id = msg_send![at_limit_value,
-                initWithBytes: at_limit.as_ptr()
-                length: at_limit.len()
-                encoding: NS_UTF8_STRING_ENCODING
-            ];
-            let over_limit_value: id = msg_send![class!(NSString), alloc];
-            let over_limit_value: id = msg_send![over_limit_value,
-                initWithBytes: over_limit.as_ptr()
-                length: over_limit.len()
-                encoding: NS_UTF8_STRING_ENCODING
-            ];
-
+    #[gpui::test]
+    fn nsstring_decode_enforces_the_paste_limit_before_copying(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            let at_limit = NSString::from_str(&"x".repeat(MAX_PASTE_BYTES));
+            let over_limit = NSString::from_str(&"x".repeat(MAX_PASTE_BYTES + 1));
             assert_eq!(
-                read_nsstring_text(at_limit_value).map(|text| text.len()),
+                read_nsstring_text(&at_limit).map(|text| text.len()),
                 Some(MAX_PASTE_BYTES)
             );
-            assert_eq!(read_nsstring_text(over_limit_value), None);
-
-            let _: () = msg_send![at_limit_value, release];
-            let _: () = msg_send![over_limit_value, release];
-            pool.drain();
-        }
+            assert_eq!(read_nsstring_text(&over_limit), None);
+        });
     }
 
-    #[test]
-    fn nsstring_decode_rejects_embedded_nul_without_truncation() {
-        // SAFETY: The NSString owns a synchronous copy of these bytes and is released below.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let bytes = b"before\0after";
-            let value: id = msg_send![class!(NSString), alloc];
-            let value: id = msg_send![value,
-                initWithBytes: bytes.as_ptr()
-                length: bytes.len()
-                encoding: NS_UTF8_STRING_ENCODING
-            ];
-
-            assert_eq!(read_nsstring_text(value), None);
-
-            let _: () = msg_send![value, release];
-            pool.drain();
-        }
+    #[gpui::test]
+    fn nsstring_decode_rejects_embedded_nul_without_truncation(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            let value = NSString::from_str("before\0after");
+            assert_eq!(read_nsstring_text(&value), None);
+        });
     }
 
-    #[test]
-    fn nsstring_decode_rejects_nonempty_failed_utf8_conversion() {
-        // SAFETY: This intentionally malformed UTF-16 NSString is owned and released entirely by
-        // the synchronous test. A lone high surrogate cannot be converted losslessly to UTF-8.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
+    #[gpui::test]
+    fn nsstring_decode_rejects_nonempty_failed_utf8_conversion(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
             let invalid_utf16 = [0xd800u16];
-            let value: id = msg_send![class!(NSString), alloc];
-            let value: id = msg_send![value,
-                initWithCharacters: invalid_utf16.as_ptr()
-                length: invalid_utf16.len()
-            ];
-
-            assert_eq!(read_nsstring_text(value), None);
-
-            let _: () = msg_send![value, release];
-            pool.drain();
-        }
+            // SAFETY: The pointer names one live UTF-16 code unit for this initializer.
+            let value = unsafe {
+                NSString::initWithCharacters_length(
+                    NSString::alloc(),
+                    std::ptr::NonNull::from(&invalid_utf16[0]),
+                    invalid_utf16.len(),
+                )
+            };
+            assert_eq!(read_nsstring_text(&value), None);
+        });
     }
 
-    #[test]
-    fn service_pasteboard_round_trip_uses_only_public_utf8_text() {
-        // SAFETY: This test owns the unique AppKit pasteboard for the synchronous round trip.
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
-
-            assert!(write_service_text(pasteboard, "service text\n"));
-            let text = read_service_text(pasteboard);
-
-            pasteboard.releaseGlobally();
-            pool.drain();
-            assert_eq!(text.as_deref(), Some("service text\n"));
-        }
+    #[gpui::test]
+    fn service_pasteboard_round_trip_uses_only_public_utf8_text(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            let board = IsolatedPasteboard::new();
+            assert!(write_service_text(&board.0, "service text\n"));
+            assert_eq!(
+                read_service_text(&board.0).as_deref(),
+                Some("service text\n")
+            );
+        });
     }
-    // NSResponder objects have no window or application attachment here. Each fixture is confined
-    // to its test thread, and this lock serializes Objective-C class registration and callbacks.
+
     static NATIVE_REQUESTOR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct NativePool(id);
-
-    impl NativePool {
-        fn new() -> Self {
-            // SAFETY: The pool is created and drained on the same synchronous test thread.
-            Self(unsafe { NSAutoreleasePool::new(nil) })
-        }
-    }
-
-    impl Drop for NativePool {
-        fn drop(&mut self) {
-            unsafe { self.0.drain() };
-        }
-    }
-
-    struct NativeObject(std::cell::Cell<id>);
+    struct NativeObject(Cell<*mut AnyObject>);
 
     impl NativeObject {
         fn requestor(endpoint: Rc<dyn ServiceEndpoint>) -> Rc<Self> {
-            // SAFETY: This constructs the registered production responder with the same owned
-            // ivar representation as install, without creating an NSView or NSApplication.
-            unsafe {
-                let class = services_responder_class().unwrap();
-                let object: id = msg_send![class, alloc];
-                let object: id = msg_send![object, init];
-                assert_ne!(object, nil);
-                let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
-                (*object).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
-                Rc::new(Self(std::cell::Cell::new(object)))
-            }
+            let mtm = super::super::native_test_marker();
+            let responder = ServicesResponder::new(mtm, Rc::new(ServiceRequests::new(endpoint)));
+            Rc::new(Self(Cell::new(Retained::into_raw(responder).cast())))
         }
 
         fn validate(&self) -> Option<Rc<Self>> {
@@ -542,68 +383,52 @@ mod tests {
         }
 
         fn validate_returning(&self, returns_text: bool) -> Option<Rc<Self>> {
-            let _pool = NativePool::new();
             let object = self.0.get();
-            assert_ne!(object, nil);
-            // SAFETY: The receiver is live at message entry. Tests may destroy it reentrantly
-            // through the endpoint; the production callback must survive that destruction.
-            unsafe {
-                let return_type = if returns_text {
-                    NSPasteboardTypeString
-                } else {
-                    nil
-                };
-                let operation: id = msg_send![object,
-                    validRequestorForSendType: NSPasteboardTypeString
-                    returnType: return_type
-                ];
-                if operation == nil {
-                    return None;
+            assert!(!object.is_null());
+            // SAFETY: AppKit exports this immutable modern string pasteboard type.
+            let modern = unsafe { NSPasteboardTypeString };
+            let return_type = returns_text.then_some(modern);
+            let operation: Option<Retained<AnyObject>> = autoreleasepool(|_| {
+                // SAFETY: The live requestor implements this selector and owns its state through entry.
+                unsafe {
+                    msg_send![object, validRequestorForSendType: modern, returnType: return_type]
                 }
-                let operation: id = msg_send![operation, retain];
-                Some(Rc::new(Self(std::cell::Cell::new(operation))))
-            }
+            });
+            operation.map(|operation| Rc::new(Self(Cell::new(Retained::into_raw(operation)))))
         }
 
-        fn write(&self, pasteboard: id) -> bool {
+        fn write(&self, pasteboard: &NSPasteboard) -> bool {
             let object = self.0.get();
-            assert_ne!(object, nil);
-            // SAFETY: These are the registered production selector and an owned NSPasteboard.
-            unsafe {
-                let types = NSArray::arrayWithObject(nil, NSPasteboardTypeString);
-                let result: BOOL =
-                    msg_send![object, writeSelectionToPasteboard: pasteboard types: types];
-                result == YES
-            }
+            assert!(!object.is_null());
+            // SAFETY: AppKit exports this immutable modern string pasteboard type.
+            let modern = unsafe { NSPasteboardTypeString };
+            let types = NSArray::from_slice(&[modern]);
+            // SAFETY: The live operation implements this selector, and both arguments remain live.
+            unsafe { msg_send![object, writeSelectionToPasteboard: pasteboard, types: &*types] }
         }
 
-        fn read(&self, pasteboard: id) -> bool {
+        fn read(&self, pasteboard: &NSPasteboard) -> bool {
             let object = self.0.get();
-            assert_ne!(object, nil);
-            // SAFETY: The receiver is live at entry and the isolated pasteboard remains owned.
-            let result: BOOL =
-                unsafe { msg_send![object, readSelectionFromPasteboard: pasteboard] };
-            result == YES
+            assert!(!object.is_null());
+            // SAFETY: The live operation implements this selector and the pasteboard remains live.
+            unsafe { msg_send![object, readSelectionFromPasteboard: pasteboard] }
         }
 
         fn release(&self) {
-            let object = self.0.replace(nil);
-            if object != nil {
-                // SAFETY: This consumes only the fixture's owned retain under normal Cocoa rules.
-                let _: () = unsafe { msg_send![object, release] };
+            let object = self.0.replace(std::ptr::null_mut());
+            if !object.is_null() {
+                // SAFETY: This pointer came from Retained::into_raw and this fixture owns it once.
+                drop(unsafe { Retained::from_raw(object) });
             }
         }
 
         fn deallocate(&self) {
-            let object = self.0.replace(nil);
-            assert_ne!(object, nil);
-            // SAFETY: The fixture owns the sole retain and is unattached to an NSView. AppKit's
-            // final-release scheduling does not run synchronously on the Rust harness thread.
-            // Deliberately dispatch the actual production dealloc selector here to probe
-            // reentrant callback ownership and superclass teardown. The cleared cell prevents
-            // a second release. This is no claim about native window removal or release timing.
+            let object = self.0.replace(std::ptr::null_mut());
+            assert!(!object.is_null());
+            // SAFETY: The unattached fixture owns the sole retain. Direct dealloc exercises
+            // reentrant callback retirement on this AppKit thread; the cleared cell prevents reuse.
             unsafe {
-                let count: NSUInteger = msg_send![object, retainCount];
+                let count: usize = msg_send![object, retainCount];
                 assert_eq!(count, 1);
                 let _: () = msg_send![object, dealloc];
             }
@@ -616,30 +441,42 @@ mod tests {
         }
     }
 
-    struct IsolatedPasteboard(id);
+    fn services_state(object: *mut AnyObject) -> Option<Rc<ServiceRequests>> {
+        // SAFETY: The fixture retains this responder until it clears its cell.
+        unsafe { object.as_ref() }?
+            .downcast_ref::<ServicesResponder>()
+            .map(|responder| Rc::clone(&responder.ivars().state))
+    }
+
+    fn services_operation_state(object: *mut AnyObject) -> Option<Rc<ServiceOperation>> {
+        // SAFETY: The fixture retains this responder until it clears its cell.
+        unsafe { object.as_ref() }?
+            .downcast_ref::<ServicesOperationResponder>()
+            .map(|responder| Rc::clone(&responder.ivars().state))
+    }
+
+    struct IsolatedPasteboard(Retained<NSPasteboard>);
 
     impl IsolatedPasteboard {
         fn new() -> Self {
-            // SAFETY: The test's outer pool retains the unique pasteboard through every callback.
-            Self(unsafe { NSPasteboard::pasteboardWithUniqueName(nil) })
+            Self(NSPasteboard::pasteboardWithUniqueName())
         }
 
         fn set_text(&self, text: &str) {
-            assert!(unsafe { write_service_text(self.0, text) });
+            assert!(write_service_text(&self.0, text));
         }
 
         fn text(&self) -> Option<String> {
-            unsafe { read_service_text(self.0) }
+            read_service_text(&self.0)
         }
     }
 
     impl Drop for IsolatedPasteboard {
         fn drop(&mut self) {
             // SAFETY: This fixture exclusively owns its named server-side pasteboard.
-            unsafe { self.0.releaseGlobally() };
+            let _: () = unsafe { msg_send![&*self.0, releaseGlobally] };
         }
     }
-
     type NativeCallback = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 
     struct NativeEndpoint {
@@ -712,251 +549,275 @@ mod tests {
         )
     }
 
-    #[test]
-    fn native_selectors_publish_selection_and_accept_exactly_one_return() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected 日本語");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let operation = requestor.validate().unwrap();
-        let board = IsolatedPasteboard::new();
+    #[gpui::test]
+    fn native_selectors_publish_selection_and_accept_exactly_one_return(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected 日本語");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let operation = requestor.validate().unwrap();
+            let board = IsolatedPasteboard::new();
 
-        assert!(operation.write(board.0));
-        assert_eq!(board.text().as_deref(), Some("selected 日本語"));
-        assert!(!operation.write(board.0));
-        board.set_text("transformed text");
-        assert!(operation.read(board.0));
-        assert!(!operation.read(board.0));
-        assert_eq!(
-            *endpoint.inserted.borrow(),
-            vec![(native_origin(1), "transformed text".into())]
-        );
-    }
-
-    #[test]
-    fn native_selectors_reject_stale_validation_and_stale_return() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("successor selection");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let stale = requestor.validate().unwrap();
-        let board = IsolatedPasteboard::new();
-        board.set_text("untouched");
-        endpoint.origin.set(native_origin(2));
-        assert!(!stale.write(board.0));
-        assert_eq!(board.text().as_deref(), Some("untouched"));
-
-        let current = requestor.validate().unwrap();
-        assert!(current.write(board.0));
-        board.set_text("stale return");
-        endpoint.origin.set(native_origin(3));
-        assert!(!current.read(board.0));
-        endpoint.origin.set(native_origin(2));
-        assert!(!current.read(board.0));
-        assert!(endpoint.inserted.borrow().is_empty());
-    }
-
-    #[test]
-    fn native_requestors_keep_overlapping_window_equivalent_owners_isolated() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let first = NativeEndpoint::new("first selection");
-        let second = NativeEndpoint::new("second selection");
-        let first_requestor = NativeObject::requestor(first.clone());
-        let second_requestor = NativeObject::requestor(second.clone());
-        let first_operation = first_requestor.validate().unwrap();
-        let overlap = first_requestor.validate().unwrap();
-        let second_operation = second_requestor.validate().unwrap();
-        let first_board = IsolatedPasteboard::new();
-        let second_board = IsolatedPasteboard::new();
-
-        assert!(first_operation.write(first_board.0));
-        assert!(!overlap.write(first_board.0));
-        assert!(second_operation.write(second_board.0));
-        assert!(!first_operation.read(second_board.0));
-        assert!(!second_operation.read(first_board.0));
-        first_requestor.deallocate();
-        assert!(!first_operation.read(first_board.0));
-        second_board.set_text("second return");
-        assert!(second_operation.read(second_board.0));
-        assert!(first.inserted.borrow().is_empty());
-        assert_eq!(
-            *second.inserted.borrow(),
-            vec![(native_origin(1), "second return".into())]
-        );
-    }
-
-    #[test]
-    fn native_validation_survives_requestor_deallocation_inside_status() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let state = unsafe { services_state(&*requestor.0.get()) }.unwrap();
-        let weak_state = Rc::downgrade(&state);
-        drop(state);
-        let callback_requestor = Rc::clone(&requestor);
-        let observed_state = weak_state.clone();
-        let observed_retirement = Rc::new(std::cell::Cell::new(false));
-        let callback_observation = Rc::clone(&observed_retirement);
-        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
-            callback_requestor.deallocate();
-            callback_observation.set(
-                observed_state
-                    .upgrade()
-                    .is_some_and(|state| state.is_retired()),
-            );
-        }));
-
-        assert!(requestor.validate().is_none());
-        assert!(observed_retirement.get());
-        assert!(weak_state.upgrade().is_none());
-        let successor = NativeObject::requestor(endpoint);
-        assert!(successor.validate().is_some());
-    }
-
-    #[test]
-    fn native_selection_survives_operation_and_owner_deallocation_without_publishing() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let operation = requestor.validate().unwrap();
-        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
-        let weak_state = Rc::downgrade(&state);
-        drop(state);
-        let callback_requestor = Rc::clone(&requestor);
-        let callback_operation = Rc::clone(&operation);
-        let observed_state = weak_state.clone();
-        let observed_retention = Rc::new(std::cell::Cell::new(false));
-        let callback_observation = Rc::clone(&observed_retention);
-        *endpoint.on_selection.borrow_mut() = Some(Box::new(move || {
-            callback_operation.deallocate();
-            callback_requestor.deallocate();
-            callback_observation.set(observed_state.upgrade().is_some());
-        }));
-        let board = IsolatedPasteboard::new();
-        board.set_text("untouched");
-
-        assert!(!operation.write(board.0));
-        assert!(observed_retention.get());
-        assert_eq!(board.text().as_deref(), Some("untouched"));
-        assert!(weak_state.upgrade().is_none());
-        let successor = NativeObject::requestor(endpoint.clone());
-        assert!(successor.validate().unwrap().write(board.0));
-        assert!(endpoint.inserted.borrow().is_empty());
-    }
-
-    #[test]
-    fn native_return_survives_operation_and_owner_deallocation_inside_status() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let operation = requestor.validate().unwrap();
-        let board = IsolatedPasteboard::new();
-        assert!(operation.write(board.0));
-        board.set_text("returned after retirement");
-        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
-        let weak_state = Rc::downgrade(&state);
-        drop(state);
-        let callback_requestor = Rc::clone(&requestor);
-        let callback_operation = Rc::clone(&operation);
-        let observed_state = weak_state.clone();
-        let observed_retention = Rc::new(std::cell::Cell::new(false));
-        let callback_observation = Rc::clone(&observed_retention);
-        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
-            callback_operation.deallocate();
-            callback_requestor.deallocate();
-            callback_observation.set(observed_state.upgrade().is_some());
-        }));
-
-        assert!(!operation.read(board.0));
-        assert!(observed_retention.get());
-        assert!(weak_state.upgrade().is_none());
-        assert!(endpoint.inserted.borrow().is_empty());
-        let successor = NativeObject::requestor(endpoint);
-        assert!(successor.validate().unwrap().write(board.0));
-    }
-
-    #[test]
-    fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        let operation = requestor.validate().unwrap();
-        let board = IsolatedPasteboard::new();
-        assert!(operation.write(board.0));
-        board.set_text("accepted return");
-        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
-        let weak_state = Rc::downgrade(&state);
-        drop(state);
-        let callback_operation = Rc::clone(&operation);
-        let observed_state = weak_state.clone();
-        let observed_retention = Rc::new(std::cell::Cell::new(false));
-        let callback_observation = Rc::clone(&observed_retention);
-        *endpoint.on_insert.borrow_mut() = Some(Box::new(move || {
-            callback_operation.deallocate();
-            callback_observation.set(observed_state.upgrade().is_some());
-        }));
-
-        assert!(operation.read(board.0));
-        assert!(observed_retention.get());
-        assert!(weak_state.upgrade().is_none());
-        assert_eq!(
-            *endpoint.inserted.borrow(),
-            vec![(native_origin(1), "accepted return".into())]
-        );
-        assert!(requestor.validate().unwrap().write(board.0));
-    }
-
-    #[test]
-    fn native_modern_validation_accepts_legacy_only_write_types_once() {
-        let _serial = NATIVE_REQUESTOR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _pool = NativePool::new();
-        let endpoint = NativeEndpoint::new("selected 日本語");
-        let requestor = NativeObject::requestor(endpoint.clone());
-        // Stickies is a send-only service: validation supplies modern text and no return type.
-        let operation = requestor.validate_returning(false).unwrap();
-        let board = IsolatedPasteboard::new();
-        let object = operation.0.get();
-
-        // SAFETY: The real registered operation responder and isolated pasteboard are retained
-        // throughout these selector calls. This reproduces AppKit's legacy-only write array.
-        unsafe {
-            let types = NSArray::arrayWithObject(nil, NSStringPboardType);
-            let contains_modern: BOOL = msg_send![types, containsObject: NSPasteboardTypeString];
-            assert_eq!(contains_modern, NO);
-            let wrote: BOOL = msg_send![object, writeSelectionToPasteboard: board.0 types: types];
-            assert_eq!(wrote, YES);
+            assert!(operation.write(&board.0));
             assert_eq!(board.text().as_deref(), Some("selected 日本語"));
-            let legacy_text: id = msg_send![board.0, stringForType: NSStringPboardType];
+            assert!(!operation.write(&board.0));
+            board.set_text("transformed text");
+            assert!(operation.read(&board.0));
+            assert!(!operation.read(&board.0));
             assert_eq!(
-                read_nsstring_text(legacy_text).as_deref(),
-                Some("selected 日本語")
+                *endpoint.inserted.borrow(),
+                vec![(native_origin(1), "transformed text".into())]
             );
-            let repeated: BOOL =
-                msg_send![object, writeSelectionToPasteboard: board.0 types: types];
-            assert_eq!(repeated, NO);
-        }
-        assert!(!operation.read(board.0));
-        assert!(endpoint.inserted.borrow().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn native_selectors_reject_stale_validation_and_stale_return(cx: &mut gpui::TestAppContext) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("successor selection");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let stale = requestor.validate().unwrap();
+            let board = IsolatedPasteboard::new();
+            board.set_text("untouched");
+            endpoint.origin.set(native_origin(2));
+            assert!(!stale.write(&board.0));
+            assert_eq!(board.text().as_deref(), Some("untouched"));
+
+            let current = requestor.validate().unwrap();
+            assert!(current.write(&board.0));
+            board.set_text("stale return");
+            endpoint.origin.set(native_origin(3));
+            assert!(!current.read(&board.0));
+            endpoint.origin.set(native_origin(2));
+            assert!(!current.read(&board.0));
+            assert!(endpoint.inserted.borrow().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn native_requestors_keep_overlapping_window_equivalent_owners_isolated(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let first = NativeEndpoint::new("first selection");
+            let second = NativeEndpoint::new("second selection");
+            let first_requestor = NativeObject::requestor(first.clone());
+            let second_requestor = NativeObject::requestor(second.clone());
+            let first_operation = first_requestor.validate().unwrap();
+            let overlap = first_requestor.validate().unwrap();
+            let second_operation = second_requestor.validate().unwrap();
+            let first_board = IsolatedPasteboard::new();
+            let second_board = IsolatedPasteboard::new();
+
+            assert!(first_operation.write(&first_board.0));
+            assert!(!overlap.write(&first_board.0));
+            assert!(second_operation.write(&second_board.0));
+            assert!(!first_operation.read(&second_board.0));
+            assert!(!second_operation.read(&first_board.0));
+            first_requestor.deallocate();
+            assert!(!first_operation.read(&first_board.0));
+            second_board.set_text("second return");
+            assert!(second_operation.read(&second_board.0));
+            assert!(first.inserted.borrow().is_empty());
+            assert_eq!(
+                *second.inserted.borrow(),
+                vec![(native_origin(1), "second return".into())]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn native_validation_survives_requestor_deallocation_inside_status(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let state = services_state(requestor.0.get()).unwrap();
+            let weak_state = Rc::downgrade(&state);
+            drop(state);
+            let callback_requestor = Rc::clone(&requestor);
+            let observed_state = weak_state.clone();
+            let observed_retirement = Rc::new(std::cell::Cell::new(false));
+            let callback_observation = Rc::clone(&observed_retirement);
+            *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+                callback_requestor.deallocate();
+                callback_observation.set(
+                    observed_state
+                        .upgrade()
+                        .is_some_and(|state| state.is_retired()),
+                );
+            }));
+
+            assert!(requestor.validate().is_none());
+            assert!(observed_retirement.get());
+            assert!(weak_state.upgrade().is_none());
+            let successor = NativeObject::requestor(endpoint);
+            assert!(successor.validate().is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn native_selection_survives_operation_and_owner_deallocation_without_publishing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let operation = requestor.validate().unwrap();
+            let state = services_operation_state(operation.0.get()).unwrap();
+            let weak_state = Rc::downgrade(&state);
+            drop(state);
+            let callback_requestor = Rc::clone(&requestor);
+            let callback_operation = Rc::clone(&operation);
+            let observed_state = weak_state.clone();
+            let observed_retention = Rc::new(std::cell::Cell::new(false));
+            let callback_observation = Rc::clone(&observed_retention);
+            *endpoint.on_selection.borrow_mut() = Some(Box::new(move || {
+                callback_operation.deallocate();
+                callback_requestor.deallocate();
+                callback_observation.set(observed_state.upgrade().is_some());
+            }));
+            let board = IsolatedPasteboard::new();
+            board.set_text("untouched");
+
+            assert!(!operation.write(&board.0));
+            assert!(observed_retention.get());
+            assert_eq!(board.text().as_deref(), Some("untouched"));
+            assert!(weak_state.upgrade().is_none());
+            let successor = NativeObject::requestor(endpoint.clone());
+            assert!(successor.validate().unwrap().write(&board.0));
+            assert!(endpoint.inserted.borrow().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn native_return_survives_operation_and_owner_deallocation_inside_status(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let operation = requestor.validate().unwrap();
+            let board = IsolatedPasteboard::new();
+            assert!(operation.write(&board.0));
+            board.set_text("returned after retirement");
+            let state = services_operation_state(operation.0.get()).unwrap();
+            let weak_state = Rc::downgrade(&state);
+            drop(state);
+            let callback_requestor = Rc::clone(&requestor);
+            let callback_operation = Rc::clone(&operation);
+            let observed_state = weak_state.clone();
+            let observed_retention = Rc::new(std::cell::Cell::new(false));
+            let callback_observation = Rc::clone(&observed_retention);
+            *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+                callback_operation.deallocate();
+                callback_requestor.deallocate();
+                callback_observation.set(observed_state.upgrade().is_some());
+            }));
+
+            assert!(!operation.read(&board.0));
+            assert!(observed_retention.get());
+            assert!(weak_state.upgrade().is_none());
+            assert!(endpoint.inserted.borrow().is_empty());
+            let successor = NativeObject::requestor(endpoint);
+            assert!(successor.validate().unwrap().write(&board.0));
+        });
+    }
+
+    #[gpui::test]
+    fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            let operation = requestor.validate().unwrap();
+            let board = IsolatedPasteboard::new();
+            assert!(operation.write(&board.0));
+            board.set_text("accepted return");
+            let state = services_operation_state(operation.0.get()).unwrap();
+            let weak_state = Rc::downgrade(&state);
+            drop(state);
+            let callback_operation = Rc::clone(&operation);
+            let observed_state = weak_state.clone();
+            let observed_retention = Rc::new(std::cell::Cell::new(false));
+            let callback_observation = Rc::clone(&observed_retention);
+            *endpoint.on_insert.borrow_mut() = Some(Box::new(move || {
+                callback_operation.deallocate();
+                callback_observation.set(observed_state.upgrade().is_some());
+            }));
+
+            assert!(operation.read(&board.0));
+            assert!(observed_retention.get());
+            assert!(weak_state.upgrade().is_none());
+            assert_eq!(
+                *endpoint.inserted.borrow(),
+                vec![(native_origin(1), "accepted return".into())]
+            );
+            assert!(requestor.validate().unwrap().write(&board.0));
+        });
+    }
+
+    #[gpui::test]
+    fn native_modern_validation_accepts_legacy_only_write_types_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let _serial = NATIVE_REQUESTOR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let endpoint = NativeEndpoint::new("selected 日本語");
+            let requestor = NativeObject::requestor(endpoint.clone());
+            // Stickies is a send-only service: validation supplies modern text and no return type.
+            let operation = requestor.validate_returning(false).unwrap();
+            let board = IsolatedPasteboard::new();
+            let object = operation.0.get();
+
+            // SAFETY: The real registered operation responder and isolated pasteboard are retained
+            // throughout these selector calls. This reproduces AppKit's legacy-only write array.
+            unsafe {
+                let legacy = legacy_string_type();
+                let types = NSArray::from_slice(&[&*legacy]);
+                let contains_modern = types.containsObject(NSPasteboardTypeString);
+                assert!(!contains_modern);
+                let wrote: bool =
+                    msg_send![object, writeSelectionToPasteboard: &*board.0, types: &*types];
+                assert!(wrote);
+                assert_eq!(board.text().as_deref(), Some("selected 日本語"));
+                let legacy_text = board.0.stringForType(&legacy).unwrap();
+                assert_eq!(
+                    read_nsstring_text(&legacy_text).as_deref(),
+                    Some("selected 日本語")
+                );
+                let repeated: bool =
+                    msg_send![object, writeSelectionToPasteboard: &*board.0, types: &*types];
+                assert!(!repeated);
+            }
+            assert!(!operation.read(&board.0));
+            assert!(endpoint.inserted.borrow().is_empty());
+        });
     }
 }

@@ -18,8 +18,6 @@ pub(crate) enum ApplicationQuitError {
     DelegateUnavailable,
     #[error("the native application delegate already owns termination policy")]
     DelegateConflict,
-    #[error("the application quit handler could not be retained")]
-    HandlerUnavailable,
 }
 
 #[derive(Clone)]

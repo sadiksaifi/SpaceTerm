@@ -8,10 +8,6 @@ pub(crate) enum ServicesRegistrationError {
     ApplicationUnavailable,
     #[error("the GPUI window did not expose a native view")]
     NativeViewUnavailable,
-    #[error("the SpaceTerm Services responder class could not be registered")]
-    ResponderClassUnavailable,
-    #[error("the SpaceTerm Services responder could not be allocated")]
-    ResponderAllocationFailed,
 }
 
 pub(crate) trait ServicesRegistration {
