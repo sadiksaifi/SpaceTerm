@@ -1400,9 +1400,9 @@ fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
 
 /// A reusable entity-backed command palette with typed semantic items.
 ///
-/// Its [`TextInput`] supplies native editable-text semantics. GPUI 0.2.2 cannot yet publish
-/// listbox and option roles for ordinary elements, so the API requires logical row labels and
-/// keeps arbitrary row painting outside the accessibility seam.
+/// Its [`TextInput`] supplies native editable-text semantics. The API requires logical row labels
+/// and keeps arbitrary row painting outside the accessibility seam. Result rows do not yet publish
+/// listbox and option nodes to the native accessibility tree.
 pub struct CommandPalette<I: Clone + Eq + 'static> {
     no_results_text: SharedString,
     items: Rc<[CommandPaletteItem<I>]>,

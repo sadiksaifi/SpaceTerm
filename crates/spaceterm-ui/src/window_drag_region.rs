@@ -155,9 +155,8 @@ type WindowDragHandler =
 /// threshold is measured in GPUI logical coordinates and defaults to a bounded compact-desktop
 /// value of four logical pixels.
 ///
-/// A logical accessibility name is mandatory. GPUI 0.2.2 cannot yet publish a custom drag-region
-/// role to the native accessibility tree, but retaining the name in the public interface keeps the
-/// semantic contract explicit and provides the default debug selector.
+/// A logical accessibility name is mandatory. It provides the default debug selector and keeps
+/// the control named for a future native accessibility node.
 #[derive(IntoElement)]
 pub struct WindowDragRegion {
     id: ElementId,

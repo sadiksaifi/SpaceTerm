@@ -311,9 +311,8 @@ type ResizeHandler = Rc<dyn Fn(&ResizeHandleEvent, &mut Window, &mut App)>;
 /// [`ResizeHandleEvent::ResizeRequested`] is advisory: callers apply policy and feed their
 /// authoritative value back on the next render. Caller clamping never rebases an active drag.
 ///
-/// A logical accessibility name is mandatory. GPUI 0.2.2 cannot yet publish a custom separator
-/// role and value to the native accessibility tree, but retaining these semantics in the public
-/// interface keeps handles named and makes the framework seam explicit.
+/// A logical accessibility name is mandatory. The control retains its axis, value, and range for
+/// callers. It does not yet publish a separator node to the native accessibility tree.
 #[derive(IntoElement)]
 pub struct ResizeHandle {
     #[cfg(feature = "appearance-exerciser")]

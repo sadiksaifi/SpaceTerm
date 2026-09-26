@@ -431,9 +431,7 @@ impl Global for ToggleTheme {}
 
 /// A labeled checkbox with controlled two-state or derived mixed-state semantics.
 ///
-/// The visible label is also retained as the logical accessibility name. GPUI 0.2.2 cannot yet
-/// publish custom checkbox roles and checked state to the native accessibility tree, so callers do
-/// not need to retrofit a different public interface when that framework seam becomes available.
+/// The visible label is retained as the logical accessibility name alongside the controlled state.
 #[derive(IntoElement)]
 pub struct Checkbox {
     core: ToggleCore,
@@ -547,8 +545,7 @@ impl RenderOnce for Checkbox {
 /// A labeled binary switch whose requested changes are intended to take effect immediately.
 ///
 /// A switch never accepts a mixed value and its visible label remains stable across state changes.
-/// GPUI 0.2.2 cannot yet publish a custom switch role and checked state to the native
-/// accessibility tree; the mandatory logical label and typed value preserve that semantic seam.
+/// The mandatory logical label and typed value preserve its accessibility semantics for callers.
 #[derive(IntoElement)]
 pub struct Switch {
     core: ToggleCore,

@@ -55,18 +55,14 @@
 //! Programmatic-only mode requires a nonzero deadline no longer than the installed desktop
 //! policy's private bound, and expiry produces a typed terminal outcome.
 //!
-//! # GPUI 0.2.2 accessibility audit
+//! # Accessibility status
 //!
-//! Pinned GPUI 0.2.2 has no general native accessibility-node API for custom GPUI elements. These
-//! controls therefore cannot publish native Alert, Dialog, or progress roles; accessible
-//! title-description relationships; default, Cancel, enabled, or destructive action state; modal
-//! state; progress values or indeterminate state; live status announcements; accessibility focus;
-//! or exclusion of an arbitrary underlay from native accessibility traversal. The implementation
-//! preserves those facts in private logical semantic snapshots and exposes stable debug selectors
-//! for automated behavior tests, but neither is native accessibility evidence. This module makes
-//! no VoiceOver, Narrator, or Orca conformance claim. Accessibility-sensitive production workflows
-//! must remain on native system prompts until native accessibility-tree support exists and is
-//! verified. SpaceTerm's existing `Window::prompt` call sites intentionally remain native.
+//! These controls do not yet publish native Alert, Dialog, or progress nodes, associated action
+//! state, progress values, live announcements, or modal underlay exclusion. Private logical
+//! semantic snapshots and stable debug selectors support behavior tests, but provide no native
+//! accessibility evidence. This module makes no VoiceOver, Narrator, or Orca conformance claim.
+//! Accessibility-sensitive production workflows remain on native system prompts. SpaceTerm's
+//! existing `Window::prompt` call sites remain native.
 //!
 //! # Example
 //!

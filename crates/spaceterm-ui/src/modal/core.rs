@@ -602,7 +602,7 @@ enum LogicalFocusEntry {
 }
 
 #[cfg(test)]
-/// Logical facts retained because GPUI 0.2.2 cannot publish them as native accessibility nodes.
+/// Logical facts retained for deterministic modal behavior tests.
 ///
 /// This private value and the renderer's debug selectors support deterministic tests only. They
 /// are not VoiceOver, Narrator, Orca, or native accessibility-tree evidence.

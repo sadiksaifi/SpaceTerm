@@ -2,9 +2,8 @@
 //!
 //! The Module owns provisional navigation and popup lifecycle. Callers own the committed value and
 //! receive acceptance only after the popup has closed. [`TextInput`] owns editing, clipboard,
-//! grapheme, and input-method behavior. GPUI 0.2.2 does not expose listbox roles or active-option
-//! relationships for ordinary elements, so this Module retains those facts without claiming native
-//! assistive-technology publication.
+//! grapheme, and input-method behavior. This control retains selection and active-option facts for
+//! its own behavior. It does not yet publish listbox nodes to the native accessibility tree.
 
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 

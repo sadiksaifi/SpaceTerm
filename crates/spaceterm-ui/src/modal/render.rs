@@ -88,9 +88,9 @@ pub(super) fn init(cx: &mut App) {
 /// dismissal or click-through. The modal key context blocks underlay keyboard routing while the
 /// leading and trailing sentinels contain the complete current-frame GPUI tab-stop order.
 ///
-/// GPUI 0.2.2 does not let this custom layer exclude the underlay from the native accessibility
-/// tree. Private logical semantic snapshots and debug selectors test retained facts and observable
-/// modality, but are not native accessibility evidence.
+/// This layer does not yet exclude the underlay from native accessibility traversal. Private
+/// logical semantic snapshots and debug selectors test retained facts and observable modality;
+/// they provide no native accessibility evidence.
 #[derive(IntoElement)]
 pub struct ModalLayer {
     content: AnyElement,

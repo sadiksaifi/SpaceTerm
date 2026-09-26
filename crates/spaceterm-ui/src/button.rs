@@ -1049,9 +1049,8 @@ impl RenderOnce for Button {
 
 /// A reusable icon-only action button.
 ///
-/// The logical accessibility name is mandatory even though GPUI 0.2.2 cannot yet publish custom
-/// element roles and names to the native accessibility tree. Keeping the name in this interface
-/// prevents unnamed icon controls and provides the semantic input for that framework seam.
+/// The logical accessibility name is mandatory for this icon-only control. It prevents unnamed
+/// actions and remains available when the control publishes a native accessibility node.
 #[derive(IntoElement)]
 pub struct IconButton {
     core: ButtonCore,
