@@ -64,8 +64,8 @@ sha2 = "0.10"
 anyhow = "1.0.100"
 async-channel = "2.5.0"
 getrandom = "=0.4.3"
-gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26" }
-gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["font-kit"] }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26.1" }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26.1", features = ["font-kit"] }
 image = { version = "=0.25.10", default-features = false }
 libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
@@ -91,8 +91,8 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["test-support"] }
-gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26", features = ["font-kit", "test-support"] }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26.1", features = ["test-support"] }
+gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26.1", features = ["font-kit", "test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
 
 [lints.rust]

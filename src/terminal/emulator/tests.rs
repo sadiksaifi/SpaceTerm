@@ -71,7 +71,7 @@ fn terminal_find_matches_across_soft_wraps() {
 fn snapshot_preserves_full_graphemes_and_empty_cells() {
     let mut emulator = emulator(12, 2);
     let cluster = format!("e{}", "\u{301}".repeat(20));
-    emulator.feed(format!("A{cluster}界😀").as_bytes());
+    emulator.feed(format!("A\u{30d}{cluster}界😀").as_bytes());
     let screen = emulator.snapshot().unwrap().unwrap();
 
     assert_eq!(
@@ -80,7 +80,7 @@ fn snapshot_preserves_full_graphemes_and_empty_cells() {
             .map(|cell| cell.text.as_str())
             .collect::<Vec<_>>(),
         [
-            "A",
+            "A\u{30d}",
             cluster.as_str(),
             "界",
             " ",
