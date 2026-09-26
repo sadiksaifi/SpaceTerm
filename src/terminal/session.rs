@@ -1218,15 +1218,16 @@ impl TerminalWorker {
                 let Some(geometry) = self.schedules.take_resize() else {
                     return true;
                 };
-                let result = self
-                    .native_pty
-                    .resize(pty_size(geometry))
-                    .map_err(|error| format!("failed to resize the native PTY: {error}"))
-                    .and_then(|()| {
-                        self.emulator
-                            .resize(geometry)
-                            .map_err(|error| format!("failed to resize terminal state: {error}"))
-                    });
+                let size = pty_size(geometry);
+                let winsize_changed = size != pty_size(self.emulator.geometry());
+                let result = (|| {
+                    self.native_pty
+                        .resize(size)
+                        .map_err(|error| format!("failed to resize the native PTY: {error}"))?;
+                    self.emulator
+                        .resize_for_pty(geometry, winsize_changed)
+                        .map_err(|error| format!("failed to resize terminal state: {error}"))
+                })();
 
                 match result {
                     Ok(()) => {

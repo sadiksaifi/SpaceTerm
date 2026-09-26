@@ -2696,6 +2696,31 @@ fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
 }
 
 #[test]
+fn unchanged_pty_winsize_does_not_clear_the_idle_prompt() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    reader_steps
+        .send(ReaderStep::Bytes(
+            b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07".to_vec(),
+        ))
+        .unwrap();
+    let before = receive_event(&events, "the idle prompt", |event| {
+        matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("QA_RESIZE_MARKER") && screen_text(screen).contains("> "))
+    });
+    let SessionEvent::Screen(before) = before else {
+        unreachable!()
+    };
+
+    session.resize(test_geometry());
+    assert!(session.copy_selection().is_ok());
+    assert_eq!(records.snapshot().resizes, vec![pty_size(test_geometry())]);
+    assert!(events.try_recv().is_err());
+    assert!(screen_text(&before).contains("~"));
+
+    session.shutdown();
+}
+
+#[test]
 fn fractional_backing_geometry_should_export_the_engine_pixel_grid_to_the_pty() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, _events, _accessibility) = result.unwrap();

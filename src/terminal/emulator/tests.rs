@@ -1900,6 +1900,48 @@ fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
 }
 
 #[test]
+fn same_grid_resize_without_winsize_change_keeps_idle_prompt_without_shell_output() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07");
+    let before = all_limited_terminal_rows(&emulator.terminal, 20);
+    assert_eq!(
+        before,
+        vec![
+            format!("{:<20}", "QA_RESIZE_MARKER"),
+            format!("{:<20}", "~"),
+            format!("{:<20}", "> "),
+            " ".repeat(20),
+        ]
+    );
+
+    emulator
+        .resize_for_pty(geometry(20, 4, 10.0, 20.0), false)
+        .unwrap();
+
+    assert_eq!(all_limited_terminal_rows(&emulator.terminal, 20), before);
+}
+
+#[test]
+fn same_grid_resize_with_pixel_winsize_change_clears_idle_prompt_without_shell_output() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07");
+
+    emulator
+        .resize_for_pty(geometry(20, 4, 11.0, 20.0), true)
+        .unwrap();
+
+    assert_eq!(
+        all_limited_terminal_rows(&emulator.terminal, 20),
+        vec![
+            format!("{:<20}", "QA_RESIZE_MARKER"),
+            " ".repeat(20),
+            " ".repeat(20),
+            " ".repeat(20),
+        ]
+    );
+}
+
+#[test]
 fn redundant_same_grid_resizes_keep_two_row_prompt_at_history_limit() {
     let prompt = "~\r\n> ";
     let mut terminal = limited_prompt_terminal(507, prompt);
