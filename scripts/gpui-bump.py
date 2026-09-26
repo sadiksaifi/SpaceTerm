@@ -140,27 +140,34 @@ def workspace_manifests(root: Path) -> tuple[str, ...]:
 
 
 def require_clean_inputs(root: Path, files: tuple[str, ...]) -> None:
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--", *files],
-            cwd=root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError as error:
-        raise BumpError(Failure.GIT_CHECK_FAILED) from error
-    if result.returncode == 1:
-        raise BumpError(Failure.DIRTY_INPUTS)
-    if result.returncode != 0:
-        raise BumpError(Failure.GIT_CHECK_FAILED)
+    # Compare the index with HEAD and the working tree with the index. A single
+    # comparison against HEAD misses a staged change that the working copy reverses.
+    for command in (
+        ["git", "diff", "--quiet", "--cached", "HEAD", "--", *files],
+        ["git", "diff", "--quiet", "--", *files],
+    ):
+        try:
+            result = subprocess.run(
+                command,
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError as error:
+            raise BumpError(Failure.GIT_CHECK_FAILED) from error
+        if result.returncode == 1:
+            raise BumpError(Failure.DIRTY_INPUTS)
+        if result.returncode != 0:
+            raise BumpError(Failure.GIT_CHECK_FAILED)
 
 
 def restore_from_head(root: Path, files: tuple[str, ...]) -> None:
-    recovery = f"rollback failed; run git restore -- {' '.join(files)}"
+    restore = ("git", "restore", "--source=HEAD", "--staged", "--worktree", "--", *files)
+    recovery = f"rollback failed; run {' '.join(restore)}"
     try:
         result = subprocess.run(
-            ["git", "restore", "--source=HEAD", "--", *files],
+            list(restore),
             cwd=root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

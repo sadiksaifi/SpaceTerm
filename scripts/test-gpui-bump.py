@@ -168,6 +168,17 @@ class GpuiBumpTests(unittest.TestCase):
         self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
         self.assertEqual(self.remote.queries, [])
 
+    def test_staged_change_reversed_in_working_copy_refuses_bump(self):
+        toolchain = self.root / "rust-toolchain.toml"
+        toolchain.write_text(TOOLCHAIN.replace("1.98.1", "1.98.0"))
+        subprocess.run(["git", "add", "rust-toolchain.toml"], cwd=self.root, check=True)
+        toolchain.write_text(TOOLCHAIN)
+        with self.assertRaises(MODULE.BumpError) as raised:
+            self.bump()
+        self.assertEqual(raised.exception.kind, MODULE.Failure.DIRTY_INPUTS)
+        self.assertEqual(toolchain.read_text(), TOOLCHAIN)
+        self.assertEqual(self.remote.queries, [])
+
     def test_member_manifest_change_refuses_bump(self):
         (self.root / MEMBER).write_text(MEMBER_MANIFEST + "\n# local change\n")
         self.assert_failure_preserves_files(MODULE.Failure.DIRTY_INPUTS)
@@ -338,7 +349,7 @@ class GpuiBumpTests(unittest.TestCase):
         restores = []
 
         def fail_restore(command, **kwargs):
-            if command[:3] == ["git", "restore", "--source=HEAD"]:
+            if command[:2] == ["git", "restore"]:
                 restores.append(command)
                 return subprocess.CompletedProcess(command, 1)
             return original_run(command, **kwargs)
@@ -348,7 +359,7 @@ class GpuiBumpTests(unittest.TestCase):
                 self.bump()
         self.assertEqual(raised.exception.kind, MODULE.Failure.RESTORE_FAILED)
         self.assertEqual(len(restores), 1)
-        recovery_command = f"git restore -- {' '.join(FILES)}"
+        recovery_command = f"git restore --source=HEAD --staged --worktree -- {' '.join(FILES)}"
         self.assertIn(recovery_command, str(raised.exception))
         self.assertNotEqual(self.snapshot(), original)
 
@@ -360,7 +371,7 @@ class GpuiBumpTests(unittest.TestCase):
         self.assertNotEqual(exit_result.exception.code, 0)
         self.assertEqual(output.getvalue(), f"gpui:bump: rollback failed; run {recovery_command}\n")
 
-        subprocess.run(["git", "restore", *FILES], cwd=self.root, check=True)
+        subprocess.run(recovery_command.split(), cwd=self.root, check=True)
         self.assertEqual(self.snapshot(), original)
         self.update = successful_update
         self.assertEqual(self.bump().new_tag, NEW_TAG)
