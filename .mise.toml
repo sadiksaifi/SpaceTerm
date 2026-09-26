@@ -90,6 +90,13 @@ python3 scripts/gpui-local.py off
 cargo metadata --format-version 1 > /dev/null
 '''
 
+[tasks."gpui:bump"]
+description = "Bump the pinned GPUI fork tag and matching Rust toolchain"
+usage = '''
+arg "<tag>" help="Published SpaceTerm Zed fork tag"
+'''
+run = 'python3 scripts/gpui-bump.py "${usage_tag?}"'
+
 [tasks."deps:fmt"]
 description = "Format the locally maintained Ghostty integration"
 run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys"
@@ -143,7 +150,10 @@ run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --pack
 
 [tasks."test:scripts"]
 description = "Test shared repository scripts"
-run = "python3 scripts/test-gpui-local.py"
+run = [
+  "python3 scripts/test-gpui-local.py",
+  "python3 scripts/test-gpui-bump.py",
+]
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
@@ -182,7 +192,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py scripts/test-gpui-local.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py
 '''
 
 [tasks."lint:diff"]
