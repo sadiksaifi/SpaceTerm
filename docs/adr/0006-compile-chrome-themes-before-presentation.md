@@ -11,12 +11,12 @@ This makes contradictory Chrome and Terminal modes unrepresentable while preserv
 choices across mode changes and restarts. Resetting the mode does not reset either slot.
 
 The Chrome Theme Compiler owns one ordered dependency program that completes each sparse built-in
-definition. Missing roles derive from same-definition dependencies. Missing success, warning, and
-error use portable semantic seeds adjusted for contrast against the definition's own background, so
-a link accent cannot turn destructive feedback into an informational color. Explicitly authored
-status colors remain exact. Light/Dark selects these fallback seeds, never a parent definition.
-Authoring each built-in sparsely keeps it a small set of intentional decisions whose dependents
-follow when one of them changes.
+definition. A definition authors its surfaces, text, accents, controls, and status colors; the
+program derives the remaining state paints, contrast-adjusted foregrounds, status surfaces, and
+structural roles from those same-definition inputs. Authored status colors remain exact, so a link
+accent cannot turn destructive feedback into an informational color. Authoring each built-in
+sparsely keeps it a small set of intentional decisions whose dependents follow when one of them
+changes.
 
 Actions, persistent selection, static surfaces and statuses have separate meanings even where
 initial colors match. Complete interactive paints own foreground, icon/mark, surface and border.
