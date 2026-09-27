@@ -246,7 +246,15 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Terminal,
         group: "Color scheme",
         label: "Scheme",
-        keywords: &["color", "colour", "palette", "theme", "scheme", "ansi"],
+        keywords: &[
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+        ],
         selector: "settings-row-terminal-scheme",
     },
     SettingsRowDescriptor {
@@ -255,7 +263,14 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         group: "Color scheme",
         label: "Light",
         keywords: &[
-            "color", "colour", "palette", "theme", "scheme", "ansi", "light",
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+            "light",
         ],
         selector: "settings-row-terminal-light-scheme",
     },
@@ -265,7 +280,14 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         group: "Color scheme",
         label: "Dark",
         keywords: &[
-            "color", "colour", "palette", "theme", "scheme", "ansi", "dark",
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+            "dark",
         ],
         selector: "settings-row-terminal-dark-scheme",
     },
@@ -505,6 +527,18 @@ mod tests {
                 SettingsRowId::TerminalLightScheme,
                 SettingsRowId::TerminalDarkScheme,
                 SettingsRowId::TerminalSchemes,
+            ])
+        );
+    }
+
+    #[test]
+    fn color_scheme_search_reaches_terminal_scheme_rows() {
+        assert_eq!(
+            matching_rows("color scheme").into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                SettingsRowId::TerminalScheme,
+                SettingsRowId::TerminalLightScheme,
+                SettingsRowId::TerminalDarkScheme,
             ])
         );
     }
