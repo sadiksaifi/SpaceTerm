@@ -295,7 +295,13 @@ impl SshHostPicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Connect to SSH Host", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new("Filter or create...", Vec::new(), window, cx);
+            palette.set_input_leading_icon(
+                |tint, size| {
+                    Icon::custom(CustomIconName::FilterCircle, size, tint).into_any_element()
+                },
+                cx,
+            );
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette

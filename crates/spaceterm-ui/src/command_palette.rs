@@ -570,7 +570,7 @@ pub enum CommandPaletteAccessory {
     Checkmark,
 }
 
-type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
+type IconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
 type ActionIconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 
 /// One control rendered at the trailing edge of the command-palette search line.
@@ -744,7 +744,7 @@ pub struct CommandPaletteItem<I> {
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
     disabled: bool,
-    leading_icon: Option<RowIconBuilder>,
+    leading_icon: Option<IconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
 }
@@ -1422,6 +1422,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     matches: Rc<[CommandPaletteMatch]>,
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
+    input_leading_icon: Option<IconBuilder>,
     header_actions: Vec<CommandPaletteAction>,
     confirm_item: Option<I>,
     matching: CommandPaletteMatching,
@@ -1829,6 +1830,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             matches,
             presented_results,
             leading_columns,
+            input_leading_icon: None,
             header_actions: Vec::new(),
             confirm_item: None,
             matching: CommandPaletteMatching::Semantic,
@@ -1914,6 +1916,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ) {
         self.fallback = fallback;
         self.recompute_matches();
+        cx.notify();
+    }
+
+    /// Sets the decorative icon rendered before the query with the search line's tint and size.
+    pub fn set_input_leading_icon(
+        &mut self,
+        build: impl Fn(Rgba, Pixels) -> AnyElement + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.input_leading_icon = Some(Rc::new(build));
         cx.notify();
     }
 
@@ -3256,6 +3268,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .gap(metrics.gap)
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
+            .when_some(self.input_leading_icon.as_ref(), |editor, icon| {
+                editor.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(icon(theme.paint.muted, metrics.icon_size)),
+                )
+            })
             .child(div().min_w_0().flex_1().child(self.input.clone()))
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
