@@ -1274,6 +1274,43 @@ fn the_confirm_key_should_ignore_a_disabled_confirm_item(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn search_line_icons_should_share_size_and_edge_spacing(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_input_leading_icon(
+            |_, size| {
+                div()
+                    .debug_selector(|| "search-leading-glyph".to_owned())
+                    .size(size)
+                    .into_any_element()
+            },
+            cx,
+        );
+        palette.set_header_actions(
+            vec![CommandPaletteAction::new("add", "Add", |_| {
+                div()
+                    .debug_selector(|| "search-trailing-glyph".to_owned())
+                    .size(px(14.0))
+                    .into_any_element()
+            })],
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let leading = cx.debug_bounds("search-leading-glyph").unwrap();
+    let trailing = cx.debug_bounds("search-trailing-glyph").unwrap();
+
+    assert_eq!(leading.size, trailing.size);
+    assert_eq!(
+        leading.left() - editor.left(),
+        editor.right() - trailing.right()
+    );
+    assert_eq!(leading.center().y, trailing.center().y);
+}
+
+#[gpui::test]
 fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);

@@ -66,6 +66,7 @@ pub(super) fn prepared(
             .panel_geometry(px(480.0), px(52.0))
             .viewport_margin(px(16.0))
             .editor_height(px(42.0))
+            .input_icon_size(icons.metrics(IconRole::Control).glyph_size)
             .row_spacing(px(12.0), px(18.0), px(10.0))
             .row_line_gap(px(2.0))
             .section_spacing(px(20.0), px(9.0))

@@ -1098,6 +1098,7 @@ pub struct CommandPaletteMetrics {
     corner_radius: Pixels,
     border_width: Pixels,
     input_size: Pixels,
+    input_icon_size: Pixels,
     label_size: Pixels,
     secondary_size: Pixels,
     section_size: Pixels,
@@ -1136,6 +1137,7 @@ impl CommandPaletteMetrics {
             corner_radius: shell.corner_radius(),
             border_width: shell.hairline(),
             input_size: px(14.0),
+            input_icon_size: px(14.0),
             label_size: px(13.0),
             secondary_size: px(11.0),
             section_size: px(13.0),
@@ -1261,6 +1263,12 @@ impl CommandPaletteMetrics {
         self
     }
 
+    /// Sets the search-line glyph size independently of result-row icons.
+    pub fn input_icon_size(mut self, size: Pixels) -> Self {
+        self.input_icon_size = size;
+        self
+    }
+
     fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
         let width_scale = crate::appearance::normalized_scale(text_scale)
             .max(crate::appearance::normalized_scale(spacing_scale));
@@ -1313,6 +1321,7 @@ impl CommandPaletteMetrics {
             corner_radius: self.corner_radius,
             border_width: self.border_width,
             input_size: crate::appearance::scale_metric(self.input_size, text_scale),
+            input_icon_size: crate::appearance::scale_metric(self.input_icon_size, text_scale),
             label_size: crate::appearance::scale_metric(self.label_size, text_scale),
             secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
             section_size: crate::appearance::scale_metric(self.section_size, text_scale),
@@ -3260,7 +3269,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .w_full()
             .h(metrics.input_height)
             .flex_shrink_0()
-            .pl(metrics.content_leading_inset())
+            .pl(if self.input_leading_icon.is_some() {
+                metrics.panel_padding
+            } else {
+                metrics.content_leading_inset()
+            })
             .pr(metrics.panel_padding)
             .flex()
             .flex_row()
@@ -3269,10 +3282,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
             .when_some(self.input_leading_icon.as_ref(), |editor, icon| {
+                let icon_slot_size = crate::ControlHost::Floating
+                    .button_theme(cx)
+                    .icon_button_size(ButtonSize::Compact);
                 editor.child(
                     div()
+                        .size(icon_slot_size)
                         .flex_shrink_0()
-                        .child(icon(theme.paint.muted, metrics.icon_size)),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(theme.paint.muted, metrics.input_icon_size)),
                 )
             })
             .child(div().min_w_0().flex_1().child(self.input.clone()))
