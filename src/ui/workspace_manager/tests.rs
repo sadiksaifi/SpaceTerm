@@ -2441,6 +2441,52 @@ fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus
 }
 
 #[gpui::test]
+fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopening(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-shift-k cmd-shift-n cmd-shift-k");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(!cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    click("terminal-pane", cx);
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_))),
+        "the terminal must accept input after the replacement switcher closes"
+    );
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .remote_workspace_flow
+            .as_ref()
+            .is_some_and(|flow| flow.read(cx).owns_first_responder(window, cx))
+    }));
+    assert!(cx.debug_bounds("command-palette-panel").is_some());
+}
+
+#[gpui::test]
 fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     cx: &mut TestAppContext,
 ) {

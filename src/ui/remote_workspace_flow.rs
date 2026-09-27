@@ -825,10 +825,10 @@ impl RemoteWorkspaceFlow {
     ) {
         match event {
             SshHostPickerEvent::Lifecycle(SshHostPickerLifecycleEvent::Opened) => {}
-            SshHostPickerEvent::Lifecycle(SshHostPickerLifecycleEvent::Closed(reason)) => {
-                if self.stage() == RemoteWorkspaceFlowStage::HostSelection
-                    && !matches!(reason, spaceterm_ui::CommandPaletteCloseReason::Replaced)
-                {
+            SshHostPickerEvent::Lifecycle(SshHostPickerLifecycleEvent::Closed(_)) => {
+                if self.stage() == RemoteWorkspaceFlowStage::HostSelection {
+                    // Owned dialogs suspend the picker after advancing the flow. Closing it
+                    // during host selection ends the flow, including external replacement.
                     self.cancel_flow(window, cx);
                 }
             }
