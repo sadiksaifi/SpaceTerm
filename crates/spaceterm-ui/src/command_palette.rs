@@ -507,7 +507,8 @@ pub struct CommandPaletteReplacementFocus {
 }
 
 struct PendingCommandPaletteOpen {
-    replacement: Option<CommandPaletteReplacementFocus>,
+    replacement: CommandPaletteReplacementFocus,
+    transferred_focus: bool,
 }
 
 /// Monotonic identity for the current command-palette query.
@@ -2016,10 +2017,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             let (registration, modal_suspension, inherited) =
                 register_open_palette(cx.entity().downgrade(), window, cx);
             if let Some(generation) = modal_suspension {
+                let replacement = replacement.or(inherited);
+                let transferred_focus = replacement.is_some();
                 self.coordinator_registration = Some(registration);
                 self.suspended_by_modal = Some(generation);
                 self.pending_open = Some(PendingCommandPaletteOpen {
-                    replacement: replacement.or(inherited),
+                    replacement: replacement.unwrap_or_else(|| CommandPaletteReplacementFocus {
+                        restore_focus: crate::modal::window_modal_predecessor_focus(window, cx),
+                    }),
+                    transferred_focus,
                 });
             } else {
                 unregister_palette(window.window_handle().window_id(), registration, None, cx);
@@ -2166,7 +2172,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     /// Returns the focus owner a replacing palette inherits, once this palette has captured one.
     ///
-    /// A pending open without an explicit replacement captures its owner only when it finishes.
+    /// A pending open inherits the modal predecessor before the modal closes.
     fn captured_replacement_focus(&self) -> Option<CommandPaletteReplacementFocus> {
         let restore_focus = if self.open {
             self.restore_focus.clone()
@@ -2174,7 +2180,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.pending_open
                 .as_ref()?
                 .replacement
-                .as_ref()?
                 .restore_focus
                 .clone()
         };
@@ -2694,7 +2699,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let pending_replacement = self
             .pending_open
             .as_ref()
-            .is_some_and(|pending| pending.replacement.is_some());
+            .is_some_and(|pending| pending.transferred_focus);
         let editor_retained_focus = self.input.read(cx).focus_handle().is_focused(window);
         let predecessor_restored = self
             .restore_focus
@@ -2712,7 +2717,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.suspended_by_modal = None;
         if let Some(pending) = self.pending_open.take() {
-            return self.finish_open(pending.replacement, window, cx);
+            return self.finish_open(Some(pending.replacement), window, cx);
         }
         if !self.open {
             return false;
@@ -2798,10 +2803,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.restore_on_activation = restore_focus;
         } else {
             self.restore_on_activation = None;
-            if reason.restores_focus()
-                && let Some(focus) = restore_focus.and_then(|focus| focus.upgrade())
-            {
-                focus.focus(window, cx);
+            if reason.restores_focus() {
+                if let Some(focus) = restore_focus.and_then(|focus| focus.upgrade()) {
+                    focus.focus(window, cx);
+                } else if self.focus_scope.contains_focused(window, cx) {
+                    window.blur(cx);
+                }
             }
         }
         true

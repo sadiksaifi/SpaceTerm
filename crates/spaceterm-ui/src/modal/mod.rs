@@ -158,6 +158,13 @@ pub(crate) fn focused_modal_parent(
     core::focused_modal_parent(window, cx)
 }
 
+pub(crate) fn window_modal_predecessor_focus(
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> Option<gpui::WeakFocusHandle> {
+    core::window_modal_predecessor_focus(window, cx)
+}
+
 pub(crate) fn focus_allows_transient_resume(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::focus_allows_transient_resume(window, cx)
 }

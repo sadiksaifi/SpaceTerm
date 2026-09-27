@@ -2515,6 +2515,7 @@ impl Render for ModalPaletteMenuBody {
 
 struct ModalPaletteRoot {
     palette: Entity<CommandPalette<u8>>,
+    replacement_palette: Option<Entity<CommandPalette<u8>>>,
     dialog_body: Entity<ModalPaletteMenuBody>,
     prior_focus: FocusHandle,
     modal: Option<crate::ModalPresentationHandle>,
@@ -2612,7 +2613,8 @@ impl Render for ModalPaletteRoot {
             div()
                 .size_full()
                 .track_focus(&self.prior_focus)
-                .child(self.palette.clone()),
+                .child(self.palette.clone())
+                .children(self.replacement_palette.clone()),
         ))
     }
 }
@@ -2650,6 +2652,7 @@ fn modal_palette_window(
     });
     let (root, cx) = cx.add_window_view(|window, cx| ModalPaletteRoot {
         palette: cx.new(|cx| CommandPalette::new("Search commands", items(), window, cx)),
+        replacement_palette: None,
         dialog_body: cx.new(|_| ModalPaletteMenuBody),
         prior_focus: cx.focus_handle().tab_stop(true),
         modal: None,
@@ -2672,6 +2675,98 @@ fn modal_palette_window(
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     (root, palette, cx)
+}
+
+#[gpui::test]
+fn pending_palette_dismissal_restores_focus_before_the_modal(cx: &mut TestAppContext) {
+    let (root, palette, cx) = modal_palette_window(cx);
+    let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
+    cx.update(|window, cx| {
+        prior_focus.focus(window, cx);
+        root.update(cx, |root, cx| root.present_alert(window, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(!palette.update(cx, |palette, cx| palette.open(window, cx)));
+    });
+    let modal = root.read_with(cx, |root, _| root.modal.clone().unwrap());
+    cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+
+    cx.update(|window, cx| {
+        assert!(palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| prior_focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn pending_palette_dismissal_blurs_when_modal_predecessor_is_gone(cx: &mut TestAppContext) {
+    let (root, palette, cx) = modal_palette_window(cx);
+    let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
+    cx.update(|window, cx| {
+        prior_focus.focus(window, cx);
+        root.update(cx, |root, cx| root.present_alert(window, cx));
+    });
+    drop(prior_focus);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(!palette.update(cx, |palette, cx| palette.open(window, cx)));
+    });
+    root.update(cx, |root, cx| {
+        root.prior_focus = cx.focus_handle().tab_stop(true);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let modal = root.read_with(cx, |root, _| root.modal.clone().unwrap());
+    cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+
+    cx.update(|window, cx| {
+        assert!(palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+}
+
+#[gpui::test]
+fn second_pending_palette_restores_focus_before_the_modal(cx: &mut TestAppContext) {
+    let (root, first, cx) = modal_palette_window(cx);
+    let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
+    cx.update(|window, cx| {
+        prior_focus.focus(window, cx);
+        root.update(cx, |root, cx| root.present_alert(window, cx));
+    });
+    cx.run_until_parked();
+    let second = cx.update(|window, cx| {
+        cx.new(|cx| CommandPalette::new("Other commands", items(), window, cx))
+    });
+    root.update(cx, |root, cx| {
+        root.replacement_palette = Some(second.clone());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(!first.update(cx, |palette, cx| palette.open(window, cx)));
+        assert!(!second.update(cx, |palette, cx| palette.open(window, cx)));
+    });
+    cx.run_until_parked();
+    let modal = root.read_with(cx, |root, _| root.modal.clone().unwrap());
+    cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
+    cx.run_until_parked();
+    assert!(!first.read_with(cx, |palette, _| palette.is_open()));
+    assert!(second.read_with(cx, |palette, _| palette.is_open()));
+
+    cx.update(|window, cx| {
+        assert!(second.update(cx, |palette, cx| palette.dismiss(window, cx)));
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| prior_focus.is_focused(window)));
 }
 
 #[gpui::test]

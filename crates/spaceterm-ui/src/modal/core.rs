@@ -2909,6 +2909,14 @@ pub(crate) fn focused_modal_parent(window: &Window, cx: &App) -> Option<ModalPar
         .or_else(|| crate::combo_box::focused_combo_box_modal_parent(window, cx))
 }
 
+pub(crate) fn window_modal_predecessor_focus(window: &Window, cx: &App) -> Option<WeakFocusHandle> {
+    modal_owner_for_render(window, cx)?
+        .read(cx)
+        .focus_chain
+        .predecessor
+        .clone()
+}
+
 pub(crate) fn modal_parent_for_focus(
     focus: &FocusHandle,
     window: &Window,
