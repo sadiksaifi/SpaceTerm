@@ -203,32 +203,17 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
         self.fresh_discovery()
     }
 
-    fn host_in_active_use(&self, alias: &SshHostAlias) -> bool {
-        self.runtime.aliases.is_active(alias)
-    }
-
-    fn managed_host(&self, alias: &SshHostAlias) -> Option<ManagedSshHost> {
-        ManagedHostsStore::new(&self.runtime.paths)
-            .load()
-            .ok()?
-            .into_iter()
-            .find(|host| host.alias() == alias)
-    }
-
     fn save_managed_host(
         &self,
         host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
     ) -> Task<Result<(), ManagedHostFormBackendError>> {
         let paths = self.runtime.paths.clone();
         let roots = self.roots();
         let aliases = self.runtime.aliases.clone();
         let host_config_filesystem = Arc::clone(&self.runtime.host_config_filesystem);
         self.executor.spawn(async move {
-            let mut mutated_aliases = vec![host.alias().clone()];
-            mutated_aliases.extend(editing_alias.iter().cloned());
             let _mutation = aliases
-                .begin_mutation(mutated_aliases)
+                .begin_mutation([host.alias().clone()])
                 .map_err(|_| ManagedHostFormBackendError::HostInUse)?;
             let discovery = discover_ssh_hosts(
                 host_config_filesystem.as_ref(),
@@ -236,24 +221,8 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 HostDiscoveryLimits::default(),
             );
             ManagedHostsStore::new(&paths)
-                .upsert(host, &discovery.hosts, editing_alias.as_ref())
+                .insert(host, &discovery.hosts)
                 .map_err(map_save_error)
-        })
-    }
-
-    fn delete_managed_host(
-        &self,
-        alias: SshHostAlias,
-    ) -> Task<Result<(), RemoteWorkspaceFlowBackendError>> {
-        let paths = self.runtime.paths.clone();
-        let aliases = self.runtime.aliases.clone();
-        self.executor.spawn(async move {
-            let _mutation = aliases
-                .begin_mutation([alias.clone()])
-                .map_err(|_| RemoteWorkspaceFlowBackendError::HostInUse)?;
-            ManagedHostsStore::new(&paths)
-                .delete(&alias)
-                .map_err(|_| RemoteWorkspaceFlowBackendError::DeleteFailed)
         })
     }
 

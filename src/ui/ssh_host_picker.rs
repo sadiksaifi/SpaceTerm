@@ -5,26 +5,26 @@ use std::fmt;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
+use gpui::{Context, Entity, EventEmitter, Render, Window};
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
-    CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon, IconName, MenuEntry,
-    fuzzy_filter,
+    CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivationPolicy,
+    CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEmptyAction, CommandPaletteEvent,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon,
+    IconName, fuzzy_filter,
 };
 
+use super::chrome_icons::IconRole;
 use crate::domain::SshDestination;
 use crate::ssh::destination::{
     DestinationQueryResolution, SshHostAlias, resolve_destination_query,
 };
-use crate::ssh::host_config::{
-    DiscoveredSshHost, HostConfigIssueKind, HostConfigSource, HostDiscovery,
-};
+use crate::ssh::host_config::{DiscoveredSshHost, HostConfigIssueKind, HostDiscovery};
 
 const MAXIMUM_DESTINATION_BYTES: usize = 1024;
 const ADD_HOST_ACTION: &str = "ssh-host-picker-add";
-const EDIT_HOST_ACTION: &str = "ssh-host-picker-edit";
-const DELETE_HOST_ACTION: &str = "ssh-host-picker-delete";
+const ADD_HOST_LABEL: &str = "Add SSH Host";
+const HEADER_ADD_HOST_SELECTOR: &str = "ssh-host-picker-header-add";
+const EMPTY_ADD_HOST_SELECTOR: &str = "ssh-host-picker-empty-add";
 const DISCOVERY_WARNING_SELECTOR: &str = "ssh-host-picker-discovery-warning";
 const HOST_ROW_SELECTOR: &str = "ssh-host-picker-row";
 const MAXIMUM_DISCOVERY_WARNING_BYTES: usize = 256;
@@ -129,12 +129,30 @@ impl HostDiscoveryDiagnostic {
     }
 }
 
-fn no_results_text(discovery: &HostDiscovery, query: &str) -> &'static str {
-    if query.is_empty() && discovery.hosts.is_empty() && discovery.issues.is_empty() {
-        "No SSH hosts configured"
+fn empty_state(discovery: &HostDiscovery, query: &str) -> CommandPaletteEmpty {
+    let empty = if query.is_empty() && discovery.hosts.is_empty() && discovery.issues.is_empty() {
+        CommandPaletteEmpty::new("No SSH hosts configured")
+            .description("Add a host to connect to it from SpaceTerm.")
     } else {
-        "No matching SSH hosts"
-    }
+        CommandPaletteEmpty::new("No matching SSH hosts")
+            .description("Check the host name, or add it as a new SSH host.")
+    };
+    empty.action(
+        CommandPaletteEmptyAction::new(ADD_HOST_ACTION, ADD_HOST_LABEL)
+            .debug_selector(EMPTY_ADD_HOST_SELECTOR),
+    )
+}
+
+/// Builds the always-available Add SSH Host control at the current appearance's icon size.
+fn add_host_header_action(cx: &gpui::App) -> CommandPaletteAction {
+    let icon_size = super::appearance::chrome(cx)
+        .icons
+        .metrics(IconRole::Control)
+        .glyph_size;
+    CommandPaletteAction::new(ADD_HOST_ACTION, ADD_HOST_LABEL, move |tint| {
+        Icon::new(IconName::Plus, icon_size, tint).into_any_element()
+    })
+    .debug_selector(HEADER_ADD_HOST_SELECTOR)
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -143,7 +161,6 @@ struct HostPickerRow {
     destination: SshDestination,
     label: String,
     subtitle: String,
-    managed: bool,
     label_matched_indices: Vec<usize>,
     subtitle_matched_indices: Vec<usize>,
 }
@@ -219,7 +236,6 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                 destination,
                 label: query.to_owned(),
                 subtitle: format!("Connect as {user} through {}", alias.as_str()),
-                managed: false,
                 label_matched_indices: (0..query.chars().count()).collect(),
                 subtitle_matched_indices: Vec::new(),
             },
@@ -235,24 +251,9 @@ fn configured_host_row(host: &DiscoveredSshHost) -> Option<HostPickerRow> {
         destination,
         label: host.alias().as_str().to_owned(),
         subtitle: host.subtitle(),
-        managed: host
-            .provenance()
-            .is_some_and(|provenance| provenance.source() == HostConfigSource::Managed),
         label_matched_indices: Vec::new(),
         subtitle_matched_indices: Vec::new(),
     })
-}
-
-fn add_destination_for_query(discovery: &HostDiscovery, query: &str) -> Option<SshDestination> {
-    let aliases = discovery
-        .hosts
-        .iter()
-        .map(|host| host.alias().clone())
-        .collect::<Vec<_>>();
-    match resolve_destination_query(query, &aliases, MAXIMUM_DESTINATION_BYTES).ok()? {
-        DestinationQueryResolution::AddHost { destination } => Some(destination),
-        DestinationQueryResolution::Configured { .. } => None,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -265,22 +266,12 @@ pub(super) enum SshHostPickerLifecycleEvent {
 pub(super) enum SshHostPickerEvent {
     Lifecycle(SshHostPickerLifecycleEvent),
     SelectDestination(SshDestination),
-    RequestAddHost(SshDestination),
-    RequestEditHost(SshHostAlias),
-    RequestDeleteHost(SshHostAlias),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum HostPickerFooterAction {
-    Add(SshDestination),
-    Edit { alias: SshHostAlias, disabled: bool },
-    Delete { alias: SshHostAlias, disabled: bool },
+    RequestAddHost,
 }
 
 pub(super) struct SshHostPicker {
     palette: Entity<CommandPalette<SshHostPickerItemId>>,
     discovery_provider: Arc<dyn HostDiscoveryProvider>,
-    host_in_active_use: Arc<dyn Fn(&SshHostAlias) -> bool + Send + Sync>,
     discovery: HostDiscovery,
     rows: Vec<HostPickerRow>,
     open: bool,
@@ -293,23 +284,13 @@ pub(super) struct SshHostPicker {
 impl SshHostPicker {
     pub(super) fn new(
         discovery_provider: Arc<dyn HostDiscoveryProvider>,
-        host_in_active_use: Arc<dyn Fn(&SshHostAlias) -> bool + Send + Sync>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Connect to SSH Host", Vec::new(), window, cx);
-            palette.set_hints(
-                vec![
-                    CommandPaletteHint::new("Connect", "↵"),
-                    CommandPaletteHint::new("Dismiss", "esc"),
-                ],
-                cx,
-            );
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
-            palette.set_empty(CommandPaletteEmpty::new("No matching SSH hosts"), cx);
-            palette.set_actions_menu_label("Host Actions", cx);
             palette
         });
         cx.subscribe_in(
@@ -322,14 +303,13 @@ impl SshHostPicker {
         .detach();
         cx.observe(&palette, |picker, palette, cx| {
             let selected = palette.read(cx).selected_item_id().cloned();
-            picker.observe_selection(selected, cx);
+            picker.observe_selection(selected);
         })
         .detach();
 
         Self {
             palette,
             discovery_provider,
-            host_in_active_use,
             discovery: HostDiscovery::default(),
             rows: Vec::new(),
             open: false,
@@ -396,7 +376,9 @@ impl SshHostPicker {
         match event {
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
                 self.open = true;
+                let add_host = add_host_header_action(cx);
                 self.palette.update(cx, |palette, cx| {
+                    palette.set_header_actions(vec![add_host], cx);
                     palette.set_items(Vec::new(), cx);
                     palette.set_preferred_item(self.retained_selection.clone(), cx);
                     if palette.query() != self.retained_query {
@@ -434,10 +416,13 @@ impl SshHostPicker {
                     cx.notify();
                 }
             }
-            CommandPaletteEvent::MenuAction(action) => self.activate_footer_action(action, cx),
-            CommandPaletteEvent::HeaderAction(_)
-            | CommandPaletteEvent::EmptyAction(_)
-            | CommandPaletteEvent::Confirmed => {}
+            CommandPaletteEvent::HeaderAction(action) | CommandPaletteEvent::EmptyAction(action)
+                if action.as_ref() == ADD_HOST_ACTION =>
+            {
+                cx.emit(SshHostPickerEvent::RequestAddHost);
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -484,14 +469,10 @@ impl SshHostPicker {
                 .map(HostPickerRow::into_palette_item),
         );
         self.palette.update(cx, |palette, cx| {
-            palette.set_empty(
-                CommandPaletteEmpty::new(no_results_text(&self.discovery, &self.retained_query)),
-                cx,
-            );
+            palette.set_empty(empty_state(&self.discovery, &self.retained_query), cx);
             palette.set_preferred_item(self.retained_selection.clone(), cx);
             palette.set_items(items, cx);
         });
-        self.sync_footer(cx);
     }
 
     fn capture_selection(&mut self, cx: &gpui::App) {
@@ -500,101 +481,13 @@ impl SshHostPicker {
         }
     }
 
-    fn observe_selection(&mut self, selected: Option<SshHostPickerItemId>, cx: &mut Context<Self>) {
+    fn observe_selection(&mut self, selected: Option<SshHostPickerItemId>) {
         if self.observed_selection == selected {
             return;
         }
         self.observed_selection = selected.clone();
         if selected.is_some() {
             self.retained_selection = selected;
-        }
-        self.sync_footer(cx);
-    }
-
-    fn footer_actions(&self, cx: &gpui::App) -> Vec<HostPickerFooterAction> {
-        let mut actions = Vec::new();
-        if let Some(destination) = add_destination_for_query(&self.discovery, &self.retained_query)
-        {
-            actions.push(HostPickerFooterAction::Add(destination));
-        }
-        let Some(SshHostPickerItemId::Configured(alias)) = self.palette.read(cx).selected_item_id()
-        else {
-            return actions;
-        };
-        let managed = self
-            .rows
-            .iter()
-            .any(|row| row.managed && row.id == SshHostPickerItemId::Configured(alias.clone()));
-        if managed {
-            let disabled = (self.host_in_active_use)(alias);
-            actions.push(HostPickerFooterAction::Edit {
-                alias: alias.clone(),
-                disabled,
-            });
-            actions.push(HostPickerFooterAction::Delete {
-                alias: alias.clone(),
-                disabled,
-            });
-        }
-        actions
-    }
-
-    fn sync_footer(&mut self, cx: &mut Context<Self>) {
-        let entries = self
-            .footer_actions(cx)
-            .into_iter()
-            .map(|action| match action {
-                HostPickerFooterAction::Add(_) => {
-                    MenuEntry::action("Add SSH Host", ADD_HOST_ACTION.into())
-                        .debug_selector(ADD_HOST_ACTION)
-                }
-                HostPickerFooterAction::Edit { disabled, .. } => {
-                    MenuEntry::action("Edit SSH Host", EDIT_HOST_ACTION.into())
-                        .disabled(disabled)
-                        .debug_selector(EDIT_HOST_ACTION)
-                }
-                HostPickerFooterAction::Delete { disabled, .. } => {
-                    MenuEntry::action("Delete SSH Host", DELETE_HOST_ACTION.into())
-                        .disabled(disabled)
-                        .destructive(true)
-                        .debug_selector(DELETE_HOST_ACTION)
-                }
-            })
-            .collect();
-        self.palette
-            .update(cx, |palette, cx| palette.set_actions_menu(entries, cx));
-    }
-
-    fn activate_footer_action(&mut self, action: &SharedString, cx: &mut Context<Self>) {
-        match action.as_ref() {
-            ADD_HOST_ACTION => {
-                if let Some(destination) =
-                    add_destination_for_query(&self.discovery, &self.retained_query)
-                {
-                    cx.emit(SshHostPickerEvent::RequestAddHost(destination));
-                    cx.notify();
-                }
-            }
-            EDIT_HOST_ACTION | DELETE_HOST_ACTION => {
-                let Some(SshHostPickerItemId::Configured(alias)) =
-                    self.palette.read(cx).selected_item_id().cloned()
-                else {
-                    return;
-                };
-                let managed = self.rows.iter().any(|row| {
-                    row.managed && row.id == SshHostPickerItemId::Configured(alias.clone())
-                });
-                if !managed || (self.host_in_active_use)(&alias) {
-                    return;
-                }
-                if action.as_ref() == EDIT_HOST_ACTION {
-                    cx.emit(SshHostPickerEvent::RequestEditHost(alias));
-                } else {
-                    cx.emit(SshHostPickerEvent::RequestDeleteHost(alias));
-                }
-                cx.notify();
-            }
-            _ => {}
         }
     }
 
@@ -648,7 +541,6 @@ mod tests {
             destination: destination.clone(),
             label: "sensitive-host".to_owned(),
             subtitle: "/sensitive/config".to_owned(),
-            managed: false,
             label_matched_indices: Vec::new(),
             subtitle_matched_indices: Vec::new(),
         };
@@ -780,11 +672,10 @@ mod tests {
     impl SshHostPickerHarness {
         fn new(
             provider: Arc<dyn HostDiscoveryProvider>,
-            host_in_active_use: Arc<dyn Fn(&SshHostAlias) -> bool + Send + Sync>,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Self {
-            let picker = cx.new(|cx| SshHostPicker::new(provider, host_in_active_use, window, cx));
+            let picker = cx.new(|cx| SshHostPicker::new(provider, window, cx));
             let events = Rc::new(RefCell::new(Vec::new()));
             let captured_events = Rc::clone(&events);
             cx.subscribe(&picker, move |_, _, event, _| {
@@ -810,15 +701,13 @@ mod tests {
 
     fn host_picker<'a>(
         provider: Arc<ScriptedHostDiscoveryProvider>,
-        host_in_active_use: impl Fn(&SshHostAlias) -> bool + Send + Sync + 'static,
         cx: &'a mut TestAppContext,
     ) -> HostPickerWindow<'a> {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let injected_provider: Arc<dyn HostDiscoveryProvider> = provider;
-        let active_use = Arc::new(host_in_active_use);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            SshHostPickerHarness::new(injected_provider, active_use, window, cx)
+            SshHostPickerHarness::new(injected_provider, window, cx)
         });
         let (picker, events) = harness.read_with(cx, |harness, _| {
             (harness.picker.clone(), Rc::clone(&harness.events))
@@ -907,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_rows_should_distinguish_managed_direct_and_read_only_provenance() {
+    fn configured_rows_should_describe_destinations_or_their_config_source() {
         let rows = host_rows_for_query(
             &host_discovery(
                 "Host work\n  HostName build.example\n  User deploy\n  Port 2222\n",
@@ -918,11 +807,11 @@ mod tests {
 
         assert_eq!(
             rows.iter()
-                .map(|row| (row.label(), row.subtitle.as_str(), row.managed))
+                .map(|row| (row.label(), row.subtitle.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("personal", "/home/test/.ssh/config", false),
-                ("work", "deploy@build.example:2222", true),
+                ("personal", "/home/test/.ssh/config"),
+                ("work", "deploy@build.example:2222"),
             ]
         );
     }
@@ -940,7 +829,7 @@ mod tests {
         let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
             unreadable_host_discovery(),
         ]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
 
         let diagnostic = picker.read_with(cx, |picker, _| {
             HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
@@ -1000,7 +889,7 @@ mod tests {
             "Host \"unterminated\nHost work\n",
             "Host personal\n",
         )]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
 
         assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
         assert_eq!(
@@ -1046,12 +935,16 @@ mod tests {
         let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
             HostDiscovery::default(),
         ]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
 
         assert_eq!(
-            picker.read_with(cx, |picker, _| no_results_text(&picker.discovery, "")),
+            picker.read_with(cx, |picker, _| empty_state(&picker.discovery, "")
+                .title()
+                .to_owned()),
             "No SSH hosts configured"
         );
+        assert!(cx.debug_bounds("command-palette-empty").is_some());
+        assert!(cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).is_some());
         assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
         assert!(selected_item(&picker, cx).is_none());
     }
@@ -1062,7 +955,7 @@ mod tests {
     ) {
         let discovery = host_discovery("Host \"unterminated\n", "");
         let provider = Arc::new(ScriptedHostDiscoveryProvider::new([discovery]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
 
         let diagnostic = picker.read_with(cx, |picker, _| {
             HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
@@ -1079,7 +972,7 @@ mod tests {
             host_discovery("Include /managed/ssh_config\nHost work\n", ""),
             host_discovery("Host work\n", ""),
         ]));
-        let (_, picker, _, cx) = host_picker(Arc::clone(&provider), |_| false, cx);
+        let (_, picker, _, cx) = host_picker(Arc::clone(&provider), cx);
         assert!(
             picker
                 .read_with(cx, |picker, _| HostDiscoveryDiagnostic::for_discovery(
@@ -1124,7 +1017,7 @@ mod tests {
             "Host work\n",
             "",
         )]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
         let stale_generation =
             picker.read_with(cx, |picker, _| picker.refresh_generation.wrapping_sub(1));
         let stale_discovery = host_discovery("Host \"unterminated\n", "");
@@ -1141,119 +1034,82 @@ mod tests {
     }
 
     #[gpui::test]
-    fn typing_should_only_filter_and_offer_safe_raw_add(cx: &mut TestAppContext) {
-        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
-            "Host work\n  HostName work.example\n",
-            "",
-        )]));
-        let (_, picker, events, cx) = host_picker(provider, |_| false, cx);
-        events.borrow_mut().clear();
-
-        set_query(&picker, "new-host", cx);
-
-        assert!(cx.debug_bounds(ADD_HOST_ACTION).is_some());
-        assert!(
-            events.borrow().is_empty(),
-            "typing emitted a host operation"
-        );
-        set_query(&picker, "work", cx);
-        assert!(cx.debug_bounds(ADD_HOST_ACTION).is_none());
-        set_query(&picker, "root@work", cx);
-        assert!(
-            picker.read_with(cx, |picker, cx| picker.footer_actions(cx).is_empty()),
-            "a user override was offered as a raw host"
-        );
-    }
-
-    #[gpui::test]
-    fn raw_add_and_row_activation_should_emit_typed_events_without_closing(
+    fn the_header_add_action_should_stay_available_and_emit_an_add_request(
         cx: &mut TestAppContext,
     ) {
         let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
             "Host work\n  HostName work.example\n",
             "",
         )]));
-        let (_, picker, events, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, events, cx) = host_picker(provider, cx);
         events.borrow_mut().clear();
-        set_query(&picker, "new-host", cx);
-        let add = cx.debug_bounds(ADD_HOST_ACTION).unwrap();
+
+        set_query(&picker, "work", cx);
+        assert!(cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).is_none());
+        let add = cx.debug_bounds(HEADER_ADD_HOST_SELECTOR).unwrap();
         cx.simulate_click(add.center(), gpui::Modifiers::none());
         cx.run_until_parked();
-        assert!(
-            events
-                .borrow()
-                .contains(&SshHostPickerEvent::RequestAddHost(
-                    SshDestination::new("new-host".to_owned()).unwrap()
-                ))
-        );
 
-        events.borrow_mut().clear();
-        set_query(&picker, "work", cx);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-
-        assert!(
-            events
-                .borrow()
-                .contains(&SshHostPickerEvent::SelectDestination(
-                    SshDestination::new("work".to_owned()).unwrap()
-                ))
+        assert_eq!(
+            events.borrow().as_slice(),
+            [SshHostPickerEvent::RequestAddHost]
         );
         assert!(picker.read_with(cx, |picker, _| picker.is_open()));
     }
 
     #[gpui::test]
-    fn footer_should_offer_managed_actions_only_and_disable_them_while_active(
-        cx: &mut TestAppContext,
-    ) {
-        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
-            "Host work\n  HostName work.example\n",
-            "Host personal\n",
-        )]));
-        let (_, picker, _, cx) = host_picker(provider, |alias| alias.as_str() == "work", cx);
-
-        set_query(&picker, "work", cx);
-        assert_eq!(
-            picker.read_with(cx, |picker, cx| picker.footer_actions(cx)),
-            vec![
-                HostPickerFooterAction::Edit {
-                    alias: SshHostAlias::new("work".to_owned()).unwrap(),
-                    disabled: true,
-                },
-                HostPickerFooterAction::Delete {
-                    alias: SshHostAlias::new("work".to_owned()).unwrap(),
-                    disabled: true,
-                },
-            ]
-        );
-
-        set_query(&picker, "personal", cx);
-        assert!(picker.read_with(cx, |picker, cx| picker.footer_actions(cx).is_empty()));
-    }
-
-    #[gpui::test]
-    fn managed_footer_actions_should_emit_typed_edit_and_delete_requests(cx: &mut TestAppContext) {
+    fn an_unmatched_query_should_offer_add_from_the_empty_state(cx: &mut TestAppContext) {
         let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
             "Host work\n  HostName work.example\n",
             "",
         )]));
-        let (_, picker, events, cx) = host_picker(provider, |_| false, cx);
-        set_query(&picker, "work", cx);
+        let (_, picker, events, cx) = host_picker(provider, cx);
         events.borrow_mut().clear();
 
-        picker.update(cx, |picker, cx| {
-            picker.activate_footer_action(&EDIT_HOST_ACTION.into(), cx);
-            picker.activate_footer_action(&DELETE_HOST_ACTION.into(), cx);
-        });
-
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
+        set_query(&picker, "new-host", cx);
+        assert!(
+            events.borrow().is_empty(),
+            "typing emitted a host operation"
+        );
+        assert!(cx.debug_bounds(HEADER_ADD_HOST_SELECTOR).is_some());
+        let add = cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).unwrap();
+        cx.simulate_click(add.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
         assert_eq!(
             events.borrow().as_slice(),
-            [
-                SshHostPickerEvent::RequestEditHost(alias.clone()),
-                SshHostPickerEvent::RequestDeleteHost(alias),
-            ]
+            [SshHostPickerEvent::RequestAddHost]
         );
+
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            [SshHostPickerEvent::RequestAddHost]
+        );
+        assert!(picker.read_with(cx, |picker, _| picker.is_open()));
+    }
+
+    #[gpui::test]
+    fn row_activation_should_emit_the_destination_without_closing(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host work\n  HostName work.example\n",
+            "",
+        )]));
+        let (_, picker, events, cx) = host_picker(provider, cx);
+        events.borrow_mut().clear();
+
+        set_query(&picker, "work", cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [SshHostPickerEvent::SelectDestination(
+                SshDestination::new("work".to_owned()).unwrap()
+            )]
+        );
+        assert!(picker.read_with(cx, |picker, _| picker.is_open()));
     }
 
     #[gpui::test]
@@ -1262,7 +1118,7 @@ mod tests {
             host_discovery("Host staging\nHost work\n", ""),
             host_discovery("Host stack\nHost staging\nHost work\n", ""),
         ]));
-        let (_, picker, _, cx) = host_picker(Arc::clone(&provider), |_| false, cx);
+        let (_, picker, _, cx) = host_picker(Arc::clone(&provider), cx);
         set_query(&picker, "st", cx);
         assert_eq!(
             selected_item(&picker, cx),
@@ -1297,7 +1153,7 @@ mod tests {
             "Host projects\nHost remote-operation\n",
             "",
         )]));
-        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let (_, picker, _, cx) = host_picker(provider, cx);
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
         assert_eq!(
@@ -1325,7 +1181,7 @@ mod tests {
             host_discovery("Host first\n", ""),
             host_discovery("Host second\n", ""),
         ]));
-        let (harness, picker, events, cx) = host_picker(Arc::clone(&provider), |_| false, cx);
+        let (harness, picker, events, cx) = host_picker(Arc::clone(&provider), cx);
         set_query(&picker, "f", cx);
         assert!(cx.update(|window, cx| {
             picker
@@ -1368,7 +1224,7 @@ mod tests {
             host_discovery("Host staging\nHost work\n", ""),
             host_discovery("Host staging\nHost work\n", ""),
         ]));
-        let (harness, picker, events, cx) = host_picker(provider, |_| false, cx);
+        let (harness, picker, events, cx) = host_picker(provider, cx);
         set_query(&picker, "st", cx);
         let selected = selected_item(&picker, cx);
         events.borrow_mut().clear();

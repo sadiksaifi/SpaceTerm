@@ -535,26 +535,10 @@ impl RemoteWorkspaceFlowBackend for TestRemoteWorkspaceFlowBackend {
         HostDiscovery::default()
     }
 
-    fn host_in_active_use(&self, _: &SshHostAlias) -> bool {
-        false
-    }
-
-    fn managed_host(&self, _: &SshHostAlias) -> Option<ManagedSshHost> {
-        None
-    }
-
     fn save_managed_host(
         &self,
         _: ManagedSshHost,
-        _: Option<SshHostAlias>,
     ) -> gpui::Task<Result<(), ManagedHostFormBackendError>> {
-        gpui::Task::ready(Ok(()))
-    }
-
-    fn delete_managed_host(
-        &self,
-        _: SshHostAlias,
-    ) -> gpui::Task<Result<(), RemoteWorkspaceFlowBackendError>> {
         gpui::Task::ready(Ok(()))
     }
 
