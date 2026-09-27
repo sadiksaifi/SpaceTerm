@@ -1,4 +1,5 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{
     ToggleMetrics, TogglePaint, TogglePaints, ToggleSizes, ToggleTheme, ToggleValuePaints,
 };
@@ -102,9 +103,6 @@ fn paint(background: Color, foreground: Color, border: Color, label: Color) -> T
     )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

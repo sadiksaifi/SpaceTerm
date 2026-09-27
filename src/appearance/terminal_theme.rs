@@ -8,11 +8,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use super::{Color, builtin};
 
-pub(crate) const MAX_SCHEME_ID_BYTES: usize = 128;
-pub(crate) const MAX_SCHEME_NAME_CHARACTERS: usize = 128;
-pub(crate) const MAX_COLOR_SCHEMES: usize = 128;
-/// One Zed family can contain 32 themes.
-const MAX_INSTALL_BATCH_SCHEMES: usize = 32;
+pub(crate) const MAX_THEME_ID_BYTES: usize = 128;
+pub(crate) const MAX_THEME_NAME_CHARACTERS: usize = 128;
+/// Installed themes stay well inside the Settings Document's size bound.
+pub(crate) const MAX_INSTALLED_THEMES: usize = 512;
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
     deserializer: D,
@@ -32,19 +31,19 @@ pub(crate) enum Appearance {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct SchemeId(String);
+pub(crate) struct ThemeId(String);
 
-impl SchemeId {
+impl ThemeId {
     pub(crate) fn new(value: impl Into<String>) -> Result<Self, CatalogError> {
         let value = value.into();
-        if !valid_scheme_id(&value) {
+        if !valid_theme_id(&value) {
             return Err(CatalogError::InvalidId);
         }
         Ok(Self(value))
     }
 
     pub(crate) fn builtin(value: &'static str) -> Self {
-        debug_assert!(valid_scheme_id(value));
+        debug_assert!(valid_theme_id(value));
         Self(value.to_owned())
     }
 
@@ -57,13 +56,13 @@ impl SchemeId {
     }
 }
 
-impl fmt::Display for SchemeId {
+impl fmt::Display for ThemeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl Serialize for SchemeId {
+impl Serialize for ThemeId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -72,18 +71,18 @@ impl Serialize for SchemeId {
     }
 }
 
-impl<'de> Deserialize<'de> for SchemeId {
+impl<'de> Deserialize<'de> for ThemeId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(|_| de::Error::custom("invalid scheme id"))
+        Self::new(value).map_err(|_| de::Error::custom("invalid theme id"))
     }
 }
 
-fn valid_scheme_id(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_SCHEME_ID_BYTES || !value.is_ascii() {
+fn valid_theme_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_THEME_ID_BYTES || !value.is_ascii() {
         return false;
     }
     let mut segments = value.split(['.', '_', '-']);
@@ -106,17 +105,26 @@ fn valid_scheme_id(value: &str) -> bool {
     })
 }
 
-/// Imported source descriptors are attribution, never authority to replace an installed scheme.
+/// Where an installed theme came from.
+///
+/// A theme installed from the Zed extension registry names its extension and version, which is
+/// what updating and reinstalling that extension replace. A theme imported from a file names none.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SchemeOrigin {
-    pub(crate) format: SchemeSourceFormat,
+pub(crate) struct ThemeOrigin {
+    pub(crate) format: ThemeSourceFormat,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) package_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) package_version: Option<String>,
     pub(crate) family: String,
     pub(crate) theme: String,
     pub(crate) fingerprint: String,
@@ -124,19 +132,19 @@ pub(crate) struct SchemeOrigin {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SchemeSourceFormat {
+pub(crate) enum ThemeSourceFormat {
     Zed,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SchemeMetadata {
+pub(crate) struct ThemeMetadata {
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) origin: Option<SchemeOrigin>,
+    pub(crate) origin: Option<ThemeOrigin>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
@@ -297,10 +305,6 @@ impl TerminalColors {
 pub(crate) struct TerminalPaletteOverrides([Option<Color>; 8]);
 
 impl TerminalPaletteOverrides {
-    pub(crate) fn sparse(colors: [Option<Color>; 8]) -> Option<Self> {
-        colors.iter().any(Option::is_some).then_some(Self(colors))
-    }
-
     pub(crate) fn complete(colors: [Color; 8]) -> Self {
         Self(colors.map(Some))
     }
@@ -513,60 +517,71 @@ impl TerminalColorOverrides {
     }
 }
 
+/// A Zed extension identity and the version of it that is installed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ThemePackage {
+    pub(crate) id: String,
+    pub(crate) version: String,
+}
+
 /// One catalog entry as a settings list presents it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SchemeSummary {
-    pub(crate) id: SchemeId,
+pub(crate) struct ThemeSummary {
+    pub(crate) id: ThemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
-    /// Built-in schemes cannot be removed, and their identifiers are reserved.
+    /// Built-in themes cannot be removed, and their identifiers are reserved.
     pub(crate) builtin: bool,
+    /// The family the theme was published in, when it was installed from Zed.
+    pub(crate) family: Option<String>,
+    /// The registry extension that installed this theme, when one did.
+    pub(crate) package: Option<ThemePackage>,
     /// Representative resolved colors, ordered for a left-to-right preview strip.
     pub(crate) swatches: Vec<Color>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ColorScheme {
-    pub(crate) id: SchemeId,
+pub(crate) struct TerminalTheme {
+    pub(crate) id: ThemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
     #[serde(default, flatten)]
-    pub(crate) metadata: SchemeMetadata,
+    pub(crate) metadata: ThemeMetadata,
     pub(crate) colors: TerminalColorOverrides,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SchemeCatalog {
+pub(crate) struct ThemeCatalog {
     revision: u64,
-    schemes: BTreeMap<SchemeId, Arc<ColorScheme>>,
+    themes: BTreeMap<ThemeId, Arc<TerminalTheme>>,
 }
 
-impl Default for SchemeCatalog {
+impl Default for ThemeCatalog {
     fn default() -> Self {
         Self {
             revision: 0,
-            schemes: builtin::builtin_schemes()
+            themes: builtin::builtin_themes()
                 .into_iter()
-                .map(|scheme| (scheme.id.clone(), Arc::new(scheme)))
+                .map(|theme| (theme.id.clone(), Arc::new(theme)))
                 .collect(),
         }
     }
 }
 
-impl SchemeCatalog {
-    pub(crate) fn from_color_schemes(schemes: &[ColorScheme]) -> Result<Self, CatalogError> {
-        if schemes.len() > MAX_COLOR_SCHEMES {
-            return Err(CatalogError::TooManySchemes);
+impl ThemeCatalog {
+    pub(crate) fn from_terminal_themes(themes: &[TerminalTheme]) -> Result<Self, CatalogError> {
+        if themes.len() > MAX_INSTALLED_THEMES {
+            return Err(CatalogError::TooManyThemes);
         }
         let mut catalog = Self::default();
         let mut seen = BTreeSet::new();
-        for scheme in schemes {
-            validate_scheme(scheme, true)?;
-            if !seen.insert(scheme.id.clone()) || catalog.contains(&scheme.id) {
+        for theme in themes {
+            validate_theme(theme, true)?;
+            if !seen.insert(theme.id.clone()) || catalog.contains(&theme.id) {
                 return Err(CatalogError::DuplicateId);
             }
-            catalog.insert_unchecked(scheme.clone());
+            catalog.insert_unchecked(theme.clone());
         }
         Ok(catalog)
     }
@@ -575,121 +590,133 @@ impl SchemeCatalog {
         self.revision
     }
 
-    /// Lists installed schemes with resolved preview swatches.
-    pub(crate) fn summaries(&self) -> Vec<SchemeSummary> {
-        self.schemes
+    /// Lists installed themes with resolved preview swatches, built-in themes first and the rest
+    /// by name.
+    pub(crate) fn summaries(&self) -> Vec<ThemeSummary> {
+        let mut summaries = self
+            .themes
             .values()
-            .map(|scheme| {
-                let mut colors = builtin::terminal_base(scheme.appearance);
-                colors.apply(&scheme.colors);
-                SchemeSummary {
-                    id: scheme.id.clone(),
-                    name: scheme.name.clone(),
-                    appearance: scheme.appearance,
-                    builtin: scheme.id.is_reserved(),
+            .map(|theme| {
+                let mut colors = builtin::terminal_base(theme.appearance);
+                colors.apply(&theme.colors);
+                ThemeSummary {
+                    id: theme.id.clone(),
+                    name: theme.name.clone(),
+                    appearance: theme.appearance,
+                    builtin: theme.id.is_reserved(),
+                    family: theme
+                        .metadata
+                        .origin
+                        .as_ref()
+                        .map(|origin| origin.family.clone()),
+                    package: theme.metadata.origin.as_ref().and_then(|origin| {
+                        Some(ThemePackage {
+                            id: origin.package_id.clone()?,
+                            version: origin.package_version.clone()?,
+                        })
+                    }),
                     swatches: std::iter::once(colors.background)
                         .chain(std::iter::once(colors.foreground))
                         .chain(colors.normal.into_iter().skip(1).take(6))
                         .collect(),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        summaries.sort_by_cached_key(|summary| {
+            (
+                !summary.builtin,
+                summary.name.to_lowercase(),
+                summary.id.clone(),
+            )
+        });
+        summaries
     }
 
-    pub(crate) fn schemes(&self) -> Vec<ColorScheme> {
-        self.schemes
+    pub(crate) fn themes(&self) -> Vec<TerminalTheme> {
+        self.themes
             .values()
-            .map(|scheme| scheme.as_ref().clone())
+            .map(|theme| theme.as_ref().clone())
             .collect()
     }
 
-    pub(crate) fn contains(&self, id: &SchemeId) -> bool {
-        self.schemes.contains_key(id)
+    pub(crate) fn contains(&self, id: &ThemeId) -> bool {
+        self.themes.contains_key(id)
     }
-    pub(crate) fn get(&self, id: &SchemeId) -> Option<&ColorScheme> {
-        self.schemes.get(id).map(AsRef::as_ref)
+    pub(crate) fn get(&self, id: &ThemeId) -> Option<&TerminalTheme> {
+        self.themes.get(id).map(AsRef::as_ref)
     }
 
+    /// Installs a batch atomically, retiring the named installed themes in the same step.
+    ///
+    /// A theme whose identity is already installed is replaced. Imported identities derive from
+    /// their source, so the same identity means the same theme from the same source.
     pub(crate) fn install_batch(
         &mut self,
-        schemes: &[ColorScheme],
+        themes: &[TerminalTheme],
         expected_revision: u64,
-        replace: &BTreeSet<SchemeId>,
-    ) -> Result<Vec<SchemeId>, CatalogError> {
+        retire: &BTreeSet<ThemeId>,
+    ) -> Result<Vec<ThemeId>, CatalogError> {
         if expected_revision != self.revision {
             return Err(CatalogError::RevisionConflict);
         }
-        if schemes.is_empty() {
+        if themes.is_empty() {
             return Err(CatalogError::EmptyBatch);
         }
-        if schemes.len() > MAX_INSTALL_BATCH_SCHEMES {
-            return Err(CatalogError::TooManySchemes);
-        }
         let mut seen = BTreeSet::new();
-        for scheme in schemes {
-            validate_scheme(scheme, true)?;
-            if !seen.insert(scheme.id.clone()) {
+        for theme in themes {
+            validate_theme(theme, true)?;
+            if !seen.insert(theme.id.clone()) {
                 return Err(CatalogError::DuplicateId);
             }
         }
-        for id in replace {
+        for id in retire {
             if id.is_reserved() {
                 return Err(CatalogError::ReservedId);
             }
-            if !seen.contains(id) || !self.contains(id) {
-                return Err(CatalogError::UnknownReplacement);
+            if !self.contains(id) {
+                return Err(CatalogError::UnknownTheme);
             }
         }
-        if schemes
-            .iter()
-            .any(|scheme| self.contains(&scheme.id) && !replace.contains(&scheme.id))
-        {
-            return Err(CatalogError::DuplicateId);
-        }
-        if self
-            .imported_count()
-            .saturating_sub(replace.len())
-            .saturating_add(schemes.len())
-            > MAX_COLOR_SCHEMES
-        {
-            return Err(CatalogError::TooManySchemes);
-        }
-
         let mut next = self.clone();
-        for scheme in schemes {
-            if replace.contains(&scheme.id) {
-                next.schemes.remove(&scheme.id);
-            }
-            next.insert_unchecked(scheme.clone());
+        for id in retire.iter().chain(&seen) {
+            next.themes.remove(id);
+        }
+        if next.imported_count().saturating_add(themes.len()) > MAX_INSTALLED_THEMES {
+            return Err(CatalogError::TooManyThemes);
+        }
+        for theme in themes {
+            next.insert_unchecked(theme.clone());
         }
         next.revision = next
             .revision
             .checked_add(1)
             .ok_or(CatalogError::RevisionOverflow)?;
-        let installed = schemes.iter().map(|scheme| scheme.id.clone()).collect();
         *self = next;
-        Ok(installed)
+        Ok(seen.into_iter().collect())
     }
 
     fn imported_count(&self) -> usize {
-        self.schemes.keys().filter(|id| !id.is_reserved()).count()
+        self.themes.keys().filter(|id| !id.is_reserved()).count()
     }
 
-    fn insert_unchecked(&mut self, scheme: ColorScheme) {
-        self.schemes.insert(scheme.id.clone(), Arc::new(scheme));
+    fn insert_unchecked(&mut self, theme: TerminalTheme) {
+        self.themes.insert(theme.id.clone(), Arc::new(theme));
     }
 }
 
-pub(super) fn validate_scheme(scheme: &ColorScheme, imported: bool) -> Result<(), CatalogError> {
-    if imported && scheme.id.is_reserved() {
+pub(super) fn validate_theme(theme: &TerminalTheme, imported: bool) -> Result<(), CatalogError> {
+    if imported && theme.id.is_reserved() {
         return Err(CatalogError::ReservedId);
     }
-    scheme.colors.validate()?;
-    let (name, metadata) = (&scheme.name, &scheme.metadata);
-    validate_text(name, MAX_SCHEME_NAME_CHARACTERS)?;
+    theme.colors.validate()?;
+    let (name, metadata) = (&theme.name, &theme.metadata);
+    validate_text(name, MAX_THEME_NAME_CHARACTERS)?;
     if let Some(origin) = &metadata.origin {
         if let Some(id) = &origin.package_id {
             validate_text(id, 256)?;
+        }
+        if let Some(version) = &origin.package_version {
+            validate_text(version, 64)?;
         }
         validate_text(&origin.family, 256)?;
         validate_text(&origin.theme, 128)?;
@@ -724,20 +751,20 @@ pub(super) fn validate_text(value: &str, max: usize) -> Result<(), CatalogError>
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum CatalogError {
-    #[error("invalid scheme identity")]
+    #[error("invalid theme identity")]
     InvalidId,
-    #[error("invalid scheme metadata")]
+    #[error("invalid theme metadata")]
     InvalidMetadata,
-    #[error("reserved scheme identity")]
+    #[error("reserved theme identity")]
     ReservedId,
-    #[error("duplicate scheme identity")]
+    #[error("duplicate theme identity")]
     DuplicateId,
-    #[error("too many schemes")]
-    TooManySchemes,
-    #[error("scheme batch is empty")]
+    #[error("too many themes")]
+    TooManyThemes,
+    #[error("theme batch is empty")]
     EmptyBatch,
-    #[error("scheme replacement target is missing")]
-    UnknownReplacement,
+    #[error("theme is not installed")]
+    UnknownTheme,
     #[error("catalog revision conflict")]
     RevisionConflict,
     #[error("catalog revision overflow")]

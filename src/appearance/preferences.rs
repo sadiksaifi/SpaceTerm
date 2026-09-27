@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::scheme::{CatalogError, TerminalColorOverrides, validate_text};
-use super::{Appearance, SchemeId, builtin};
+use super::terminal_theme::{CatalogError, TerminalColorOverrides, validate_text};
+use super::{Appearance, ThemeId, builtin};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,30 +33,30 @@ impl From<Appearance> for AppearanceMode {
     }
 }
 
-/// Terminal scheme identities for each Appearance Mode slot.
+/// Terminal theme identities for each Appearance Mode slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SchemeSlots {
-    pub(crate) light: SchemeId,
-    pub(crate) dark: SchemeId,
+pub(crate) struct ThemeSlots {
+    pub(crate) light: ThemeId,
+    pub(crate) dark: ThemeId,
 }
 
-impl SchemeSlots {
-    pub(crate) fn get(&self, appearance: Appearance) -> &SchemeId {
+impl ThemeSlots {
+    pub(crate) fn get(&self, appearance: Appearance) -> &ThemeId {
         match appearance {
             Appearance::Light => &self.light,
             Appearance::Dark => &self.dark,
         }
     }
 
-    pub(crate) fn get_mut(&mut self, appearance: Appearance) -> &mut SchemeId {
+    pub(crate) fn get_mut(&mut self, appearance: Appearance) -> &mut ThemeId {
         match appearance {
             Appearance::Light => &mut self.light,
             Appearance::Dark => &mut self.dark,
         }
     }
 
-    pub(crate) fn set(&mut self, appearance: Appearance, id: SchemeId) {
+    pub(crate) fn set(&mut self, appearance: Appearance, id: ThemeId) {
         *self.get_mut(appearance) = id;
     }
 }
@@ -130,17 +130,17 @@ impl Default for TerminalRenderingPreferences {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TerminalPreferences {
-    pub(crate) schemes: SchemeSlots,
+    pub(crate) themes: ThemeSlots,
     pub(crate) typography: TerminalTypographyPreferences,
     pub(crate) rendering: TerminalRenderingPreferences,
     #[serde(default)]
-    pub(crate) overrides: BTreeMap<SchemeId, TerminalColorOverrides>,
+    pub(crate) overrides: BTreeMap<ThemeId, TerminalColorOverrides>,
 }
 
 impl Default for TerminalPreferences {
     fn default() -> Self {
         Self {
-            schemes: SchemeSlots {
+            themes: ThemeSlots {
                 light: builtin::fallback_id(Appearance::Light),
                 dark: builtin::dark_terminal_id(),
             },
@@ -200,9 +200,9 @@ impl AppearancePreferences {
             ResetTarget::AppearanceMode => self.mode = defaults.mode,
             ResetTarget::Transparency => self.window.transparency = defaults.window.transparency,
             ResetTarget::Blur => self.window.blur = defaults.window.blur,
-            ResetTarget::TerminalScheme(appearance) => {
-                *self.terminal.schemes.get_mut(appearance) =
-                    defaults.terminal.schemes.get(appearance).clone();
+            ResetTarget::TerminalTheme(appearance) => {
+                *self.terminal.themes.get_mut(appearance) =
+                    defaults.terminal.themes.get(appearance).clone();
             }
             ResetTarget::TerminalFontFamily => {
                 self.terminal.typography.family = defaults.terminal.typography.family
@@ -226,17 +226,17 @@ impl AppearancePreferences {
             ResetTarget::TerminalBoldAsBright => {
                 self.terminal.rendering.bold_as_bright = defaults.terminal.rendering.bold_as_bright
             }
-            ResetTarget::TerminalColorOverride { scheme, role } => {
-                if let Some(overrides) = self.terminal.overrides.get_mut(&scheme) {
+            ResetTarget::TerminalColorOverride { theme, role } => {
+                if let Some(overrides) = self.terminal.overrides.get_mut(&theme) {
                     overrides.remove_role(role.as_str());
                     if overrides.is_empty() {
-                        self.terminal.overrides.remove(&scheme);
+                        self.terminal.overrides.remove(&theme);
                     }
                 }
             }
             ResetTarget::Density => self.window.density = defaults.window.density,
             ResetTarget::TerminalColors => {
-                self.terminal.schemes = defaults.terminal.schemes;
+                self.terminal.themes = defaults.terminal.themes;
                 self.terminal.overrides.clear();
             }
             ResetTarget::TerminalTypography => {
@@ -257,7 +257,7 @@ pub(crate) enum ResetTarget {
     AppearanceMode,
     Transparency,
     Blur,
-    TerminalScheme(Appearance),
+    TerminalTheme(Appearance),
     TerminalFontFamily,
     TerminalBaseSize,
     TerminalRegularWeight,
@@ -266,7 +266,7 @@ pub(crate) enum ResetTarget {
     TerminalItalic,
     TerminalBoldAsBright,
     TerminalColorOverride {
-        scheme: SchemeId,
+        theme: ThemeId,
         role: TerminalColorRole,
     },
     Density,
@@ -281,9 +281,9 @@ impl ResetTarget {
         dead_code,
         reason = "individual color-role reset awaits the color override editor"
     )]
-    pub(crate) fn terminal_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
+    pub(crate) fn terminal_color_override(theme: ThemeId, role: &'static str) -> Option<Self> {
         Some(Self::TerminalColorOverride {
-            scheme,
+            theme,
             role: TerminalColorRole::new(role)?,
         })
     }

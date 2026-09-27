@@ -1,12 +1,12 @@
 # Compile Chrome themes before presentation
 
 SpaceTerm authors its Chrome. One application-scoped Appearance Mode selects the built-in Light or
-Dark Chrome definition and the Terminal Color Scheme slot of that appearance. Chrome typography is
+Dark Chrome definition and the Terminal Theme slot of that appearance. Chrome typography is
 fixed, and Density is the only Chrome Setting. The material, contrast and composition rules below
 are tuned against these two definitions. Terminal colors retain protocol ownership; Chrome does not
 reinterpret terminal palettes or OSC values. Inactive selected Tabs remain identifiable.
 
-Settings persists the Appearance Mode once and persists Light and Dark Terminal Color Scheme slots.
+Settings persists the Appearance Mode once and persists Light and Dark Terminal Theme slots.
 This makes contradictory Chrome and Terminal modes unrepresentable while preserving the Terminal
 choices across mode changes and restarts. Resetting the mode does not reset either slot.
 
@@ -148,7 +148,5 @@ distinct operations. The SpaceTerm GPUI fork corrects destination-alpha attenuat
 main and path-sprite pipelines. Layered translucent surfaces require this composition; theme
 colors cannot compensate for incorrect alpha blending.
 
-Terminal Color Scheme exports distinguish authored definitions from current effective portable
-copies. Effective exports include user overrides and fresh install identities, including copies of
-built-ins. Zed remains an external Adapter that contributes only terminal colors. Source identity
-and attribution remain separate from installed identity and content fingerprints.
+Terminal Themes never reach Chrome. Zed themes contribute only terminal colors (see ADR 0008).
+Source identity and attribution remain separate from installed identity and content fingerprints.

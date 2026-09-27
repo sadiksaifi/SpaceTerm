@@ -1,7 +1,8 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{CommandPaletteMetrics, CommandPalettePaint, CommandPaletteTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_icons::{ChromeIcons, IconRole};
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
@@ -80,8 +81,4 @@ pub(super) fn prepared(
             )
             .icon_baseline_center(icons.metrics(IconRole::Row).baseline_center),
     )
-}
-
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
 }

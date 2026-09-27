@@ -4,10 +4,11 @@
 //! label, a control, and an optional reset affordance; a stepper is two icon buttons around a
 //! readout. Interaction behavior stays in `spaceterm-ui`.
 
+use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px, rgba};
+use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -24,15 +25,12 @@ use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, Tex
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
-pub(super) fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 /// A field action rests on its field and uses complete neutral paints while interacting.
 #[cfg(test)]
 pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
     let paint = |background, foreground| {
-        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), rgba(0))
+        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), gpui::rgba(0))
     };
     spaceterm_ui::ButtonVariantStyle::new(
         paint(colors.input_background, colors.input_text),
@@ -48,7 +46,7 @@ pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonV
     )
 }
 
-/// The width every scheme's color strip takes, so the names beside them share one column.
+/// The width every theme's color strip takes, so the names beside them share one column.
 const SWATCH_WIDTH: f32 = 88.0;
 
 /// The horizontal breathing room every row keeps inside the card that holds it.
@@ -732,10 +730,10 @@ impl gpui::RenderOnce for StepperElement {
     }
 }
 
-/// A left-to-right strip of representative scheme colors.
+/// A left-to-right strip of representative theme colors.
 ///
-/// Every strip is the same size whatever a scheme offers, so the names beside them line up in one
-/// column. A scheme with fewer colors shows wider bands rather than a shorter strip.
+/// Every strip is the same size whatever a theme offers, so the names beside them line up in one
+/// column. A theme with fewer colors shows wider bands rather than a shorter strip.
 pub(super) fn swatch_strip(
     selector: String,
     swatches: &[Color],
@@ -760,8 +758,8 @@ pub(super) fn swatch_strip(
         .h(appearance.spacing(14.0))
         .rounded(RadiusRole::ControlSmall.pixels())
         .overflow_hidden()
-        // A strip is bounded by a hairline rather than left to its own colors: a scheme is free to
-        // open on a near-background color, and the built-in dark scheme does, which would otherwise
+        // A strip is bounded by a hairline rather than left to its own colors: a theme is free to
+        // open on a near-background color, and the built-in dark theme does, which would otherwise
         // leave the strip looking short of the column every other strip fills.
         .border(px(HAIRLINE))
         .border_color(gpui_color(border))
@@ -773,11 +771,11 @@ pub(super) fn swatch_strip(
         )
 }
 
-/// A short status a row carries, such as a scheme being the one in use.
+/// A short status a row carries, such as a theme being the one in use.
 ///
 /// It is filled rather than outlined, so it reads as a state rather than as one more frame. The
 /// fill comes from the raised element role rather than the plain element background, which a
-/// scheme may resolve to the window background and would leave the badge invisible.
+/// theme may resolve to the window background and would leave the badge invisible.
 pub(super) fn badge(
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
@@ -820,11 +818,11 @@ mod tests {
     fn field_action_preserves_a_light_field_and_opposite_hover_paint() {
         use crate::appearance::{ChromeColors, Color};
         let colors = ChromeColors {
-            input_background: Color::rgb(0xffffff),
+            input_background: Color::WHITE,
             input_text: Color::rgb(0x111111),
-            text: Color::rgb(0xffffff),
+            text: Color::WHITE,
             ghost_element_hover: Color::rgb(0x111111),
-            ghost_element_hover_foreground: Color::rgb(0xffffff),
+            ghost_element_hover_foreground: Color::WHITE,
             ..ChromeColors::default()
         };
         let style = super::field_action_style(&colors);

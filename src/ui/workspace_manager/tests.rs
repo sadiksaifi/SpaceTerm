@@ -311,7 +311,7 @@ fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext)
         let mut preferences = crate::appearance::AppearancePreferences::default();
 
         preferences.window.density = density;
-        let resolved = crate::appearance::SchemeCatalog::default()
+        let resolved = crate::appearance::ThemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
                 &preferences,
@@ -7293,7 +7293,7 @@ fn inline_rename_contains_fixed_chrome_line_height_in_both_densities(cx: &mut Te
             let mut preferences = crate::appearance::AppearancePreferences::default();
 
             preferences.window.density = density;
-            let resolved = crate::appearance::SchemeCatalog::default()
+            let resolved = crate::appearance::ThemeCatalog::default()
                 .resolve(
                     crate::appearance::AppearanceGeneration::INITIAL,
                     &preferences,

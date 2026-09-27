@@ -1,6 +1,7 @@
+use crate::ui::appearance::gpui_color;
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SchemeCatalog,
+    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, ThemeCatalog,
     SystemAppearance, WindowBackgroundAppearance,
 };
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
@@ -102,7 +103,7 @@ fn light_selections_and_terminal_share_the_common_surface() {
         reference.row_selected_match,
         reference.row_selected_border,
     ]
-    .map(|color| gpui::rgba(color.rgba_hex()));
+    .map(gpui_color);
     assert_eq!(
         rows.resolve(true, true, false),
         spaceterm_ui::ListRowPaint::new(
@@ -509,7 +510,7 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
                     for role in FLOATING_ROLES {
                         let shell = prepared.floating_surfaces().shell(role);
                         let divider = Color::rgba(u32::from(shell.divider()));
-                        for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                        for underlay in [Color::BLACK, Color::WHITE] {
                             let host = shell_endpoint_background(shell, underlay);
                             let contrast = divider.source_over(host).contrast_ratio(host);
                             let (floor, ceiling) = match (appearance, increase_contrast) {
@@ -555,7 +556,7 @@ fn show_borders_reinforces_dark_floating_surface_edges() {
             for role in FLOATING_ROLES {
                 let shell = prepared.floating_surfaces().shell(role);
                 let edge = Color::rgba(u32::from(shell.edge()));
-                for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                for underlay in [Color::BLACK, Color::WHITE] {
                     let host = shell_endpoint_background(shell, underlay);
                     assert!(edge.source_over(host).contrast_ratio(host) >= 3.0);
                 }
@@ -586,7 +587,7 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
                         assert_eq!(shell.material().a, 1.0);
                     }
                     let foreground = prepared.floating_colors.preview_foreground;
-                    for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                    for underlay in [Color::BLACK, Color::WHITE] {
                         let host = shell_endpoint_background(shell, underlay);
                         let minimum = if prepared.active || increase_contrast {
                             4.5
@@ -852,7 +853,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                 );
 
                 let focused_floating = active.host_colors(spaceterm_ui::ControlHost::Floating);
-                for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                for underlay in [Color::BLACK, Color::WHITE] {
                     let host = shell_endpoint_background(shell, underlay);
                     for (fill, focused_fill, primary, secondary, icon, matched) in [
                         (
@@ -914,7 +915,7 @@ fn disabled_segmented_content_remains_readable_on_both_activity_tracks() {
                 let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
                 for prepared in [&active, &inactive] {
                     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-                    let floating_hosts = [Color::rgb(0), Color::rgb(0xffffff)]
+                    let floating_hosts = [Color::BLACK, Color::WHITE]
                         .map(|underlay| shell_endpoint_background(shell, underlay));
                     for (name, paint, hosts) in [
                         (
@@ -997,7 +998,7 @@ fn final_disabled_control_paints_are_identical_across_window_activity() {
                     ..AppearancePreferences::default()
                 };
                 preferences.window.transparency = transparency;
-                let resolved = SchemeCatalog::default()
+                let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &preferences,
@@ -1106,7 +1107,7 @@ fn final_disabled_control_paints_are_identical_across_window_activity() {
                     let minimum = if increase_contrast { 4.5 } else { 3.0 };
                     let endpoints = |prepared: &ChromeAppearance| {
                         let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-                        [Color::rgb(0), Color::rgb(0xffffff)]
+                        [Color::BLACK, Color::WHITE]
                             .map(|underlay| shell_endpoint_background(shell, underlay))
                     };
                     let active_hosts = endpoints(&active);
@@ -1181,7 +1182,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
                     ..AppearancePreferences::default()
                 };
                 preferences.window.transparency = transparency;
-                let resolved = SchemeCatalog::default()
+                let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &preferences,
@@ -1276,7 +1277,7 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
             };
             preferences.window.transparency = transparency;
             preferences.window.blur = true;
-            let resolved = SchemeCatalog::default()
+            let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
@@ -1307,7 +1308,7 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                     );
                 }
                 let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-                for endpoint in [Color::rgb(0), Color::rgb(0xffffff)] {
+                for endpoint in [Color::BLACK, Color::WHITE] {
                     let background = shell_endpoint_background(shell, endpoint);
                     let edge = Color::rgba(u32::from(shell.edge()));
                     assert!(
@@ -1585,7 +1586,7 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
                 };
                 preferences.window.transparency = transparency;
                 preferences.window.blur = true;
-                let resolved = SchemeCatalog::default()
+                let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &preferences,
@@ -1595,7 +1596,7 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
                     .unwrap();
                 let prepared = ChromeAppearance::prepare(&resolved.chrome);
                 let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-                let hosts = [Color::rgb(0), Color::rgb(0xffffff)]
+                let hosts = [Color::BLACK, Color::WHITE]
                     .map(|underlay| shell_endpoint_background(shell, underlay));
                 let assert_host_contrast =
                     |name: &str, color: Color, hosts: [Color; 2], minimum: f64| {
@@ -1716,7 +1717,7 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
 /// contrast contract.
 fn shell_endpoint_background(shell: FloatingShell, underlay: Color) -> Color {
     assert!(
-        underlay == Color::rgb(0x000000) || underlay == Color::rgb(0xffffff),
+        underlay == Color::BLACK || underlay == Color::WHITE,
         "this helper models only the tone box endpoints"
     );
     let tone = Color::rgba(u32::from(shell.backdrop_tone()));
@@ -1759,7 +1760,7 @@ fn resolve_case_with_transparency_accessibility(
     preferences.window.density = density;
     preferences.window.transparency = transparency;
     preferences.window.blur = blur;
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
@@ -2321,7 +2322,7 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
         preferences.window.density = ChromeDensity::Compact;
         preferences.window.transparency = 1.0;
         preferences.window.blur = true;
-        let accessible = SchemeCatalog::default()
+        let accessible = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
@@ -2349,7 +2350,7 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
                 Appearance::Dark => 1.25..=1.50,
             };
             for shell in [opaque_shell, translucent_shell] {
-                for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+                for underlay in [Color::BLACK, Color::WHITE] {
                     let host = shell_endpoint_background(shell, underlay);
                     let edge = Color::rgba(u32::from(shell.edge()));
                     assert!(
@@ -2358,7 +2359,7 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
                     );
                 }
             }
-            let host = shell_endpoint_background(opaque_shell, Color::rgb(0));
+            let host = shell_endpoint_background(opaque_shell, Color::BLACK);
             let divider = Color::rgba(u32::from(opaque_shell.divider()));
             let expected_divider_band = match appearance {
                 Appearance::Light => 1.12..=1.22,
@@ -2498,7 +2499,7 @@ fn dark_floating_ordinary_controls_share_one_readable_ordered_alpha() {
     assert!(fills[0].a < 255);
 
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+    for underlay in [Color::BLACK, Color::WHITE] {
         let host = shell_endpoint_background(shell, underlay);
         let backgrounds = fills.map(|fill| fill.source_over(host));
         assert!(backgrounds[0].contrast_ratio(backgrounds[1]) >= 1.05);
@@ -2549,7 +2550,7 @@ fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback
     let hover = paint.ghost_element_hover;
     let pressed = paint.ghost_element_active;
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    let endpoints = [Color::rgb(0), Color::rgb(0xffffff)]
+    let endpoints = [Color::BLACK, Color::WHITE]
         .map(|underlay| shell_endpoint_background(shell, underlay));
     assert!(
         !prepared
@@ -2610,7 +2611,7 @@ fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() 
                 reference[1].r.cmp(&reference[2].r),
             ];
             let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-            for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let host = shell_endpoint_background(shell, underlay);
                 let rendered = [
                     host,
@@ -2800,7 +2801,7 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
     let authored = resolved.chrome.colors.clone();
 
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
-    let black = Color::rgb(0);
+    let black = Color::BLACK;
     let authored_root = authored.background.with_alpha(255);
     for (host_name, segmented) in [
         ("Window", &prepared.segmented_control_colors),
@@ -2953,7 +2954,7 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
             ),
         ];
         for (state, fill, foreground, minimum) in text_states {
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let host = shell_endpoint_background(shell, underlay);
                 let background = fill.source_over(host);
                 let contrast = foreground
@@ -2965,7 +2966,7 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
                 );
             }
         }
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let host = shell_endpoint_background(shell, underlay);
             assert!(
                 colors.text_accent.source_over(host).contrast_ratio(host) >= 4.5,
@@ -2993,7 +2994,7 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
             }
         }
         let segmented = &prepared.floating_segmented_colors;
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let host = shell_endpoint_background(shell, underlay);
             let track = segmented.element_background.source_over(host);
             for (state, fill, foreground, minimum) in [
@@ -3097,7 +3098,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
             spaceterm_ui::ControlShadow::none(),
             None,
             spaceterm_ui::ControlShadow::single(spaceterm_ui::ControlShadowLayer::new(
-                gpui::rgba(prepared.colors.shadow.multiply_opacity(89).rgba_hex()).into(),
+                gpui_color(prepared.colors.shadow.multiply_opacity(89)).into(),
                 gpui::px(0.0),
                 gpui::px(1.0),
                 gpui::px(2.0),
@@ -3257,7 +3258,7 @@ fn floating_text_stays_readable_over_extreme_content_at_maximum_transparency() {
             } else {
                 host.text
             };
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let background = shell_endpoint_background(shell, underlay);
                 let foreground = text.source_over(background);
                 let contrast = foreground.contrast_ratio(background);
@@ -3284,7 +3285,7 @@ fn floating_supporting_text_stays_readable_over_extreme_content_at_maximum_trans
             FloatingRole::Notice,
         ] {
             let shell = prepared.floating_surfaces().shell(role);
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let background = shell_endpoint_background(shell, underlay);
                 let foreground = host.text_muted.source_over(background);
                 let contrast = foreground.contrast_ratio(background);
@@ -3308,7 +3309,7 @@ fn floating_disabled_content_stays_perceptible_without_matching_enabled_text() {
             prepared.floating_colors.icon_disabled,
         ] {
             assert_ne!(disabled, prepared.floating_colors.text);
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let background = shell_endpoint_background(shell, underlay);
                 assert!(
                     disabled.contrast_ratio(background) >= 3.0,
@@ -3345,7 +3346,7 @@ fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
                         prepared.disabled_diagnostics,
                     );
                     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-                    let floating_hosts = [Color::rgb(0), Color::rgb(0xffffff)]
+                    let floating_hosts = [Color::BLACK, Color::WHITE]
                         .map(|underlay| shell_endpoint_background(shell, underlay));
                     for (host_name, colors, hosts) in [
                         (
@@ -3435,7 +3436,7 @@ fn floating_bare_editor_placeholders_stay_readable_over_extreme_content() {
         let host = &prepared.floating_colors;
         for role in [FloatingRole::Command, FloatingRole::Popover] {
             let shell = prepared.floating_surfaces().shell(role);
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+            for underlay in [Color::BLACK, Color::WHITE] {
                 let background = shell_endpoint_background(shell, underlay);
                 let contrast = host
                     .input_placeholder
@@ -3514,7 +3515,7 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
                     [foreground, secondary, icon, matched],
                     border,
                 );
-                for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+                for underlay in [Color::BLACK, Color::WHITE] {
                     let background = row
                         .fill
                         .source_over(shell_endpoint_background(shell, underlay));
@@ -3540,12 +3541,12 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
 
     for foreground in [bare.input_text, bare.input_placeholder] {
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let background = shell_endpoint_background(shell, underlay);
             assert!(foreground.contrast_ratio(background) >= 4.5);
         }
     }
-    for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+    for underlay in [Color::BLACK, Color::WHITE] {
         let shell_background = shell_endpoint_background(shell, underlay);
         let background = standard.input_background.source_over(shell_background);
         for foreground in [standard.input_text, standard.input_placeholder] {

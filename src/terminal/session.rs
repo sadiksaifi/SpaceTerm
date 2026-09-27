@@ -120,10 +120,10 @@ pub(crate) struct TerminalAppearanceUpdate {
 #[cfg(test)]
 pub(crate) fn test_terminal_appearance_update() -> TerminalAppearanceUpdate {
     use crate::appearance::{
-        AppearancePreferences, AvailableFonts, SchemeCatalog, SystemAppearance,
+        AppearancePreferences, AvailableFonts, ThemeCatalog, SystemAppearance,
     };
 
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &AppearancePreferences::default(),

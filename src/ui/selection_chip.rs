@@ -2,8 +2,9 @@
 //! Callers supply prepared state paints and semantic geometry. Collection focus changes the
 //! selection paint; it never adds a row focus ring.
 
+use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
-use gpui::{AnyElement, Pixels, div, px, rgba};
+use gpui::{AnyElement, Pixels, div, px};
 
 use crate::appearance::{Appearance, Color};
 use crate::ui::chrome_geometry::HAIRLINE;
@@ -147,19 +148,19 @@ impl SelectionChip {
         Self::body(self.shape)
             .debug_selector(move || selector.clone())
             .when_some(self.paint.fill, |chip, fill| {
-                chip.bg(rgba(fill.rgba_hex())).when_some(rim, |chip, rim| {
-                    chip.border(px(HAIRLINE)).border_color(rgba(rim.rgba_hex()))
+                chip.bg(gpui_color(fill)).when_some(rim, |chip, rim| {
+                    chip.border(px(HAIRLINE)).border_color(gpui_color(rim))
                 })
             })
             .group_hover(group.to_owned(), move |style| {
                 let style = match hover_fill {
-                    Some(fill) => style.bg(rgba(fill.rgba_hex())),
+                    Some(fill) => style.bg(gpui_color(fill)),
                     None => style,
                 };
                 match hover_rim {
                     Some(rim) => style
                         .border(px(HAIRLINE))
-                        .border_color(rgba(rim.rgba_hex())),
+                        .border_color(gpui_color(rim)),
                     None => style,
                 }
             })
@@ -172,13 +173,13 @@ mod tests {
     use super::*;
     use crate::appearance::{
         AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-        SchemeCatalog, SystemAppearance,
+        ThemeCatalog, SystemAppearance,
     };
 
     fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {
         let mut preferences = AppearancePreferences::default();
         preferences.window.transparency = transparency;
-        let resolved = SchemeCatalog::default()
+        let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,

@@ -1,10 +1,11 @@
 // Production progress presentation is selected here so reusable controls remain independent of
 // the application's appearance vocabulary.
 
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{ProgressMetrics, ProgressMotion, ProgressPaint, ProgressSizes, ProgressTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 
 pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTheme {
     ProgressTheme::new(
@@ -29,13 +30,12 @@ fn paint(colors: &ChromeColors) -> ProgressPaint {
     )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Color;
+    use gpui::rgba;
 
     #[test]
     fn paint_uses_dedicated_progress_roles() {

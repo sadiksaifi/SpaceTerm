@@ -2203,11 +2203,11 @@ fn publish_terminal_preferences(
     cx: &mut App,
 ) {
     use crate::appearance::{
-        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, SchemeCatalog,
+        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, ThemeCatalog,
         SystemAppearance,
     };
     let previous = super::super::appearance_runtime::current(cx);
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::new(previous.generation.get() + 1),
             &preferences,

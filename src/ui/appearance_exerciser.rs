@@ -7,7 +7,8 @@ mod tests;
 mod floating_fixtures;
 mod gallery;
 
-use std::{collections::BTreeSet, time::Duration};
+use crate::ui::appearance::gpui_color;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
@@ -26,7 +27,7 @@ use crate::appearance::{
     Appearance, AppearanceMode, ChromeDensity, ResetTarget, TerminalFontFamily, export_settings,
     parse_settings,
 };
-use crate::settings::{PreviewToken, SchemeImport};
+use crate::settings::{PreviewToken, ThemeImport};
 
 use super::WorkspaceManager;
 use super::appearance_runtime::{self, AppearanceRuntime};
@@ -234,7 +235,7 @@ impl AppearanceExerciser {
             };
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
-                .map_err(|_| "Scheme preview rejected")
+                .map_err(|_| "Theme preview rejected")
         })();
         self.status = result
             .map(|()| "Shared appearance toggled for Chrome and Terminal")
@@ -253,7 +254,7 @@ impl AppearanceExerciser {
                 !candidate.preferences.terminal.rendering.bold_as_bright;
             settings
                 .update_preview(self.preview.as_ref().unwrap(), candidate)
-                .map_err(|_| "Terminal scheme preview rejected")
+                .map_err(|_| "Terminal theme preview rejected")
         })();
         self.status = result
             .map(|()| "Terminal rendering toggled; Chrome retained")
@@ -347,7 +348,7 @@ impl AppearanceExerciser {
             1 => ResetTarget::Transparency,
             2 => ResetTarget::Blur,
             3 => ResetTarget::Density,
-            4 => ResetTarget::TerminalScheme(Appearance::Dark),
+            4 => ResetTarget::TerminalTheme(Appearance::Dark),
             5 => ResetTarget::TerminalFontFamily,
             6 => ResetTarget::TerminalBaseSize,
             7 => ResetTarget::TerminalRegularWeight,
@@ -356,7 +357,7 @@ impl AppearanceExerciser {
             10 => ResetTarget::TerminalItalic,
             11 => ResetTarget::TerminalBoldAsBright,
             _ => ResetTarget::terminal_color_override(
-                resolved.terminal.effective_scheme.clone(),
+                resolved.terminal.effective_theme.clone(),
                 "foreground",
             )
             .unwrap(),
@@ -385,7 +386,7 @@ impl AppearanceExerciser {
                 .map_err(|_| "Reset preview rejected")
         })();
         self.status = result
-            .map(|()| "All appearance preferences reset; imported schemes retained")
+            .map(|()| "All appearance preferences reset; imported themes retained")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -574,7 +575,7 @@ impl AppearanceExerciser {
         cx.notify();
     }
 
-    fn import_editor(&mut self, cx: &mut Context<Self>) {
+    fn import_zed_editor(&mut self, cx: &mut Context<Self>) {
         let result = (|| {
             let bytes = self.editor_value(cx);
             self.ensure_preview(cx)?;
@@ -584,54 +585,19 @@ impl AppearanceExerciser {
                 .import_preview(
                     self.preview.as_ref().unwrap(),
                     catalog_revision,
-                    SchemeImport::SpaceTerm(bytes.as_bytes()),
-                    &BTreeSet::new(),
+                    ThemeImport::ZedFamily(bytes.as_bytes()),
                 )
-                .map_err(|_| "Import collides or is invalid")
+                .map_err(|_| "Zed theme family rejected")
         })();
         self.status = result
             .map(|receipt| {
                 format!(
-                    "Imported {} schemes at catalog revision {}; no scheme was selected",
+                    "Installed {} themes at catalog revision {}; no theme was selected",
                     receipt.installed.len(),
                     receipt.catalog_revision
                 )
             })
             .unwrap_or_else(str::to_owned);
-        self.export_settings_to_editor(cx);
-        cx.notify();
-    }
-
-    fn import_zed_editor(&mut self, cx: &mut Context<Self>) {
-        let result = (|| {
-            let bytes = self.editor_value(cx);
-            let candidates =
-                crate::settings::UserSettings::list_import_candidates(bytes.as_bytes())
-                    .map_err(|_| "Invalid Zed theme family")?;
-            let candidate = candidates.first().ok_or("Zed family has no candidate 0")?;
-            let candidate_index = candidate.index;
-            let candidate_name = candidate.name.clone();
-            let candidate_appearance = candidate.appearance;
-            self.ensure_preview(cx)?;
-            let settings = Self::settings(cx);
-            let catalog_revision = settings.snapshot().catalog_revision;
-            settings
-                .import_preview(
-                    self.preview.as_ref().unwrap(),
-                    catalog_revision,
-                    SchemeImport::Zed {
-                        bytes: bytes.as_bytes(),
-                        candidate_index,
-                    },
-                    &BTreeSet::new(),
-                )
-                .map_err(|_| "Zed candidate rejected")?;
-            Ok(format!(
-                "Imported candidate 0 '{}' ({:?}) into preview; no scheme was selected",
-                candidate_name, candidate_appearance
-            ))
-        })();
-        self.status = result.unwrap_or_else(|error: &'static str| error.to_owned());
         self.export_settings_to_editor(cx);
         cx.notify();
     }
@@ -714,19 +680,6 @@ impl AppearanceExerciser {
         }
     }
 
-    fn export_effective_schemes(&mut self, cx: &mut Context<Self>) {
-        let settings = Self::settings(cx);
-        let current = appearance_runtime::current(cx);
-        match settings.export_appearance(&current) {
-            Ok(output) => {
-                self.set_editor(output, cx);
-                self.status = String::from("Exported complete effective color schemes");
-            }
-            Err(_) => self.status = String::from("Scheme export failed"),
-        }
-        cx.notify();
-    }
-
     fn diagnostics(&self, cx: &App) -> String {
         let current = appearance_runtime::current(cx);
         let settings = Self::settings(cx).snapshot();
@@ -737,8 +690,8 @@ impl AppearanceExerciser {
             settings.phase,
             settings.status,
             current.chrome.appearance,
-            current.terminal.requested_scheme,
-            current.terminal.effective_scheme,
+            current.terminal.requested_theme,
+            current.terminal.effective_theme,
             current.diagnostics
         )
     }
@@ -762,8 +715,8 @@ impl AppearanceExerciser {
                 )
                 .rgba_hex(),
         );
-        let foreground = rgba(appearance.colors.text.rgba_hex());
-        let muted = rgba(appearance.colors.text_muted.rgba_hex());
+        let foreground = gpui_color(appearance.colors.text);
+        let muted = gpui_color(appearance.colors.text_muted);
         let weak = cx.weak_entity();
         let preview_shortcut =
             crate::desktop_profile::DesktopPresentation::get(cx).shortcut(&ToggleAppearancePreview);
@@ -897,9 +850,7 @@ impl AppearanceExerciser {
                 .child(action("appearance-cancel", "Cancel", Self::cancel))
                 .child(action("appearance-commit", "Commit", Self::commit))
                 .child(action("appearance-reload", "Reload", Self::reload))
-                .child(action("appearance-import", "Import Color Package", Self::import_editor))
-                .child(action("appearance-import-zed", "Import Zed Candidate 0", Self::import_zed_editor))
-                .child(action("appearance-export", "Export Effective Schemes", Self::export_effective_schemes))
+                .child(action("appearance-import-zed", "Import Zed Theme Family", Self::import_zed_editor))
                 .child(action("appearance-reload-fonts", "Reload Fonts", Self::reload_fonts))
                 .child(action("appearance-show-gallery", "Show State Gallery", Self::show_gallery))
                 .child(action("appearance-show-fixtures", "Show Acceptance Fixtures", Self::show_fixture_window))
@@ -917,7 +868,7 @@ impl AppearanceExerciser {
             )
             .child(div().chrome_text(appearance.typography.style(TextRole::Body)).whitespace_normal().child(self.status.clone()))
             .child(div().chrome_text(appearance.typography.style(TextRole::Secondary)).text_color(muted).whitespace_normal().child(
-                "The JSON editor is a bounded single-line development field. Export, edit or paste a native settings/color package, then use the matching action. Preview never writes; Commit uses the isolated retained Config root."
+                "The JSON editor is a bounded single-line development field. Export, edit or paste a settings document or a Zed theme family, then use the matching action. Preview never writes; Commit uses the isolated retained Config root."
             ));
         spaceterm_ui::ModalLayer::new(content)
     }
@@ -1078,8 +1029,8 @@ impl AppearanceFixtures {
             .flex_col()
             .gap(appearance.spacing(12.0))
             .p(appearance.spacing(16.0))
-            .bg(rgba(appearance.surface(crate::appearance::SurfaceRole::Sheet, appearance.colors.background).rgba_hex()))
-            .text_color(rgba(appearance.colors.text.rgba_hex()))
+            .bg(gpui_color(appearance.surface(crate::appearance::SurfaceRole::Sheet, appearance.colors.background)))
+            .text_color(gpui_color(appearance.colors.text))
             .chrome_text(appearance.typography.style(TextRole::Body))
             .child(
                 div()
@@ -1113,7 +1064,7 @@ impl AppearanceFixtures {
             .child(
                 div()
                     .chrome_text(appearance.typography.style(TextRole::Secondary))
-                    .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                    .text_color(gpui_color(appearance.colors.text_muted))
                     .whitespace_normal()
                     .child("Open each modal to verify that the input, combo box and menu remain safely obscured and cannot receive interaction through the scrim."),
             )

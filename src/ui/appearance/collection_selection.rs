@@ -95,7 +95,7 @@ pub(super) fn prepare(
         .shell(spaceterm_ui::FloatingRole::Popover);
     let tone = Color::rgba(u32::from(shell.backdrop_tone()));
     let wash = Color::rgba(u32::from(shell.material()));
-    let hosts = [Color::rgb(0), Color::rgb(0xffffff)]
+    let hosts = [Color::BLACK, Color::WHITE]
         .map(|underlay| wash.source_over(tone.source_over(underlay)));
     prepare_colors(
         &mut result.floating,
@@ -212,7 +212,7 @@ fn prepare_state<const N: usize>(
         None
     };
     let prepared = dimmed.or_else(|| resolve(active_fill)).or_else(|| {
-        [Color::rgb(0), Color::rgb(0xffffff)]
+        [Color::BLACK, Color::WHITE]
             .into_iter()
             .filter_map(|endpoint| {
                 let mut previous = 0.0;
@@ -250,9 +250,9 @@ fn prepare_state<const N: usize>(
                 .map(|background| ink.contrast_ratio(background))
                 .fold(f64::INFINITY, f64::min)
         };
-        [Color::rgb(0), Color::rgb(0xffffff)]
+        [Color::BLACK, Color::WHITE]
             .map(|fill| {
-                let ink = [Color::rgb(0), Color::rgb(0xffffff)]
+                let ink = [Color::BLACK, Color::WHITE]
                     .into_iter()
                     .max_by(|left, right| score(fill, *left).total_cmp(&score(fill, *right)))
                     .expect("two achromatic endpoints");

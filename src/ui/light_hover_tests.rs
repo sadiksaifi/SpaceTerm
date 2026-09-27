@@ -1,7 +1,7 @@
 use super::appearance::ChromeAppearance;
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts, Color,
-    CompositionCapabilities, SchemeCatalog, SystemAppearance,
+    CompositionCapabilities, ThemeCatalog, SystemAppearance,
 };
 
 fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {
@@ -10,7 +10,7 @@ fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {
         ..Default::default()
     };
     preferences.window.transparency = transparency;
-    SchemeCatalog::default()
+    ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
@@ -45,7 +45,7 @@ fn light_popup_uses_base_host_and_raised_selection() {
     let tone = Color::rgba(u32::from(shell.backdrop_tone()));
     let wash = Color::rgba(u32::from(shell.material()));
     assert_eq!(
-        wash.source_over(tone.source_over(Color::rgb(0))),
+        wash.source_over(tone.source_over(Color::BLACK)),
         Color::rgb(0xe5e5e5)
     );
 }
@@ -284,7 +284,7 @@ fn every_chip_lifts_without_drawing_a_border() {
                 ..Default::default()
             };
             preferences.window.transparency = transparency;
-            let resolved = SchemeCatalog::default()
+            let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
@@ -389,7 +389,7 @@ fn chip_geometry_matches_across_appearances() {
             mode,
             ..Default::default()
         };
-        let resolved = crate::appearance::SchemeCatalog::default()
+        let resolved = crate::appearance::ThemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
                 &preferences,
@@ -422,7 +422,7 @@ fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
         ..Default::default()
     };
     preferences.window.transparency = 0.0;
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,

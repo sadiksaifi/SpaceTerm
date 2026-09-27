@@ -15,7 +15,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
     KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle,
-    SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
+    SharedString, WeakEntity, Window, canvas, div, point, px,
 };
 use spaceterm_ui::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, ButtonSize, ButtonVariant,
@@ -523,9 +523,6 @@ impl Render for WorkspaceSidebar {
         self.sync_scrollbar(cx);
         self.render_body(cx.entity().downgrade(), window, cx)
     }
-}
-fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
 }
 
 impl WorkspaceSidebar {

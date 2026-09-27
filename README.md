@@ -93,5 +93,5 @@ SpaceTerm maintains its Rust integration as local workspace dependencies. See
 
 SpaceTerm authors paired Light and Dark appearances for the interface and terminal. Neutral
 surfaces share one material hierarchy across opaque and translucent appearance. The interface
-appearance is fixed apart from density; terminal color schemes, including imported schemes, and
-terminal fonts are selectable.
+appearance is fixed apart from density. Terminal Themes and terminal fonts are selectable, and any
+theme published for Zed can be installed from Settings.

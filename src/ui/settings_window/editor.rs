@@ -9,18 +9,17 @@ mod draft;
 use std::future::Future as _;
 
 use std::{
-    collections::BTreeSet,
     sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use gpui::{Context, Task};
 
-use crate::appearance::{ResetTarget, SchemeId, SchemeSummary, SettingsDocument};
+use crate::appearance::{ResetTarget, ThemeId, ThemeSummary, SettingsDocument};
 #[cfg(test)]
 use crate::settings::CommitJob;
 use crate::settings::storage::StorageError;
-use crate::settings::{CommitOutcome, ImportReceipt, SchemeImport, SettingsError, UserSettings};
+use crate::settings::{CommitOutcome, ImportReceipt, ThemeImport, SettingsError, UserSettings};
 
 use super::SettingsWindow;
 pub(super) use draft::SaveStatus;
@@ -103,7 +102,7 @@ impl SettingsEditor {
         }
     }
 
-    /// Restores every Setting, including the imported scheme catalog, to its default.
+    /// Restores every Setting, including the imported theme catalog, to its default.
     pub(super) fn reset_all(&mut self, cx: &mut Context<SettingsWindow>) {
         if self.draft.reset_all() {
             self.schedule(cx);
@@ -112,48 +111,30 @@ impl SettingsEditor {
 
     pub(super) fn import(
         &mut self,
-        source: SchemeImport<'_>,
-        replace: &BTreeSet<SchemeId>,
+        source: ThemeImport<'_>,
         cx: &mut Context<SettingsWindow>,
     ) -> Result<ImportReceipt, SettingsError> {
-        let receipt = self.draft.import(source, replace)?;
+        let receipt = self.draft.import(source)?;
         self.schedule(cx);
         Ok(receipt)
     }
 
-    pub(super) fn remove_scheme(
+    pub(super) fn remove_theme(
         &mut self,
-        id: &SchemeId,
+        id: &ThemeId,
         cx: &mut Context<SettingsWindow>,
     ) -> Result<(), SettingsError> {
-        self.draft.remove_scheme(id)?;
+        self.draft.remove_theme(id)?;
         self.schedule(cx);
         Ok(())
     }
 
-    pub(super) fn scheme_summaries(&self) -> Result<Vec<SchemeSummary>, SettingsError> {
-        self.draft.scheme_summaries()
+    pub(super) fn theme_summaries(&self) -> Result<Vec<ThemeSummary>, SettingsError> {
+        self.draft.theme_summaries()
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
         self.draft.export_document()
-    }
-
-    pub(super) fn export_definitions(&self, schemes: &[SchemeId]) -> Result<String, SettingsError> {
-        self.draft.export_definitions(schemes)
-    }
-
-    pub(super) fn export_appearance(
-        &self,
-        resolved: &crate::appearance::ResolvedAppearance,
-    ) -> Result<String, SettingsError> {
-        self.draft.export_appearance(resolved)
-    }
-
-    pub(super) fn list_import_candidates(
-        bytes: &[u8],
-    ) -> Result<Vec<crate::appearance::ImportCandidate>, SettingsError> {
-        SettingsDraft::list_import_candidates(bytes)
     }
 
     /// Attempts to save before closing, keeping a running write and any failed draft alive.

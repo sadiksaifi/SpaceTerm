@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceMode, SchemeId, SettingsDocument};
+use crate::appearance::{Appearance, AppearanceMode, ThemeId, SettingsDocument};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
@@ -623,17 +623,17 @@ fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
     let (settings, _) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.terminal.schemes.dark = SchemeId::new("custom.missing").unwrap();
+    candidate.preferences.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
         let resolved = current(cx);
         assert_eq!(
-            resolved.terminal.requested_scheme.as_str(),
+            resolved.terminal.requested_theme.as_str(),
             "custom.missing"
         );
         assert_eq!(
-            resolved.terminal.effective_scheme.as_str(),
+            resolved.terminal.effective_theme.as_str(),
             "builtin.spaceterm.dark"
         );
         assert!(!resolved.diagnostics.is_empty());

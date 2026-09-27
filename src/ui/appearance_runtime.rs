@@ -13,7 +13,7 @@ use crate::platform::window_frame::WindowFrameGeometry;
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
     AvailableFonts, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES, FontClass,
-    ResolvedAppearance, SchemeCatalog, SystemAppearance, TerminalFontFamily,
+    ResolvedAppearance, ThemeCatalog, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -141,7 +141,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     };
     ensure_selected_fonts(&candidate.preferences, cx);
     let fonts = cx.global::<AppearanceRuntime>().fonts.clone();
-    let catalog = SchemeCatalog::from_color_schemes(&candidate.color_schemes)
+    let catalog = ThemeCatalog::from_terminal_themes(&candidate.terminal_themes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
         .try_global::<InstalledAppearance>()
@@ -445,7 +445,7 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
         .map(|value| Arc::clone(&value.0))
         .unwrap_or_else(|| {
             Arc::new(
-                SchemeCatalog::default()
+                ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &Default::default(),

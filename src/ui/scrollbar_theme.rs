@@ -1,7 +1,8 @@
-use gpui::{Rgba, rgba};
+use crate::ui::appearance::gpui_color;
+
 use spaceterm_ui::ScrollbarTheme;
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 
 pub(super) fn theme(colors: &ChromeColors) -> ScrollbarTheme {
     ScrollbarTheme::new(
@@ -16,13 +17,11 @@ pub(super) fn theme(colors: &ChromeColors) -> ScrollbarTheme {
     .track_background(gpui_color(colors.scrollbar_track))
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Color;
     #[test]
     fn dragging_uses_its_authored_slot_even_while_hovered() {
         let colors = ChromeColors {

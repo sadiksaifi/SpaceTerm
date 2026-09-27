@@ -7,6 +7,11 @@ pub(crate) struct Color {
 }
 
 impl Color {
+    /// The dark contrast endpoint.
+    pub(crate) const BLACK: Self = Self::rgb(0x000000);
+    /// The light contrast endpoint.
+    pub(crate) const WHITE: Self = Self::rgb(0xffffff);
+
     pub(crate) const fn rgb(hex: u32) -> Self {
         Self {
             r: ((hex >> 16) & 0xff) as u8,

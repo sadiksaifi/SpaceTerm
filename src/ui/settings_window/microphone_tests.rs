@@ -94,6 +94,7 @@ fn open_settings(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             access,
+            None,
             window,
             cx,
         )

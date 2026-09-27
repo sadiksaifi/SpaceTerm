@@ -1,9 +1,10 @@
+use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{
-    Appearance, AppearanceMode, SchemeId, SettingsDocument, TerminalFontFamily,
+    Appearance, AppearanceMode, ThemeId, SettingsDocument, TerminalFontFamily,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::ui::appearance_runtime;
@@ -42,12 +43,12 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
 fn highlighted_row_materializes_against_its_card_host() {
     use crate::appearance::{
         AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-        SchemeCatalog, SurfaceRole, SystemAppearance,
+        ThemeCatalog, SurfaceRole, SystemAppearance,
     };
 
     let mut preferences = AppearancePreferences::default();
     preferences.window.transparency = 1.0;
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
@@ -102,7 +103,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     let mut appearance = ChromeAppearance::default();
     appearance.control_colors.input_background = Color::rgb(0xcc2233);
     appearance.card_controls.colors.input_background = Color::rgb(0x228844);
-    let expected = gpui::rgba(appearance.card_controls.colors.input_background.rgba_hex());
+    let expected = gpui_color(appearance.card_controls.colors.input_background);
     cx.update(|cx| {
         spaceterm_ui::replace_control_theme_catalog(
             cx,
@@ -316,10 +317,10 @@ fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppC
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::ColorSchemes
+        SettingsSectionId::Themes
     );
     assert!(
-        cx.debug_bounds("settings-navigation-chip-settings-section-color-schemes")
+        cx.debug_bounds("settings-navigation-chip-settings-section-themes")
             .is_some(),
         "keyboard navigation must retain the selected fill"
     );
@@ -402,7 +403,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::ColorSchemes
+        SettingsSectionId::Themes
     );
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
@@ -513,15 +514,15 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn unavailable_scheme_ids_remain_selected(cx: &mut TestAppContext) {
+fn unavailable_theme_ids_remain_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.schemes.dark = SchemeId::new("user.missing-terminal").unwrap();
+    document.preferences.terminal.themes.dark = ThemeId::new("user.missing-terminal").unwrap();
     let (settings, cx) = open_settings(&document, cx);
 
-    click("settings-navigation-settings-section-terminal", cx);
-    click("settings-row-terminal-scheme-control", cx);
+    click("settings-navigation-settings-section-themes", cx);
+    click("settings-row-terminal-theme-control", cx);
     assert!(
-        cx.debug_bounds("settings-row-terminal-scheme-control-user.missing-terminal")
+        cx.debug_bounds("settings-row-terminal-theme-control-user.missing-terminal")
             .is_some()
     );
     cx.simulate_keystrokes("enter");

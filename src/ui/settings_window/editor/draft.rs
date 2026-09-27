@@ -7,12 +7,12 @@
 //! and retires tokens when the committed revision moves. Edits remain here until they can reach
 //! the preview transaction again.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
-use crate::appearance::{ResetTarget, SchemeCatalog, SchemeId, SchemeSummary, SettingsDocument};
+use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary, SettingsDocument};
 use crate::settings::storage::StorageError;
 use crate::settings::{
-    CommitOutcome, ImportReceipt, PreviewToken, SchemeImport, SettingsError, UserSettings,
+    CommitOutcome, ImportReceipt, PreviewToken, ThemeImport, SettingsError, UserSettings,
 };
 
 /// What the Settings Window reports about the retained document.
@@ -98,29 +98,25 @@ impl SettingsDraft {
         })
     }
 
-    /// Restores every Setting, including the imported scheme catalog, to its default.
+    /// Restores every Setting, including the imported theme catalog, to its default.
     ///
     /// This goes through `edit` rather than `edit_catalog`: emptying the catalog cannot strand a
-    /// selection, because the same edit returns the selections to built-in schemes.
+    /// selection, because the same edit returns the selections to built-in themes.
     pub(super) fn reset_all(&mut self) -> bool {
         self.edit(SettingsDocument::reset_all)
     }
 
-    /// Installs parsed schemes without selecting any of them.
-    pub(super) fn import(
-        &mut self,
-        source: SchemeImport<'_>,
-        replace: &BTreeSet<SchemeId>,
-    ) -> Result<ImportReceipt, SettingsError> {
+    /// Installs translated themes without selecting any of them.
+    pub(super) fn import(&mut self, source: ThemeImport<'_>) -> Result<ImportReceipt, SettingsError> {
         self.edit_catalog(|settings, token, revision| {
-            settings.import_preview(token, revision, source, replace)
+            settings.import_preview(token, revision, source)
         })
     }
 
-    pub(super) fn remove_scheme(&mut self, id: &SchemeId) -> Result<(), SettingsError> {
+    pub(super) fn remove_theme(&mut self, id: &ThemeId) -> Result<(), SettingsError> {
         self.edit_catalog(|settings, token, revision| {
             settings
-                .remove_scheme_preview(token, revision, id)
+                .remove_theme_preview(token, revision, id)
                 .map(|_| ())
         })
     }
@@ -168,35 +164,14 @@ impl SettingsDraft {
         }
     }
 
-    /// Lists selectable schemes from the draft, so a freshly imported scheme appears
+    /// Lists selectable themes from the draft, so a freshly imported theme appears
     /// before it has been written.
-    pub(super) fn scheme_summaries(&self) -> Result<Vec<SchemeSummary>, SettingsError> {
-        Ok(SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?.summaries())
+    pub(super) fn theme_summaries(&self) -> Result<Vec<ThemeSummary>, SettingsError> {
+        Ok(ThemeCatalog::from_terminal_themes(&self.draft.terminal_themes)?.summaries())
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
         Ok(crate::appearance::export_settings(&self.draft)?)
-    }
-
-    pub(super) fn export_appearance(
-        &self,
-        resolved: &crate::appearance::ResolvedAppearance,
-    ) -> Result<String, SettingsError> {
-        let catalog = SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?;
-        Ok(crate::appearance::export_resolved_schemes(
-            &catalog, resolved,
-        )?)
-    }
-
-    pub(super) fn export_definitions(&self, schemes: &[SchemeId]) -> Result<String, SettingsError> {
-        let catalog = SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?;
-        Ok(crate::appearance::export_schemes(&catalog, schemes)?)
-    }
-
-    pub(super) fn list_import_candidates(
-        bytes: &[u8],
-    ) -> Result<Vec<crate::appearance::ImportCandidate>, SettingsError> {
-        UserSettings::list_import_candidates(bytes)
     }
 
     /// Re-reads the retained document, discarding any live preview.

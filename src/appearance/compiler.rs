@@ -556,8 +556,8 @@ fn contrast(foreground: Color, background: Color, minimum: f64) -> Color {
     {
         return foreground;
     }
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     if dark.contrast_ratio(background) >= light.contrast_ratio(background) {
         dark
     } else {
@@ -739,7 +739,7 @@ mod tests {
                 Color::rgb(0xfbfbfc),
                 Color::rgb(0xff00ff),
                 Color::rgb(0x777777),
-                Color::rgb(0),
+                Color::BLACK,
             ] {
                 for focused in [false, true] {
                     let caption = colors.caption(surface, focused);
@@ -804,9 +804,9 @@ mod tests {
     }
     #[test]
     fn status_fallback_meets_contrast_on_opposing_surfaces() {
-        let surfaces = [Color::rgb(0x000000), Color::rgb(0xffffff)];
+        let surfaces = [Color::BLACK, Color::WHITE];
         let colors = ChromeColors {
-            warning: Color::rgb(0x000000),
+            warning: Color::BLACK,
             ..builtin::chrome_base(Appearance::Light)
         };
         for surface in surfaces {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://spaceterm.dev/schema/appearance-settings-v2.json",
+  "$id": "https://spaceterm.dev/schema/appearance-settings-v3.json",
   "title": "SpaceTerm appearance settings",
   "type": "object",
   "additionalProperties": false,
@@ -8,11 +8,11 @@
     "schema_version",
     "revision",
     "preferences",
-    "color_schemes"
+    "terminal_themes"
   ],
   "properties": {
     "schema_version": {
-      "const": 2
+      "const": 3
     },
     "revision": {
       "type": "integer",
@@ -21,11 +21,11 @@
     "preferences": {
       "$ref": "#/$defs/preferences"
     },
-    "color_schemes": {
+    "terminal_themes": {
       "type": "array",
-      "maxItems": 128,
+      "maxItems": 512,
       "items": {
-        "$ref": "color-scheme-definitions-v1.schema.json#/$defs/colorScheme"
+        "$ref": "#/$defs/terminalTheme"
       }
     }
   },
@@ -36,22 +36,6 @@
         "dark",
         "auto"
       ]
-    },
-    "schemeSlots": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "light",
-        "dark"
-      ],
-      "properties": {
-        "light": {
-          "$ref": "color-scheme-definitions-v1.schema.json#/$defs/id"
-        },
-        "dark": {
-          "$ref": "color-scheme-definitions-v1.schema.json#/$defs/id"
-        }
-      }
     },
     "terminalTypography": {
       "type": "object",
@@ -145,14 +129,14 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "schemes",
+            "themes",
             "typography",
             "rendering",
             "overrides"
           ],
           "properties": {
-            "schemes": {
-              "$ref": "#/$defs/schemeSlots"
+            "themes": {
+              "$ref": "#/$defs/themeSlots"
             },
             "typography": {
               "$ref": "#/$defs/terminalTypography"
@@ -173,10 +157,10 @@
               "type": "object",
               "maxProperties": 128,
               "propertyNames": {
-                "$ref": "color-scheme-definitions-v1.schema.json#/$defs/id"
+                "$ref": "#/$defs/themeId"
               },
               "additionalProperties": {
-                "$ref": "color-scheme-definitions-v1.schema.json#/$defs/terminalColors"
+                "$ref": "#/$defs/terminalColors"
               }
             }
           }
@@ -212,6 +196,226 @@
         "transparency",
         "blur"
       ]
+    },
+    "themeSlots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "light",
+        "dark"
+      ],
+      "properties": {
+        "light": {
+          "$ref": "#/$defs/themeId"
+        },
+        "dark": {
+          "$ref": "#/$defs/themeId"
+        }
+      }
+    },
+    "themeId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$"
+    },
+    "importedThemeId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/themeId"
+        },
+        {
+          "not": {
+            "pattern": "^builtin\\."
+          }
+        }
+      ]
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
+    },
+    "appearance": {
+      "enum": [
+        "light",
+        "dark"
+      ]
+    },
+    "terminalColors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "background": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "normal": {
+          "$ref": "#/$defs/palette"
+        },
+        "bright": {
+          "$ref": "#/$defs/palette"
+        },
+        "dim": {
+          "$ref": "#/$defs/palette"
+        },
+        "bright_foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "dim_foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "cursor": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "cursor_text": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "selection_background": {
+          "$ref": "#/$defs/color"
+        },
+        "selection_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "find_match_background": {
+          "$ref": "#/$defs/color"
+        },
+        "find_match_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "find_active_match_background": {
+          "$ref": "#/$defs/color"
+        },
+        "find_active_match_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "hyperlink": {
+          "$ref": "#/$defs/color"
+        },
+        "visual_bell": {
+          "$ref": "#/$defs/color"
+        }
+      }
+    },
+    "palette": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/opaqueColor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "opaqueColor": {
+      "type": "string",
+      "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{3}[fF]|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{6}[fF]{2})$"
+    },
+    "nullableOpaqueColor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "themeOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "family",
+        "theme",
+        "fingerprint"
+      ],
+      "properties": {
+        "format": {
+          "const": "zed"
+        },
+        "package_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "package_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "theme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    "terminalTheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "appearance",
+        "colors"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/importedThemeId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "appearance": {
+          "$ref": "#/$defs/appearance"
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "license": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "colors": {
+          "$ref": "#/$defs/terminalColors"
+        },
+        "origin": {
+          "$ref": "#/$defs/themeOrigin"
+        }
+      }
     }
   }
 }

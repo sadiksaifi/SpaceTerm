@@ -154,8 +154,8 @@ fn readable(color: Color, host: Color, minimum: f64) -> Color {
 /// A middle-luminance host can have less than 7:1 contrast with both black and white. Move
 /// only such a host toward the nearest feasible endpoint before resolving its content.
 pub(super) fn contrast_host(host: Color, minimum: f64) -> Color {
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let ink = if dark.contrast_ratio(host) >= light.contrast_ratio(host) {
         dark
     } else {

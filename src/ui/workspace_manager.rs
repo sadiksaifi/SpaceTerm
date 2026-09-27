@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use super::workspace_chrome::{
@@ -74,7 +75,7 @@ use gpui::prelude::*;
 
 use gpui::{
     Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
-    px, rgba,
+    px,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
@@ -3355,9 +3356,6 @@ fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity 
     }
 }
 
-pub(super) fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
-}
 
 fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
     if path == home {

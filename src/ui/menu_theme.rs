@@ -1,7 +1,8 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::{px, rgba};
 use spaceterm_ui::{MenuMetrics, MenuPaint, MenuSizes, MenuTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::{ChromeIcons, IconRole};
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
@@ -140,13 +141,11 @@ fn metrics(width: f32, typography: &ChromeTypography, icons: &ChromeIcons) -> Me
         )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Color;
     use crate::appearance::{Appearance, builtin_chrome_base};
     use spaceterm_ui::ListRowPaint;
 

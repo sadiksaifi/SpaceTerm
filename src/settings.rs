@@ -20,8 +20,9 @@ use std::{
 };
 
 use crate::appearance::{
-    CatalogError, ColorScheme, ImportCandidate, ImportError, ResetTarget, SchemeCatalog, SchemeId,
-    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
+    CatalogError, ImportError, ResetTarget, SettingsDocument, SettingsDocumentError,
+    TerminalTheme, ThemeCatalog, ThemeId, ZedExtension, export_settings, parse_settings,
+    translate_zed_extension, translate_zed_family,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
 use storage::{Durability, SettingsStorage, StorageError};
@@ -78,7 +79,7 @@ pub(crate) struct CommitOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImportReceipt {
-    pub(crate) installed: Vec<SchemeId>,
+    pub(crate) installed: Vec<ThemeId>,
     pub(crate) catalog_revision: u64,
 }
 
@@ -123,35 +124,39 @@ pub(crate) struct PreviewToken {
     revision: u64,
 }
 
-/// Parsing is bounded and color-only. Installing never selects the imported schemes.
-pub(crate) enum SchemeImport<'a> {
-    SpaceTerm(&'a [u8]),
-    Zed {
-        bytes: &'a [u8],
-        candidate_index: usize,
-    },
-    ZedFamily {
-        bytes: &'a [u8],
-    },
+/// A Zed theme source. Translation is bounded and color-only; installing never selects a theme.
+#[derive(Clone, Copy)]
+pub(crate) enum ThemeImport<'a> {
+    /// One Zed theme family document the user selected. Reinstalling it replaces its themes.
+    ZedFamily(&'a [u8]),
+    /// A Zed theme extension from the registry. Installing it replaces every theme an earlier
+    /// version of the same extension installed, including themes the new version no longer has.
+    ZedExtension(&'a ZedExtension),
 }
 
-impl SchemeImport<'_> {
-    fn parse(self) -> Result<Vec<ColorScheme>, ImportError> {
+impl ThemeImport<'_> {
+    fn translate(self) -> Result<Vec<TerminalTheme>, ImportError> {
         match self {
-            Self::SpaceTerm(bytes) => Ok(crate::appearance::parse_color_document(bytes)?.schemes),
-            Self::Zed {
-                bytes,
-                candidate_index,
-            } => crate::appearance::import_zed(bytes, candidate_index).map(|scheme| vec![scheme]),
-            Self::ZedFamily { bytes } => {
-                let candidates = crate::appearance::list_zed_candidates(bytes)?;
-                let mut schemes = Vec::with_capacity(candidates.len());
-                for candidate in candidates {
-                    schemes.push(crate::appearance::import_zed(bytes, candidate.index)?);
-                }
-                Ok(schemes)
-            }
+            Self::ZedFamily(bytes) => translate_zed_family(bytes),
+            Self::ZedExtension(extension) => translate_zed_extension(extension),
         }
+    }
+
+    /// Installed themes this source supersedes.
+    fn retired(self, document: &SettingsDocument) -> BTreeSet<ThemeId> {
+        let Self::ZedExtension(extension) = self else {
+            return BTreeSet::new();
+        };
+        document
+            .terminal_themes
+            .iter()
+            .filter(|theme| {
+                theme.metadata.origin.as_ref().is_some_and(|origin| {
+                    origin.package_id.as_deref() == Some(extension.id.as_str())
+                })
+            })
+            .map(|theme| theme.id.clone())
+            .collect()
     }
 }
 
@@ -350,8 +355,7 @@ impl UserSettings {
         &self,
         token: &PreviewToken,
         catalog_revision: u64,
-        source: SchemeImport<'_>,
-        replace: &BTreeSet<SchemeId>,
+        source: ThemeImport<'_>,
     ) -> Result<ImportReceipt, SettingsError> {
         let mut state = self.0.lock();
         self.require_token(&state, token)?;
@@ -359,7 +363,7 @@ impl UserSettings {
         let Transaction::Preview { candidate, .. } = &state.transaction else {
             return Err(SettingsError::Stale);
         };
-        let (candidate, installed) = install_schemes(candidate, source.parse()?, replace)?;
+        let (candidate, installed) = install_themes(candidate, source)?;
         state.transaction = Transaction::Preview {
             id: token.id,
             candidate: Arc::new(candidate),
@@ -383,13 +387,12 @@ impl UserSettings {
         &self,
         revision: u64,
         catalog_revision: u64,
-        source: SchemeImport<'_>,
-        replace: &BTreeSet<SchemeId>,
+        source: ThemeImport<'_>,
     ) -> Result<(ImportReceipt, CommitJob), SettingsError> {
         let mut state = self.0.lock();
         state.require_idle(revision)?;
         state.require_catalog_revision(catalog_revision)?;
-        let (candidate, installed) = install_schemes(&state.committed, source.parse()?, replace)?;
+        let (candidate, installed) = install_themes(&state.committed, source)?;
         let resulting_catalog_revision = state
             .catalog_revision
             .checked_add(1)
@@ -404,11 +407,11 @@ impl UserSettings {
         ))
     }
 
-    pub(crate) fn remove_scheme_preview(
+    pub(crate) fn remove_theme_preview(
         &self,
         token: &PreviewToken,
         catalog_revision: u64,
-        id: &SchemeId,
+        id: &ThemeId,
     ) -> Result<u64, SettingsError> {
         let mut state = self.0.lock();
         self.require_token(&state, token)?;
@@ -416,7 +419,7 @@ impl UserSettings {
         let Transaction::Preview { candidate, .. } = &state.transaction else {
             return Err(SettingsError::Stale);
         };
-        let candidate = remove_scheme(candidate, id)?;
+        let candidate = remove_theme(candidate, id)?;
         state.transaction = Transaction::Preview {
             id: token.id,
             candidate: Arc::new(candidate),
@@ -429,46 +432,28 @@ impl UserSettings {
 
     #[allow(
         dead_code,
-        reason = "direct imported scheme deletion is available without a preview UI"
+        reason = "direct imported theme deletion is available without a preview UI"
     )]
-    pub(crate) fn remove_scheme_committed(
+    pub(crate) fn remove_theme_committed(
         &self,
         revision: u64,
         catalog_revision: u64,
-        id: &SchemeId,
+        id: &ThemeId,
     ) -> Result<CommitJob, SettingsError> {
         let mut state = self.0.lock();
         state.require_idle(revision)?;
         state.require_catalog_revision(catalog_revision)?;
-        let candidate = remove_scheme(&state.committed, id)?;
+        let candidate = remove_theme(&state.committed, id)?;
         self.prepare_direct_commit(&mut state, candidate)
     }
 
     #[allow(
         dead_code,
-        reason = "complete scheme listing remains available to interchange surfaces"
+        reason = "complete theme listing remains available to interchange surfaces"
     )]
-    pub(crate) fn list_schemes(&self) -> Result<Vec<ColorScheme>, SettingsError> {
+    pub(crate) fn list_themes(&self) -> Result<Vec<TerminalTheme>, SettingsError> {
         let snapshot = self.snapshot();
-        Ok(SchemeCatalog::from_color_schemes(&snapshot.candidate.color_schemes)?.schemes())
-    }
-
-    pub(crate) fn list_import_candidates(
-        bytes: &[u8],
-    ) -> Result<Vec<ImportCandidate>, SettingsError> {
-        Ok(crate::appearance::list_zed_candidates(bytes)?)
-    }
-
-    #[cfg(feature = "appearance-exerciser")]
-    pub(crate) fn export_appearance(
-        &self,
-        resolved: &crate::appearance::ResolvedAppearance,
-    ) -> Result<String, SettingsError> {
-        let snapshot = self.snapshot();
-        let catalog = SchemeCatalog::from_color_schemes(&snapshot.candidate.color_schemes)?;
-        Ok(crate::appearance::export_resolved_schemes(
-            &catalog, resolved,
-        )?)
+        Ok(ThemeCatalog::from_terminal_themes(&snapshot.candidate.terminal_themes)?.themes())
     }
 
     pub(crate) fn export_document(&self) -> Result<String, SettingsError> {
@@ -702,18 +687,19 @@ fn restore_preview_after_failure(state: &mut State) {
     }
 }
 
-fn install_schemes(
+fn install_themes(
     document: &SettingsDocument,
-    schemes: Vec<ColorScheme>,
-    replace: &BTreeSet<SchemeId>,
-) -> Result<(SettingsDocument, Vec<SchemeId>), SettingsError> {
-    let mut catalog = SchemeCatalog::from_color_schemes(&document.color_schemes)?;
-    let installed = catalog.install_batch(&schemes, catalog.revision(), replace)?;
+    source: ThemeImport<'_>,
+) -> Result<(SettingsDocument, Vec<ThemeId>), SettingsError> {
+    let themes = source.translate()?;
+    let retired = source.retired(document);
+    let mut catalog = ThemeCatalog::from_terminal_themes(&document.terminal_themes)?;
+    let installed = catalog.install_batch(&themes, catalog.revision(), &retired)?;
     let mut candidate = document.clone();
-    candidate
-        .color_schemes
-        .retain(|scheme| !replace.contains(&scheme.id));
-    candidate.color_schemes.extend(schemes);
+    candidate.terminal_themes.retain(|theme| {
+        !retired.contains(&theme.id) && !installed.contains(&theme.id)
+    });
+    candidate.terminal_themes.extend(themes);
     Ok((validate_candidate(candidate, document.revision)?, installed))
 }
 
@@ -721,18 +707,18 @@ fn install_schemes(
     dead_code,
     reason = "shared validation for the optional preview and direct deletion operations"
 )]
-fn remove_scheme(
+fn remove_theme(
     document: &SettingsDocument,
-    id: &SchemeId,
+    id: &ThemeId,
 ) -> Result<SettingsDocument, SettingsError> {
     if id.is_reserved() {
         return Err(CatalogError::ReservedId.into());
     }
     let mut candidate = document.clone();
-    let before = candidate.color_schemes.len();
-    candidate.color_schemes.retain(|scheme| &scheme.id != id);
-    if candidate.color_schemes.len() == before {
-        return Err(CatalogError::UnknownReplacement.into());
+    let before = candidate.terminal_themes.len();
+    candidate.terminal_themes.retain(|theme| &theme.id != id);
+    if candidate.terminal_themes.len() == before {
+        return Err(CatalogError::UnknownTheme.into());
     }
     validate_candidate(candidate, document.revision)
 }

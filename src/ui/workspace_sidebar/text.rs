@@ -8,7 +8,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::ui::workspace_status::WorkspaceStatusPaint;
 
-use super::gpui_color;
+use crate::ui::appearance::gpui_color;
 
 const GAP: f32 = 8.0;
 const PIN_WIDTH: f32 = 16.0;

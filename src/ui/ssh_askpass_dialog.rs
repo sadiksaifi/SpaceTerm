@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 #[cfg(test)]
 use gpui::px;
@@ -10,7 +11,6 @@ use spaceterm_ui::{
 };
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use crate::appearance::Color;
 use crate::platform::ssh_askpass::{
     AskPassCompletion, AskPassConfirmationPresentation, AskPassPresentationError, AskPassRequest,
     AskPassResponseError, AskPassResult, AskPassSecret, AskPassSecretPresentation,
@@ -484,9 +484,6 @@ impl Render for AskPassSecretBody {
     }
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    gpui::rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

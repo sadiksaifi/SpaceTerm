@@ -10,7 +10,8 @@ mod controls;
 mod editor;
 mod import;
 mod microphone;
-mod schemes;
+mod themes;
+mod zed_extensions;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -25,6 +26,7 @@ mod microphone_tests;
 #[path = "settings_window/tests.rs"]
 mod tests;
 
+use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -44,9 +46,10 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, SchemeCatalog, SchemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
+use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
@@ -61,11 +64,13 @@ use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 use catalog::{ROWS, SettingsRowId, SettingsSectionId};
 use controls::{
-    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button, gpui_color,
+    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
     reset_button, row_horizontal_inset, section_heading,
 };
 use editor::{SaveStatus, SettingsEditor};
 use microphone::MicrophoneAccessRow;
+use themes::InstalledThemesSearch;
+use zed_extensions::ZedExtensionsBrowser;
 
 actions!(
     spaceterm,
@@ -155,17 +160,20 @@ impl Global for OpenSettingsWindow {}
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
     microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+    theme_registry: Option<ZedThemeRegistry>,
 }
 impl Global for SettingsWindowComposition {}
 
 pub(crate) fn configure_window_chrome(
     window_movement: Rc<dyn WindowMovementFactory>,
     microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+    theme_registry: Option<ZedThemeRegistry>,
     cx: &mut App,
 ) {
     cx.set_global(SettingsWindowComposition {
         window_movement,
         microphone_access,
+        theme_registry,
     });
 }
 
@@ -193,6 +201,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     };
     let window_drag = composition.window_movement.create();
     let microphone_access = composition.microphone_access.clone();
+    let theme_registry = composition.theme_registry.clone();
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
         .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
@@ -225,6 +234,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
                 SettingsWindow::new_with_capabilities(
                     Rc::clone(&window_drag),
                     microphone_access.clone(),
+                    theme_registry.clone(),
                     window,
                     cx,
                 )
@@ -305,6 +315,8 @@ pub(crate) struct SettingsWindow {
     navigation_focus_visible: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     microphone_access: MicrophoneAccessRow,
+    installed_search: InstalledThemesSearch,
+    zed_extensions: ZedExtensionsBrowser,
 }
 
 impl SettingsWindow {
@@ -312,6 +324,7 @@ impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            None,
             None,
             window,
             cx,
@@ -321,6 +334,7 @@ impl SettingsWindow {
     fn new_with_capabilities(
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+        theme_registry: Option<ZedThemeRegistry>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -429,6 +443,8 @@ impl SettingsWindow {
             async {}
         })
         .detach();
+        let installed_search = InstalledThemesSearch::new(window, cx);
+        let zed_extensions = ZedExtensionsBrowser::new(theme_registry, window, cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -446,6 +462,8 @@ impl SettingsWindow {
             navigation_focus_visible: true,
             operating_system_window_drag_platform,
             microphone_access: MicrophoneAccessRow::new(microphone_access),
+            installed_search,
+            zed_extensions,
         }
     }
 
@@ -565,8 +583,8 @@ impl SettingsWindow {
     fn row_applies(&self, row: SettingsRowId) -> bool {
         let auto = self.editor.document().preferences.mode == AppearanceMode::Auto;
         match row {
-            SettingsRowId::TerminalScheme => !auto,
-            SettingsRowId::TerminalLightScheme | SettingsRowId::TerminalDarkScheme => auto,
+            SettingsRowId::TerminalTheme => !auto,
+            SettingsRowId::TerminalLightTheme | SettingsRowId::TerminalDarkTheme => auto,
             _ => true,
         }
     }
@@ -589,7 +607,7 @@ impl SettingsWindow {
             return false;
         };
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
-        // the document would copy the whole installed scheme catalog to answer a question about
+        // the document would copy the whole installed theme catalog to answer a question about
         // one field.
         let current = &self.editor.document().preferences;
         let mut reset = current.clone();
@@ -1043,7 +1061,7 @@ impl SettingsWindow {
                                 match section {
                                     SettingsSectionId::Appearance => IconName::SunMoon,
                                     SettingsSectionId::Terminal => IconName::Terminal,
-                                    SettingsSectionId::ColorSchemes => IconName::Palette,
+                                    SettingsSectionId::Themes => IconName::Palette,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
@@ -1238,7 +1256,7 @@ impl SettingsWindow {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let notice = (section == SettingsSectionId::ColorSchemes)
+        let notice = (section == SettingsSectionId::Themes)
             .then(|| self.render_diagnostics_notice(appearance, cx))
             .flatten();
         div()
@@ -1344,12 +1362,12 @@ impl SettingsWindow {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
-            SettingsRowId::TerminalScheme => self.render_scheme_picker(row, None, appearance, cx),
-            SettingsRowId::TerminalLightScheme => {
-                self.render_scheme_picker(row, Some(Appearance::Light), appearance, cx)
+            SettingsRowId::TerminalTheme => self.render_theme_picker(row, None, appearance, cx),
+            SettingsRowId::TerminalLightTheme => {
+                self.render_theme_picker(row, Some(Appearance::Light), appearance, cx)
             }
-            SettingsRowId::TerminalDarkScheme => {
-                self.render_scheme_picker(row, Some(Appearance::Dark), appearance, cx)
+            SettingsRowId::TerminalDarkTheme => {
+                self.render_theme_picker(row, Some(Appearance::Dark), appearance, cx)
             }
             SettingsRowId::Density => self.render_density(appearance, cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
@@ -1360,8 +1378,9 @@ impl SettingsWindow {
             }
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
-            SettingsRowId::TerminalSchemes => self.render_installed_schemes(appearance, cx),
-            SettingsRowId::SchemeInterchange => self.render_scheme_interchange(appearance, cx),
+            SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
+            SettingsRowId::ZedExtensions => self.render_zed_extensions(appearance, cx),
+            SettingsRowId::ThemeImport => self.render_theme_import(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
         }
     }
@@ -1405,7 +1424,7 @@ impl SettingsWindow {
     /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
     fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
         let document = self.editor.document();
-        let catalog = SchemeCatalog::from_color_schemes(&document.color_schemes).unwrap_or_default();
+        let catalog = ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
         let pick = |appearance: Appearance| {
             let mut preferences = document.preferences.clone();
             preferences.mode = appearance.into();
@@ -1440,7 +1459,7 @@ impl SettingsWindow {
         self.synchronize_search_results();
     }
 
-    fn render_scheme_picker(
+    fn render_theme_picker(
         &mut self,
         row: SettingsRowId,
         slot: Option<Appearance>,
@@ -1448,12 +1467,12 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preferences = &self.editor.document().preferences;
-        let schemes = &preferences.terminal.schemes;
+        let themes = &preferences.terminal.themes;
         let restrict = slot.unwrap_or_else(|| self.fixed_appearance());
-        let current = schemes.get(restrict).clone();
+        let current = themes.get(restrict).clone();
         let summaries = self
             .editor
-            .scheme_summaries()
+            .theme_summaries()
             .unwrap_or_default()
             .into_iter()
             .filter(|summary| summary.appearance == restrict)
@@ -1478,9 +1497,9 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         settings_selector(
             selector,
-            format!("{} color scheme", row.descriptor().label),
+            format!("{} terminal theme", row.descriptor().label),
             Some(current),
-            "Choose a color scheme",
+            "Choose a terminal theme",
             items,
             appearance,
         )
@@ -1488,17 +1507,17 @@ impl SettingsWindow {
         .on_accept(move |acceptance, _, cx| {
             let id = acceptance.item_id().clone();
             let _ = owner.update(cx, |settings, cx| {
-                settings.set_scheme(restrict, id, cx);
+                settings.set_theme(restrict, id, cx);
             });
         })
         .into_any_element()
     }
 
-    fn set_scheme(&mut self, slot: Appearance, id: SchemeId, cx: &mut Context<Self>) {
+    fn set_theme(&mut self, slot: Appearance, id: ThemeId, cx: &mut Context<Self>) {
         self.edit(
             move |draft| {
-                let schemes = &mut draft.preferences.terminal.schemes;
-                schemes.set(slot, id);
+                let themes = &mut draft.preferences.terminal.themes;
+                themes.set(slot, id);
             },
             cx,
         );
@@ -1721,7 +1740,7 @@ impl SettingsWindow {
 
     /// Renders one font-weight row.
     ///
-    /// Weight uses the same selector family as the scheme and font rows. One dropdown family for
+    /// Weight uses the same selector family as the theme and font rows. One dropdown family for
     /// every "choose one" row keeps a single form from presenting two different control shapes.
     fn render_weight(
         &mut self,
@@ -1860,7 +1879,7 @@ impl SettingsWindow {
                 .flex_row()
                 .items_start()
                 .gap(appearance.spacing(8.0))
-                // The same inset notice the Color Schemes page carries, at the window's own scope
+                // The same inset notice the Themes page carries, at the window's own scope
                 // rather than the page's. A strip ruled off across the pane would be the one square
                 // edge left on a surface made of cards.
                 .mx(card_gutter(appearance))
@@ -1945,6 +1964,7 @@ impl SettingsWindow {
         let appearance = &settings.chrome;
         let status = self.editor.status();
         let owner = cx.weak_entity();
+        let exporter = cx.weak_entity();
         div()
             .debug_selector(|| "settings-footer".to_owned())
             .flex()
@@ -1996,18 +2016,39 @@ impl SettingsWindow {
                         - px(super::button_theme::CONTROL_BORDER_WIDTH))
                     .pr(appearance.spacing(CONTENT_GUTTER))
                     .child(
-                        action_button(
-                            "settings-reset-all",
-                            "Reset All…",
-                            self.editor.editable(),
-                            move |window, cx| {
-                                let _ = owner.update(cx, |settings, cx| {
-                                    settings.confirm_reset_all(window, cx);
-                                });
-                            },
-                        )
-                        .variant(spaceterm_ui::ButtonVariant::Bare)
-                        .size(spaceterm_ui::ButtonSize::Compact),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .gap(appearance.spacing(4.0))
+                            .child(
+                                action_button(
+                                    "settings-reset-all",
+                                    "Reset All…",
+                                    self.editor.editable(),
+                                    move |window, cx| {
+                                        let _ = owner.update(cx, |settings, cx| {
+                                            settings.confirm_reset_all(window, cx);
+                                        });
+                                    },
+                                )
+                                .variant(spaceterm_ui::ButtonVariant::Bare)
+                                .size(spaceterm_ui::ButtonSize::Compact),
+                            )
+                            .child(
+                                action_button(
+                                    "settings-document-export",
+                                    "Export All Settings…",
+                                    true,
+                                    move |window, cx| {
+                                        let _ = exporter.update(cx, |settings, cx| {
+                                            settings.begin_document_export(window, cx);
+                                        });
+                                    },
+                                )
+                                .variant(spaceterm_ui::ButtonVariant::Bare)
+                                .size(spaceterm_ui::ButtonSize::Compact),
+                            ),
                     )
                     .child(
                         div()
@@ -2029,7 +2070,7 @@ impl SettingsWindow {
             ModalId::new("settings-reset-all"),
             "Reset all settings",
             "Reset All Settings",
-            "Every setting returns to its default, and the color schemes you imported are removed.",
+            "Every setting returns to its default, and the terminal themes you installed are removed.",
             vec![
                 ModalAction::new(
                     true,
@@ -2048,10 +2089,10 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        // An imported scheme is the one thing here the reset cannot give back, so the alert says
-        // so and names the action that would keep it rather than leaving that to be discovered.
+        // Installed themes are the one thing here the reset cannot give back, so the alert says
+        // so rather than leaving that to be discovered.
         .detail(
-            "This cannot be undone. Export any imported scheme you want to keep first. \
+            "This cannot be undone. Themes can be installed again from their Zed extension or file. \
              Microphone access is a system permission and is not affected.",
         )
         .present(window, cx, move |outcome, cx| {
@@ -2225,13 +2266,12 @@ fn control_selector(row: SettingsRowId) -> String {
 
 /// Where a row's label sits.
 ///
-/// The Color Schemes rows present a list and a button group rather than one control, and each is
-/// the only row in its box, so the group's own title names them and the content spans the row.
+/// The installed library and the Zed extension browser present lists rather than one control,
+/// and each is the only row in its box, so the group's own title names them and the content spans
+/// the row.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::TerminalSchemes | SettingsRowId::SchemeInterchange => {
-            SettingsRowLayout::Full
-        }
+        SettingsRowId::InstalledThemes | SettingsRowId::ZedExtensions => SettingsRowLayout::Full,
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -2281,6 +2321,9 @@ impl SettingsWindow {
                 })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
+            SettingsRowId::ThemeImport => {
+                Some("Install every theme in a Zed theme family JSON file.")
+            }
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }

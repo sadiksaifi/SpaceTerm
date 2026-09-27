@@ -13,10 +13,10 @@ use crate::appearance::{Appearance, ResetTarget};
 pub(super) enum SettingsSectionId {
     /// Appearance mode and window presentation.
     Appearance,
-    /// Terminal colors, typography, and text rendering.
+    /// Terminal typography and text rendering.
     Terminal,
-    /// The installed Terminal scheme library.
-    ColorSchemes,
+    /// Terminal Themes: the selection, the installed library, and where themes come from.
+    Themes,
     /// System permissions that tools running in SpaceTerm rely on.
     Privacy,
 }
@@ -26,7 +26,7 @@ impl SettingsSectionId {
     pub(super) const ALL: [Self; 4] = [
         Self::Appearance,
         Self::Terminal,
-        Self::ColorSchemes,
+        Self::Themes,
         Self::Privacy,
     ];
 
@@ -34,7 +34,7 @@ impl SettingsSectionId {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
-            Self::ColorSchemes => "Color Schemes",
+            Self::Themes => "Themes",
             Self::Privacy => "Privacy",
         }
     }
@@ -44,7 +44,7 @@ impl SettingsSectionId {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
-            Self::ColorSchemes => "Color Schemes",
+            Self::Themes => "Themes",
             Self::Privacy => "Privacy",
         }
     }
@@ -54,9 +54,9 @@ impl SettingsSectionId {
             Self::Appearance => {
                 "Choose light, dark, or automatic appearance, window transparency, and interface density."
             }
-            Self::Terminal => "Color scheme, type, and text rendering in terminal output.",
-            Self::ColorSchemes => {
-                "Terminal color schemes. Built-in schemes are always available; imported schemes can be removed."
+            Self::Terminal => "Type and text rendering in terminal output.",
+            Self::Themes => {
+                "Colors for terminal panes, including any theme published for Zed. SpaceTerm's own interface keeps its built-in appearance."
             }
             Self::Privacy => {
                 "System permissions that voice and other tools running in SpaceTerm rely on."
@@ -68,7 +68,7 @@ impl SettingsSectionId {
         match self {
             Self::Appearance => "settings-section-appearance",
             Self::Terminal => "settings-section-terminal",
-            Self::ColorSchemes => "settings-section-color-schemes",
+            Self::Themes => "settings-section-themes",
             Self::Privacy => "settings-section-privacy",
         }
     }
@@ -82,9 +82,9 @@ pub(super) enum SettingsRowId {
     Transparency,
     Blur,
     Density,
-    TerminalScheme,
-    TerminalLightScheme,
-    TerminalDarkScheme,
+    TerminalTheme,
+    TerminalLightTheme,
+    TerminalDarkTheme,
     TerminalFontFamily,
     TerminalBaseSize,
     TerminalLineHeight,
@@ -92,8 +92,12 @@ pub(super) enum SettingsRowId {
     TerminalBoldWeight,
     TerminalItalic,
     TerminalBoldAsBright,
-    TerminalSchemes,
-    SchemeInterchange,
+    /// The installed Terminal Theme library.
+    InstalledThemes,
+    /// Theme extensions published to the Zed extension registry.
+    ZedExtensions,
+    /// Installing a Zed theme family document from a local file.
+    ThemeImport,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
 }
@@ -107,7 +111,7 @@ impl SettingsRowId {
 
     /// The reset target restoring this row alone, when the row holds a resettable preference.
     ///
-    /// A scheme row restores its own scheme and leaves the appearance mode alone, because the mode
+    /// A theme row restores its own theme and leaves the appearance mode alone, because the mode
     /// belongs to the shared Appearance control.
     pub(super) fn reset_target(self, appearance: Appearance) -> Option<ResetTarget> {
         Some(match self {
@@ -115,9 +119,9 @@ impl SettingsRowId {
             Self::Transparency => ResetTarget::Transparency,
             Self::Blur => ResetTarget::Blur,
             Self::Density => ResetTarget::Density,
-            Self::TerminalScheme => ResetTarget::TerminalScheme(appearance),
-            Self::TerminalLightScheme => ResetTarget::TerminalScheme(Appearance::Light),
-            Self::TerminalDarkScheme => ResetTarget::TerminalScheme(Appearance::Dark),
+            Self::TerminalTheme => ResetTarget::TerminalTheme(appearance),
+            Self::TerminalLightTheme => ResetTarget::TerminalTheme(Appearance::Light),
+            Self::TerminalDarkTheme => ResetTarget::TerminalTheme(Appearance::Dark),
             Self::TerminalFontFamily => ResetTarget::TerminalFontFamily,
             Self::TerminalBaseSize => ResetTarget::TerminalBaseSize,
             Self::TerminalRegularWeight => ResetTarget::TerminalRegularWeight,
@@ -125,7 +129,10 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::TerminalSchemes | Self::SchemeInterchange | Self::MicrophoneAccess => {
+            Self::InstalledThemes
+            | Self::ZedExtensions
+            | Self::ThemeImport
+            | Self::MicrophoneAccess => {
                 return None;
             }
         })
@@ -210,7 +217,6 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "automatic",
             "system",
             "mode",
-            "theme",
             "interface",
             "chrome",
             "terminal",
@@ -240,56 +246,6 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         label: "Blur",
         keywords: &["blurred", "background", "window", "glass"],
         selector: "settings-row-blur",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalScheme,
-        section: SettingsSectionId::Terminal,
-        group: "Color scheme",
-        label: "Scheme",
-        keywords: &[
-            "color",
-            "colour",
-            "palette",
-            "theme",
-            "scheme",
-            "color scheme",
-            "ansi",
-        ],
-        selector: "settings-row-terminal-scheme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalLightScheme,
-        section: SettingsSectionId::Terminal,
-        group: "Color scheme",
-        label: "Light",
-        keywords: &[
-            "color",
-            "colour",
-            "palette",
-            "theme",
-            "scheme",
-            "color scheme",
-            "ansi",
-            "light",
-        ],
-        selector: "settings-row-terminal-light-scheme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalDarkScheme,
-        section: SettingsSectionId::Terminal,
-        group: "Color scheme",
-        label: "Dark",
-        keywords: &[
-            "color",
-            "colour",
-            "palette",
-            "theme",
-            "scheme",
-            "color scheme",
-            "ansi",
-            "dark",
-        ],
-        selector: "settings-row-terminal-dark-scheme",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalFontFamily,
@@ -348,31 +304,85 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-terminal-bold-as-bright",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::TerminalSchemes,
-        section: SettingsSectionId::ColorSchemes,
+        id: SettingsRowId::TerminalTheme,
+        section: SettingsSectionId::Themes,
+        group: "Current theme",
+        label: "Theme",
+        keywords: &["color", "colour", "palette", "terminal theme", "ansi"],
+        selector: "settings-row-terminal-theme",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalLightTheme,
+        section: SettingsSectionId::Themes,
+        group: "Current theme",
+        label: "Light",
+        keywords: &[
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "terminal theme",
+            "ansi",
+        ],
+        selector: "settings-row-terminal-light-theme",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalDarkTheme,
+        section: SettingsSectionId::Themes,
+        group: "Current theme",
+        label: "Dark",
+        keywords: &[
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "terminal theme",
+            "ansi",
+        ],
+        selector: "settings-row-terminal-dark-theme",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::InstalledThemes,
+        section: SettingsSectionId::Themes,
         group: "Installed",
-        label: "Terminal schemes",
+        label: "Installed themes",
         keywords: &[
             "builtin",
             "custom",
+            "use",
             "remove",
             "delete",
             "list",
             "unavailable",
             "fallback",
             "missing",
-            "ansi",
-            "theme",
         ],
-        selector: "settings-row-terminal-schemes",
+        selector: "settings-row-installed-themes",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::SchemeInterchange,
-        section: SettingsSectionId::ColorSchemes,
-        group: "Import and export",
-        label: "Import and export",
-        keywords: &["zed", "import", "export", "file", "package", "share"],
-        selector: "settings-row-scheme-interchange",
+        id: SettingsRowId::ZedExtensions,
+        section: SettingsSectionId::Themes,
+        group: "Zed extensions",
+        label: "Zed extensions",
+        keywords: &[
+            "registry",
+            "download",
+            "install",
+            "update",
+            "browse",
+            "gallery",
+            "online",
+            "more themes",
+        ],
+        selector: "settings-row-zed-extensions",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ThemeImport,
+        section: SettingsSectionId::Themes,
+        group: "Import",
+        label: "Zed theme file",
+        keywords: &["import", "file", "json", "family", "local"],
+        selector: "settings-row-theme-import",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::MicrophoneAccess,
@@ -403,14 +413,14 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 17] = [
+    const EVERY_ROW: [SettingsRowId; 18] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
         SettingsRowId::Density,
-        SettingsRowId::TerminalScheme,
-        SettingsRowId::TerminalLightScheme,
-        SettingsRowId::TerminalDarkScheme,
+        SettingsRowId::TerminalTheme,
+        SettingsRowId::TerminalLightTheme,
+        SettingsRowId::TerminalDarkTheme,
         SettingsRowId::TerminalFontFamily,
         SettingsRowId::TerminalBaseSize,
         SettingsRowId::TerminalLineHeight,
@@ -418,8 +428,9 @@ mod tests {
         SettingsRowId::TerminalBoldWeight,
         SettingsRowId::TerminalItalic,
         SettingsRowId::TerminalBoldAsBright,
-        SettingsRowId::TerminalSchemes,
-        SettingsRowId::SchemeInterchange,
+        SettingsRowId::InstalledThemes,
+        SettingsRowId::ZedExtensions,
+        SettingsRowId::ThemeImport,
         SettingsRowId::MicrophoneAccess,
     ];
 
@@ -486,16 +497,16 @@ mod tests {
         assert_eq!(modes, 1);
     }
 
-    /// A scheme row changes a scheme, so its reset leaves the shared appearance mode alone.
+    /// A theme row changes a theme, so its reset leaves the shared appearance mode alone.
     #[test]
-    fn a_scheme_row_resets_only_its_own_scheme() {
+    fn a_theme_row_resets_only_its_own_theme() {
         assert_eq!(
-            SettingsRowId::TerminalDarkScheme.reset_target(Appearance::Light),
-            Some(ResetTarget::TerminalScheme(Appearance::Dark)),
+            SettingsRowId::TerminalDarkTheme.reset_target(Appearance::Light),
+            Some(ResetTarget::TerminalTheme(Appearance::Dark)),
         );
         assert_eq!(
-            SettingsRowId::TerminalLightScheme.reset_target(Appearance::Dark),
-            Some(ResetTarget::TerminalScheme(Appearance::Light)),
+            SettingsRowId::TerminalLightTheme.reset_target(Appearance::Dark),
+            Some(ResetTarget::TerminalTheme(Appearance::Light)),
         );
     }
 
@@ -518,27 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn theme_search_matches_only_appearance_and_color_schemes() {
+    fn theme_search_matches_only_the_themes_section() {
         assert_eq!(
             matching_rows("theme").into_iter().collect::<HashSet<_>>(),
             HashSet::from([
-                SettingsRowId::AppearanceMode,
-                SettingsRowId::TerminalScheme,
-                SettingsRowId::TerminalLightScheme,
-                SettingsRowId::TerminalDarkScheme,
-                SettingsRowId::TerminalSchemes,
+                SettingsRowId::TerminalTheme,
+                SettingsRowId::TerminalLightTheme,
+                SettingsRowId::TerminalDarkTheme,
+                SettingsRowId::InstalledThemes,
+                SettingsRowId::ZedExtensions,
+                SettingsRowId::ThemeImport,
             ])
         );
     }
 
     #[test]
-    fn color_scheme_search_reaches_terminal_scheme_rows() {
+    fn terminal_theme_search_reaches_the_selection_rows() {
         assert_eq!(
-            matching_rows("color scheme").into_iter().collect::<HashSet<_>>(),
+            matching_rows("terminal theme").into_iter().collect::<HashSet<_>>(),
             HashSet::from([
-                SettingsRowId::TerminalScheme,
-                SettingsRowId::TerminalLightScheme,
-                SettingsRowId::TerminalDarkScheme,
+                SettingsRowId::TerminalTheme,
+                SettingsRowId::TerminalLightTheme,
+                SettingsRowId::TerminalDarkTheme,
             ])
         );
     }
@@ -559,15 +571,16 @@ mod tests {
     #[test]
     fn a_keyword_query_reaches_a_row_whose_label_omits_the_word() {
         assert!(matching_rows("leading").contains(&SettingsRowId::TerminalLineHeight));
-        assert!(matching_rows("zed").contains(&SettingsRowId::SchemeInterchange));
+        assert!(matching_rows("registry").contains(&SettingsRowId::ZedExtensions));
+        assert!(matching_rows("import").contains(&SettingsRowId::ThemeImport));
         assert!(matching_rows("automatic").contains(&SettingsRowId::AppearanceMode));
     }
 
-    /// The diagnostics readout is part of the scheme library rather than a row of its own, so the
-    /// words a person searches for when a scheme is missing still reach that page.
+    /// The diagnostics readout is part of the theme library rather than a row of its own, so the
+    /// words a person searches for when a theme is missing still reach that page.
     #[test]
-    fn a_missing_scheme_query_reaches_the_library() {
-        assert!(matching_rows("fallback").contains(&SettingsRowId::TerminalSchemes));
+    fn a_missing_theme_query_reaches_the_library() {
+        assert!(matching_rows("fallback").contains(&SettingsRowId::InstalledThemes));
     }
 
     /// A person whose voice tool cannot hear them searches for what they were doing, not for the
@@ -632,8 +645,9 @@ mod tests {
         for row in ROWS {
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::TerminalSchemes
-                    | SettingsRowId::SchemeInterchange
+                SettingsRowId::InstalledThemes
+                    | SettingsRowId::ZedExtensions
+                    | SettingsRowId::ThemeImport
                     | SettingsRowId::MicrophoneAccess
             );
             assert_eq!(
