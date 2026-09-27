@@ -125,7 +125,6 @@ pub(crate) struct ChromeAppearance {
     pub(crate) materials: SurfaceMaterials,
     pub(crate) floating_materials: SurfaceMaterials,
     pub(crate) floating_blur: bool,
-    pub(crate) text_scale: f32,
     pub(crate) spacing_scale: f32,
     pub(crate) settings_hosts: Option<settings::SettingsHostBackgrounds>,
 }
@@ -316,7 +315,6 @@ impl Default for ChromeAppearance {
             materials: SurfaceMaterials::OPAQUE,
             floating_materials,
             floating_blur: false,
-            text_scale: 1.0,
             spacing_scale: 1.0,
             settings_hosts: None,
         }
@@ -4470,7 +4468,6 @@ impl ChromeAppearance {
             materials: resolved.composition.materials,
             floating_materials: resolved.composition.floating_materials,
             floating_blur: resolved.composition.floating_blur,
-            text_scale: resolved.typography.body.size / 13.0,
             spacing_scale: Self::density_spacing_scale(resolved.density),
             settings_hosts: None,
         }
@@ -4487,13 +4484,10 @@ impl ChromeAppearance {
         px(baseline * self.spacing_scale)
     }
 
-    /// Keep the original line box and add only the extra text and density space.
+    /// Keep the original line box and add only the extra density space.
     pub(crate) fn height(&self, baseline: f32, text: f32) -> Pixels {
         let line = text * 1.4;
-        px(
-            (line * self.text_scale + (baseline - line).max(0.0) * self.spacing_scale)
-                .max(baseline),
-        )
+        px((line + (baseline - line).max(0.0) * self.spacing_scale).max(baseline))
     }
 
     pub(crate) fn top_height(&self) -> Pixels {

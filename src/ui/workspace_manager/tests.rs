@@ -5528,17 +5528,16 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
     );
 }
 
-/// The collapsed switcher matches the Tab surface height across appearance scales.
+/// The collapsed switcher matches the Tab surface height across densities.
 #[gpui::test]
 fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
     assert!(cx.debug_bounds("workspace-switcher-chip").is_none());
 
-    for (text_scale, spacing_scale) in [(1.0, 1.0), (1.0, 1.25), (24.0 / 13.0, 1.25)] {
+    for spacing_scale in [1.0, 1.25] {
         cx.update(|window, cx| {
             let appearance = crate::ui::appearance::ChromeAppearance {
-                text_scale,
                 spacing_scale,
                 ..crate::ui::appearance::ChromeAppearance::default()
             };
@@ -5554,7 +5553,7 @@ fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext)
         assert_eq!(
             (switcher.top(), switcher.bottom()),
             (tab.top(), tab.bottom()),
-            "switcher and Tab surface edges must align at text scale {text_scale}, spacing scale {spacing_scale}"
+            "switcher and Tab surface edges must align at spacing scale {spacing_scale}"
         );
         assert_eq!(workspace.center().y, tab.center().y);
         assert!(workspace.top() >= tab.top() && workspace.bottom() <= tab.bottom());
@@ -5602,7 +5601,6 @@ fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
     let appearance = crate::ui::appearance::ChromeAppearance {
-        text_scale: 24.0 / 13.0,
         spacing_scale: 1.25,
         ..crate::ui::appearance::ChromeAppearance::default()
     };
