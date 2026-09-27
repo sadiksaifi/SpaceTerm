@@ -1,24 +1,22 @@
 # Compile Chrome themes before presentation
 
-Chrome and Terminal Color Schemes remain independent under one application-scoped Appearance Mode.
-The shared Light, Dark or Auto choice selects the matching persisted slot from both scheme families.
-Terminal colors retain protocol ownership; Chrome changes do not reinterpret terminal palettes or
-OSC values. Inactive selected Tabs remain identifiable.
+SpaceTerm authors its Chrome. One application-scoped Appearance Mode selects the built-in Light or
+Dark Chrome definition and the Terminal Color Scheme slot of that appearance. Chrome typography is
+fixed, and Density is the only Chrome Setting. The material, contrast and composition rules below
+are tuned against these two definitions. Terminal colors retain protocol ownership; Chrome does not
+reinterpret terminal palettes or OSC values. Inactive selected Tabs remain identifiable.
 
-Settings persists the Appearance Mode once and persists Light and Dark Color Scheme slots inside
-each appearance family. This makes contradictory Chrome and Terminal modes unrepresentable while
-preserving both families' choices across mode changes and restarts. Resetting the shared mode does
-not reset either family's scheme slots.
+Settings persists the Appearance Mode once and persists Light and Dark Terminal Color Scheme slots.
+This makes contradictory Chrome and Terminal modes unrepresentable while preserving the Terminal
+choices across mode changes and restarts. Resetting the mode does not reset either slot.
 
-The Chrome Theme Compiler owns one ordered dependency program for built-ins, native definitions,
-Zed imports and live overrides. Exact user overrides precede authored values. Missing roles derive
-from the effective same-definition dependencies. Missing background and text use neutral fallbacks.
-Missing success, warning, and error use portable semantic seeds adjusted for contrast against the
-definition's own background, so a link accent cannot turn destructive feedback into an informational
-color. Explicitly authored status colors and overrides remain exact. Light/Dark selects these
-fallback seeds, never a hidden parent Color Scheme. Parent inheritance is unsupported. Authored
-inputs remain stored separately from resolved paints, whose role provenance records authored,
-overridden, derived or neutral fallback origin. This preserves intent when dependency inputs change.
+The Chrome Theme Compiler owns one ordered dependency program that completes each sparse built-in
+definition. Missing roles derive from same-definition dependencies. Missing success, warning, and
+error use portable semantic seeds adjusted for contrast against the definition's own background, so
+a link accent cannot turn destructive feedback into an informational color. Explicitly authored
+status colors remain exact. Light/Dark selects these fallback seeds, never a parent definition.
+Authoring each built-in sparsely keeps it a small set of intentional decisions whose dependents
+follow when one of them changes.
 
 Actions, persistent selection, static surfaces and statuses have separate meanings even where
 initial colors match. Complete interactive paints own foreground, icon/mark, surface and border.
@@ -34,9 +32,8 @@ operation resolves caption content, controls, focus and attention against that a
 may adapt foreground contrast without modifying the authored theme or terminal protocol colors.
 Compilation retains explicitly authored colors; completion only fills missing roles. Prepared
 presentation may adapt those resolved paints for the actual material host, window activity, and
-accessibility requirements. These adjustments leave authored definitions, role provenance, and
-effective exports unchanged. Keeping the two stages separate permits readable custom controls
-without turning a rendering fallback into a saved theme edit.
+accessibility requirements. These adjustments leave the authored definitions unchanged. Keeping the two
+stages separate keeps a rendering adaptation out of the definitions it adapts.
 
 Window background appearance is distinct from Light/Dark and from each straight RGBA color.
 Application Settings own transparency and blur independently of scheme authorship. Native and
@@ -49,9 +46,7 @@ near-white Chrome it agrees with the paint above and disappears. Bright Chrome t
 the more transmissive of the native materials, so one Transparency Setting shows the desktop under
 either. One Setting still drives the whole window, and bright Chrome reads it on a curve that
 gives up its tint twice over: what the Setting leaves standing is taken again. That tone is read
-from the compiled window root rather than from the Light or Dark slot a definition is filed under,
-since a scheme offered for Light may paint a near-black root and a reader sees the desktop through
-that root exactly as they would through a dark scheme's. The ends keep
+from the compiled window root, since the desktop is seen through the paint of that root. The ends keep
 their meaning, an untouched Setting keeps the opaque presentation and the maximum clears the tint
 entirely, and only the sheet reads that curve, so a Pane, a chip and a row hold the spacing their
 appearance authored while the shell behind them clears. Depth
@@ -91,8 +86,7 @@ own step over the strip, which collapses as the window transmits, so a rim that 
 weight there outruns the fill it belongs to and lands on the strip's tone, drawing the line this
 avoids. Application preparation leaves both
 built-in lifts as authored rather than raising them to the boundary floor that interactive edges
-answer to. A custom definition keeps that floor, since its rim is the only edge the application
-can count on, and Increase Contrast keeps it everywhere.
+answer to; Increase Contrast restores that floor everywhere.
 
 The desktop behind an Operating-System Window may use its platform's native effect. Everything
 inside the window follows one portable GPUI floating-surface contract. Apple design is a quality
@@ -115,9 +109,7 @@ and blur. Show Borders adds interactive-control edges independently. These capab
 separate because a request for stronger contrast or boundaries is not a request to remove
 transparency. A platform's
 lack of native desktop transparency does not disable GPUI floating-surface translucency or blur.
-The compiled floating tone bounds opaque GPUI content to a range with readable foregrounds. If a
-custom tone admits no readable neutral foreground, its floating-only RGB moves minimally toward
-the appearance endpoint; authored and resting-surface colors remain unchanged. The native material
+The compiled floating tone bounds opaque GPUI content to a range with readable foregrounds. The native material
 is composited outside GPUI and cannot be sampled by this filter. Limiting framebuffer coverage
 lets that same native material show through; it does not establish a contrast guarantee
 against arbitrary final desktop pixels. Opaque accessibility presentation remains the deterministic
@@ -156,8 +148,7 @@ distinct operations. The SpaceTerm GPUI fork corrects destination-alpha attenuat
 main and path-sprite pipelines. Layered translucent surfaces require this composition; theme
 colors cannot compensate for incorrect alpha blending.
 
-Exports distinguish authored definitions from current effective portable copies. Effective exports
-include user overrides and fresh install identities, including copies of built-ins. Zed remains an
-external Adapter into SpaceTerm semantics. Source identity and attribution remain separate from
-installed identity and content fingerprints; source backdrop intent does not silently enable native
-transparency. Backward compatibility with the old development contract is not retained.
+Terminal Color Scheme exports distinguish authored definitions from current effective portable
+copies. Effective exports include user overrides and fresh install identities, including copies of
+built-ins. Zed remains an external Adapter that contributes only terminal colors. Source identity
+and attribution remain separate from installed identity and content fingerprints.
