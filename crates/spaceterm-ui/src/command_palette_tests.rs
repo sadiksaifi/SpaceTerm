@@ -342,6 +342,7 @@ impl Render for CloneCountingRoot {
 
 struct TestRoot {
     palette: Entity<CommandPalette<u8>>,
+    replacement_palette: Option<Entity<CommandPalette<u8>>>,
     other_focus: FocusHandle,
     intruder_focus: FocusHandle,
     underlay_presses: Rc<RefCell<usize>>,
@@ -368,6 +369,7 @@ impl Render for TestRoot {
             )
             .child(div().track_focus(&self.intruder_focus).child("Intruder"))
             .child(self.palette.clone())
+            .children(self.replacement_palette.clone())
             .on_action(cx.listener(|_, _: &MoveDown, _, _| {}))
     }
 }
@@ -477,6 +479,7 @@ fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
         .detach();
         TestRoot {
             palette,
+            replacement_palette: None,
             other_focus: cx.focus_handle().tab_stop(true),
             intruder_focus: cx.focus_handle().tab_stop(true),
             underlay_presses: root_underlay,
@@ -2143,6 +2146,33 @@ fn replacement_chain_should_restore_the_original_focus_owner(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn opening_another_palette_should_transfer_the_original_focus_owner(cx: &mut TestAppContext) {
+    let (root, first, _, _, cx) = palette_window(cx);
+    let prior = open_palette(&root, &first, cx);
+    let second = cx.update(|window, cx| {
+        cx.new(|cx| CommandPalette::new("Other commands", items(), window, cx))
+    });
+    root.update(cx, |root, cx| {
+        root.replacement_palette = Some(second.clone());
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        second.update(cx, |palette, cx| palette.open(window, cx));
+    });
+    cx.run_until_parked();
+    assert!(!first.read_with(cx, |palette, _| palette.is_open()));
+    assert!(second.read_with(cx, |palette, _| palette.is_open()));
+
+    cx.update(|window, cx| {
+        second.update(cx, |palette, cx| palette.dismiss(window, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.update(|window, _| prior.is_focused(window)));
+}
+
+#[gpui::test]
 fn outside_press_should_close_without_reaching_underlay(cx: &mut TestAppContext) {
     let (root, palette, _, underlay, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
@@ -2805,6 +2835,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                 first_window,
                 ErasedPaletteRegistration {
                     token: CommandPaletteRegistration(1),
+                    restore_focus: None,
                     suspend: Rc::new(move |_, _| {
                         first_flag.set(true);
                         None
@@ -2818,6 +2849,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                 second_window,
                 ErasedPaletteRegistration {
                     token: CommandPaletteRegistration(2),
+                    restore_focus: None,
                     suspend: Rc::new(move |_, _| {
                         second_flag.set(true);
                         None

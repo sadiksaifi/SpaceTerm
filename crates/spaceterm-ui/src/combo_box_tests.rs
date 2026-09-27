@@ -136,6 +136,7 @@ impl Render for TestRoot {
 
 struct PaletteReplacementRoot {
     palette: Entity<CommandPalette<u8>>,
+    prior_focus: FocusHandle,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     reentries: usize,
 }
@@ -682,6 +683,7 @@ impl Render for PaletteReplacementRoot {
         let owner = cx.entity().downgrade();
         div()
             .size_full()
+            .child(div().track_focus(&self.prior_focus))
             .child(
                 ComboBox::new(
                     "palette-replacement-combo-box",
@@ -1225,6 +1227,7 @@ fn command_palette_should_replace_an_open_combo_box_in_the_same_window(cx: &mut 
                 cx,
             )
         }),
+        prior_focus: cx.focus_handle(),
         events: root_events,
         reentries: 0,
     });
@@ -1270,6 +1273,59 @@ fn command_palette_should_replace_an_open_combo_box_in_the_same_window(cx: &mut 
         ]
     );
     assert_eq!(root.read_with(cx, |root, _| root.reentries), 1);
+}
+
+#[gpui::test]
+fn palette_replacing_combo_box_editor_menu_should_restore_original_focus(cx: &mut TestAppContext) {
+    install_themes(cx);
+    let (root, cx) = cx.add_window_view(|window, cx| PaletteReplacementRoot {
+        palette: cx.new(|cx| {
+            CommandPalette::new(
+                "Replacement palette",
+                vec![CommandPaletteItem::new(1, "Command")],
+                window,
+                cx,
+            )
+        }),
+        prior_focus: cx.focus_handle(),
+        events: Rc::new(RefCell::new(Vec::new())),
+        reentries: 0,
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let prior_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
+    cx.update(|window, cx| prior_focus.focus(window, cx));
+    let trigger = cx
+        .debug_bounds("palette-replacement-trigger")
+        .expect("ComboBox trigger should render")
+        .center();
+    cx.simulate_click(trigger, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_input("local");
+    cx.run_until_parked();
+    let editor = cx
+        .debug_bounds("combo-box-input")
+        .expect("ComboBox editor should render")
+        .center();
+    cx.simulate_mouse_down(editor, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(editor, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+
+    let palette = root.read_with(cx, |root, _| root.palette.clone());
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| palette.open(window, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| palette.dismiss(window, cx));
+    });
+    cx.run_until_parked();
+
+    assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| prior_focus.is_focused(window)));
 }
 
 #[gpui::test]
