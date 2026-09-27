@@ -1736,14 +1736,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 {
                     // Unmounting removes the focus path before GPUI clears the responder. An
                     // unchanged responder belongs to the removed palette, not a new focus owner.
+                    let retired_focus = event.blurred.upgrade();
                     let removed_responder = window.is_window_active()
-                        && event
-                            .blurred
-                            .upgrade()
+                        && retired_focus
+                            .as_ref()
                             .is_some_and(|focus| focus.is_focused(window));
                     let predecessor = palette.restore_focus.clone();
-                    if palette.close(CommandPaletteCloseReason::FocusLost, window, cx)
+                    let closed = palette.close(CommandPaletteCloseReason::FocusLost, window, cx)
+                        || (removed_responder
+                            && palette.close(CommandPaletteCloseReason::Programmatic, window, cx));
+                    if closed
                         && removed_responder
+                        && retired_focus.is_some_and(|focus| focus.is_focused(window))
                     {
                         if let Some(predecessor) = predecessor.and_then(|focus| focus.upgrade()) {
                             predecessor.focus(window, cx);

@@ -2229,6 +2229,48 @@ fn removing_an_open_palette_should_restore_its_focus_owner(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn removing_a_non_dismissible_palette_should_restore_its_focus_owner(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    install_control_themes(cx);
+    cx.update(crate::text_input::init);
+    cx.update(super::init);
+    let (root, cx) = cx.add_window_view(|window, cx| RemovablePaletteRoot {
+        palette: Some(cx.new(|cx| CommandPalette::new("Commands", items(), window, cx))),
+        prior_focus: cx.focus_handle(),
+        successor_focus: cx.focus_handle(),
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let (palette, prior_focus) = root.read_with(cx, |root, _| {
+        (
+            root.palette.clone().expect("palette should exist"),
+            root.prior_focus.clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        prior_focus.focus(window, cx);
+        palette.update(cx, |palette, cx| {
+            palette.open(window, cx);
+            palette.set_dismissible(false, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    root.update(cx, |root, cx| {
+        root.palette = None;
+        cx.notify();
+    });
+    let retired_palette = palette.downgrade();
+    drop(palette);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    assert!(retired_palette.upgrade().is_none());
+    assert!(cx.update(|window, _| prior_focus.is_focused(window)));
+}
+
+#[gpui::test]
 fn removing_an_open_palette_should_preserve_a_successor_focus(cx: &mut TestAppContext) {
     cx.set_global(test_theme());
     install_control_themes(cx);
