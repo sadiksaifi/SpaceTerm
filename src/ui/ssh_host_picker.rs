@@ -129,8 +129,12 @@ impl HostDiscoveryDiagnostic {
     }
 }
 
+/// Presents the discovery diagnostic in place of a warning row, because a disabled row would
+/// suppress the empty state and its Add SSH Host action.
 fn empty_state(discovery: &HostDiscovery, query: &str) -> CommandPaletteEmpty {
-    let empty = if query.is_empty() && discovery.hosts.is_empty() && discovery.issues.is_empty() {
+    let empty = if let Some(diagnostic) = HostDiscoveryDiagnostic::for_discovery(discovery) {
+        CommandPaletteEmpty::new(diagnostic.title).description(diagnostic.description)
+    } else if query.is_empty() && discovery.hosts.is_empty() {
         CommandPaletteEmpty::new("No SSH hosts configured")
             .description("Add a host to connect to it from SpaceTerm.")
     } else {
@@ -459,7 +463,9 @@ impl SshHostPicker {
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         self.rows = host_rows_for_query(&self.discovery, &self.retained_query);
         let mut items = Vec::with_capacity(self.rows.len().saturating_add(1));
-        if let Some(diagnostic) = HostDiscoveryDiagnostic::for_discovery(&self.discovery) {
+        if !self.rows.is_empty()
+            && let Some(diagnostic) = HostDiscoveryDiagnostic::for_discovery(&self.discovery)
+        {
             items.push(diagnostic.into_palette_item());
         }
         items.extend(
@@ -950,7 +956,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn partial_empty_discovery_should_explain_that_no_safe_hosts_were_found(
+    fn partial_empty_discovery_should_explain_in_the_empty_state_that_no_safe_hosts_were_found(
         cx: &mut TestAppContext,
     ) {
         let discovery = host_discovery("Host \"unterminated\n", "");
@@ -961,7 +967,14 @@ mod tests {
             HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
         });
         assert_eq!(diagnostic.title, "No safe SSH hosts were found");
-        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
+        assert_eq!(
+            picker.read_with(cx, |picker, _| empty_state(&picker.discovery, "")
+                .title()
+                .to_owned()),
+            "No safe SSH hosts were found"
+        );
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
+        assert!(cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).is_some());
         assert!(selected_item(&picker, cx).is_none());
     }
 
@@ -1088,6 +1101,34 @@ mod tests {
             [SshHostPickerEvent::RequestAddHost]
         );
         assert!(picker.read_with(cx, |picker, _| picker.is_open()));
+    }
+
+    #[gpui::test]
+    fn a_discovery_warning_should_not_hide_the_empty_state_add_action(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host \"unterminated\nHost work\n",
+            "",
+        )]));
+        let (_, picker, events, cx) = host_picker(provider, cx);
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
+        events.borrow_mut().clear();
+
+        set_query(&picker, "new-host", cx);
+
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
+        assert!(cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).is_some());
+        assert_eq!(
+            picker.read_with(cx, |picker, _| empty_state(&picker.discovery, "new-host")
+                .title()
+                .to_owned()),
+            "SSH host list is incomplete"
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            [SshHostPickerEvent::RequestAddHost]
+        );
     }
 
     #[gpui::test]
