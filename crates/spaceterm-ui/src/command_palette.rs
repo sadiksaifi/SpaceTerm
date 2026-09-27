@@ -82,9 +82,11 @@ type SuspendPalette = Rc<dyn Fn(u64, &mut App) -> Option<WeakFocusHandle>>;
 type ResumePalette = Rc<dyn Fn(u64, CommandPaletteRegistration, &mut App)>;
 type ReplacePalette = Rc<dyn Fn(&mut App)>;
 type ReplacePaletteNow = Rc<dyn Fn(&mut Window, &mut App) -> Option<WeakFocusHandle>>;
+type PaletteReplacementFocus = Rc<dyn Fn(&App) -> Option<CommandPaletteReplacementFocus>>;
 
 struct ErasedPaletteRegistration {
     token: CommandPaletteRegistration,
+    replacement_focus: PaletteReplacementFocus,
     suspend: SuspendPalette,
     resume: ResumePalette,
     replace: ReplacePalette,
@@ -253,10 +255,21 @@ fn register_open_palette<I: Clone + Eq + 'static>(
     owner: WeakEntity<CommandPalette<I>>,
     window: &Window,
     cx: &mut App,
-) -> (CommandPaletteRegistration, Option<u64>) {
+) -> (
+    CommandPaletteRegistration,
+    Option<u64>,
+    Option<CommandPaletteReplacementFocus>,
+) {
     let window_id = window.window_handle().window_id();
     let window_handle = window.window_handle();
     let suspend_window = window_handle;
+    let focus_owner = owner.clone();
+    let replacement_focus: PaletteReplacementFocus = Rc::new(move |cx| {
+        focus_owner
+            .read_with(cx, |palette, _| palette.captured_replacement_focus())
+            .ok()
+            .flatten()
+    });
     let suspend_owner = owner.clone();
     let suspend: SuspendPalette = Rc::new(move |generation, cx| {
         let predecessor = suspend_owner
@@ -341,13 +354,14 @@ fn register_open_palette<I: Clone + Eq + 'static>(
                     window_id,
                     ErasedPaletteRegistration {
                         token,
+                        replacement_focus,
                         suspend,
                         resume,
                         replace,
                         replace_now,
                     },
                 )
-                .map(|registration| registration.replace);
+                .map(|registration| (registration.replace, registration.replacement_focus));
             let modal_suspension =
                 coordinator
                     .modal_suspensions
@@ -358,10 +372,12 @@ fn register_open_palette<I: Clone + Eq + 'static>(
                     });
             (token, modal_suspension, replaced)
         });
-    if let Some(replaced) = replaced {
-        replaced(cx);
-    }
-    (token, modal_suspension)
+    let inherited = replaced.and_then(|(replace, replacement_focus)| {
+        let predecessor = replacement_focus(cx);
+        replace(cx);
+        predecessor
+    });
+    (token, modal_suspension, inherited)
 }
 
 pub(crate) fn dismiss_active_command_palette_for_replacement(
@@ -1691,14 +1707,35 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         );
         let focus_scope = cx.focus_handle();
-        let focus_subscription = cx.on_focus_out(&focus_scope, window, |palette, _, window, cx| {
-            if palette.open
-                && palette.suspended_by_modal.is_none()
-                && !crate::menu::window_menu_is_open(window, cx)
-            {
-                palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
-            }
-        });
+        let focus_subscription =
+            cx.on_focus_out(&focus_scope, window, |palette, event, window, cx| {
+                if palette.open
+                    && palette.suspended_by_modal.is_none()
+                    && !crate::menu::window_menu_is_open(window, cx)
+                {
+                    // Unmounting removes the focus path before GPUI clears the responder. An
+                    // unchanged responder belongs to the removed palette, not a new focus owner.
+                    let retired_focus = event.blurred.upgrade();
+                    let removed_responder = window.is_window_active()
+                        && retired_focus
+                            .as_ref()
+                            .is_some_and(|focus| focus.is_focused(window));
+                    let predecessor = palette.restore_focus.clone();
+                    let closed = palette.close(CommandPaletteCloseReason::FocusLost, window, cx)
+                        || (removed_responder
+                            && palette.close(CommandPaletteCloseReason::Programmatic, window, cx));
+                    if closed
+                        && removed_responder
+                        && retired_focus.is_some_and(|focus| focus.is_focused(window))
+                    {
+                        if let Some(predecessor) = predecessor.and_then(|focus| focus.upgrade()) {
+                            predecessor.focus(window, cx);
+                        } else {
+                            window.blur(cx);
+                        }
+                    }
+                }
+            });
         let scrollbar =
             cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar").persistent());
         let scrollbar_subscription = cx.subscribe_in(
@@ -1976,12 +2013,14 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if command_palette_modal_generation(window.window_handle().window_id(), cx).is_some()
             || crate::modal::window_modal_is_open(window, cx)
         {
-            let (registration, modal_suspension) =
+            let (registration, modal_suspension, inherited) =
                 register_open_palette(cx.entity().downgrade(), window, cx);
             if let Some(generation) = modal_suspension {
                 self.coordinator_registration = Some(registration);
                 self.suspended_by_modal = Some(generation);
-                self.pending_open = Some(PendingCommandPaletteOpen { replacement });
+                self.pending_open = Some(PendingCommandPaletteOpen {
+                    replacement: replacement.or(inherited),
+                });
             } else {
                 unregister_palette(window.window_handle().window_id(), registration, None, cx);
             }
@@ -2007,19 +2046,24 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if let Some(combo_replacement) = combo_replacement {
             cx.defer(move |cx| combo_replacement.finish(cx));
         }
+        let explicit_replacement = replacement.is_some();
         self.restore_focus = match replacement {
             Some(replacement) => replacement.restore_focus,
+            None if replaced_combo_box => combo_focus,
             None => match menu_replacement {
                 Some(crate::menu::MenuReplacementFocus(focus)) => focus,
-                None => combo_focus.or_else(|| window.focused(cx).map(|focus| focus.downgrade())),
+                None => window.focused(cx).map(|focus| focus.downgrade()),
             },
         };
         self.open = true;
         if self.coordinator_registration.is_none() {
-            let (registration, modal_suspension) =
+            let (registration, modal_suspension, inherited) =
                 register_open_palette(cx.entity().downgrade(), window, cx);
             self.coordinator_registration = Some(registration);
             self.suspended_by_modal = modal_suspension;
+            if !explicit_replacement && let Some(inherited) = inherited {
+                self.restore_focus = inherited.restore_focus;
+            }
         }
         crate::tooltip::set_window_tooltip_suppression(
             window.window_handle().window_id(),
@@ -2118,6 +2162,23 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         };
         self.close(CommandPaletteCloseReason::Replaced, window, cx)
             .then_some(replacement)
+    }
+
+    /// Returns the focus owner a replacing palette inherits, once this palette has captured one.
+    ///
+    /// A pending open without an explicit replacement captures its owner only when it finishes.
+    fn captured_replacement_focus(&self) -> Option<CommandPaletteReplacementFocus> {
+        let restore_focus = if self.open {
+            self.restore_focus.clone()
+        } else {
+            self.pending_open
+                .as_ref()?
+                .replacement
+                .as_ref()?
+                .restore_focus
+                .clone()
+        };
+        Some(CommandPaletteReplacementFocus { restore_focus })
     }
 
     /// Returns whether the transient overlay is open.
