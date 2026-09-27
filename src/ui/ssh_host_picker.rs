@@ -9,8 +9,8 @@ use gpui::{Context, Entity, EventEmitter, Render, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEmptyAction, CommandPaletteEvent,
-    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon,
-    IconName, fuzzy_filter,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, CustomIconName,
+    FuzzyTarget, Icon, IconName, fuzzy_filter,
 };
 
 use super::chrome_icons::IconRole;
@@ -150,7 +150,7 @@ fn add_host_header_action(cx: &gpui::App) -> CommandPaletteAction {
         .metrics(IconRole::Control)
         .glyph_size;
     CommandPaletteAction::new(ADD_HOST_ACTION, ADD_HOST_LABEL, move |tint| {
-        Icon::new(IconName::Plus, icon_size, tint).into_any_element()
+        Icon::custom(CustomIconName::GlobePlus, icon_size, tint).into_any_element()
     })
     .debug_selector(HEADER_ADD_HOST_SELECTOR)
 }
