@@ -15,7 +15,6 @@ use crate::{
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
-    menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
 };
 
@@ -23,9 +22,7 @@ const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
 /// The palette is the window's focal search surface.
 const COMMAND_PALETTE_ROLE: FloatingRole = FloatingRole::Command;
 
-/// Every footer control shares one size so their labels sit on one baseline and one inset.
-const FOOTER_CONTROL_SIZE: ButtonSize = ButtonSize::Small;
-/// Empty-state actions are the surface's only controls, so they take the ordinary control size.
+/// Empty-state actions are the content's only controls, so they take the ordinary control size.
 const EMPTY_ACTION_SIZE: ButtonSize = ButtonSize::Regular;
 /// A description longer than this many lines is truncated rather than growing the panel.
 const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
@@ -558,10 +555,6 @@ pub enum CommandPaletteEvent<I> {
     HeaderAction(SharedString),
     /// An empty-state action was activated by pointer, Return, or its own keyboard focus.
     EmptyAction(SharedString),
-    /// A footer actions-menu entry was activated.
-    MenuAction(SharedString),
-    /// The footer confirm control was activated by pointer or by its keyboard equivalent.
-    Confirmed,
 }
 
 /// A standardized trailing row accessory.
@@ -624,23 +617,6 @@ impl CommandPaletteAction {
     /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
-    }
-}
-
-/// One footer hint pairing a key presentation with the action it performs.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommandPaletteHint {
-    label: SharedString,
-    key: SharedString,
-}
-
-impl CommandPaletteHint {
-    /// Creates a hint such as `Open` paired with `\u{23ce}`.
-    pub fn new(label: impl Into<SharedString>, key: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            key: key.into(),
-        }
     }
 }
 
@@ -752,57 +728,6 @@ pub enum CommandPaletteActivationPolicy {
     /// Drill-down callers, such as a filesystem navigator whose rows descend a level, select this
     /// and answer the activation by publishing a new query and new items.
     Continue,
-}
-
-/// The single primary footer control and its keyboard equivalent.
-///
-/// It is primary by placement and by owning the confirm key, not by weight: the palette renders it
-/// as low-emphasis text so the result list stays the loudest thing on the surface.
-///
-/// The caller owns the label, displayed shortcut, enabled state, and operation identity; the
-/// palette owns the control's size, paint, placement, and shortcut rendering. Activating it, by
-/// pointer or by the palette's confirm key, emits [`CommandPaletteEvent::Confirmed`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommandPaletteConfirm {
-    label: SharedString,
-    shortcut: SharedString,
-    disabled: bool,
-    debug_selector: Option<String>,
-}
-
-impl CommandPaletteConfirm {
-    /// Creates an enabled confirm control with caller-selected label and shortcut presentation.
-    pub fn new(label: impl Into<SharedString>, shortcut: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            shortcut: shortcut.into(),
-            disabled: false,
-            debug_selector: None,
-        }
-    }
-
-    /// Controls whether the control can activate. A disabled confirm ignores its keyboard
-    /// equivalent as well as pointer activation.
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-
-    /// Adds a stable selector used by GPUI interaction tests.
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.debug_selector = Some(selector.into());
-        self
-    }
-
-    /// Returns the caller-owned label.
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Returns whether the control is disabled.
-    pub const fn is_disabled(&self) -> bool {
-        self.disabled
-    }
 }
 
 /// One typed semantic command-palette item.
@@ -1026,14 +951,12 @@ pub struct CommandPalettePaint {
     icon_foreground: Rgba,
     disabled_icon_foreground: Rgba,
     section_foreground: Rgba,
-    footer_foreground: Rgba,
-    footer_key_foreground: Rgba,
 }
 
 impl CommandPalettePaint {
     /// Creates the core paint catalog.
     ///
-    /// Hover, section, and footer colors default to the closest core value so a caller only
+    /// Hover and section colors default to the closest core value so a caller only
     /// overrides what its theme distinguishes.
     pub fn new(
         foreground: Rgba,
@@ -1056,8 +979,6 @@ impl CommandPalettePaint {
             icon_foreground: foreground,
             disabled_icon_foreground: disabled,
             section_foreground: muted,
-            footer_foreground: muted,
-            footer_key_foreground: disabled,
         }
     }
 
@@ -1149,13 +1070,6 @@ impl CommandPalettePaint {
         self.section_foreground = color;
         self
     }
-
-    /// Sets the footer hint label and key foregrounds.
-    pub fn footer(mut self, foreground: Rgba, key_foreground: Rgba) -> Self {
-        self.footer_foreground = foreground;
-        self.footer_key_foreground = key_foreground;
-        self
-    }
 }
 
 /// Native desktop dimensions for the command-palette panel.
@@ -1175,8 +1089,6 @@ pub struct CommandPaletteMetrics {
     row_line_gap: Pixels,
     section_height: Pixels,
     separator_height: Pixels,
-    footer_height: Pixels,
-    footer_control_padding: Option<Pixels>,
     empty_padding: Pixels,
     empty_line_gap: Pixels,
     empty_actions_gap: Pixels,
@@ -1215,8 +1127,6 @@ impl CommandPaletteMetrics {
             row_line_gap: px(2.0),
             section_height: px(22.0),
             separator_height: px(9.0),
-            footer_height: px(30.0),
-            footer_control_padding: None,
             empty_padding: px(20.0),
             empty_line_gap: px(4.0),
             empty_actions_gap: px(14.0),
@@ -1238,16 +1148,6 @@ impl CommandPaletteMetrics {
             icon_size: px(12.0),
             icon_baseline_center: px(4.0),
         }
-    }
-
-    /// Sets the horizontal padding already carried by the footer's controls.
-    ///
-    /// This padding is subtracted from the shared content inset so the controls' labels align
-    /// with the editor and row content as the floating shell changes size. Without this value,
-    /// the control boxes align with the content edges.
-    pub fn footer_control_padding(mut self, padding: Pixels) -> Self {
-        self.footer_control_padding = Some(padding.max(px(0.0)));
-        self
     }
 
     /// Sets the height of a row that carries no description.
@@ -1305,12 +1205,6 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the hint and actions footer height.
-    pub fn footer_height(mut self, height: Pixels) -> Self {
-        self.footer_height = height;
-        self
-    }
-
     /// Sets the empty state's vertical padding, title-to-description gap, and text-to-actions gap.
     pub fn empty_spacing(mut self, padding: Pixels, line_gap: Pixels, actions_gap: Pixels) -> Self {
         self.empty_padding = padding;
@@ -1327,7 +1221,7 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the group-heading size independently from row descriptions and footer hints.
+    /// Sets the group-heading size independently from row descriptions.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_size = size;
         self
@@ -1403,15 +1297,6 @@ impl CommandPaletteMetrics {
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
-            footer_height: crate::appearance::scale_line_box(
-                self.footer_height,
-                self.secondary_line_height,
-                text_scale,
-                spacing_scale,
-            ),
-            footer_control_padding: self
-                .footer_control_padding
-                .map(|value| crate::appearance::scale_metric(value, spacing_scale)),
             empty_padding: crate::appearance::scale_metric(self.empty_padding, spacing_scale),
             empty_line_gap: crate::appearance::scale_metric(self.empty_line_gap, spacing_scale),
             empty_actions_gap: crate::appearance::scale_metric(
@@ -1468,10 +1353,6 @@ impl CommandPaletteMetrics {
     /// Returns the shared left edge of the editor, headings, status text, and row content.
     fn content_leading_inset(&self) -> Pixels {
         self.panel_padding + self.horizontal_padding
-    }
-
-    fn footer_inset(&self) -> Pixels {
-        (self.content_leading_inset() - self.footer_control_padding.unwrap_or(px(0.0))).max(px(0.0))
     }
 
     /// Returns the concentric radius for an inset row inside the outer panel.
@@ -1542,10 +1423,6 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
     header_actions: Vec<CommandPaletteAction>,
-    hints: Vec<CommandPaletteHint>,
-    actions_menu: Vec<MenuEntry<SharedString>>,
-    actions_menu_label: SharedString,
-    confirm: Option<CommandPaletteConfirm>,
     confirm_item: Option<I>,
     matching: CommandPaletteMatching,
     activation: CommandPaletteActivationPolicy,
@@ -1953,10 +1830,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             presented_results,
             leading_columns,
             header_actions: Vec::new(),
-            hints: Vec::new(),
-            actions_menu: Vec::new(),
-            actions_menu_label: "Actions".into(),
-            confirm: None,
             confirm_item: None,
             matching: CommandPaletteMatching::Semantic,
             activation: CommandPaletteActivationPolicy::Close,
@@ -2076,48 +1949,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.activation = activation;
-        cx.notify();
-    }
-
-    /// Replaces the single primary footer control. `None` removes it.
-    ///
-    /// An installed confirm claims the palette's confirm key; without one that key is left for the
-    /// surrounding application.
-    pub fn set_confirm(
-        &mut self,
-        confirm: Option<CommandPaletteConfirm>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.confirm = confirm;
-        cx.notify();
-    }
-
-    /// Replaces the footer hints. An empty list removes the footer unless an actions menu remains.
-    pub fn set_hints(&mut self, hints: Vec<CommandPaletteHint>, cx: &mut gpui::Context<Self>) {
-        self.hints = hints;
-        cx.notify();
-    }
-
-    /// Replaces the footer actions menu. An empty list removes its trigger.
-    ///
-    /// Activating an entry emits [`CommandPaletteEvent::MenuAction`]. The palette stays open while
-    /// the menu holds focus and closes only once the caller acts on the entry.
-    pub fn set_actions_menu(
-        &mut self,
-        entries: Vec<MenuEntry<SharedString>>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.actions_menu = entries;
-        cx.notify();
-    }
-
-    /// Replaces the footer actions-menu trigger label, which is also its accessibility name.
-    pub fn set_actions_menu_label(
-        &mut self,
-        label: impl Into<SharedString>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.actions_menu_label = label.into();
         cx.notify();
     }
 
@@ -2772,10 +2603,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let input_focus = self.input.read(cx).focus_handle();
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
-        let maximum_steps = self.header_actions.len()
-            + self.presented_empty_actions().len()
-            + usize::from(!self.actions_menu.is_empty())
-            + usize::from(self.confirm.is_some());
+        let maximum_steps = self.header_actions.len() + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
             window.focus_next(cx);
             if !self.focus_scope.contains_focused(window, cx) {
@@ -3079,7 +2907,6 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .top_offset
             .min((viewport.height - metrics.viewport_margin).max(px(0.0)));
 
-        let footer = self.has_footer();
         let content_height = if self.loading {
             metrics.row_height
         } else if self.matches.is_empty() {
@@ -3087,7 +2914,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         } else {
             self.presented_results.total_height(metrics)
         };
-        let chrome_height = chrome_height(metrics, footer);
+        let chrome_height = chrome_height(metrics);
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
         let panel_height = (chrome_height + content_height)
             .min(metrics.maximum_height)
@@ -3176,12 +3003,6 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 cx.stop_propagation();
             }))
-            .when(self.confirm.is_some(), |overlay| {
-                overlay.on_action(cx.listener(|palette, _: &Confirm, _, cx| {
-                    palette.confirm_activated(cx);
-                    cx.stop_propagation();
-                }))
-            })
             .when(self.confirm_item.is_some(), |overlay| {
                 overlay.on_action(cx.listener(|palette, _: &Confirm, window, cx| {
                     palette.activate_confirm_item(window, cx);
@@ -3195,9 +3016,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.focus_previous_control(window, cx);
             }));
 
-        // A command surface always hosts a potential footer menu, and GPUI collects deferred draws
-        // once per frame, so the palette draws normally and lets that menu defer above it. Its
-        // owner renders it last, and the anchored full-window layer keeps it above the chrome.
+        // The query field can open its context menu, and GPUI collects deferred draws once per
+        // frame, so the palette draws normally and lets that menu defer above it. Its owner
+        // renders it last, and the anchored full-window layer keeps it above the chrome.
         crate::floating_surface::present(
             theme.shell.layer(true),
             anchored()
@@ -3312,17 +3133,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .into_any_element()
     }
 
-    fn has_footer(&self) -> bool {
-        !self.hints.is_empty() || !self.actions_menu.is_empty() || self.confirm.is_some()
-    }
-
-    fn confirm_activated(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.confirm.as_ref().is_none_or(|confirm| confirm.disabled) {
-            return;
-        }
-        cx.emit(CommandPaletteEvent::<I>::Confirmed);
-    }
-
     fn render_outside_tracker(
         &self,
         panel_bounds: gpui::Bounds<Pixels>,
@@ -3421,12 +3231,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     .min_h_0()
                     .py(metrics.panel_padding)
                     .child(content),
-            )
-            .when(self.has_footer(), |panel| {
-                panel
-                    .child(separator_line(theme))
-                    .child(self.render_footer(width, theme, cx))
-            });
+            );
         theme.shell.mount(panel).into_any_element()
     }
 
@@ -3539,137 +3344,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .child(self.scrollbar.clone())
             .into_any_element()
     }
-
-    /// Renders the footer's caller actions.
-    ///
-    /// A lone ordinary action is offered directly, because a disclosure that reveals exactly one
-    /// choice is more chrome than the choice it hides. Anything else stays a menu.
-    fn render_actions(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
-        if self.actions_menu.is_empty() {
-            return None;
-        }
-        let palette = cx.entity().downgrade();
-        if let [entry] = self.actions_menu.as_slice()
-            && let Some(action) = entry.plain_action()
-        {
-            let emitted = action.action.clone();
-            return Some(
-                Button::new("command-palette-actions-single", action.label.clone())
-                    .variant(ButtonVariant::Ghost)
-                    .size(FOOTER_CONTROL_SIZE)
-                    .disabled(action.disabled)
-                    .tab_stop(true)
-                    .when_some(action.debug_selector, |button, selector| {
-                        button.debug_selector(selector)
-                    })
-                    .on_activate(move |_, _, cx| {
-                        let action = emitted.clone();
-                        let _ = palette.update(cx, |_, cx| {
-                            cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
-                        });
-                    })
-                    .into_any_element(),
-            );
-        }
-        Some(
-            Menu::new(
-                "command-palette-actions-menu",
-                self.actions_menu_label.clone(),
-                self.actions_menu.clone(),
-            )
-            .size(MenuSize::Regular)
-            .debug_selector("command-palette-actions-menu")
-            .on_activate(move |activation: &MenuActivation<SharedString>, _, cx| {
-                let action = activation.action().clone();
-                let _ = palette.update(cx, |_, cx| {
-                    cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
-                });
-            })
-            .into_any_element(),
-        )
-    }
-
-    fn render_footer(
-        &self,
-        width: Pixels,
-        theme: CommandPaletteTheme,
-        cx: &mut gpui::Context<Self>,
-    ) -> AnyElement {
-        let paint = theme.paint;
-        let metrics = theme.metrics;
-        // Caller actions anchor the leading edge and the confirm anchors the trailing one, so an
-        // escape hatch never reads as the peer of the primary action.
-        div()
-            .debug_selector(|| "command-palette-footer".to_owned())
-            .w_full()
-            .h(metrics.footer_height)
-            .flex_shrink_0()
-            .px(metrics.footer_inset())
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(metrics.gap)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(metrics.gap)
-                    .children(self.render_actions(cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(metrics.gap)
-                    .children(
-                        self.hints
-                            .iter()
-                            .filter(|_| width >= px(540.0) || self.confirm.is_none())
-                            .map(|hint| render_hint(hint, metrics, paint)),
-                    )
-                    .when_some(self.confirm.clone(), |trailing, confirm| {
-                        let confirm_palette = cx.entity().downgrade();
-                        let shortcut = confirm.shortcut.clone();
-                        let shortcut_size = metrics.secondary_size;
-                        let shortcut_line_height = metrics.secondary_line_height;
-                        trailing.child(
-                            Button::new("command-palette-confirm", confirm.label.clone())
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::Small)
-                                .disabled(confirm.disabled)
-                                .tab_stop(true)
-                                .when_some(confirm.debug_selector.clone(), |button, selector| {
-                                    button.debug_selector(selector)
-                                })
-                                .trailing(move |foreground| {
-                                    div()
-                                        .text_size(shortcut_size)
-                                        .line_height(shortcut_line_height)
-                                        .text_color(foreground)
-                                        .child(shortcut)
-                                        .into_any_element()
-                                })
-                                .on_activate(move |_, _, cx| {
-                                    let _ = confirm_palette
-                                        .update(cx, |palette, cx| palette.confirm_activated(cx));
-                                }),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
 }
 
-fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
-    let footer_height = if footer {
-        metrics.border_width + metrics.footer_height
-    } else {
-        px(0.0)
-    };
-    metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width * 3.0 + footer_height
+fn chrome_height(metrics: CommandPaletteMetrics) -> Pixels {
+    metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width * 3.0
 }
 
 fn separator_line(theme: CommandPaletteTheme) -> impl IntoElement {
@@ -3678,31 +3356,6 @@ fn separator_line(theme: CommandPaletteTheme) -> impl IntoElement {
         .h(theme.shell.hairline())
         .flex_shrink_0()
         .bg(theme.shell.divider())
-}
-
-fn render_hint(
-    hint: &CommandPaletteHint,
-    metrics: CommandPaletteMetrics,
-    paint: CommandPalettePaint,
-) -> impl IntoElement {
-    div()
-        .flex_shrink_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(metrics.accessory_padding)
-        .text_size(metrics.secondary_size)
-        .line_height(metrics.secondary_line_height)
-        .child(
-            div()
-                .text_color(paint.footer_foreground)
-                .child(hint.label.clone()),
-        )
-        .child(
-            div()
-                .text_color(paint.footer_key_foreground)
-                .child(hint.key.clone()),
-        )
 }
 
 /// Counts the lines `text` occupies at `wrap_width`, bounded by the empty-state line limit.
