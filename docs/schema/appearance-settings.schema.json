@@ -8,7 +8,7 @@
     "schema_version",
     "revision",
     "preferences",
-    "custom_schemes"
+    "color_schemes"
   ],
   "properties": {
     "schema_version": {
@@ -21,11 +21,11 @@
     "preferences": {
       "$ref": "#/$defs/preferences"
     },
-    "custom_schemes": {
+    "color_schemes": {
       "type": "array",
       "maxItems": 128,
       "items": {
-        "$ref": "color-scheme-definitions-v1.schema.json#/$defs/customScheme"
+        "$ref": "color-scheme-definitions-v1.schema.json#/$defs/colorScheme"
       }
     }
   },
@@ -50,36 +50,6 @@
         },
         "dark": {
           "$ref": "color-scheme-definitions-v1.schema.json#/$defs/id"
-        }
-      }
-    },
-    "chromeTypography": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "family",
-        "base_size",
-        "regular_weight",
-        "emphasis_weight",
-        "heading_weight"
-      ],
-      "properties": {
-        "family": {
-          "$ref": "#/$defs/chromeFamily"
-        },
-        "base_size": {
-          "type": "number",
-          "minimum": 10,
-          "maximum": 24
-        },
-        "regular_weight": {
-          "$ref": "#/$defs/weight"
-        },
-        "emphasis_weight": {
-          "$ref": "#/$defs/weight"
-        },
-        "heading_weight": {
-          "$ref": "#/$defs/weight"
         }
       }
     },
@@ -118,41 +88,6 @@
           "type": "boolean"
         }
       }
-    },
-    "chromeFamily": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source"
-          ],
-          "properties": {
-            "source": {
-              "const": "system_ui"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source",
-            "family"
-          ],
-          "properties": {
-            "source": {
-              "const": "named"
-            },
-            "family": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256,
-              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
-            }
-          }
-        }
-      ]
     },
     "terminalFamily": {
       "oneOf": [
@@ -199,54 +134,12 @@
       "additionalProperties": false,
       "required": [
         "mode",
-        "chrome",
-        "terminal"
+        "terminal",
+        "window"
       ],
       "properties": {
         "mode": {
           "$ref": "#/$defs/appearanceMode"
-        },
-        "background": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "transparency": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
-            "blur": { "type": "boolean", "default": true }
-          }
-        },
-        "chrome": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schemes",
-            "typography",
-            "density",
-            "overrides"
-          ],
-          "properties": {
-            "schemes": {
-              "$ref": "#/$defs/schemeSlots"
-            },
-            "typography": {
-              "$ref": "#/$defs/chromeTypography"
-            },
-            "density": {
-              "enum": [
-                "compact",
-                "comfortable"
-              ]
-            },
-            "overrides": {
-              "type": "object",
-              "maxProperties": 128,
-              "propertyNames": {
-                "$ref": "color-scheme-definitions-v1.schema.json#/$defs/id"
-              },
-              "additionalProperties": {
-                "$ref": "color-scheme-definitions-v1.schema.json#/$defs/chromeColors"
-              }
-            }
-          }
         },
         "terminal": {
           "type": "object",
@@ -287,8 +180,38 @@
               }
             }
           }
+        },
+        "window": {
+          "$ref": "#/$defs/window"
         }
       }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transparency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.35
+        },
+        "blur": {
+          "type": "boolean",
+          "default": true
+        },
+        "density": {
+          "enum": [
+            "compact",
+            "comfortable"
+          ]
+        }
+      },
+      "required": [
+        "density",
+        "transparency",
+        "blur"
+      ]
     }
   }
 }

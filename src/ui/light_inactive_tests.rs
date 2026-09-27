@@ -1,7 +1,6 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeColorOverrides, ChromeColors, Color, CompositionCapabilities, SchemeCatalog,
-    SystemAppearance,
+    ChromeColors, Color, CompositionCapabilities, SchemeCatalog, SystemAppearance,
 };
 
 use super::appearance::{ChromeAppearance, settings};
@@ -11,7 +10,7 @@ fn resolve_builtin_light(transparency: f32) -> crate::appearance::ResolvedAppear
         mode: AppearanceMode::Light,
         ..AppearancePreferences::default()
     };
-    preferences.background.transparency = transparency;
+    preferences.window.transparency = transparency;
     SchemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -86,74 +85,6 @@ fn builtin_light_inactive_navigation_and_segments_keep_raised_polarity() {
             );
         }
     }
-}
-
-#[test]
-fn builtin_light_floating_selection_preserves_user_overrides_equal_to_the_surface() {
-    let selected = Color::rgb(0xfafafa);
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Light,
-        ..AppearancePreferences::default()
-    };
-    preferences.chrome.overrides.insert(
-        crate::appearance::builtin_light_chrome(),
-        ChromeColorOverrides {
-            row_selected_background: Some(selected),
-            row_selected_hover_background: Some(selected),
-            ..ChromeColorOverrides::default()
-        },
-    );
-    let resolved = SchemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &preferences,
-            SystemAppearance::available(Appearance::Light),
-            &AvailableFonts::default(),
-        )
-        .expect("overridden built-in Light should resolve");
-    let active = ChromeAppearance::prepare(&resolved.chrome);
-
-    assert_eq!(active.floating_colors.row_selected_background, selected);
-    assert_eq!(
-        active.floating_colors.row_selected_hover_background,
-        selected
-    );
-}
-
-#[test]
-fn builtin_light_active_segments_preserve_explicit_hover_and_pressed_overrides() {
-    let hover = Color::rgb(0xf7f7f7);
-    let pressed = Color::rgb(0xf0f0f0);
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Light,
-        ..AppearancePreferences::default()
-    };
-    preferences.chrome.overrides.insert(
-        crate::appearance::builtin_light_chrome(),
-        ChromeColorOverrides {
-            selection_hover_background: Some(hover),
-            selection_pressed_background: Some(pressed),
-            ..ChromeColorOverrides::default()
-        },
-    );
-    let resolved = SchemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &preferences,
-            SystemAppearance::available(Appearance::Light),
-            &AvailableFonts::default(),
-        )
-        .expect("overridden built-in Light should resolve");
-    let active = ChromeAppearance::prepare(&resolved.chrome);
-
-    assert_eq!(
-        active.segmented_control_colors.selection_hover_background,
-        hover
-    );
-    assert_eq!(
-        active.segmented_control_colors.selection_pressed_background,
-        pressed
-    );
 }
 
 fn assert_active_segment_uses_elevated_surface(

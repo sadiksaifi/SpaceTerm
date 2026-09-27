@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_chrome_row_icons_are_independent_from_trigger_icons() {
+    fn row_icons_are_independent_from_trigger_icons() {
         let colors = ChromeColors::default();
         let row_icons = ChromeColors {
             row_hover_icon: Color::rgba(0x12345678),

@@ -1,5 +1,4 @@
 //! Repeatable native acceptance fixtures using the production controls and appearance transaction.
-use std::collections::BTreeSet;
 
 use gpui::prelude::*;
 use gpui::{
@@ -21,8 +20,8 @@ use super::super::appearance_runtime::{self, AppearanceRuntime, WindowAppearance
 use super::super::chrome_geometry::RadiusRole;
 use super::super::chrome_icons::IconRole;
 use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::appearance::{Appearance, AppearanceMode, SchemeId, ZedImportKind};
-use crate::settings::{PreviewToken, SchemeImport};
+use crate::appearance::{Appearance, AppearanceMode};
+use crate::settings::PreviewToken;
 
 gpui::actions!(appearance_gallery, [NextGalleryFixture]);
 
@@ -38,7 +37,7 @@ pub(super) fn open(cx: &mut App) -> gpui::Result<()> {
             window_background: appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Chrome Theme State Gallery".into()),
+                title: Some("Appearance State Gallery".into()),
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
@@ -53,34 +52,22 @@ pub(super) fn open(cx: &mut App) -> gpui::Result<()> {
 enum Fixture {
     Dark,
     Light,
-    SparseDark,
-    SparseLight,
-    Adversarial,
 }
 impl Fixture {
     fn label(self) -> &'static str {
         match self {
             Self::Dark => "Built-in Dark",
             Self::Light => "Built-in Light",
-            Self::SparseDark => "Sparse Zed Dark",
-            Self::SparseLight => "Sparse Zed Light",
-            Self::Adversarial => "Distinct authored roles",
         }
     }
     fn appearance(self) -> Appearance {
         match self {
-            Self::Light | Self::SparseLight => Appearance::Light,
+            Self::Light => Appearance::Light,
             _ => Appearance::Dark,
         }
     }
 }
-const FIXTURES: [Fixture; 5] = [
-    Fixture::Dark,
-    Fixture::Light,
-    Fixture::SparseDark,
-    Fixture::SparseLight,
-    Fixture::Adversarial,
-];
+const FIXTURES: [Fixture; 2] = [Fixture::Dark, Fixture::Light];
 const STATES: [(&str, ControlPreviewState); 5] = [
     ("Normal", ControlPreviewState::Normal),
     ("Hover", ControlPreviewState::Hovered),
@@ -364,73 +351,8 @@ impl Gallery {
             }
             let token = self.preview.as_ref().unwrap();
             let appearance = fixture.appearance();
-            let id = if matches!(fixture, Fixture::SparseDark | Fixture::SparseLight) {
-                let (mode, bg, text) = if appearance == Appearance::Dark {
-                    ("dark", "#081a24", "#e8f5ee")
-                } else {
-                    ("light", "#fff4e5", "#30271e")
-                };
-                let bytes=serde_json::json!({"name":"SpaceTerm acceptance fixtures","author":"SpaceTerm","themes":[{"name":fixture.label(),"appearance":mode,"style":{"background":bg,"text":text}}]}).to_string();
-                let incoming =
-                    crate::appearance::import_zed(bytes.as_bytes(), 0, &[ZedImportKind::Chrome])
-                        .map_err(|_| "Fixture source invalid")?
-                        .into_iter()
-                        .map(|scheme| scheme.id().clone())
-                        .collect::<BTreeSet<_>>();
-                let snapshot = settings.snapshot();
-                let replace = snapshot
-                    .candidate
-                    .custom_schemes
-                    .iter()
-                    .map(|scheme| scheme.id().clone())
-                    .filter(|id| incoming.contains(id))
-                    .collect::<BTreeSet<_>>();
-                settings
-                    .import_preview(
-                        token,
-                        snapshot.catalog_revision,
-                        SchemeImport::Zed {
-                            bytes: bytes.as_bytes(),
-                            candidate_index: 0,
-                            kinds: &[ZedImportKind::Chrome],
-                        },
-                        &replace,
-                    )
-                    .map_err(|_| "Fixture import failed")?
-                    .installed
-                    .into_iter()
-                    .next()
-                    .ok_or("Fixture import was empty")?
-            } else {
-                SchemeId::new(if appearance == Appearance::Light {
-                    "builtin.spaceterm.chrome.light"
-                } else {
-                    "builtin.spaceterm.chrome.dark"
-                })
-                .unwrap()
-            };
             let mut candidate = (*settings.snapshot().candidate).clone();
             candidate.preferences.mode = AppearanceMode::from(appearance);
-            candidate.preferences.chrome.overrides.clear();
-            candidate
-                .preferences
-                .chrome
-                .schemes
-                .set(appearance, id.clone());
-            if fixture == Fixture::Adversarial {
-                let colors = serde_json::json!({
-                    "primary_background":"#f7da60","primary_foreground":"#202535","primary_icon":"#643700","primary_hover_background":"#7ae1bc","primary_hover_foreground":"#173d28","primary_hover_icon":"#583375","primary_pressed_background":"#c7a3f1","primary_pressed_foreground":"#271045","primary_pressed_icon":"#083f4c",
-                    "selection_background":"#335784","selection_foreground":"#fbf2c9","selection_hover_background":"#753969","selection_hover_foreground":"#d7ffe5",
-                    "destructive_background":"#a2253f","destructive_foreground":"#fff4ef","destructive_hover_background":"#ffc5a1","destructive_hover_foreground":"#4c0e17","destructive_pressed_background":"#753944","destructive_pressed_foreground":"#f9e078",
-                    "input_background":"#ffffff00","input_text":"#f6f3e9","input_selection_background":"#f6f3e9","input_selection_foreground":"#101b25",
-                    "row_selected_background":"#e5d7fa","row_selected_foreground":"#25113d","row_selected_secondary":"#4b2153","row_selected_icon":"#075348","row_selected_match":"#941d43","row_hover_background":"#b6e9d7","row_hover_foreground":"#123b26","row_hover_secondary":"#573726","row_hover_icon":"#472174","row_hover_match":"#85323c",
-                    "scrollbar_thumb_background":"#809dcd","scrollbar_thumb_hover_background":"#e2b067","scrollbar_thumb_active_background":"#9bd49c"
-                });
-                candidate.preferences.chrome.overrides.insert(
-                    id,
-                    serde_json::from_value(colors).map_err(|_| "Adversarial fixture invalid")?,
-                );
-            }
             settings
                 .update_preview(token, candidate)
                 .map_err(|_| "Fixture preview failed")?;
@@ -511,7 +433,7 @@ impl Gallery {
             .child(
                 div()
                     .chrome_text(appearance.typography.style(TextRole::Title))
-                    .child("Chrome theme state gallery"),
+                    .child("Appearance state gallery"),
             )
             .child(
                 div()
@@ -1012,7 +934,7 @@ mod tests {
         assert!(palette.read_with(cx, |palette, _| palette.is_open()));
         assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
 
-        for fixture in [Fixture::Light, Fixture::SparseDark] {
+        for fixture in [Fixture::Light, Fixture::Dark] {
             cx.simulate_keystrokes("ctrl-alt-n");
             cx.run_until_parked();
             gallery.read_with(cx, |gallery, cx| {
@@ -1059,7 +981,6 @@ mod tests {
                 );
             });
         }
-        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
     }
 
     #[gpui::test]
@@ -1082,7 +1003,7 @@ mod tests {
                 gallery.update(cx, |gallery, cx| {
                     let token = gallery.preview.as_ref().unwrap();
                     let mut candidate = (*settings.snapshot().candidate).clone();
-                    candidate.preferences.background.transparency = transparency;
+                    candidate.preferences.window.transparency = transparency;
                     settings.update_preview(token, candidate).unwrap();
                     cx.notify();
                 });

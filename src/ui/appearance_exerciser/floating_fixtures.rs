@@ -71,20 +71,18 @@ impl PreviewChoice {
         match self {
             Self::Light => document.preferences.mode = AppearanceMode::Light,
             Self::Dark => document.preferences.mode = AppearanceMode::Dark,
-            Self::Compact => document.preferences.chrome.density = ChromeDensity::Compact,
+            Self::Compact => document.preferences.window.density = ChromeDensity::Compact,
             Self::Comfortable => {
-                document.preferences.chrome.density = ChromeDensity::Comfortable;
+                document.preferences.window.density = ChromeDensity::Comfortable;
             }
-            Self::Opaque => document.preferences.background.transparency = 0.0,
+            Self::Opaque => document.preferences.window.transparency = 0.0,
             Self::DefaultTransparency => {
-                document.preferences.background.transparency = SettingsDocument::default()
-                    .preferences
-                    .background
-                    .transparency;
+                document.preferences.window.transparency =
+                    SettingsDocument::default().preferences.window.transparency;
             }
-            Self::MaximumTransparency => document.preferences.background.transparency = 1.0,
-            Self::BlurOn => document.preferences.background.blur = true,
-            Self::BlurOff => document.preferences.background.blur = false,
+            Self::MaximumTransparency => document.preferences.window.transparency = 1.0,
+            Self::BlurOn => document.preferences.window.blur = true,
+            Self::BlurOff => document.preferences.window.blur = false,
         }
     }
 }

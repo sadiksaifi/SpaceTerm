@@ -1,6 +1,6 @@
 use super::*;
 use crate::appearance::{
-    AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeColorOverrides, SystemAppearance,
+    AppearanceGeneration, AppearanceMode, AvailableFonts, SystemAppearance, TerminalColorOverrides,
 };
 use crate::platform::secure_filesystem::PrivateFileSnapshot;
 use storage::StorageCommit;
@@ -71,7 +71,7 @@ fn setup() -> (UserSettings, Arc<MemoryStorage>) {
     (settings, storage)
 }
 
-const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
+const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"id":"custom.sample","name":"Sample","appearance":"light","colors":{"foreground":"#112233"}}]}"##;
 
 #[test]
 fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection() {
@@ -97,9 +97,9 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         imported.candidate.preferences,
         initial.committed.preferences
     );
-    assert_eq!(imported.candidate.custom_schemes.len(), 1);
+    assert_eq!(imported.candidate.color_schemes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
-    assert_eq!(settings.list_schemes().unwrap().len(), 5);
+    assert_eq!(settings.list_schemes().unwrap().len(), 3);
     assert_eq!(
         settings.import_preview(
             &token,
@@ -110,16 +110,9 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         Err(SettingsError::Stale)
     );
     let id = SchemeId::new("custom.sample").unwrap();
-    let exported = settings
-        .export_schemes(&[(SchemeKind::Chrome, id.clone())])
-        .unwrap();
-    assert!(!exported.contains("typography"));
-    let copy = crate::appearance::parse_color_document(exported.as_bytes()).unwrap();
-    assert_ne!(copy.schemes[0].id(), &id);
-    let mut fresh = SchemeCatalog::default();
-    fresh
-        .install_batch(&copy.schemes, fresh.revision(), &BTreeSet::new())
-        .unwrap();
+    let exported = settings.export_document().unwrap();
+    let copy = crate::appearance::parse_settings(exported.as_bytes()).unwrap();
+    assert_eq!(&copy, imported.candidate.as_ref());
     assert_eq!(
         settings.import_preview(
             &token,
@@ -144,10 +137,10 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
     settings
         .reset_preview(&token, ResetTarget::AllAppearance)
         .unwrap();
-    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
     let job = settings.commit_preview(&token).unwrap();
     assert_eq!(
-        settings.reset_preview(&token, ResetTarget::ChromeTypography),
+        settings.reset_preview(&token, ResetTarget::TerminalTypography),
         Err(SettingsError::Busy)
     );
     assert_eq!(
@@ -184,7 +177,7 @@ fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
         vec![SchemeId::new("custom.sample").unwrap()]
     );
     assert_eq!(receipt.catalog_revision, initial.catalog_revision + 1);
-    assert!(settings.snapshot().candidate.custom_schemes.is_empty());
+    assert!(settings.snapshot().candidate.color_schemes.is_empty());
     job.run().unwrap();
     assert_eq!(
         settings.snapshot().catalog_revision,
@@ -196,7 +189,7 @@ fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
         .unwrap()
         .run()
         .unwrap();
-    assert_eq!(settings.snapshot().committed.custom_schemes.len(), 1);
+    assert_eq!(settings.snapshot().committed.color_schemes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 
@@ -214,12 +207,11 @@ fn zed_candidates_require_explicit_selection_and_install_through_settings() {
             SchemeImport::Zed {
                 bytes,
                 candidate_index: candidates[0].index,
-                kinds: &[ZedImportKind::Terminal],
             },
             &BTreeSet::new(),
         )
         .unwrap();
-    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
     assert_eq!(
         settings.snapshot().candidate.preferences,
         SettingsDocument::default().preferences
@@ -245,16 +237,13 @@ fn maximum_zed_family_installs_as_one_bounded_batch() {
         .import_preview(
             &token,
             settings.snapshot().catalog_revision,
-            SchemeImport::ZedFamily {
-                bytes: &bytes,
-                kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
-            },
+            SchemeImport::ZedFamily { bytes: &bytes },
             &BTreeSet::new(),
         )
         .unwrap();
 
-    assert_eq!(receipt.installed.len(), 64);
-    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 64);
+    assert_eq!(receipt.installed.len(), 32);
+    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 32);
 }
 
 #[test]
@@ -272,22 +261,22 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
     candidate.preferences.mode = AppearanceMode::Light;
-    candidate.preferences.chrome.schemes.light = selected.clone();
+    candidate.preferences.terminal.schemes.light = selected.clone();
     candidate
         .preferences
-        .chrome
+        .terminal
         .overrides
-        .insert(selected.clone(), ChromeColorOverrides::default());
+        .insert(selected.clone(), TerminalColorOverrides::default());
     settings.update_preview(&token, candidate).unwrap();
 
     let catalog_revision = settings.snapshot().catalog_revision;
     let preferences_before_deletion = settings.snapshot().candidate.preferences.clone();
     let removed_revision = settings
-        .remove_custom_scheme_preview(&token, catalog_revision, &selected)
+        .remove_scheme_preview(&token, catalog_revision, &selected)
         .unwrap();
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
-    assert!(snapshot.candidate.custom_schemes.is_empty());
+    assert!(snapshot.candidate.color_schemes.is_empty());
     assert_eq!(snapshot.candidate.preferences, preferences_before_deletion);
     let resolved = SchemeCatalog::default()
         .resolve(
@@ -297,10 +286,10 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
             &AvailableFonts::default(),
         )
         .unwrap();
-    assert_eq!(resolved.chrome.requested_scheme, selected);
+    assert_eq!(resolved.terminal.requested_scheme, selected);
     assert_eq!(
-        resolved.chrome.effective_scheme,
-        SchemeId::builtin("builtin.spaceterm.chrome.light")
+        resolved.terminal.effective_scheme,
+        SchemeId::builtin("builtin.spaceterm.light")
     );
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
@@ -312,10 +301,10 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
     let before = settings.snapshot();
 
     assert_eq!(
-        settings.remove_custom_scheme_preview(
+        settings.remove_scheme_preview(
             &token,
             before.catalog_revision,
-            &SchemeId::builtin("builtin.spaceterm.chrome.dark"),
+            &SchemeId::builtin("builtin.spaceterm.dark"),
         ),
         Err(SettingsError::Catalog(CatalogError::ReservedId))
     );
@@ -324,7 +313,7 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         before.catalog_revision
     );
     assert_eq!(
-        settings.remove_custom_scheme_preview(
+        settings.remove_scheme_preview(
             &token,
             before.catalog_revision,
             &SchemeId::new("custom.unknown").unwrap(),
@@ -336,8 +325,8 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         before.catalog_revision
     );
     assert_eq!(
-        settings.snapshot().candidate.custom_schemes,
-        before.candidate.custom_schemes
+        settings.snapshot().candidate.color_schemes,
+        before.candidate.color_schemes
     );
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
@@ -358,20 +347,20 @@ fn deletion_rejects_stale_and_busy_operations_without_removing_the_scheme() {
     let id = imported.installed[0].clone();
 
     assert_eq!(
-        settings.remove_custom_scheme_preview(&token, stale_catalog_revision, &id),
+        settings.remove_scheme_preview(&token, stale_catalog_revision, &id),
         Err(SettingsError::Stale)
     );
     let current_catalog_revision = settings.snapshot().catalog_revision;
     let job = settings.commit_preview(&token).unwrap();
     assert_eq!(
-        settings.remove_custom_scheme_preview(&token, current_catalog_revision, &id),
+        settings.remove_scheme_preview(&token, current_catalog_revision, &id),
         Err(SettingsError::Busy)
     );
     assert!(matches!(
-        settings.remove_custom_scheme_committed(0, current_catalog_revision, &id),
+        settings.remove_scheme_committed(0, current_catalog_revision, &id),
         Err(SettingsError::Busy)
     ));
-    assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
     drop(job);
 }
 
@@ -392,16 +381,16 @@ fn direct_deletion_commits_only_the_named_custom_scheme() {
     let installed = settings.snapshot();
 
     let deletion = settings
-        .remove_custom_scheme_committed(
+        .remove_scheme_committed(
             installed.committed.revision,
             installed.catalog_revision,
             &id,
         )
         .unwrap();
-    assert_eq!(settings.snapshot().committed.custom_schemes.len(), 1);
+    assert_eq!(settings.snapshot().committed.color_schemes.len(), 1);
     deletion.run().unwrap();
-    assert!(settings.snapshot().committed.custom_schemes.is_empty());
-    assert_eq!(settings.list_schemes().unwrap().len(), 4);
+    assert!(settings.snapshot().committed.color_schemes.is_empty());
+    assert_eq!(settings.list_schemes().unwrap().len(), 2);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 
@@ -409,7 +398,7 @@ fn direct_deletion_commits_only_the_named_custom_scheme() {
 fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
     let (settings, storage) = setup();
     let mut first = SettingsDocument::default();
-    first.preferences.chrome.typography.base_size = 20.0;
+    first.preferences.terminal.typography.base_size = 20.0;
     settings.update_committed(0, first).unwrap().run().unwrap();
     let committed = settings.snapshot().committed;
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 50));
@@ -434,7 +423,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
     let (settings, storage) = setup();
     let original = settings.snapshot().committed;
     let mut candidate = (*original).clone();
-    candidate.preferences.chrome.typography.base_size = 24.0;
+    candidate.preferences.terminal.typography.base_size = 24.0;
     let job = settings
         .update_committed(original.revision, candidate.clone())
         .unwrap();
@@ -465,7 +454,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
             .snapshot()
             .committed
             .preferences
-            .chrome
+            .terminal
             .typography
             .base_size,
         24.0

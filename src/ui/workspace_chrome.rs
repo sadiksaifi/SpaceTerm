@@ -363,8 +363,7 @@ mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        ChromeColorOverrides, ChromeScheme, CompositionCapabilities, CustomScheme, SchemeCatalog,
-        SchemeId, SchemeMetadata, SystemAppearance, builtin_chrome_base,
+        CompositionCapabilities, SchemeCatalog, SystemAppearance, builtin_chrome_base,
     };
 
     #[test]
@@ -411,30 +410,12 @@ mod tests {
 
     #[test]
     fn status_dot_should_read_on_distinct_painted_chip_hosts() {
-        let scheme_id = SchemeId::new("test.workspace-status-hosts").unwrap();
-        let custom = CustomScheme::Chrome(Box::new(ChromeScheme {
-            window_background: None,
-            id: scheme_id.clone(),
-            name: "Workspace Status Hosts".to_owned(),
-            appearance: Appearance::Light,
-            metadata: SchemeMetadata::default(),
-            colors: ChromeColorOverrides {
-                background: Some(Color::rgb(0xffffff)),
-                title_bar_background: Some(Color::rgb(0xffffff)),
-                tab_active_background: Some(Color::rgb(0x101010)),
-                tab_active_hover_background: Some(Color::rgb(0x101010)),
-                warning: Some(Color::rgb(0xffffff)),
-                ..ChromeColorOverrides::default()
-            },
-        }));
         let mut preferences = AppearancePreferences {
             mode: AppearanceMode::Light,
             ..AppearancePreferences::default()
         };
-        preferences.chrome.schemes.light = scheme_id;
-        preferences.background.transparency = 1.0;
-        let resolved = SchemeCatalog::from_custom_schemes(&[custom])
-            .unwrap()
+        preferences.window.transparency = 1.0;
+        let resolved = SchemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,

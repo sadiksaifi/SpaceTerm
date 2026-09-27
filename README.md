@@ -91,7 +91,7 @@ The terminal engine is pinned in the `third_party/ghostty` submodule and built f
 SpaceTerm maintains its Rust integration as local workspace dependencies. See
 [the Ghostty integration guide](docs/ghostty-integration.md) for source, binding, and patch updates.
 
-SpaceTerm authors paired Light and Dark color schemes for the interface and terminal. Neutral
-surfaces share one material hierarchy across opaque and translucent appearance. Interface and
-terminal schemes remain independently selectable, including imported schemes; their font sizes
-are independent too.
+SpaceTerm authors paired Light and Dark appearances for the interface and terminal. Neutral
+surfaces share one material hierarchy across opaque and translucent appearance. The interface
+appearance is fixed apart from density; terminal color schemes, including imported schemes, and
+terminal fonts are selectable.

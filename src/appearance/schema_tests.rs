@@ -1,8 +1,3 @@
-macro_rules! role_names {
-    ($($field:ident),+ $(,)?) => { &[ $(stringify!($field)),+ ] };
-}
-
-const CHROME_ROLES: &[&str] = chrome_color_fields!(role_names);
 const TERMINAL_ROLES: &[&str] = &[
     "foreground",
     "background",
@@ -29,14 +24,6 @@ fn published_schema_lists_exactly_the_accepted_color_roles() {
         "../../docs/schema/color-scheme-definitions-v1.schema.json"
     ))
     .expect("published color-scheme definitions must be JSON");
-    let listed_chrome: std::collections::BTreeSet<_> =
-        schema["$defs"]["chromeColors"]["propertyNames"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|role| role.as_str().unwrap())
-            .collect();
-    assert_eq!(listed_chrome, CHROME_ROLES.iter().copied().collect());
     let listed_terminal: std::collections::BTreeSet<_> =
         schema["$defs"]["terminalColors"]["properties"]
             .as_object()
@@ -71,13 +58,13 @@ fn published_schemas_resolve_external_draft_2020_12_references() {
         .expect("appearance schema must resolve the shared definitions");
     assert!(settings_validator.is_valid(&settings));
     let mut invalid_settings = settings;
-    invalid_settings["preferences"]["chrome"]["schemes"]["light"] = serde_json::json!("INVALID ID");
+    invalid_settings["preferences"]["terminal"]["schemes"]["light"] =
+        serde_json::json!("INVALID ID");
     assert!(!settings_validator.is_valid(&invalid_settings));
 
     let package = serde_json::json!({
         "schema_version": 1,
         "schemes": [{
-            "kind": "chrome",
             "id": "custom.valid",
             "name": "Valid",
             "appearance": "dark",
@@ -114,7 +101,7 @@ fn published_schema_accepts_sparse_terminal_palettes() {
     let package = serde_json::json!({
         "schema_version": 1,
         "schemes": [{
-            "kind": "terminal",
+
             "id": "custom.sparse-ansi",
             "name": "Sparse ANSI",
             "appearance": "dark",
@@ -143,19 +130,17 @@ fn named_font_families_have_matching_schema_and_runtime_character_rules() {
         .build(&settings_schema)
         .unwrap();
 
-    for surface in ["chrome", "terminal"] {
-        let mut invalid = serde_json::to_value(super::SettingsDocument::default()).unwrap();
-        invalid["preferences"][surface]["typography"]["family"] =
-            serde_json::json!({"source": "named", "family": "Broken\nFamily"});
-        assert!(!validator.is_valid(&invalid));
-        assert!(super::parse_settings(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    let mut invalid = serde_json::to_value(super::SettingsDocument::default()).unwrap();
+    invalid["preferences"]["terminal"]["typography"]["family"] =
+        serde_json::json!({"source": "named", "family": "Broken\nFamily"});
+    assert!(!validator.is_valid(&invalid));
+    assert!(super::parse_settings(&serde_json::to_vec(&invalid).unwrap()).is_err());
 
-        let mut unicode = serde_json::to_value(super::SettingsDocument::default()).unwrap();
-        unicode["preferences"][surface]["typography"]["family"] =
-            serde_json::json!({"source": "named", "family": "ヒラギノ角ゴシック"});
-        assert!(validator.is_valid(&unicode));
-        assert!(super::parse_settings(&serde_json::to_vec(&unicode).unwrap()).is_ok());
-    }
+    let mut unicode = serde_json::to_value(super::SettingsDocument::default()).unwrap();
+    unicode["preferences"]["terminal"]["typography"]["family"] =
+        serde_json::json!({"source": "named", "family": "ヒラギノ角ゴシック"});
+    assert!(validator.is_valid(&unicode));
+    assert!(super::parse_settings(&serde_json::to_vec(&unicode).unwrap()).is_ok());
 }
 
 struct PublishedSchemaRetriever(serde_json::Value);
@@ -194,24 +179,16 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
         property_keys(&schema["$defs"]["preferences"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["chrome"]),
-        property_keys(&schema["$defs"]["preferences"]["properties"]["chrome"])
-    );
-    assert_eq!(
         object_keys(&runtime["preferences"]["terminal"]),
         property_keys(&schema["$defs"]["preferences"]["properties"]["terminal"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["chrome"]["schemes"]),
-        property_keys(&schema["$defs"]["schemeSlots"])
+        object_keys(&runtime["preferences"]["window"]),
+        property_keys(&schema["$defs"]["window"])
     );
     assert_eq!(
         object_keys(&runtime["preferences"]["terminal"]["schemes"]),
         property_keys(&schema["$defs"]["schemeSlots"])
-    );
-    assert_eq!(
-        object_keys(&runtime["preferences"]["chrome"]["typography"]),
-        property_keys(&schema["$defs"]["chromeTypography"])
     );
     assert_eq!(
         object_keys(&runtime["preferences"]["terminal"]["typography"]),

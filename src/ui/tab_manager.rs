@@ -2217,69 +2217,6 @@ mod tests {
         }
     }
 
-    /// A custom scheme tunes the Tab separator and outlined controls as two decisions.
-    ///
-    /// The scheme travels the production path, from a native color document through the catalog
-    /// and prepared Chrome into both consumers, so an alias anywhere along it would tie a retuned
-    /// outline ring to the Tab strip or the reverse.
-    #[test]
-    fn custom_scheme_should_tune_tab_separators_independently_of_outlined_controls() {
-        use crate::appearance::{
-            AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-            SchemeCatalog, SchemeId, SystemAppearance, parse_color_document,
-        };
-
-        let prepare = |outline: &str, separator: &str| {
-            let document = format!(
-                r##"{{"schema_version":1,"schemes":[{{"kind":"chrome","id":"test.tab-separator","name":"Tab separator","appearance":"light","colors":{{"background":"#fbfbfc","text":"#1d1f23","outline_border":"{outline}","tab_separator":"{separator}"}}}}]}}"##
-            );
-            let document = parse_color_document(document.as_bytes()).unwrap();
-            let catalog = SchemeCatalog::from_custom_schemes(&document.schemes).unwrap();
-            let mut preferences = AppearancePreferences {
-                mode: AppearanceMode::Light,
-                ..Default::default()
-            };
-            preferences.chrome.schemes.light = SchemeId::new("test.tab-separator").unwrap();
-            let resolved = catalog
-                .resolve(
-                    AppearanceGeneration::INITIAL,
-                    &preferences,
-                    SystemAppearance::unavailable(),
-                    &AvailableFonts::default(),
-                )
-                .unwrap();
-            super::super::appearance::ChromeAppearance::prepare(&resolved.chrome).colors
-        };
-        let separators = |colors: &ChromeColors| {
-            [true, false].map(|window_active| {
-                TabChromePresentation::resolve(window_active, false, colors).tab_separator
-            })
-        };
-
-        let baseline = prepare("#c8cbd3", "#b9bcc4");
-        assert_eq!(separators(&baseline), [Color::rgb(0xb9bcc4); 2]);
-
-        let retuned_outline = prepare("#5a5e66", "#b9bcc4");
-        assert_ne!(
-            super::super::button_theme::theme(&retuned_outline),
-            super::super::button_theme::theme(&baseline),
-            "the outlined control should follow its own ring"
-        );
-        assert_eq!(
-            separators(&retuned_outline),
-            separators(&baseline),
-            "retuning outlined controls should leave the Tab separator alone"
-        );
-
-        let retuned_separator = prepare("#c8cbd3", "#d4d6dc");
-        assert_eq!(separators(&retuned_separator), [Color::rgb(0xd4d6dc); 2]);
-        assert_eq!(
-            super::super::button_theme::theme(&retuned_separator),
-            super::super::button_theme::theme(&baseline),
-            "retuning the Tab separator should leave outlined controls alone"
-        );
-    }
-
     /// The separator keeps one logical point at every supported display scale, which never
     /// rasterises below one whole device pixel: a single crisp pixel at 1x and more on denser
     /// displays, so the mark stays thin without disappearing.
@@ -2378,7 +2315,7 @@ mod tests {
         };
 
         let mut preferences = AppearancePreferences::default();
-        preferences.background.transparency = 1.0;
+        preferences.window.transparency = 1.0;
         let resolved = SchemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,

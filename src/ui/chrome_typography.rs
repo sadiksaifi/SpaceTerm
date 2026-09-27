@@ -11,9 +11,6 @@ use crate::appearance::{ChromeDensity, ResolvedChromeTypography, ResolvedFontDes
 
 use super::appearance::prepared_font;
 
-const MINIMUM_SIZE: f32 = 9.0;
-const MAXIMUM_SIZE: f32 = 32.0;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextRole {
     Title,
@@ -169,9 +166,7 @@ impl ChromeTypography {
             } else {
                 0.0
             };
-        let size = (base_size + specification.offset + density_step)
-            .round()
-            .clamp(MINIMUM_SIZE, MAXIMUM_SIZE);
+        let size = (base_size + specification.offset + density_step).round();
         let mut font = prepared_font(descriptor);
         font.weight = FontWeight(f32::from(weight));
         if specification.tabular {
@@ -278,7 +273,8 @@ mod tests {
         assert_eq!(tabular.tabular(), tabular);
     }
 
-    fn resolved_with_body_size(size: f32) -> ResolvedChromeTypography {
+    fn resolved() -> ResolvedChromeTypography {
+        const SIZE: f32 = 13.0;
         fn descriptor(family: &str, size: f32, features: &[&str]) -> ResolvedFontDescriptor {
             ResolvedFontDescriptor {
                 primary_family: family.to_owned(),
@@ -292,19 +288,19 @@ mod tests {
             }
         }
         ResolvedChromeTypography {
-            body: descriptor("Body Family", size, &["-calt", "+ss01"]),
-            small: descriptor("Small Family", size - 2.0, &[]),
-            control: descriptor("Control Family", size - 1.0, &[]),
-            navigation: descriptor("Navigation Family", size - 1.0, &["+ss02"]),
-            caption: descriptor("Caption Family", size - 2.0, &["+ss03"]),
-            heading: descriptor("Heading Family", size + 9.0, &["+ss04"]),
-            shortcut: descriptor("Shortcut Family", size - 2.0, &[]),
+            body: descriptor("Body Family", SIZE, &["-calt", "+ss01"]),
+            small: descriptor("Small Family", SIZE - 2.0, &[]),
+            control: descriptor("Control Family", SIZE - 1.0, &[]),
+            navigation: descriptor("Navigation Family", SIZE - 1.0, &["+ss02"]),
+            caption: descriptor("Caption Family", SIZE - 2.0, &["+ss03"]),
+            heading: descriptor("Heading Family", SIZE + 9.0, &["+ss04"]),
+            shortcut: descriptor("Shortcut Family", SIZE - 2.0, &[]),
         }
     }
 
     #[test]
     fn comfortable_density_only_steps_roles_that_can_reflow() {
-        let resolved = resolved_with_body_size(13.0);
+        let resolved = resolved();
         let compact = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
         let comfortable = ChromeTypography::prepare(&resolved, ChromeDensity::Comfortable);
 
@@ -327,22 +323,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn base_size_is_additive_and_catalog_bounds_are_enforced() {
-        let large =
-            ChromeTypography::prepare(&resolved_with_body_size(24.0), ChromeDensity::Compact);
-        assert_eq!(large.style(TextRole::Body).size, px(23.0));
-        assert_eq!(large.style(TextRole::Title).size, px(32.0));
-
-        let small =
-            ChromeTypography::prepare(&resolved_with_body_size(3.0), ChromeDensity::Compact);
-        assert_eq!(small.style(TextRole::Badge).size, px(9.0));
-    }
 
     #[test]
     fn roles_retain_descriptor_identity_and_features_with_mapped_weight() {
         let typography =
-            ChromeTypography::prepare(&resolved_with_body_size(13.0), ChromeDensity::Compact);
+            ChromeTypography::prepare(&resolved(), ChromeDensity::Compact);
         let shortcut = typography.style(TextRole::Shortcut);
         assert_eq!(shortcut.font.family.as_ref(), "Body Family");
         assert_eq!(
@@ -377,44 +362,8 @@ mod tests {
         assert_eq!(title.font.weight, FontWeight(300.0));
     }
 
-    #[test]
-    fn regular_roles_follow_the_retained_regular_weight_independently() {
-        let mut resolved = resolved_with_body_size(13.0);
-        resolved.body.weight = 450;
 
-        let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
 
-        assert_eq!(
-            typography.style(TextRole::Body).font.weight,
-            FontWeight(450.0)
-        );
-    }
-
-    #[test]
-    fn emphasis_roles_follow_the_retained_emphasis_weight_independently() {
-        let mut resolved = resolved_with_body_size(13.0);
-        resolved.navigation.weight = 650;
-
-        let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
-
-        assert_eq!(
-            typography.style(TextRole::Section).font.weight,
-            FontWeight(650.0)
-        );
-    }
-
-    #[test]
-    fn title_follows_the_retained_heading_weight_independently() {
-        let mut resolved = resolved_with_body_size(13.0);
-        resolved.heading.weight = 750;
-
-        let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
-
-        assert_eq!(
-            typography.style(TextRole::Title).font.weight,
-            FontWeight(750.0)
-        );
-    }
 
     #[test]
     fn default_catalog_keeps_the_shipped_regular_emphasis_and_heading_weights() {

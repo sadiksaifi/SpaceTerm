@@ -9,10 +9,7 @@ use spaceterm_ui::{
     ModalId,
 };
 
-use crate::appearance::{
-    AppearanceDiagnostic, CatalogError, ImportError, SchemeId, SchemeKind, SchemeSummary,
-    ZedImportKind,
-};
+use crate::appearance::{AppearanceDiagnostic, CatalogError, ImportError, SchemeId, SchemeSummary};
 use crate::settings::{ImportReceipt, SchemeImport, SettingsError};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
@@ -45,25 +42,20 @@ enum RemovalChoice {
 }
 
 impl SettingsWindow {
-    /// One surface's installed schemes.
+    /// Installed Terminal schemes.
     ///
-    /// The group's own title names the surface, so the list adds no heading of its own: it is a run
-    /// of rows on the group's card, like every other row on every other page.
+    /// The Installed group contains one row per scheme.
     pub(super) fn render_installed_schemes(
         &mut self,
-        kind: SchemeKind,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let summaries = self.scheme_summaries(kind, cx);
+        let summaries = self.scheme_summaries(cx);
         let rows = summaries
             .iter()
             .map(|summary| self.render_scheme_row(summary, appearance, cx))
             .collect::<Vec<_>>();
-        let selector = match kind {
-            SchemeKind::Chrome => "settings-installed-schemes-chrome",
-            SchemeKind::Terminal => "settings-installed-schemes-terminal",
-        };
+        let selector = "settings-installed-schemes-terminal";
         div()
             .debug_selector(move || selector.to_owned())
             .flex()
@@ -312,21 +304,16 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    fn scheme_summaries(&self, kind: SchemeKind, cx: &mut Context<Self>) -> Vec<SchemeSummary> {
+    fn scheme_summaries(&self, cx: &mut Context<Self>) -> Vec<SchemeSummary> {
         let _ = cx;
-        self.editor.scheme_summaries(kind).unwrap_or_default()
+        self.editor.scheme_summaries().unwrap_or_default()
     }
 
-    /// The scheme identities currently selected by either domain, in any appearance slot.
+    /// Scheme identities selected in either Terminal appearance slot.
     fn selected_scheme_ids(&self, cx: &mut Context<Self>) -> BTreeSet<SchemeId> {
         let _ = cx;
-        let preferences = &self.editor.document().preferences;
-        let mut selected = BTreeSet::new();
-        for slots in [&preferences.chrome.schemes, &preferences.terminal.schemes] {
-            selected.insert(slots.light.clone());
-            selected.insert(slots.dark.clone());
-        }
-        selected
+        let slots = &self.editor.document().preferences.terminal.schemes;
+        BTreeSet::from([slots.light.clone(), slots.dark.clone()])
     }
 
     fn confirm_scheme_removal(
@@ -379,7 +366,7 @@ impl SettingsWindow {
             }
             let _ = owner.update(cx, |window, cx| {
                 window.interchange_status =
-                    Some(match window.editor.remove_custom_scheme(&id, cx) {
+                    Some(match window.editor.remove_scheme(&id, cx) {
                         Ok(()) => SharedString::from(format!("Removed “{name}”.")),
                         Err(_) => SharedString::from("That scheme could not be removed."),
                     });
@@ -459,13 +446,7 @@ impl SettingsWindow {
     fn begin_definition_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
         let resolved = crate::ui::appearance_runtime::current(cx);
-        let schemes = [
-            (SchemeKind::Chrome, resolved.chrome.effective_scheme.clone()),
-            (
-                SchemeKind::Terminal,
-                resolved.terminal.effective_scheme.clone(),
-            ),
-        ];
+        let schemes = [resolved.terminal.effective_scheme.clone()];
         match self.editor.export_definitions(&schemes) {
             Ok(contents) => self.write_export("SpaceTerm-scheme-definitions.json", contents, cx),
             Err(_) => {
@@ -530,10 +511,7 @@ fn import_document<'a>(
         _ => return "That file is not a SpaceTerm color package or a Zed theme.".into(),
     }
     // The owner translates and validates every candidate before atomically installing the family.
-    match install(SchemeImport::ZedFamily {
-        bytes,
-        kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
-    }) {
+    match install(SchemeImport::ZedFamily { bytes }) {
         Ok(receipt) => installed_message(receipt.installed.len()),
         Err(error) => import_failure_message(error).into(),
     }
@@ -575,14 +553,8 @@ fn diagnostic_message(diagnostic: AppearanceDiagnostic) -> &'static str {
         AppearanceDiagnostic::SystemAppearanceUnavailable => {
             "SpaceTerm cannot read the system light or dark setting, so Auto is using the dark slot."
         }
-        AppearanceDiagnostic::ChromeSchemeUnavailable { .. } => {
-            "The application color scheme you selected is not installed. A built-in scheme is in use."
-        }
         AppearanceDiagnostic::TerminalSchemeUnavailable { .. } => {
             "The terminal color scheme you selected is not installed. A built-in scheme is in use."
-        }
-        AppearanceDiagnostic::ChromeFontUnavailable => {
-            "The interface font you selected is not available. The system font is in use."
         }
         AppearanceDiagnostic::TerminalFontUnavailable => {
             "The terminal font you selected is not available. A monospace fallback is in use."
@@ -616,7 +588,7 @@ mod tests {
         }
     }
 
-    const PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
+    const PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"id":"custom.sample","name":"Sample","appearance":"light","colors":{"foreground":"#112233"}}]}"##;
 
     #[gpui::test]
     fn schemes_beyond_the_twelfth_row_can_be_scrolled_to_and_removed(
@@ -627,22 +599,16 @@ mod tests {
         use crate::ui::appearance_runtime;
         use crate::ui::settings_window::test_support::MemoryStorage;
 
-        let schemes = ["chrome", "terminal"]
-            .into_iter()
-            .flat_map(|kind| {
-                (0..14).map(move |index| {
-                    serde_json::json!({
-                        "kind": kind,
-                        "id": format!("custom.{kind}.{index:02}"),
-                        "name": format!("Sample {index}"),
-                        "appearance": "dark",
-                        "colors": {},
-                    })
+        let schemes = (0..14)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom.terminal.{index:02}"), "name": format!("Sample {index}"),
+                    "appearance": "dark", "colors": {},
                 })
             })
             .collect::<Vec<_>>();
         let document = SettingsDocument {
-            custom_schemes: serde_json::from_value(serde_json::json!(schemes)).unwrap(),
+            color_schemes: serde_json::from_value(serde_json::json!(schemes)).unwrap(),
             ..SettingsDocument::default()
         };
         let storage = MemoryStorage::with_document(&document);
@@ -663,53 +629,44 @@ mod tests {
         });
         cx.run_until_parked();
 
-        for (id, selector) in [
-            (
-                "custom.chrome.13",
-                "settings-scheme-remove-custom.chrome.13",
-            ),
-            (
-                "custom.terminal.13",
-                "settings-scheme-remove-custom.terminal.13",
-            ),
-        ] {
-            let target = cx
-                .debug_bounds(selector)
-                .expect("late scheme removal action");
-            cx.update(|_, cx| {
-                settings_window.update(cx, |settings, cx| {
-                    let viewport = settings.scroll.bounds();
-                    let offset =
-                        settings.scroll.offset().y + viewport.center().y - target.center().y;
-                    settings.scroll.set_offset(gpui::point(px(0.0), offset));
-                    cx.notify();
-                });
-            });
-            cx.run_until_parked();
-            let position = cx.debug_bounds(selector).unwrap().center();
-            assert!(settings_window.read_with(cx, |settings, _| {
-                settings.scroll.bounds().contains(&position)
-            }));
-            cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
-            cx.simulate_click(position, gpui::Modifiers::none());
-            cx.run_until_parked();
-            let confirmation = cx
-                .debug_bounds("modal-action-settings-remove-scheme-confirm")
-                .expect("removal confirmation")
-                .center();
-            cx.simulate_mouse_move(confirmation, None, gpui::Modifiers::none());
-            cx.simulate_click(confirmation, gpui::Modifiers::none());
-            cx.run_until_parked();
+        let id = "custom.terminal.13";
+        let selector = "settings-scheme-remove-custom.terminal.13";
 
-            assert!(settings_window.read_with(cx, |settings, _| {
-                settings
-                    .editor
-                    .document()
-                    .custom_schemes
-                    .iter()
-                    .all(|scheme| scheme.id().as_str() != id)
-            }));
-        }
+        let target = cx
+            .debug_bounds(selector)
+            .expect("late scheme removal action");
+        cx.update(|_, cx| {
+            settings_window.update(cx, |settings, cx| {
+                let viewport = settings.scroll.bounds();
+                let offset = settings.scroll.offset().y + viewport.center().y - target.center().y;
+                settings.scroll.set_offset(gpui::point(px(0.0), offset));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let position = cx.debug_bounds(selector).unwrap().center();
+        assert!(settings_window.read_with(cx, |settings, _| {
+            settings.scroll.bounds().contains(&position)
+        }));
+        cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+        cx.simulate_click(position, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let confirmation = cx
+            .debug_bounds("modal-action-settings-remove-scheme-confirm")
+            .expect("removal confirmation")
+            .center();
+        cx.simulate_mouse_move(confirmation, None, gpui::Modifiers::none());
+        cx.simulate_click(confirmation, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(settings_window.read_with(cx, |settings, _| {
+            settings
+                .editor
+                .document()
+                .color_schemes
+                .iter()
+                .all(|scheme| scheme.id.as_str() != id)
+        }));
     }
 
     #[test]
@@ -730,7 +687,7 @@ mod tests {
             import_document(PACKAGE, &mut install).as_ref(),
             "Those schemes are already installed, or they collide with schemes you have."
         );
-        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 1);
+        assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
     }
 
     #[test]
@@ -748,8 +705,8 @@ mod tests {
             )
         });
 
-        assert_eq!(message, installed_message(2));
-        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 2);
+        assert_eq!(message, installed_message(1));
+        assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
     }
 
     #[test]
@@ -773,10 +730,10 @@ mod tests {
             install(invalid).as_ref(),
             "That color package contains invalid schemes."
         );
-        assert!(settings.snapshot().candidate.custom_schemes.is_empty());
+        assert!(settings.snapshot().candidate.color_schemes.is_empty());
 
-        assert_eq!(install(corrected), installed_message(4));
-        assert_eq!(settings.snapshot().candidate.custom_schemes.len(), 4);
+        assert_eq!(install(corrected), installed_message(2));
+        assert_eq!(settings.snapshot().candidate.color_schemes.len(), 2);
     }
 
     #[test]

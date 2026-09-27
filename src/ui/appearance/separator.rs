@@ -4,21 +4,11 @@ use crate::appearance::Color;
 
 use super::{content_is_lighter_than_background, host_relative_fill, preferred_readable_endpoint};
 
-pub(super) const CONTRAST_FLOOR: f64 = 1.35;
-pub(super) const CONTRAST_CEILING: f64 = 1.9;
-
 /// A role's standard contrast limits. Increase Contrast retains its independent floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SeparatorBand {
     pub(super) floor: f64,
     pub(super) ceiling: f64,
-}
-
-impl SeparatorBand {
-    pub(super) const FUNCTIONAL: Self = Self {
-        floor: CONTRAST_FLOOR,
-        ceiling: CONTRAST_CEILING,
-    };
 }
 
 pub(super) fn prepare_in_band<const N: usize>(
@@ -85,32 +75,5 @@ pub(super) fn prepare_in_band<const N: usize>(
         prepared
     } else {
         minimum_alpha(endpoint)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn incompatible_endpoint_band_preserves_the_visibility_floor() {
-        let backgrounds = [Color::rgb(0), Color::rgb(0x989898)];
-        let color = prepare_in_band(
-            Color::rgb(0x2d2d2d),
-            backgrounds[0],
-            Color::rgb(0xffffff),
-            backgrounds,
-            false,
-            SeparatorBand::FUNCTIONAL,
-        );
-        for host in backgrounds {
-            assert!(color.source_over(host).contrast_ratio(host) >= CONTRAST_FLOOR);
-        }
-        assert!(
-            color
-                .source_over(backgrounds[0])
-                .contrast_ratio(backgrounds[0])
-                > CONTRAST_CEILING
-        );
     }
 }

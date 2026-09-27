@@ -1,8 +1,7 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeColorOverrides, ChromeDensity, ChromeScheme, Color, ColorProvenance,
-    CompositionCapabilities, CustomScheme, ResolvedAppearance, SchemeCatalog, SchemeId,
-    SchemeMetadata, SystemAppearance, WindowBackgroundAppearance,
+    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SchemeCatalog,
+    SystemAppearance, WindowBackgroundAppearance,
 };
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
 use spaceterm_ui::{FloatingRole, FloatingShell};
@@ -320,24 +319,6 @@ fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
 }
 
 #[test]
-fn dark_settings_sidebar_preserves_an_explicit_panel_override() {
-    use super::appearance::settings::SettingsSurfaceRole::Sidebar;
-
-    let (mut resolved, _) =
-        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.35, true, true);
-    let panel = Color::rgb(0x243044);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.colors.panel_background = panel;
-    chrome
-        .provenance
-        .insert("panel_background", ColorProvenance::Overridden);
-    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-    let (settings, _) =
-        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
-    assert_eq!(settings.surface(Sidebar).semantic, panel);
-}
-
-#[test]
 fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_hosts() {
     use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
 
@@ -622,7 +603,7 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
 
 #[test]
 fn interactive_floating_roles_share_one_material() {
-    let default_transparency = AppearancePreferences::default().background.transparency;
+    let default_transparency = AppearancePreferences::default().window.transparency;
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
             for transparency in [0.0, default_transparency, 1.0] {
@@ -722,23 +703,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                     .composition
                     .capabilities
                     .increase_contrast = increase_contrast;
-                let opposing_custom_host = transparency == 1.0 && appearance == Appearance::Light;
-                if opposing_custom_host {
-                    let colors = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-                    colors.background = Color::rgb(0xf4f4f4);
-                    colors.panel_background = Color::rgb(0x181818);
-                    colors.elevated_surface_background = Color::rgb(0xe8e8e8);
-                    colors.row_selected_background = Color::rgb(0x777777);
-                    colors.row_selected_hover_background = Color::rgb(0x696969);
-                    colors.row_selected_foreground = Color::rgba(0x1259b010);
-                    colors.row_selected_secondary = Color::rgba(0x8a430010);
-                    colors.row_selected_icon = Color::rgba(0x146b4210);
-                    colors.row_selected_match = Color::rgba(0x1259b010);
-                    colors.row_selected_hover_foreground = Color::rgba(0x1259b010);
-                    colors.row_selected_hover_secondary = Color::rgba(0x8a430010);
-                    colors.row_selected_hover_icon = Color::rgba(0x146b4210);
-                    colors.row_selected_hover_match = Color::rgba(0x1259b010);
-                }
+
                 let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
                 let primary_floor = if increase_contrast { 7.0 } else { 4.5 };
                 let secondary_floor = 4.5;
@@ -767,17 +732,17 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         }
                         _ => unreachable!(),
                     };
-                    if !opposing_custom_host {
-                        let inactive_colors = inactive.host_colors(host);
-                        assert_eq!(
-                            mixed.row_selected_border,
-                            inactive_colors.row_selected_border
-                        );
-                        assert_eq!(
-                            mixed.row_selected_hover_border,
-                            inactive_colors.row_selected_hover_border
-                        );
-                    }
+
+                    let inactive_colors = inactive.host_colors(host);
+                    assert_eq!(
+                        mixed.row_selected_border,
+                        inactive_colors.row_selected_border
+                    );
+                    assert_eq!(
+                        mixed.row_selected_hover_border,
+                        inactive_colors.row_selected_hover_border
+                    );
+
                     let row_host = active
                         .materials
                         .paint(
@@ -875,17 +840,17 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
 
                 let shell = active.floating_surfaces().shell(FloatingRole::Popover);
                 let mixed = active.unfocused_selection_colors(spaceterm_ui::ControlHost::Floating);
-                if !opposing_custom_host {
-                    let inactive_colors = inactive.host_colors(spaceterm_ui::ControlHost::Floating);
-                    assert_eq!(
-                        mixed.row_selected_border,
-                        inactive_colors.row_selected_border
-                    );
-                    assert_eq!(
-                        mixed.row_selected_hover_border,
-                        inactive_colors.row_selected_hover_border
-                    );
-                }
+
+                let inactive_colors = inactive.host_colors(spaceterm_ui::ControlHost::Floating);
+                assert_eq!(
+                    mixed.row_selected_border,
+                    inactive_colors.row_selected_border
+                );
+                assert_eq!(
+                    mixed.row_selected_hover_border,
+                    inactive_colors.row_selected_hover_border
+                );
+
                 let focused_floating = active.host_colors(spaceterm_ui::ControlHost::Floating);
                 for underlay in [Color::rgb(0), Color::rgb(0xffffff)] {
                     let host = shell_endpoint_background(shell, underlay);
@@ -1031,7 +996,7 @@ fn final_disabled_control_paints_are_identical_across_window_activity() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.background.transparency = transparency;
+                preferences.window.transparency = transparency;
                 let resolved = SchemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -1203,50 +1168,6 @@ fn final_disabled_control_paints_are_identical_across_window_activity() {
 }
 
 #[test]
-fn title_bar_disabled_controls_split_only_when_the_shared_fill_cap_is_infeasible() {
-    let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.35, true, true);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.composition.capabilities.increase_contrast = false;
-    chrome.composition.capabilities.show_borders = false;
-    chrome.colors.background = Color::rgb(0x202020);
-    chrome.colors.title_bar_background = Color::rgb(0x101010);
-    chrome.colors.title_bar_inactive_background = Color::rgb(0xf0f0f0);
-    chrome.colors.element_disabled = Color::rgba(0x303030b0);
-    chrome.colors.element_disabled_foreground = Color::rgb(0xffffff);
-    chrome.colors.element_disabled_icon = Color::rgb(0xffffff);
-    chrome.colors.element_disabled_border = Color::rgba(0);
-
-    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-    assert!(
-        active
-            .disabled_diagnostics
-            .contains(&DisabledControlDiagnostic::SharedPaint {
-                family: FloatingControlFamily::Element,
-            })
-    );
-    let active_colors = &active.title_bar_controls.colors;
-    let inactive_colors = &inactive.title_bar_controls.colors;
-    assert_ne!(
-        active_colors.element_disabled,
-        inactive_colors.element_disabled
-    );
-    for (prepared, colors) in [(&active, active_colors), (&inactive, inactive_colors)] {
-        let host = prepared.control_host_background(spaceterm_ui::ControlHost::TitleBar);
-        let ordinary = colors.element_background.source_over(host);
-        let disabled = colors.element_disabled.source_over(host);
-        assert!(disabled.contrast_ratio(host) <= ordinary.contrast_ratio(host) + 1e-9);
-        assert!(
-            colors
-                .element_disabled_foreground
-                .source_over(disabled)
-                .contrast_ratio(disabled)
-                >= 3.0
-        );
-    }
-}
-
-#[test]
 fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
@@ -1259,7 +1180,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.background.transparency = transparency;
+                preferences.window.transparency = transparency;
                 let resolved = SchemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -1353,8 +1274,8 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                 },
                 ..AppearancePreferences::default()
             };
-            preferences.background.transparency = transparency;
-            preferences.background.blur = true;
+            preferences.window.transparency = transparency;
+            preferences.window.blur = true;
             let resolved = SchemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -1417,133 +1338,11 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
 }
 
 #[test]
-fn ordinary_contrast_sparse_custom_rows_and_tabs_read_on_their_material_hosts() {
-    let scheme_id = SchemeId::new("test.opposing-app-owned-hosts").unwrap();
-    let custom = CustomScheme::Chrome(Box::new(ChromeScheme {
-        window_background: None,
-        id: scheme_id.clone(),
-        name: "Opposing App-owned Hosts".to_owned(),
-        appearance: Appearance::Light,
-        metadata: SchemeMetadata::default(),
-        colors: ChromeColorOverrides {
-            background: Some(Color::rgb(0xffffff)),
-            panel_background: Some(Color::rgb(0x101010)),
-            title_bar_background: Some(Color::rgb(0x101010)),
-            title_bar_inactive_background: Some(Color::rgb(0x101010)),
-            ..ChromeColorOverrides::default()
-        },
-    }));
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Light,
-        ..AppearancePreferences::default()
-    };
-    preferences.chrome.schemes.light = scheme_id;
-    preferences.background.transparency = 1.0;
-    let resolved = SchemeCatalog::from_custom_schemes(&[custom])
-        .unwrap()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &preferences,
-            SystemAppearance::available(Appearance::Light)
-                .with_composition(CompositionCapabilities::new(true, true)),
-            &AvailableFonts::default(),
-        )
-        .unwrap();
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-
-    let panel = &prepared.panel_controls.reference;
-    let panel_host = prepared.control_host_background(spaceterm_ui::ControlHost::Panel);
-    let row = prepared
-        .materials
-        .paint(
-            crate::appearance::SurfaceRole::Surface,
-            panel.panel_background,
-            panel.row_background,
-        )
-        .source_over(panel_host);
-    assert!(
-        panel.row_foreground.source_over(row).contrast_ratio(row) >= 4.5,
-        "ordinary row content must read on its final Panel material host: content={:?}, host={row:?}",
-        panel.row_foreground
-    );
-
-    let title_bar = prepared.colors.title_bar_background;
-    let title_bar_host = prepared.control_host_background(spaceterm_ui::ControlHost::TitleBar);
-    for (name, fill, foreground) in [
-        (
-            "inactive",
-            prepared.colors.tab_inactive_background,
-            prepared.colors.tab_inactive_foreground,
-        ),
-        (
-            "active",
-            prepared.colors.tab_active_background,
-            prepared.colors.tab_active_foreground,
-        ),
-    ] {
-        let tab = prepared
-            .materials
-            .paint(crate::appearance::SurfaceRole::Surface, title_bar, fill)
-            .source_over(title_bar_host);
-        assert!(
-            foreground.source_over(tab).contrast_ratio(tab) >= 4.5,
-            "ordinary {name} Tab content must read on its final title-bar material host: content={foreground:?}, host={tab:?}"
-        );
-    }
-}
-
-#[test]
 fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
     let (mut resolved, _) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
-    let white = Color::rgb(0xffffff);
-    let black = Color::rgb(0x000000);
-    chrome.colors.background = white;
-    chrome.colors.panel_background = white;
-    chrome.colors.title_bar_background = white;
-    chrome.colors.title_bar_inactive_background = white;
-    for fill in [
-        &mut chrome.colors.row_background,
-        &mut chrome.colors.row_hover_background,
-        &mut chrome.colors.row_selected_background,
-        &mut chrome.colors.row_selected_hover_background,
-        &mut chrome.colors.navigation_selected_background,
-        &mut chrome.colors.tab_inactive_background,
-        &mut chrome.colors.tab_hover_background,
-        &mut chrome.colors.tab_active_background,
-        &mut chrome.colors.tab_active_hover_background,
-    ] {
-        *fill = black;
-    }
-    for content in [
-        &mut chrome.colors.row_foreground,
-        &mut chrome.colors.row_secondary,
-        &mut chrome.colors.row_icon,
-        &mut chrome.colors.row_hover_foreground,
-        &mut chrome.colors.row_hover_secondary,
-        &mut chrome.colors.row_hover_icon,
-        &mut chrome.colors.row_selected_foreground,
-        &mut chrome.colors.row_selected_secondary,
-        &mut chrome.colors.row_selected_icon,
-        &mut chrome.colors.row_selected_hover_foreground,
-        &mut chrome.colors.row_selected_hover_secondary,
-        &mut chrome.colors.row_selected_hover_icon,
-        &mut chrome.colors.navigation_selected_foreground,
-        &mut chrome.colors.navigation_selected_secondary,
-        &mut chrome.colors.navigation_selected_icon,
-        &mut chrome.colors.tab_inactive_foreground,
-        &mut chrome.colors.tab_inactive_icon,
-        &mut chrome.colors.tab_hover_foreground,
-        &mut chrome.colors.tab_hover_icon,
-        &mut chrome.colors.tab_active_foreground,
-        &mut chrome.colors.tab_active_icon,
-        &mut chrome.colors.tab_active_hover_foreground,
-        &mut chrome.colors.tab_active_hover_icon,
-    ] {
-        *content = white;
-    }
     let authored = chrome.colors.clone();
 
     for active in [true, false] {
@@ -1721,144 +1520,11 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
 }
 
 #[test]
-fn increased_contrast_makes_custom_non_floating_material_hosts_feasible() {
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.composition.capabilities.increase_contrast = true;
-    chrome.colors.background = Color::rgb(0x606060);
-    chrome.colors.panel_background = Color::rgb(0x909090);
-    chrome.colors.elevated_surface_background = Color::rgb(0x909090);
-    chrome.colors.title_bar_background = Color::rgb(0x909090);
-    chrome.colors.title_bar_inactive_background = Color::rgb(0x909090);
-    let authored = chrome.colors.clone();
-
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-
-    for (name, host, colors, role, target) in [
-        (
-            "TitleBar",
-            prepared.control_host_background(spaceterm_ui::ControlHost::TitleBar),
-            &prepared.title_bar_controls.colors,
-            crate::appearance::SurfaceRole::Base,
-            prepared.colors.title_bar_background,
-        ),
-        (
-            "Panel",
-            prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
-            &prepared.panel_controls.colors,
-            crate::appearance::SurfaceRole::Base,
-            prepared.colors.panel_background,
-        ),
-        (
-            "Card",
-            prepared.control_host_background(spaceterm_ui::ControlHost::Card),
-            &prepared.card_controls.colors,
-            crate::appearance::SurfaceRole::Surface,
-            prepared.colors.elevated_surface_background,
-        ),
-    ] {
-        assert_eq!(
-            host,
-            prepared
-                .surface(role, target)
-                .source_over(prepared.colors.background),
-            "{name} guarantee must change the target consumed by the material renderer"
-        );
-        assert!(
-            colors.text.source_over(host).contrast_ratio(host) >= 7.0,
-            "{name} text must reach 7:1 on its final modeled in-window host {host:?}"
-        );
-        assert!(
-            colors.icon.source_over(host).contrast_ratio(host) >= 7.0,
-            "{name} icon must reach 7:1 on its final modeled in-window host {host:?}"
-        );
-    }
-    assert_eq!(resolved.chrome.colors, authored);
-}
-
-#[test]
-fn app_owned_content_resolves_against_custom_non_floating_material_hosts() {
-    let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.colors.panel_background = Color::rgb(0x202020);
-    chrome.colors.elevated_surface_background = Color::rgb(0x202020);
-    chrome.colors.title_bar_background = Color::rgb(0x202020);
-    chrome.colors.title_bar_inactive_background = Color::rgb(0x202020);
-    let white = Color::rgb(0xffffff);
-    for content in [
-        &mut chrome.colors.text,
-        &mut chrome.colors.text_accent,
-        &mut chrome.colors.text_secondary,
-        &mut chrome.colors.text_muted,
-        &mut chrome.colors.text_placeholder,
-        &mut chrome.colors.text_disabled,
-        &mut chrome.colors.icon,
-        &mut chrome.colors.icon_muted,
-        &mut chrome.colors.icon_disabled,
-        &mut chrome.colors.link_text,
-        &mut chrome.colors.link_text_hover,
-        &mut chrome.colors.link_text_pressed,
-        &mut chrome.colors.link_text_disabled,
-    ] {
-        *content = white;
-    }
-    let authored = chrome.colors.clone();
-
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-
-    for host_role in [
-        spaceterm_ui::ControlHost::Window,
-        spaceterm_ui::ControlHost::TitleBar,
-        spaceterm_ui::ControlHost::Panel,
-        spaceterm_ui::ControlHost::Card,
-    ] {
-        let host = prepared.control_host_background(host_role);
-        let content = prepared.host_colors(host_role);
-        for (name, color, minimum) in [
-            ("text", content.text, 4.5),
-            ("accent text", content.text_accent, 4.5),
-            ("secondary text", content.text_secondary, 4.5),
-            ("muted text", content.text_muted, 4.5),
-            ("placeholder text", content.text_placeholder, 4.5),
-            ("disabled text", content.text_disabled, 3.0),
-            ("icon", content.icon, 4.5),
-            ("muted icon", content.icon_muted, 4.5),
-            ("disabled icon", content.icon_disabled, 3.0),
-            ("link", content.link_text, 4.5),
-            ("hovered link", content.link_text_hover, 4.5),
-            ("pressed link", content.link_text_pressed, 4.5),
-            ("disabled link", content.link_text_disabled, 3.0),
-        ] {
-            assert!(
-                color.source_over(host).contrast_ratio(host) >= minimum,
-                "{host_role:?} app-owned {name} must reach {minimum}:1 on its final modeled in-window host {host:?}"
-            );
-        }
-        let semantic_host = match host_role {
-            spaceterm_ui::ControlHost::Window => prepared.colors.background,
-            spaceterm_ui::ControlHost::TitleBar => prepared.colors.title_bar_background,
-            spaceterm_ui::ControlHost::Panel => prepared.colors.panel_background,
-            spaceterm_ui::ControlHost::Card => prepared.colors.elevated_surface_background,
-            spaceterm_ui::ControlHost::Floating => unreachable!(),
-        };
-        assert_eq!(
-            content.background, semantic_host,
-            "app content must retain the semantic host rather than expose its materialized fill"
-        );
-    }
-    assert_eq!(resolved.chrome.colors, authored);
-}
-
-#[test]
 fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() {
     let (mut resolved, _) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
-    chrome.colors.background = Color::rgb(0xffffff);
-    chrome.colors.panel_background = Color::rgb(0x202020);
-    chrome.colors.sidebar_focus = Color::rgb(0xffffff);
     let authored = chrome.colors.clone();
 
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
@@ -1917,8 +1583,8 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.background.transparency = transparency;
-                preferences.background.blur = true;
+                preferences.window.transparency = transparency;
+                preferences.window.blur = true;
                 let resolved = SchemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -2090,9 +1756,9 @@ fn resolve_case_with_transparency_accessibility(
         },
         ..AppearancePreferences::default()
     };
-    preferences.chrome.density = density;
-    preferences.background.transparency = transparency;
-    preferences.background.blur = blur;
+    preferences.window.density = density;
+    preferences.window.transparency = transparency;
+    preferences.window.blur = blur;
     let resolved = SchemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -2533,7 +2199,7 @@ fn native_window_support_does_not_disable_floating_translucency() {
 
 #[test]
 fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
-    let default_transparency = AppearancePreferences::default().background.transparency;
+    let default_transparency = AppearancePreferences::default().window.transparency;
     for appearance in [Appearance::Light, Appearance::Dark] {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
             let (opaque, opaque_prepared) = resolve_case(appearance, density, 0.0, false, true);
@@ -2652,9 +2318,9 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
             },
             ..AppearancePreferences::default()
         };
-        preferences.chrome.density = ChromeDensity::Compact;
-        preferences.background.transparency = 1.0;
-        preferences.background.blur = true;
+        preferences.window.density = ChromeDensity::Compact;
+        preferences.window.transparency = 1.0;
+        preferences.window.blur = true;
         let accessible = SchemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -3126,53 +2792,12 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
             );
         }
     }
-
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
-    let input = Color::rgba(0x20406080);
-    let disabled_input = Color::rgba(0x60402060);
-    let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-    authored.input_background = input;
-    authored.input_disabled_background = disabled_input;
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-    let root = resolved.chrome.colors.background.with_alpha(255);
-    let black = Color::rgb(0);
-    for host in [&prepared.panel_controls, &prepared.card_controls] {
-        for (authored, actual) in [
-            (input, host.reference.input_background),
-            (disabled_input, host.reference.input_disabled_background),
-        ] {
-            let authored_step =
-                authored.source_over(root).contrast_ratio(black) / root.contrast_ratio(black);
-            let actual_step =
-                actual.contrast_ratio(black) / host.reference.background.contrast_ratio(black);
-            assert!(
-                // Each semantic endpoint is quantized independently to eight-bit sRGB. The
-                // resulting ratio can move by a little over one hundredth at this luminance.
-                (authored_step - actual_step).abs() < 0.015,
-                "authored root-relative field step must survive rehosting: {authored_step} versus {actual_step}"
-            );
-        }
-    }
-    assert_eq!(resolved.chrome.colors.input_background, input);
-    assert_eq!(
-        resolved.chrome.colors.input_disabled_background,
-        disabled_input
-    );
 }
 
 #[test]
 fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
-    let colors = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-    colors.background = Color::rgb(0x181818);
-    colors.panel_background = Color::rgb(0x202020);
-    colors.elevated_surface_background = Color::rgb(0x282828);
-    colors.element_background = Color::rgb(0x303030);
-    colors.selection_background = Color::rgb(0x383838);
-    colors.selection_hover_background = Color::rgb(0x404040);
-    colors.selection_pressed_background = Color::rgb(0x484848);
-    colors.selection_disabled_background = Color::rgb(0x505050);
-    let authored = colors.clone();
+    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
+    let authored = resolved.chrome.colors.clone();
 
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let black = Color::rgb(0);
@@ -3227,36 +2852,6 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
             "{host_name}/disabled must keep the selected chip step"
         );
     }
-}
-
-#[test]
-fn segmented_options_use_a_translucent_authored_track_composited_over_its_root() {
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.colors.background = Color::rgb(0x182838);
-    chrome.colors.segmented_track_background = Color::rgba(0xb0603080);
-    chrome.colors.selection_background = Color::rgba(0xf0c070c0);
-    chrome
-        .provenance
-        .insert("segmented_track_background", ColorProvenance::Authored);
-    let authored_track = chrome
-        .colors
-        .segmented_track_background
-        .source_over(chrome.colors.background);
-    let authored_selection = chrome
-        .colors
-        .selection_background
-        .source_over(authored_track);
-
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-    assert_eq!(
-        prepared.segmented_control_colors.element_background,
-        authored_track,
-    );
-    assert_eq!(
-        prepared.segmented_control_colors.selection_background,
-        authored_selection,
-    );
 }
 
 #[test]
@@ -3856,114 +3451,6 @@ fn floating_bare_editor_placeholders_stay_readable_over_extreme_content() {
 }
 
 #[test]
-fn midgray_custom_floating_material_moves_only_its_tint_to_admit_readable_content() {
-    for appearance in [Appearance::Light, Appearance::Dark] {
-        let (mut resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
-        let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-        let midgray = Color::rgb(0x808080);
-        authored.elevated_surface_background = midgray;
-        authored.preview_background = midgray;
-        let prepared = ChromeAppearance::prepare(&resolved.chrome);
-        let host = &prepared.floating_colors;
-
-        assert_eq!(prepared.colors.elevated_surface_background, midgray);
-        assert_eq!(prepared.colors.preview_background, midgray);
-        for role in FLOATING_ROLES {
-            let shell = prepared.floating_surfaces().shell(role);
-            let tone = Color::rgba(u32::from(shell.backdrop_tone()));
-            let alpha = f32::from(tone.a) / 255.0;
-            if role == FloatingRole::Readout {
-                assert!(alpha >= 0.90);
-            } else {
-                assert!((0.65..=0.75).contains(&alpha));
-            }
-            assert_ne!(
-                (tone.r, tone.g, tone.b),
-                (midgray.r, midgray.g, midgray.b),
-                "{appearance:?} {role:?} fixture must exercise the material fallback"
-            );
-            let foreground = if role == FloatingRole::Readout {
-                host.preview_foreground
-            } else {
-                host.text
-            };
-            for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
-                let background = shell_endpoint_background(shell, underlay);
-                assert!(
-                    foreground
-                        .source_over(background)
-                        .contrast_ratio(background)
-                        >= 4.5,
-                    "{appearance:?} {role:?} custom material must admit readable content over {underlay:?}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn midgray_custom_material_remains_resolvable_while_glass_engages() {
-    for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 1.0 / 255.0, 0.01, 0.05, 0.12] {
-            let (mut resolved, _) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
-            let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-            authored.elevated_surface_background = Color::rgb(0x808080);
-            authored.preview_background = Color::rgb(0x808080);
-            let prepared = ChromeAppearance::prepare(&resolved.chrome);
-            for role in [FloatingRole::Popover, FloatingRole::Readout] {
-                let shell = prepared.floating_surfaces().shell(role);
-                let foreground = if role == FloatingRole::Readout {
-                    prepared.floating_colors.preview_foreground
-                } else {
-                    prepared.floating_colors.text
-                };
-                for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
-                    let background = shell_endpoint_background(shell, underlay);
-                    assert!(
-                        foreground.contrast_ratio(background) >= 4.5,
-                        "{appearance:?} {role:?} at {transparency} must resolve a readable neutral foreground"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn custom_floating_colors_remain_readable_across_material_engagement() {
-    for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 1.0 / 255.0, 0.03, 0.06, 0.12, 0.35, 1.0] {
-            for color in [
-                0x404040, 0x707070, 0x808080, 0xa0a0a0, 0xff0000, 0x00ff00, 0x0000ff,
-            ] {
-                let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
-                let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-                authored.elevated_surface_background = Color::rgb(color);
-                authored.preview_background = Color::rgb(color);
-                let prepared = ChromeAppearance::prepare(&resolved.chrome);
-                for role in [FloatingRole::Popover, FloatingRole::Readout] {
-                    let shell = prepared.floating_surfaces().shell(role);
-                    let foreground = if role == FloatingRole::Readout {
-                        prepared.floating_colors.preview_foreground
-                    } else {
-                        prepared.floating_colors.text
-                    };
-                    for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
-                        let background = shell_endpoint_background(shell, underlay);
-                        assert!(
-                            foreground.contrast_ratio(background) >= 4.5,
-                            "{appearance:?} {role:?} color={color:#08x} transparency={transparency} foreground={foreground:?} background={background:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
     use super::control_theme_catalog::OverlayRow;
 
@@ -4044,52 +3531,8 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
 }
 
 #[test]
-fn custom_midgray_idle_row_uses_the_resolved_material_as_its_contrast_reference() {
-    use super::control_theme_catalog::OverlayRow;
-
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
-    std::sync::Arc::make_mut(&mut resolved.chrome)
-        .colors
-        .elevated_surface_background = Color::rgb(0x808080);
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-    let reference = &prepared.floating_colors;
-    let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    let material = prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
-    assert_ne!(reference.elevated_surface_background, material);
-    let idle = OverlayRow::resolve(
-        (
-            reference.elevated_surface_background,
-            reference.elevated_surface_background,
-        ),
-        (material, material),
-        [
-            reference.row_foreground,
-            reference.row_secondary,
-            reference.row_icon,
-            reference.row_match,
-        ],
-        reference.row_border,
-    );
-    assert_eq!(idle.fill.a, 0, "the idle row inherits its shell material");
-    for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
-        let background = idle
-            .fill
-            .source_over(shell_endpoint_background(shell, underlay));
-        for content in idle.content {
-            assert!(
-                content.contrast_ratio(background) >= 4.5,
-                "idle content {content:?} must read over resolved custom material {background:?}"
-            );
-        }
-    }
-}
-
-#[test]
 fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() {
-    let (mut resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
-    let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-    authored.elevated_surface_background = Color::rgb(0x808080);
-    authored.input_background = Color::rgb(0xffffff);
+    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let bare = &prepared.floating_colors;
     let field_reference = &prepared.floating_field_reference;
@@ -4136,7 +3579,6 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
         standard.input_background.a < 255,
         "a Standard field must preserve its floating material"
     );
-    assert_ne!(bare.input_text, standard.input_text);
     assert_ne!(
         super::text_input_theme::theme(bare),
         super::text_input_theme::themed(standard, bare),
@@ -4163,82 +3605,4 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
             "the clear glyph must remain readable on every enabled disc state"
         );
     }
-}
-
-#[test]
-fn translucent_authored_elevation_is_composited_once_for_shell_and_host_reference() {
-    for transparency in [0.0, 0.35, 1.0] {
-        let (mut resolved, _) = resolve_case(
-            Appearance::Dark,
-            ChromeDensity::Compact,
-            transparency,
-            true,
-            true,
-        );
-        let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-        authored.background = Color::rgb(0x182430);
-        authored.elevated_surface_background = Color::rgba(0xc0e0ff80);
-        let expected_host = authored
-            .elevated_surface_background
-            .source_over(authored.background);
-        let doubled = authored
-            .elevated_surface_background
-            .source_over(expected_host);
-
-        let prepared = ChromeAppearance::prepare(&resolved.chrome);
-
-        assert_ne!(
-            expected_host, doubled,
-            "fixture must distinguish repeated composition"
-        );
-        assert_eq!(
-            prepared.floating_colors.elevated_surface_background,
-            expected_host
-        );
-        assert_eq!(prepared.floating_colors.background, expected_host);
-        let expected_material = prepared.floating_surface(expected_host);
-        let repeated_material = prepared.floating_surface(doubled);
-        assert_ne!(
-            expected_material, repeated_material,
-            "material adjustment must not hide repeated authored composition"
-        );
-        let reference = gpui::rgba(expected_material.rgba_hex());
-        for role in FLOATING_ROLES {
-            // The readout applies its own tone-alpha floor after this shared host solve.
-            if role == FloatingRole::Readout {
-                continue;
-            }
-            let shell = prepared.floating_surfaces().shell(role);
-            let material = Color::rgba(u32::from(shell.material()))
-                .source_over(Color::rgba(u32::from(shell.backdrop_tone())));
-            let material = gpui::rgba(material.rgba_hex());
-            assert_eq!(
-                (material.r, material.g, material.b),
-                (reference.r, reference.g, reference.b),
-                "{role:?} material must share the once-composited host contrast reference"
-            );
-        }
-    }
-}
-
-#[test]
-fn floating_fields_resolve_authored_alpha_against_the_host_before_root_flattening() {
-    let (mut resolved, _) =
-        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.35, true, true);
-    let authored = &mut std::sync::Arc::make_mut(&mut resolved.chrome).colors;
-    authored.background = Color::rgb(0x101010);
-    authored.elevated_surface_background = Color::rgb(0xe0e0e0);
-    authored.panel_background = Color::rgba(0);
-    authored.input_background = Color::rgba(0x00000080);
-    let expected = authored
-        .input_background
-        .source_over(authored.elevated_surface_background);
-
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-
-    assert_eq!(prepared.floating_colors.input_background, expected);
-    assert_ne!(
-        prepared.floating_colors.input_background,
-        prepared.colors.input_background
-    );
 }

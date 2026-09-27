@@ -202,7 +202,6 @@ fn focus_input(fixture: &Entity<ModalAppearanceRegressionFixture>, cx: &mut Visu
 
 fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
     let appearance = ChromeAppearance {
-        text_scale: 1.0 + generation as f32 / 10.0,
         spacing_scale: 1.0 + generation as f32 / 20.0,
         ..ChromeAppearance::default()
     };

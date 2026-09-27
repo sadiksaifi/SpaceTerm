@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 
-use crate::appearance::{
-    Appearance, Color, ColorProvenance, ResolvedChromeAppearance, SurfaceRole,
-};
+use crate::appearance::{Appearance, Color, ResolvedChromeAppearance, SurfaceRole};
 
 use super::{
     ChromeAppearance, ChromeStatePolicy, FloatingContrastFloors, prepare_state_control_host,
@@ -14,7 +12,6 @@ use super::{
 
 const CARD_TRANSMISSION_SHARE: f32 = 0.25;
 const BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE: f32 = 0.10;
-const SIDEBAR_CHANNEL_STEP: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsSurfaceRole {
@@ -126,46 +123,17 @@ impl SettingsAppearance {
 
     /// Accessibility can reinforce the otherwise fill-separated built-in sidebar and canvas.
     pub(crate) fn sidebar_edge(&self) -> Option<Color> {
-        ((self.chrome.built_in_light || self.chrome.built_in_dark)
-            && (self.chrome.capabilities.increase_contrast
-                || self.chrome.capabilities.show_borders))
+        (self.chrome.capabilities.increase_contrast || self.chrome.capabilities.show_borders)
             .then(|| self.chrome.surface_edge(spaceterm_ui::ControlHost::Panel))
     }
 
-    /// Built-in groups separate by fill; accessibility and custom schemes retain boundaries.
+    /// Groups separate by fill; accessibility adds boundaries.
     pub(crate) fn card_edge(&self) -> Color {
-        let host = self.card.background;
-        if self.chrome.built_in_light || self.chrome.built_in_dark {
-            return if self.chrome.capabilities.increase_contrast
-                || self.chrome.capabilities.show_borders
-            {
-                self.chrome.surface_edge(spaceterm_ui::ControlHost::Card)
-            } else {
-                Color::rgba(0)
-            };
+        if self.chrome.capabilities.increase_contrast || self.chrome.capabilities.show_borders {
+            self.chrome.surface_edge(spaceterm_ui::ControlHost::Card)
+        } else {
+            Color::rgba(0)
         }
-        let prepared = self.separator(SettingsSurfaceRole::Card);
-        if self.chrome.capabilities.increase_contrast {
-            return prepared;
-        }
-        let ink = prepared.with_alpha(255);
-        let within_ceiling = |candidate: Color| {
-            candidate.source_over(host).contrast_ratio(host) <= super::separator::CONTRAST_CEILING
-        };
-        if within_ceiling(ink) {
-            return ink;
-        }
-        let mut lower = u16::from(prepared.a);
-        let mut upper = u16::from(u8::MAX);
-        while lower + 1 < upper {
-            let middle = (lower + upper) / 2;
-            if within_ceiling(ink.with_alpha(middle as u8)) {
-                lower = middle;
-            } else {
-                upper = middle;
-            }
-        }
-        ink.with_alpha(lower as u8)
     }
 }
 
@@ -205,7 +173,7 @@ fn prepare_variant(
     };
     let authored = state.surfaces(&resolved.colors);
     let mut settings_authored = authored.clone();
-    let (sidebar, canvas, card) = prepare_surfaces(&chrome, resolved);
+    let (sidebar, canvas, card) = prepare_surfaces(&chrome);
     settings_authored.panel_background = sidebar.semantic;
     settings_authored.elevated_surface_background = card.semantic;
     chrome.colors.panel_background = sidebar.semantic;
@@ -225,11 +193,7 @@ fn prepare_variant(
         interactive: active,
         ..FloatingContrastFloors::for_increase_contrast(capabilities.increase_contrast)
     };
-    let explicit_segmented_track = matches!(
-        resolved.provenance.get("segmented_track_background"),
-        Some(ColorProvenance::Authored | ColorProvenance::Overridden)
-    );
-    if chrome.built_in_light {
+    if chrome.appearance == Appearance::Light {
         // The Settings content column is the same light canvas as the Workspace content,
         // not the muted root beneath navigation. Resolve its controls on the painted host.
         let mut canvas_authored = settings_authored.clone();
@@ -241,9 +205,7 @@ fn prepare_variant(
             chrome.materials,
             state,
             floors,
-            explicit_segmented_track,
             true,
-            false,
         );
         chrome.colors = super::with_final_host_content(chrome.colors, &window.colors);
         chrome.control_colors = window.colors;
@@ -251,31 +213,18 @@ fn prepare_variant(
         chrome.window_control_fallbacks = window.fallback_families;
     }
     let mut panel_authored = settings_authored.clone();
-    if chrome.built_in_dark {
+    if chrome.appearance == Appearance::Dark {
         // Navigation states belong to the sidebar, not the darker definition root.
         // Rehost their existing contrast steps before preparing text and material paints.
-        for (name, fill) in [
-            ("row_background", &mut panel_authored.row_background),
-            (
-                "row_hover_background",
-                &mut panel_authored.row_hover_background,
-            ),
-            (
-                "row_selected_background",
-                &mut panel_authored.row_selected_background,
-            ),
-            (
-                "row_selected_hover_background",
-                &mut panel_authored.row_selected_hover_background,
-            ),
-            (
-                "navigation_selected_background",
-                &mut panel_authored.navigation_selected_background,
-            ),
+        for fill in [
+            &mut panel_authored.row_background,
+            &mut panel_authored.row_hover_background,
+            &mut panel_authored.row_selected_background,
+            &mut panel_authored.row_selected_hover_background,
+            &mut panel_authored.navigation_selected_background,
         ] {
-            if resolved.provenance.get(name) != Some(&ColorProvenance::Overridden)
-                && let Some(rehosted) =
-                    super::host_relative_fill(*fill, authored.panel_background, sidebar.semantic)
+            if let Some(rehosted) =
+                super::host_relative_fill(*fill, authored.panel_background, sidebar.semantic)
             {
                 *fill = rehosted;
             }
@@ -288,9 +237,7 @@ fn prepare_variant(
         chrome.materials,
         state,
         floors,
-        explicit_segmented_track,
-        chrome.built_in_light,
-        chrome.built_in_dark,
+        chrome.appearance == Appearance::Light,
     );
     chrome.card_controls = prepare_state_control_host(
         &settings_authored,
@@ -299,9 +246,7 @@ fn prepare_variant(
         chrome.materials,
         state,
         floors,
-        explicit_segmented_track,
-        chrome.built_in_light,
-        chrome.built_in_dark,
+        chrome.appearance == Appearance::Light,
     );
     chrome.semantic_text_pairs = super::super::chrome_semantic_pairs::prepare_semantic_text_pairs(
         &chrome.colors,
@@ -329,37 +274,24 @@ fn prepare_variant(
 
 fn prepare_surfaces(
     chrome: &ChromeAppearance,
-    resolved: &ResolvedChromeAppearance,
 ) -> (
     PreparedSettingsSurface,
     PreparedSettingsSurface,
     PreparedSettingsSurface,
 ) {
     let root = chrome.colors.background;
-    let light_content_hierarchy = chrome.built_in_light
-        && matches!(
-            resolved.provenance.get("elevated_surface_background"),
-            Some(ColorProvenance::Authored)
-        );
+    let light_content_hierarchy = chrome.appearance == Appearance::Light;
     // Navigation stays muted, and a group rises from the canvas it sits on. Light once sank its
     // groups instead, to keep them off the tone a selected control takes, which left grey wells
     // cut into a white page while Dark raised the same groups. A group is elevated in both.
-    let sidebar_semantic = if chrome.built_in_light {
+    let sidebar_semantic = if chrome.appearance == Appearance::Light {
         chrome.colors.panel_background
-    } else if chrome.built_in_dark
-        && matches!(
-            resolved.provenance.get("panel_background"),
-            Some(ColorProvenance::Authored)
-        )
-    {
-        // The neutral sidebar needs enough tonal separation to survive window transmission.
-        root.mix(Color::rgb(0xffffff), 0.10)
     } else {
-        settings_sidebar_rung(root, chrome.colors.panel_background, chrome.appearance)
+        root.mix(Color::rgb(0xffffff), 0.10)
     };
     let elevated = chrome.colors.elevated_surface_background;
     // Dark seats the canvas on the window root, which its lifted navigation already clears. A
-    // bright scheme's navigation rests on that root, so the canvas takes the rung between root
+    // Light navigation rests on that root, so the canvas takes the rung between root
     // and group instead, leaving one step on either side of it.
     let canvas_semantic = if light_content_hierarchy {
         root.mix(elevated, 0.5)
@@ -368,13 +300,13 @@ fn prepare_surfaces(
     };
     let card_semantic = elevated;
     let sidebar_materials = chrome.materials;
-    let card_materials = chrome
-        .materials
-        .with_transmission_share(if chrome.built_in_light {
+    let card_materials = chrome.materials.with_transmission_share(
+        if chrome.appearance == Appearance::Light {
             BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE
         } else {
             CARD_TRANSMISSION_SHARE
-        });
+        },
+    );
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
     let canvas_paint = if light_content_hierarchy {
         // A bright canvas sits one rung above the navigation beside it and one below the groups
@@ -408,35 +340,6 @@ fn prepare_surfaces(
     (sidebar, canvas, card)
 }
 
-fn sidebar_rung(root: Color, appearance: Appearance) -> Color {
-    let endpoint = match appearance {
-        Appearance::Light => Color::rgb(0x000000),
-        Appearance::Dark => Color::rgb(0xffffff),
-    };
-    let distance = [root.r, root.g, root.b]
-        .into_iter()
-        .zip([endpoint.r, endpoint.g, endpoint.b])
-        .map(|(channel, endpoint)| channel.abs_diff(endpoint))
-        .max()
-        .unwrap_or_default();
-    if distance == 0 {
-        root
-    } else {
-        root.mix(
-            endpoint,
-            (SIDEBAR_CHANNEL_STEP / f64::from(distance)).min(1.0),
-        )
-    }
-}
-
-fn settings_sidebar_rung(root: Color, authored_panel: Color, appearance: Appearance) -> Color {
-    if authored_panel == root {
-        sidebar_rung(root, appearance)
-    } else {
-        authored_panel
-    }
-}
-
 pub(crate) fn selected(cx: &App) -> &Arc<SettingsAppearance> {
     let installed = cx.global::<InstalledSettingsChrome>();
     match spaceterm_ui::ControlWindowActivity::current() {
@@ -452,33 +355,11 @@ pub(crate) fn shared(cx: &App) -> Arc<SettingsAppearance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Appearance;
     use crate::appearance::{
         AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
         CompositionCapabilities, SchemeCatalog, SystemAppearance,
     };
-
-    #[test]
-    fn sidebar_rung_moves_five_channels_in_the_appearance_direction() {
-        assert_eq!(
-            sidebar_rung(Color::rgb(0xe5e5e5), Appearance::Light),
-            Color::rgb(0xe0e0e0)
-        );
-        assert_eq!(
-            sidebar_rung(Color::rgb(0x151515), Appearance::Dark),
-            Color::rgb(0x1a1a1a)
-        );
-    }
-
-    #[test]
-    fn distinct_custom_sidebar_color_is_not_replaced_by_the_builtin_rung() {
-        let root = Color::rgb(0xe5e5e5);
-        let authored_panel = Color::rgb(0x7a91b3);
-
-        assert_eq!(
-            settings_sidebar_rung(root, authored_panel, Appearance::Light),
-            authored_panel
-        );
-    }
 
     #[test]
     fn built_in_dark_groups_use_fill_separation_and_accessible_edges() {
@@ -489,7 +370,7 @@ mod tests {
                     mode: AppearanceMode::Dark,
                     ..AppearancePreferences::default()
                 };
-                preferences.background.transparency = transparency;
+                preferences.window.transparency = transparency;
                 let mut resolved = SchemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -543,7 +424,7 @@ mod tests {
             mode: AppearanceMode::Light,
             ..AppearancePreferences::default()
         };
-        preferences.background.transparency = 1.0;
+        preferences.window.transparency = 1.0;
         let resolved = SchemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -572,7 +453,7 @@ mod tests {
                 mode: AppearanceMode::Light,
                 ..AppearancePreferences::default()
             };
-            preferences.background.transparency = transparency;
+            preferences.window.transparency = transparency;
             let resolved = SchemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,

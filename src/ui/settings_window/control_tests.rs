@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{
-    Appearance, AppearanceMode, ChromeFontFamily, SchemeId, SettingsDocument, TerminalFontFamily,
+    Appearance, AppearanceMode, SchemeId, SettingsDocument, TerminalFontFamily,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::ui::appearance_runtime;
@@ -46,7 +46,7 @@ fn highlighted_row_materializes_against_its_card_host() {
     };
 
     let mut preferences = AppearancePreferences::default();
-    preferences.background.transparency = 1.0;
+    preferences.window.transparency = 1.0;
     let resolved = SchemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -231,7 +231,7 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
         SettingsSectionId::Appearance
     );
 
-    cx.simulate_keystrokes("down down");
+    cx.simulate_keystrokes("down");
     cx.run_until_parked();
 
     assert_eq!(
@@ -245,9 +245,9 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Interface
+        SettingsSectionId::Appearance
     );
-    assert!(cx.debug_bounds("settings-chrome-font-family").is_some());
+    assert!(cx.debug_bounds("settings-appearance-mode").is_some());
 }
 
 /// The list stops at both ends rather than wrapping, so holding an arrow lands somewhere stable.
@@ -343,14 +343,12 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
 ) {
     let mut document = SettingsDocument::default();
     document.preferences.mode = AppearanceMode::Light;
-    document.preferences.chrome.schemes.light =
-        SchemeId::new("builtin.spaceterm.chrome.light").unwrap();
     let (settings, cx) = open_settings(&document, cx);
     cx.simulate_keystrokes("tab tab");
     cx.run_until_parked();
 
     let position = cx
-        .debug_bounds("settings-navigation-settings-section-interface")
+        .debug_bounds("settings-navigation-settings-section-terminal")
         .unwrap()
         .center();
     cx.simulate_mouse_move(position, None, Modifiers::none());
@@ -373,7 +371,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     redraw(cx);
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Interface
+        SettingsSectionId::Terminal
     );
     assert!(!settings.read_with(cx, |settings, _| settings.navigation_focus_visible));
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
@@ -390,7 +388,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
             .is_some()
     );
 
-    click("settings-navigation-settings-section-interface", cx);
+    click("settings-navigation-settings-section-terminal", cx);
     redraw(cx);
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
@@ -398,13 +396,13 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Interface
+        SettingsSectionId::Terminal
     );
     cx.simulate_keystrokes("tab tab down");
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::ColorSchemes
     );
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
     assert!(
@@ -441,7 +439,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Interface,
+        SettingsSectionId::Terminal,
         "search should land on the first section that can answer it"
     );
 
@@ -464,14 +462,14 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
 #[gpui::test]
 fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.typography.regular_weight = 450;
-    document.preferences.terminal.typography.regular_weight = 900;
+
+    document.preferences.terminal.typography.regular_weight = 450;
     let (settings, cx) = open_settings(&document, cx);
 
-    click("settings-navigation-settings-section-interface", cx);
-    click("settings-row-chrome-regular-weight-control", cx);
+    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-row-terminal-regular-weight-control", cx);
     assert!(
-        cx.debug_bounds("settings-row-chrome-regular-weight-control-450")
+        cx.debug_bounds("settings-row-terminal-regular-weight-control-450")
             .is_some()
     );
     cx.simulate_keystrokes("enter");
@@ -479,30 +477,7 @@ fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestA
     click("settings-navigation-settings-section-terminal", cx);
     click("settings-row-terminal-regular-weight-control", cx);
     assert!(
-        cx.debug_bounds("settings-row-terminal-regular-weight-control-900")
-            .is_some()
-    );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-
-    assert_eq!(
-        settings.read_with(cx, |settings, _| settings.editor.document().clone()),
-        document
-    );
-}
-
-#[gpui::test]
-fn unavailable_interface_font_remains_selected(cx: &mut TestAppContext) {
-    let mut document = SettingsDocument::default();
-    document.preferences.chrome.typography.family = ChromeFontFamily::Named {
-        family: "Unavailable Settings Test Font".to_owned(),
-    };
-    let (settings, cx) = open_settings(&document, cx);
-    click("settings-navigation-settings-section-interface", cx);
-
-    click("settings-chrome-font-family", cx);
-    assert!(
-        cx.debug_bounds("settings-chrome-font-unavailable")
+        cx.debug_bounds("settings-row-terminal-regular-weight-control-450")
             .is_some()
     );
     cx.simulate_keystrokes("enter");
@@ -540,17 +515,10 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 #[gpui::test]
 fn unavailable_scheme_ids_remain_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.schemes.dark = SchemeId::new("user.missing-interface").unwrap();
     document.preferences.terminal.schemes.dark = SchemeId::new("user.missing-terminal").unwrap();
     let (settings, cx) = open_settings(&document, cx);
 
-    click("settings-row-chrome-scheme-control", cx);
-    assert!(
-        cx.debug_bounds("settings-row-chrome-scheme-control-user.missing-interface")
-            .is_some()
-    );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    click("settings-navigation-settings-section-terminal", cx);
     click("settings-row-terminal-scheme-control", cx);
     assert!(
         cx.debug_bounds("settings-row-terminal-scheme-control-user.missing-terminal")

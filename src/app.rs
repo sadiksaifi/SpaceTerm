@@ -1353,7 +1353,7 @@ mod runtime_tests {
         });
         let token = user_settings.begin_preview(0).unwrap();
         let mut candidate = SettingsDocument::default();
-        candidate.preferences.chrome.density = ChromeDensity::Comfortable;
+        candidate.preferences.window.density = ChromeDensity::Comfortable;
         user_settings.update_preview(&token, candidate).unwrap();
         cx.run_until_parked();
         let (workspace_expected, settings_expected) = cx.update(|cx| {
@@ -1700,7 +1700,7 @@ mod runtime_tests {
         });
         let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
         let edit = settings_cx
-            .debug_bounds("settings-chrome-density-comfortable")
+            .debug_bounds("settings-density-comfortable")
             .expect("Settings control")
             .center();
         settings_cx.simulate_mouse_move(edit, None, gpui::Modifiers::none());

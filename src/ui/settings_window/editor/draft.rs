@@ -9,9 +9,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::appearance::{
-    ResetTarget, SchemeCatalog, SchemeId, SchemeKind, SchemeSummary, SettingsDocument,
-};
+use crate::appearance::{ResetTarget, SchemeCatalog, SchemeId, SchemeSummary, SettingsDocument};
 use crate::settings::storage::StorageError;
 use crate::settings::{
     CommitOutcome, ImportReceipt, PreviewToken, SchemeImport, SettingsError, UserSettings,
@@ -119,10 +117,10 @@ impl SettingsDraft {
         })
     }
 
-    pub(super) fn remove_custom_scheme(&mut self, id: &SchemeId) -> Result<(), SettingsError> {
+    pub(super) fn remove_scheme(&mut self, id: &SchemeId) -> Result<(), SettingsError> {
         self.edit_catalog(|settings, token, revision| {
             settings
-                .remove_custom_scheme_preview(token, revision, id)
+                .remove_scheme_preview(token, revision, id)
                 .map(|_| ())
         })
     }
@@ -170,13 +168,10 @@ impl SettingsDraft {
         }
     }
 
-    /// Lists one kind's selectable schemes from the draft, so a freshly imported scheme appears
+    /// Lists selectable schemes from the draft, so a freshly imported scheme appears
     /// before it has been written.
-    pub(super) fn scheme_summaries(
-        &self,
-        kind: SchemeKind,
-    ) -> Result<Vec<SchemeSummary>, SettingsError> {
-        Ok(SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?.summaries(kind))
+    pub(super) fn scheme_summaries(&self) -> Result<Vec<SchemeSummary>, SettingsError> {
+        Ok(SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?.summaries())
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
@@ -187,17 +182,14 @@ impl SettingsDraft {
         &self,
         resolved: &crate::appearance::ResolvedAppearance,
     ) -> Result<String, SettingsError> {
-        let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
+        let catalog = SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?;
         Ok(crate::appearance::export_resolved_schemes(
             &catalog, resolved,
         )?)
     }
 
-    pub(super) fn export_definitions(
-        &self,
-        schemes: &[(SchemeKind, SchemeId)],
-    ) -> Result<String, SettingsError> {
-        let catalog = SchemeCatalog::from_custom_schemes(&self.draft.custom_schemes)?;
+    pub(super) fn export_definitions(&self, schemes: &[SchemeId]) -> Result<String, SettingsError> {
+        let catalog = SchemeCatalog::from_color_schemes(&self.draft.color_schemes)?;
         Ok(crate::appearance::export_schemes(&catalog, schemes)?)
     }
 

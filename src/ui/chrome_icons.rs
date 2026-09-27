@@ -113,18 +113,18 @@ impl ChromeIcons {
         });
         let body_size = f32::from(typography.style(TextRole::Body).size);
         let clear_disc = body_size.round();
-        let minimum_target = interactive_target_size(InteractiveIconRole::Control, density);
+        let control_target = interactive_target_size(InteractiveIconRole::Control, density);
         let mark_metrics = [
             ChromeMarkMetrics {
                 disc_diameter: px(clear_disc),
                 glyph_size: px((clear_disc * 0.58).round()),
-                target_size: px(minimum_target.max(clear_disc)),
+                target_size: px(control_target),
             },
             ChromeMarkMetrics {
                 disc_diameter: px(0.0),
                 // An inline reset annotates the label instead of competing with it.
-                glyph_size: px((body_size - 2.0).round().max(1.0)),
-                target_size: px(minimum_target),
+                glyph_size: px((body_size - 2.0).round()),
+                target_size: px(control_target),
             },
         ];
         Self {
@@ -172,17 +172,13 @@ mod tests {
     use super::*;
 
     fn typography(density: ChromeDensity) -> ChromeTypography {
-        typography_with_size(13.0, density)
-    }
-
-    fn typography_with_size(size: f32, density: ChromeDensity) -> ChromeTypography {
         use crate::appearance::{FontStyle, ResolvedChromeTypography, ResolvedFontDescriptor};
 
         let descriptor = || ResolvedFontDescriptor {
             primary_family: ".SystemUIFont".to_owned(),
             fallback_families: Vec::new(),
-            size,
-            line_height: size,
+            size: 13.0,
+            line_height: 13.0,
             weight: 400,
             style: FontStyle::Normal,
             features: Vec::new(),
@@ -273,11 +269,5 @@ mod tests {
                 target_size: px(28.0),
             }
         );
-
-        let large_type = typography_with_size(33.0, ChromeDensity::Compact);
-        let large = ChromeIcons::prepare(&large_type, ChromeDensity::Compact);
-        let large = large.mark_metrics(MarkRole::Clear);
-        assert_eq!(large.disc_diameter, px(32.0));
-        assert_eq!(large.target_size, large.disc_diameter);
     }
 }

@@ -5,7 +5,7 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Pixels, div, px, rgba};
 
-use crate::appearance::Color;
+use crate::appearance::{Appearance, Color};
 use crate::ui::chrome_geometry::HAIRLINE;
 
 /// Where a chip sits inside the item that owns it.
@@ -61,7 +61,7 @@ impl ChipPaint {
             .hover_fill
             .map(|fill| appearance.selection_surface(semantic_host, fill));
         // Built-in Light uses a stronger rim when selected hover keeps the same fill.
-        if appearance.built_in_light
+        if appearance.appearance == Appearance::Light
             && appearance.active
             && paint.fill == paint.hover_fill
             && let Some(fill) = paint.fill
@@ -100,7 +100,9 @@ impl ChipPaint {
         };
         Self {
             fill: material(self.fill),
-            hover_fill: if appearance.built_in_light && appearance.active {
+            hover_fill: if appearance.appearance == Appearance::Light
+                && appearance.active
+            {
                 self.hover_fill
                     .map(|fill| appearance.hover_surface(semantic_host, fill))
             } else {
@@ -175,7 +177,7 @@ mod tests {
 
     fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {
         let mut preferences = AppearancePreferences::default();
-        preferences.background.transparency = transparency;
+        preferences.window.transparency = transparency;
         let resolved = SchemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,

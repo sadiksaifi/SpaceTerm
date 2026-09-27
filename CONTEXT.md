@@ -80,8 +80,8 @@ One labeled Setting control within a Settings Section.
 Fuzzy search over Settings Row labels and keywords that reveals a matching Settings Row.
 
 **Appearance Mode**:
-The application-scoped Light, Dark, or Auto choice governing which Color Scheme slot applies to
-both Application Chrome and Terminal appearance.
+The application-scoped Light, Dark, or Auto choice selecting the built-in Application Chrome and
+the Terminal Color Scheme slot of that appearance.
 
 ## Focus and transient UI
 
@@ -185,13 +185,13 @@ One authorization for an exact user-requested close that may discard running wor
 ## Color Schemes
 
 **Color Scheme**:
-Identifying metadata and authored color decisions for either Chrome or Terminal appearance.
+Identifying metadata and authored color decisions for Terminal appearance.
 
 **Authored Definition**:
 Color decisions intentionally supplied by a built-in author, imported source or native theme author.
 
 **Resolved Theme**:
-Complete validated presentation colors after override precedence and semantic dependency completion.
+Complete validated presentation colors after Terminal override precedence and built-in completion.
 
 **Scheme Origin**:
 Source identity and attribution, separate from the installed identifier and display name.
@@ -202,6 +202,9 @@ Opaque, transparent or blurred native presentation, independent of Light/Dark an
 **Transparency**:
 The application-scoped amount of underlying content visible through window backgrounds and floating
 surfaces, from zero (opaque) to one (maximum transparency). Terminal text and explicit cell colors retain their own appearance.
+
+**Density**:
+The application-scoped Compact or Comfortable spacing of Application Chrome, its only preference.
 
 **Blur**:
 The application-scoped choice to soften the desktop behind window backgrounds and application

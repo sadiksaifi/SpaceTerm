@@ -300,7 +300,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
 }
 
 #[gpui::test]
-fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppContext) {
+fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click_new_workspace_menu("new-workspace-menu-create-local", cx);
 
@@ -309,8 +309,8 @@ fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppCo
         crate::appearance::ChromeDensity::Comfortable,
     ] {
         let mut preferences = crate::appearance::AppearancePreferences::default();
-        preferences.chrome.typography.base_size = 24.0;
-        preferences.chrome.density = density;
+
+        preferences.window.density = density;
         let resolved = crate::appearance::SchemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
@@ -319,7 +319,7 @@ fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppCo
                     .with_composition(crate::appearance::CompositionCapabilities::new(true, true)),
                 &crate::appearance::AvailableFonts::default(),
             )
-            .expect("maximum supported Chrome typography should resolve");
+            .expect("built-in appearance should resolve");
         let (active, inactive) =
             crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
         cx.update(|window, cx| {
@@ -5528,17 +5528,16 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
     );
 }
 
-/// The collapsed switcher matches the Tab surface height across appearance scales.
+/// The collapsed switcher matches the Tab surface height across densities.
 #[gpui::test]
 fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
     assert!(cx.debug_bounds("workspace-switcher-chip").is_none());
 
-    for (text_scale, spacing_scale) in [(1.0, 1.0), (1.0, 1.25), (24.0 / 13.0, 1.25)] {
+    for spacing_scale in [1.0, 1.25] {
         cx.update(|window, cx| {
             let appearance = crate::ui::appearance::ChromeAppearance {
-                text_scale,
                 spacing_scale,
                 ..crate::ui::appearance::ChromeAppearance::default()
             };
@@ -5554,7 +5553,7 @@ fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext)
         assert_eq!(
             (switcher.top(), switcher.bottom()),
             (tab.top(), tab.bottom()),
-            "switcher and Tab surface edges must align at text scale {text_scale}, spacing scale {spacing_scale}"
+            "switcher and Tab surface edges must align at spacing scale {spacing_scale}"
         );
         assert_eq!(workspace.center().y, tab.center().y);
         assert!(workspace.top() >= tab.top() && workspace.bottom() <= tab.bottom());
@@ -5602,7 +5601,6 @@ fn sidebar_resize_target_should_track_scaled_top_chrome_in_both_layout_states(
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
     let appearance = crate::ui::appearance::ChromeAppearance {
-        text_scale: 24.0 / 13.0,
         spacing_scale: 1.25,
         ..crate::ui::appearance::ChromeAppearance::default()
     };
@@ -7498,7 +7496,7 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
 }
 
 #[gpui::test]
-fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
+fn inline_rename_contains_fixed_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
@@ -7509,8 +7507,8 @@ fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut 
     ] {
         let line_height = cx.update(|window, cx| {
             let mut preferences = crate::appearance::AppearancePreferences::default();
-            preferences.chrome.typography.base_size = 24.0;
-            preferences.chrome.density = density;
+
+            preferences.window.density = density;
             let resolved = crate::appearance::SchemeCatalog::default()
                 .resolve(
                     crate::appearance::AppearanceGeneration::INITIAL,
@@ -7520,7 +7518,7 @@ fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut 
                     ),
                     &crate::appearance::AvailableFonts::default(),
                 )
-                .expect("maximum supported Chrome typography should resolve");
+                .expect("built-in appearance should resolve");
             let (active, inactive) =
                 crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
             let line_height = active
