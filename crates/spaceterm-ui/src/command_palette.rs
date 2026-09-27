@@ -2,11 +2,11 @@ use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, EventEmitter, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Render, Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
-    canvas, div, list, prelude::FluentBuilder as _, px,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div,
+    list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -1588,7 +1588,7 @@ struct CommandPalettePanelLayout {
 }
 
 mod presented_results {
-    use gpui::{Pixels, SharedString, px};
+    use gpui::{ListOffset, Pixels, SharedString, px};
 
     use super::{CommandPaletteItem, CommandPaletteMatch, CommandPaletteMetrics};
 
@@ -1669,9 +1669,34 @@ mod presented_results {
         }
 
         pub(super) fn total_height(&self, metrics: CommandPaletteMetrics) -> Pixels {
+            self.top_of(self.rows.len(), metrics)
+        }
+
+        /// Returns the content offset of the row at `index`, or the total height past the end.
+        pub(super) fn top_of(&self, index: usize, metrics: CommandPaletteMetrics) -> Pixels {
             self.rows
                 .iter()
+                .take(index)
                 .fold(px(0.0), |height, row| height + row.height(metrics))
+        }
+
+        /// Converts a content offset into the list position that scrolls it to the top.
+        pub(super) fn offset_at(&self, y: Pixels, metrics: CommandPaletteMetrics) -> ListOffset {
+            let mut row_top = px(0.0);
+            for (item_ix, row) in self.rows.iter().enumerate() {
+                let row_bottom = row_top + row.height(metrics);
+                if y < row_bottom {
+                    return ListOffset {
+                        item_ix,
+                        offset_in_item: (y - row_top).max(px(0.0)),
+                    };
+                }
+                row_top = row_bottom;
+            }
+            ListOffset {
+                item_ix: self.rows.len(),
+                offset_in_item: px(0.0),
+            }
         }
 
         pub(super) fn list_index_for_match(&self, position: usize) -> Option<usize> {
@@ -2209,7 +2234,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.recompute_matches();
         }
         self.repair_selection();
-        self.reveal_selected();
         self.selection_reveal_pending = true;
         if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx) {
             self.input.read(cx).focus_handle().focus(window, cx);
@@ -2473,7 +2497,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             Rc::new(PresentedResults::new(&self.presented_items, &self.matches));
         self.list.reset(self.presented_results.len());
         self.repair_selection();
-        self.reveal_selected();
         self.selection_reveal_pending = true;
     }
 
@@ -2561,7 +2584,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
     }
 
-    fn reveal_selected(&mut self) {
+    /// Scrolls the least distance that shows the selected row and a section heading directly
+    /// above the first result.
+    ///
+    /// Positions come from the palette's exact row heights, so the reveal is correct before GPUI
+    /// has measured the rows and never hides rows above a selection that already fits.
+    fn reveal_selected(&mut self, metrics: CommandPaletteMetrics, list_height: Pixels) {
         let Some(position) = self.selected_match_position() else {
             return;
         };
@@ -2578,19 +2606,20 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         } else {
             row
         };
-        let item_is_visible = self
-            .list
-            .bounds_for_item(reveal_row)
-            .is_some_and(|item_bounds| {
-                let viewport = self.list.viewport_bounds();
-                item_bounds.top() >= viewport.top() && item_bounds.bottom() <= viewport.bottom()
-            });
-        if !item_is_visible {
-            self.list.scroll_to(ListOffset {
-                item_ix: reveal_row,
-                offset_in_item: px(0.0),
-            });
-        }
+        let reveal_top = self.presented_results.top_of(reveal_row, metrics);
+        let row_bottom = self.presented_results.top_of(row + 1, metrics);
+        let scroll_top = self.list.logical_scroll_top();
+        let scrolled =
+            self.presented_results.top_of(scroll_top.item_ix, metrics) + scroll_top.offset_in_item;
+        let target = if reveal_top < scrolled {
+            reveal_top
+        } else if row_bottom > scrolled + list_height {
+            row_bottom - list_height
+        } else {
+            return;
+        };
+        self.list
+            .scroll_to(self.presented_results.offset_at(target, metrics));
     }
 
     fn enabled_match_positions(&self) -> Vec<usize> {
@@ -3042,15 +3071,6 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 let _ = palette.update(cx, |_, cx| cx.notify());
             });
         }
-        if std::mem::take(&mut self.selection_reveal_pending) {
-            let palette = cx.entity().downgrade();
-            window.on_next_frame(move |_, cx| {
-                let _ = palette.update(cx, |palette, cx| {
-                    palette.reveal_selected();
-                    cx.notify();
-                });
-            });
-        }
         let viewport = window.viewport_size();
         let available_width = (viewport.width - metrics.viewport_margin * 2.0).max(px(0.0));
         let panel_width = metrics.panel_width.min(available_width);
@@ -3091,6 +3111,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         } else {
             list_height
         };
+        if std::mem::take(&mut self.selection_reveal_pending) {
+            self.reveal_selected(metrics, list_height);
+        }
         let panel_height = chrome_height + list_height;
 
         let panel_bounds = gpui::Bounds::new(

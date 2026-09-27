@@ -2052,6 +2052,38 @@ fn opening_should_reveal_a_preferred_item_below_the_initial_viewport(cx: &mut Te
 }
 
 #[gpui::test]
+fn replacing_items_should_keep_rows_above_a_visible_preferred_item_in_view(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_matching(CommandPaletteMatching::Caller, cx)
+    });
+    open_palette(&root, &palette, cx);
+    let items = || {
+        (0u8..32)
+            .map(|id| {
+                CommandPaletteItem::new(id, format!("Command {id}"))
+                    .debug_selector(format!("row-{id}"))
+            })
+            .collect()
+    };
+    palette.update(cx, |palette, cx| {
+        palette.set_preferred_item(Some(1), cx);
+        palette.set_items(items(), cx);
+    });
+    cx.run_until_parked();
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+    assert!(cx.debug_bounds("row-0").is_some());
+}
+
+#[gpui::test]
 fn loading_state_should_not_activate_a_hidden_stale_selection(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
