@@ -24,6 +24,7 @@ impl fmt::Debug for HostConfigProvenance {
 }
 
 impl HostConfigProvenance {
+    #[cfg(test)]
     pub(crate) const fn source(&self) -> HostConfigSource {
         self.source
     }
@@ -62,7 +63,6 @@ impl DirectSshTarget {
 pub(crate) struct DiscoveredSshHost {
     alias: SshHostAlias,
     provenance: Option<HostConfigProvenance>,
-    provenances: Vec<HostConfigProvenance>,
     ambiguous: bool,
     direct_target: Option<DirectSshTarget>,
 }
@@ -78,14 +78,12 @@ impl DiscoveredSshHost {
         &self.alias
     }
 
+    #[cfg(test)]
     pub(crate) const fn provenance(&self) -> Option<&HostConfigProvenance> {
         self.provenance.as_ref()
     }
 
-    pub(crate) fn provenances(&self) -> &[HostConfigProvenance] {
-        &self.provenances
-    }
-
+    #[cfg(test)]
     pub(crate) const fn is_ambiguous(&self) -> bool {
         self.ambiguous
     }
@@ -281,9 +279,6 @@ impl DiscoveredHosts {
     ) {
         if let Some(index) = self.indexes.get(alias.as_str()).copied() {
             let existing = &mut self.hosts[index];
-            if !existing.provenances.contains(&provenance) {
-                existing.provenances.push(provenance);
-            }
             existing.ambiguous = true;
             existing.direct_target = None;
         } else {
@@ -291,8 +286,7 @@ impl DiscoveredHosts {
                 .insert(alias.as_str().to_owned(), self.hosts.len());
             self.hosts.push(DiscoveredSshHost {
                 alias,
-                provenance: Some(provenance.clone()),
-                provenances: vec![provenance],
+                provenance: Some(provenance),
                 ambiguous: stanza_ambiguous,
                 direct_target,
             });
@@ -1247,7 +1241,6 @@ mod tests {
                 .map(HostConfigProvenance::source),
             Some(HostConfigSource::Managed)
         );
-        assert_eq!(discovery.hosts[0].provenances().len(), 2);
         assert!(discovery.hosts[0].is_ambiguous());
         assert_eq!(discovery.hosts[0].direct_target(), None);
     }
@@ -1266,7 +1259,6 @@ mod tests {
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
         assert_eq!(aliases(&discovery), ["duplicate"]);
-        assert_eq!(discovery.hosts[0].provenances().len(), 2);
         assert!(discovery.hosts[0].is_ambiguous());
         assert!(
             discovery

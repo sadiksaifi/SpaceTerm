@@ -41,6 +41,7 @@ impl ActiveSshAliasRegistry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn is_active(&self, alias: &SshHostAlias) -> bool {
         self.state
             .lock()

@@ -22,11 +22,9 @@ fn test_theme() -> CommandPaletteTheme {
             rgba(0x7e98e8ff),
         )
         .hover_background(rgba(0x1c1c24ff))
-        .section_foreground(rgba(0x878787ff))
-        .footer(rgba(0x878787ff), rgba(0x606079ff)),
+        .section_foreground(rgba(0x878787ff)),
         CommandPaletteMetrics::new(px(420.0), px(40.0))
             .single_line_row_height(px(28.0))
-            .footer_control_padding(px(8.0))
             .panel_geometry(px(260.0), px(24.0)),
     )
 }
@@ -538,7 +536,6 @@ fn role_line_boxes_scale_independently_from_fixed_palette_extents() {
         .single_line_row_height(px(32.0))
         .editor_height(px(42.0))
         .section_spacing(px(20.0), px(9.0))
-        .footer_height(px(30.0))
         .text_geometry(px(18.0), px(15.0), px(21.0), px(14.0))
         .scaled(1.5, 1.0);
 
@@ -549,7 +546,6 @@ fn role_line_boxes_scale_independently_from_fixed_palette_extents() {
     assert_eq!(metrics.row_height, px(64.5));
     assert_eq!(metrics.single_line_row_height, px(41.0));
     assert_eq!(metrics.section_height, px(31.5));
-    assert_eq!(metrics.footer_height, px(37.5));
 }
 
 #[gpui::test]
@@ -1005,77 +1001,6 @@ fn caller_matching_should_survive_a_query_that_matches_nothing(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn a_lone_footer_action_should_be_offered_without_a_disclosure(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_actions_menu(
-            vec![
-                MenuEntry::action("Choose with Finder", "finder".into())
-                    .debug_selector("footer-finder"),
-            ],
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    assert!(
-        cx.debug_bounds("command-palette-actions-menu").is_none(),
-        "one action still rendered a disclosure"
-    );
-    let button = cx
-        .debug_bounds("footer-finder")
-        .expect("the lone action was not offered directly");
-
-    cx.simulate_click(button.center(), Modifiers::none());
-    cx.run_until_parked();
-
-    assert!(
-        events
-            .borrow()
-            .contains(&CommandPaletteEvent::MenuAction("finder".into())),
-        "activating the lone action did not report its caller identity"
-    );
-}
-
-#[gpui::test]
-fn lone_decorated_footer_entries_should_stay_behind_a_disclosure(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    let decorated = vec![
-        (
-            "checkbox",
-            MenuEntry::checkbox("Show hidden", false, "checkbox".into()),
-        ),
-        (
-            "destructive",
-            MenuEntry::action("Delete", "destructive".into()).destructive(true),
-        ),
-        (
-            "shortcut",
-            MenuEntry::action("Retry", "shortcut".into()).shortcut("⌘R"),
-        ),
-        (
-            "icon",
-            MenuEntry::action("Finder", "icon".into()).icon(|_, _| div().into_any_element()),
-        ),
-    ];
-
-    for (decoration, entry) in decorated {
-        palette.update(cx, |palette, cx| {
-            palette.set_actions_menu(vec![entry], cx);
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("command-palette-actions-menu").is_some(),
-            "a lone {decoration} entry lost its menu presentation"
-        );
-    }
-}
-
-#[gpui::test]
 fn a_row_without_a_description_should_take_the_single_line_height(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
@@ -1103,127 +1028,6 @@ fn a_row_without_a_description_should_take_the_single_line_height(cx: &mut TestA
 
     assert_eq!(single.size.height, metrics.single_line_row_height);
     assert_eq!(described.size.height, metrics.row_height);
-}
-
-#[gpui::test]
-fn footer_control_labels_should_share_the_content_edges(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_actions_menu(
-            vec![
-                MenuEntry::action("Choose with Finder", "finder".into())
-                    .debug_selector("footer-finder"),
-            ],
-            cx,
-        );
-        palette.set_confirm(
-            Some(
-                CommandPaletteConfirm::new("Add", "Primary+Enter").debug_selector("footer-confirm"),
-            ),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
-    // The padding install_control_themes gives a Small text button around its label.
-    let label_inset = px(8.0);
-    let row = cx
-        .debug_bounds("row-open")
-        .expect("the first row was not rendered");
-    let action = cx
-        .debug_bounds("footer-finder")
-        .expect("the footer action was not rendered");
-    let confirm = cx
-        .debug_bounds("footer-confirm")
-        .expect("the confirm was not rendered");
-
-    // The controls hang outward by their own label padding, so their text, not their boxes,
-    // lines up with the row content above.
-    assert_eq!(
-        action.left() + label_inset,
-        row.left() + metrics.horizontal_padding,
-        "the footer action's label did not share the content leading edge: {action:?} {row:?}"
-    );
-    assert_eq!(
-        confirm.right() - label_inset,
-        row.right() - metrics.horizontal_padding,
-        "the confirm's label did not share the content trailing edge: {confirm:?} {row:?}"
-    );
-}
-
-#[gpui::test]
-fn the_footer_should_anchor_actions_and_the_confirm_to_opposite_edges(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_actions_menu(
-            vec![
-                MenuEntry::action("Choose with Finder", "finder".into())
-                    .debug_selector("footer-finder"),
-            ],
-            cx,
-        );
-        palette.set_confirm(
-            Some(
-                CommandPaletteConfirm::new("Add", "Primary+Enter").debug_selector("footer-confirm"),
-            ),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let footer = cx
-        .debug_bounds("command-palette-footer")
-        .expect("the footer was not rendered");
-    let action = cx
-        .debug_bounds("footer-finder")
-        .expect("the footer action was not rendered");
-    let confirm = cx
-        .debug_bounds("footer-confirm")
-        .expect("the confirm was not rendered");
-
-    assert!(
-        action.right() < confirm.left(),
-        "the action and the confirm were not separated: {action:?} {confirm:?}"
-    );
-    let leading_gap = action.left() - footer.left();
-    let trailing_gap = footer.right() - confirm.right();
-    assert!(
-        leading_gap < footer.size.width / 4.0 && trailing_gap < footer.size.width / 4.0,
-        "the footer clustered its controls instead of anchoring both edges: \
-             leading {leading_gap:?} trailing {trailing_gap:?} in {footer:?}"
-    );
-}
-
-#[gpui::test]
-fn several_footer_actions_should_stay_behind_a_disclosure(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_actions_menu(
-            vec![
-                MenuEntry::action("Choose with Finder", "finder".into())
-                    .debug_selector("footer-finder"),
-                MenuEntry::action("Retry", "retry".into()),
-            ],
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    assert!(
-        cx.debug_bounds("command-palette-actions-menu").is_some(),
-        "several actions did not render a disclosure"
-    );
-    assert!(
-        cx.debug_bounds("footer-finder").is_none(),
-        "a menu entry rendered outside its closed menu"
-    );
 }
 
 #[gpui::test]
@@ -1259,108 +1063,255 @@ fn continuing_activation_should_report_the_item_without_closing(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn confirm_should_render_once_and_report_its_keyboard_equivalent(cx: &mut TestAppContext) {
+fn the_confirm_key_should_stay_unclaimed_without_a_confirm_item(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
-
-    assert!(
-        cx.debug_bounds("command-palette-footer").is_none(),
-        "a palette without a confirm rendered a footer"
-    );
-
-    palette.update(cx, |palette, cx| {
-        palette.set_confirm(
-            Some(
-                CommandPaletteConfirm::new("Add", "Primary+Enter")
-                    .debug_selector("palette-confirm"),
-            ),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let footer = cx
-        .debug_bounds("command-palette-footer")
-        .expect("an installed confirm did not render a footer");
-    let confirm = cx
-        .debug_bounds("palette-confirm")
-        .expect("the confirm control was not rendered");
-    assert!(
-        footer.contains(&confirm.center()),
-        "the confirm control rendered outside the footer: {footer:?} {confirm:?}"
-    );
 
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
-    assert_eq!(
-        events
+    assert!(
+        !events
             .borrow()
             .iter()
-            .filter(|event| **event == CommandPaletteEvent::Confirmed)
-            .count(),
-        1,
-        "the confirm key did not emit exactly one confirmation"
-    );
-}
-
-#[gpui::test]
-fn a_disabled_confirm_should_ignore_its_keyboard_equivalent(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_confirm(
-            Some(CommandPaletteConfirm::new("Add", "Primary+Enter").disabled(true)),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-enter");
-    cx.run_until_parked();
-
-    assert!(
-        !events.borrow().contains(&CommandPaletteEvent::Confirmed),
-        "a disabled confirm reported a confirmation"
-    );
-}
-
-#[gpui::test]
-fn the_confirm_key_should_stay_unclaimed_without_a_confirm(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    cx.simulate_keystrokes("cmd-enter");
-    cx.run_until_parked();
-
-    assert!(
-        !events.borrow().contains(&CommandPaletteEvent::Confirmed),
-        "a palette without a confirm claimed the confirm key"
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
+        "a palette without a confirm item claimed the confirm key"
     );
     assert!(
         palette.read_with(cx, |palette, _| palette.is_open()),
-        "the confirm key closed a palette that had no confirm"
+        "the confirm key closed a palette that had no confirm item"
+    );
+}
+
+fn show_empty_state(
+    root: &Entity<TestRoot>,
+    palette: &Entity<CommandPalette<u8>>,
+    empty: CommandPaletteEmpty,
+    cx: &mut VisualTestContext,
+) {
+    palette.update(cx, |palette, cx| palette.set_empty(empty, cx));
+    open_palette(root, palette, cx);
+    cx.simulate_keystrokes("z z z");
+    cx.run_until_parked();
+}
+
+fn empty_actions(events: &RefCell<Vec<CommandPaletteEvent<u8>>>) -> Vec<SharedString> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::EmptyAction(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn return_should_activate_the_default_empty_action_without_closing(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .description("Add the host to connect.")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").debug_selector("empty-add"))
+            .action(CommandPaletteEmptyAction::new("help", "Help").debug_selector("empty-help")),
+        cx,
+    );
+
+    for selector in [
+        "command-palette-empty-title",
+        "command-palette-empty-description",
+        "empty-add",
+        "empty-help",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the empty state did not render {selector}"
+        );
+    }
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(empty_actions(&events), vec![SharedString::from("add")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn a_disabled_default_empty_action_should_ignore_return(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").disabled(true))
+            .action(CommandPaletteEmptyAction::new("help", "Help").debug_selector("empty-help")),
+        cx,
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(empty_actions(&events).is_empty());
+
+    let help = cx
+        .debug_bounds("empty-help")
+        .expect("the second empty action was not rendered");
+    cx.simulate_click(help.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(empty_actions(&events), vec![SharedString::from("help")]);
+}
+
+#[gpui::test]
+fn tab_navigation_should_reach_empty_actions_and_return_to_the_query(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host")),
+        cx,
+    );
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+
+    cx.simulate_keystrokes("shift-tab backspace");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.query().to_owned()),
+        "zz"
     );
 }
 
 #[gpui::test]
-fn footer_should_render_only_with_hints_or_an_actions_menu(cx: &mut TestAppContext) {
+fn the_panel_should_contain_a_wrapped_empty_description_and_its_actions(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    assert!(
-        cx.debug_bounds("command-palette-footer").is_none(),
-        "a palette without hints or an actions menu rendered a footer"
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .description(
+                "This description is long enough to wrap across more than one line inside the \
+                 narrow test palette, so the panel must grow to fit it.",
+            )
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").debug_selector("empty-add")),
+        cx,
     );
 
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
+    let panel = cx
+        .debug_bounds("command-palette-panel")
+        .expect("the palette panel was not rendered");
+    let description = cx
+        .debug_bounds("command-palette-empty-description")
+        .expect("the empty description was not rendered");
+    let action = cx
+        .debug_bounds("empty-add")
+        .expect("the empty action was not rendered");
+
+    assert!(
+        description.size.height > metrics.secondary_line_height,
+        "the description did not wrap: {description:?}"
+    );
+    assert!(
+        action.bottom() + metrics.empty_padding <= panel.bottom(),
+        "the panel clipped the empty state: {panel:?} {action:?}"
+    );
+}
+
+#[gpui::test]
+fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
-        palette.set_hints(vec![CommandPaletteHint::new("Open", "\u{21b5}")], cx);
+        palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
+        palette.set_confirm_item(Some(3), cx);
     });
+    open_palette(&root, &palette, cx);
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    let activated = events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::Activated(activation) => Some(*activation.item_id()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(activated, vec![3]);
+}
+
+#[gpui::test]
+fn the_confirm_key_should_ignore_a_disabled_confirm_item(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| palette.set_confirm_item(Some(2), cx));
+    open_palette(&root, &palette, cx);
+
+    cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
     assert!(
-        cx.debug_bounds("command-palette-footer").is_some(),
-        "a palette with hints did not render a footer"
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
+        "the confirm key activated a disabled item"
+    );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn search_line_icons_should_share_size_and_edge_spacing(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_input_leading_icon(
+            |_, size| {
+                div()
+                    .debug_selector(|| "search-leading-glyph".to_owned())
+                    .size(size)
+                    .into_any_element()
+            },
+            cx,
+        );
+        palette.set_header_actions(
+            vec![CommandPaletteAction::new("add", "Add", |_| {
+                div()
+                    .debug_selector(|| "search-trailing-glyph".to_owned())
+                    .size(px(14.0))
+                    .into_any_element()
+            })],
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let leading = cx.debug_bounds("search-leading-glyph").unwrap();
+    let trailing = cx.debug_bounds("search-trailing-glyph").unwrap();
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+
+    assert_eq!(leading.size, trailing.size);
+    assert_eq!(
+        leading.left() - editor.left(),
+        editor.right() - trailing.right()
+    );
+    assert_eq!(leading.center().y, trailing.center().y);
+    assert_eq!(
+        input.left() - leading.right(),
+        leading.left() - editor.left()
     );
 }
 
@@ -1385,7 +1336,27 @@ fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) 
     let button = cx
         .debug_bounds("header-toggle-ignored")
         .expect("the search-line control was not rendered");
-    cx.simulate_click(button.center(), Modifiers::default());
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    assert_eq!(button.size.width, button.size.height);
+    assert!(button.size.height > px(24.0) && button.size.height < editor.size.height);
+    assert_eq!(
+        button.top() - editor.top(),
+        editor.bottom() - button.bottom()
+    );
+    assert_eq!(button.top() - editor.top(), editor.right() - button.right());
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let focus = cx
+        .debug_bounds("header-toggle-ignored-keyboard-focus")
+        .expect("the search-line control did not show keyboard focus");
+    assert!(focus.left() > editor.left() && focus.right() < editor.right());
+    assert!(focus.top() > editor.top() && focus.bottom() < editor.bottom());
+
+    cx.simulate_click(
+        point(button.center().x, button.top() + px(2.0)),
+        Modifiers::default(),
+    );
     cx.run_until_parked();
 
     assert!(
@@ -1399,87 +1370,6 @@ fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) 
         palette.read_with(cx, |palette, _| palette.is_open()),
         "pressing a search-line control closed the palette"
     );
-}
-
-#[gpui::test]
-fn actions_menu_should_take_focus_without_closing_the_palette(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_actions_menu(
-            vec![
-                MenuEntry::action("Copy path", SharedString::from("copy-path")),
-                MenuEntry::action("Reveal", SharedString::from("reveal")),
-            ],
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let trigger = cx
-        .debug_bounds("command-palette-actions-menu")
-        .expect("the actions menu trigger was not rendered");
-    cx.simulate_click(trigger.center(), Modifiers::default());
-    cx.run_until_parked();
-
-    assert!(
-        palette.read_with(cx, |palette, _| palette.is_open()),
-        "opening the actions menu closed the palette"
-    );
-}
-
-#[gpui::test]
-fn actions_menu_external_focus_should_close_the_palette(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
-    cx.update(|window, cx| {
-        root.update(cx, |_, cx| {
-            let intruder = intruder.clone();
-            cx.subscribe_in(
-                &palette,
-                window,
-                move |_, _, event: &CommandPaletteEvent<u8>, window, cx| {
-                    if matches!(event, CommandPaletteEvent::MenuAction(_)) {
-                        intruder.focus(window, cx);
-                    }
-                },
-            )
-            .detach();
-        });
-        palette.update(cx, |palette, cx| {
-            palette.set_actions_menu(
-                vec![
-                    MenuEntry::action(
-                        "Focus external control",
-                        SharedString::from("focus-external"),
-                    )
-                    .debug_selector("command-palette-focus-external"),
-                    MenuEntry::action("Second action", SharedString::from("second")),
-                ],
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-
-    let trigger = cx
-        .debug_bounds("command-palette-actions-menu")
-        .expect("the actions menu trigger was not rendered");
-    cx.simulate_click(trigger.center(), Modifiers::default());
-    cx.run_until_parked();
-    let entry = cx
-        .debug_bounds("command-palette-focus-external")
-        .expect("the actions menu entry was not rendered");
-    cx.simulate_click(entry.center(), Modifiers::default());
-    cx.run_until_parked();
-
-    assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
-    assert!(cx.update(|window, _| intruder.is_focused(window)));
-    assert!(events.borrow().contains(&CommandPaletteEvent::Lifecycle(
-        CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::FocusLost)
-    )));
 }
 
 #[gpui::test]
@@ -1804,28 +1694,6 @@ fn tab_navigation_should_reach_header_controls_and_return_to_the_query(cx: &mut 
 }
 
 #[gpui::test]
-fn shift_tab_from_query_should_reach_a_confirm_only_footer(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_confirm(Some(CommandPaletteConfirm::new("Add", "Primary+Enter")), cx);
-    });
-    open_palette(&root, &palette, cx);
-
-    cx.simulate_keystrokes("shift-tab");
-    cx.run_until_parked();
-
-    assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
-
-    cx.simulate_keystrokes("tab x");
-    cx.run_until_parked();
-
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.query().to_owned()),
-        "x"
-    );
-}
-
-#[gpui::test]
 fn preferred_item_should_seed_each_open_transition(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
@@ -1859,6 +1727,38 @@ fn opening_should_reveal_a_preferred_item_below_the_initial_viewport(cx: &mut Te
     open_palette(&root, &palette, cx);
 
     assert!(cx.debug_bounds("row-31").is_some());
+}
+
+#[gpui::test]
+fn replacing_items_should_keep_rows_above_a_visible_preferred_item_in_view(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_matching(CommandPaletteMatching::Caller, cx)
+    });
+    open_palette(&root, &palette, cx);
+    let items = || {
+        (0u8..32)
+            .map(|id| {
+                CommandPaletteItem::new(id, format!("Command {id}"))
+                    .debug_selector(format!("row-{id}"))
+            })
+            .collect()
+    };
+    palette.update(cx, |palette, cx| {
+        palette.set_preferred_item(Some(1), cx);
+        palette.set_items(items(), cx);
+    });
+    cx.run_until_parked();
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+    assert!(cx.debug_bounds("row-0").is_some());
 }
 
 #[gpui::test]

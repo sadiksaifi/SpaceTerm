@@ -11,7 +11,6 @@ pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
-mod directory_picker;
 #[cfg(test)]
 mod floating_surface_tests;
 #[cfg(test)]

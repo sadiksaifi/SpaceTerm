@@ -5,7 +5,7 @@ use std::num::NonZeroU16;
 use thiserror::Error;
 
 use super::destination::SshHostAlias;
-use super::host_config::{DiscoveredSshHost, HostConfigSource};
+use super::host_config::DiscoveredSshHost;
 use crate::platform::app_directories::AppDirectoryFile;
 use crate::platform::app_paths::{AppPaths, AppPathsError};
 use crate::platform::secure_filesystem::{
@@ -101,22 +101,6 @@ impl ManagedSshHost {
     pub(crate) const fn alias(&self) -> &SshHostAlias {
         &self.alias
     }
-
-    pub(crate) fn host_name(&self) -> &str {
-        &self.host_name
-    }
-
-    pub(crate) fn user(&self) -> Option<&str> {
-        self.user.as_deref()
-    }
-
-    pub(crate) const fn port(&self) -> Option<NonZeroU16> {
-        self.port
-    }
-
-    pub(crate) fn identity_file(&self) -> Option<&str> {
-        self.identity_file.as_deref()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -129,8 +113,6 @@ pub(crate) enum ManagedHostsFormatError {
 pub(crate) enum ManagedHostsError {
     #[error("the SSH alias is already configured")]
     AliasCollision,
-    #[error("the managed SSH alias does not exist")]
-    Missing,
     #[error("the managed SSH config is not in SpaceTerm's canonical format")]
     NonCanonical,
     #[error(
@@ -161,6 +143,7 @@ impl<'a> ManagedHostsStore<'a> {
     }
 
     /// Loads only the bounded canonical app-owned format.
+    #[cfg(test)]
     pub(crate) fn load(&self) -> Result<Vec<ManagedSshHost>, ManagedHostsError> {
         let Some(snapshot) = self.read_snapshot()? else {
             return Ok(Vec::new());
@@ -194,19 +177,18 @@ impl<'a> ManagedHostsStore<'a> {
         Err(ManagedHostsError::ConcurrentMutation)
     }
 
-    /// Inserts or edits one host after collision checks against fresh discovered provenance.
+    /// Inserts one host after collision checks against fresh discovered configuration.
     ///
-    /// The exact edited managed declaration is the sole collision exemption. Pre-commit failure
-    /// preserves the original bytes; a directory-sync failure is reported as committed state.
-    pub(crate) fn upsert(
+    /// Pre-commit failure preserves the original bytes; a directory-sync failure is reported as
+    /// committed state.
+    pub(crate) fn insert(
         &self,
         host: ManagedSshHost,
         configured_hosts: &[DiscoveredSshHost],
-        editing_alias: Option<&SshHostAlias>,
     ) -> Result<(), ManagedHostsError> {
         if configured_hosts
             .iter()
-            .any(|configured| configured_host_collides(configured, host.alias(), editing_alias))
+            .any(|configured| configured.alias() == host.alias())
         {
             return Err(ManagedHostsError::AliasCollision);
         }
@@ -218,52 +200,13 @@ impl<'a> ManagedHostsStore<'a> {
                 .transpose()
                 .map_err(|_| ManagedHostsError::NonCanonical)?
                 .unwrap_or_default();
-            if let Some(editing_alias) = editing_alias {
-                let position = hosts
-                    .iter()
-                    .position(|existing| existing.alias() == editing_alias)
-                    .ok_or(ManagedHostsError::Missing)?;
-                if editing_alias != host.alias()
-                    && hosts
-                        .iter()
-                        .any(|existing| existing.alias() == host.alias())
-                {
-                    return Err(ManagedHostsError::AliasCollision);
-                }
-                hosts.remove(position);
-            } else if hosts
+            if hosts
                 .iter()
                 .any(|existing| existing.alias() == host.alias())
             {
                 return Err(ManagedHostsError::AliasCollision);
             }
             hosts.push(host.clone());
-            match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
-                SecureCommitOutcome::Committed => return Ok(()),
-                SecureCommitOutcome::CommittedButUnsynced => {
-                    return Err(ManagedHostsError::CommittedButUnsynced);
-                }
-                SecureCommitOutcome::Conflict => continue,
-            }
-        }
-        Err(ManagedHostsError::ConcurrentMutation)
-    }
-
-    /// Deletes one existing managed alias using the same atomic mutation contract.
-    pub(crate) fn delete(&self, alias: &SshHostAlias) -> Result<(), ManagedHostsError> {
-        for _ in 0..MUTATION_ATTEMPTS {
-            let snapshot = self.read_snapshot()?;
-            let mut hosts = snapshot
-                .as_ref()
-                .map(|snapshot| parse_managed_hosts(&snapshot.bytes))
-                .transpose()
-                .map_err(|_| ManagedHostsError::NonCanonical)?
-                .unwrap_or_default();
-            let position = hosts
-                .iter()
-                .position(|host| host.alias() == alias)
-                .ok_or(ManagedHostsError::Missing)?;
-            hosts.remove(position);
             match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
                 SecureCommitOutcome::Committed => return Ok(()),
                 SecureCommitOutcome::CommittedButUnsynced => {
@@ -334,28 +277,6 @@ impl<'a> ManagedHostsStore<'a> {
 
 fn map_filesystem_error(_: SecureFilesystemError) -> ManagedHostsError {
     ManagedHostsError::StorageUnavailable
-}
-
-fn configured_host_collides(
-    configured: &DiscoveredSshHost,
-    candidate: &SshHostAlias,
-    editing_alias: Option<&SshHostAlias>,
-) -> bool {
-    if configured.alias() != candidate {
-        return false;
-    }
-    if editing_alias != Some(candidate) || configured.is_ambiguous() {
-        return true;
-    }
-    let mut excluded_edited_declaration = false;
-    for provenance in configured.provenances() {
-        if !excluded_edited_declaration && provenance.source() == HostConfigSource::Managed {
-            excluded_edited_declaration = true;
-        } else {
-            return true;
-        }
-    }
-    !excluded_edited_declaration
 }
 
 fn validate_alias(value: &str) -> Result<(), ManagedSshHostValidationError> {
@@ -838,28 +759,20 @@ mod tests {
     }
 
     #[test]
-    fn store_should_add_edit_delete_and_preserve_canonical_order() {
+    fn store_should_insert_hosts_and_reject_duplicate_aliases() {
         let filesystem = Arc::new(RecordingFilesystem::default());
         let paths = paths(filesystem);
         let store = ManagedHostsStore::new(&paths);
-        store
-            .upsert(host("zeta", "zeta.example"), &[], None)
-            .unwrap();
-        store
-            .upsert(host("alpha", "alpha.example"), &[], None)
-            .unwrap();
-        store
-            .upsert(
-                host("beta", "beta.example"),
-                &[],
-                Some(host("zeta", "ignored").alias()),
-            )
-            .unwrap();
-        store.delete(host("alpha", "ignored").alias()).unwrap();
+        store.insert(host("zeta", "zeta.example"), &[]).unwrap();
+        store.insert(host("alpha", "alpha.example"), &[]).unwrap();
 
-        let loaded = store.load().unwrap();
+        let duplicate = store.insert(host("alpha", "other.example"), &[]);
 
-        assert_eq!(loaded, vec![host("beta", "beta.example")]);
+        assert!(matches!(duplicate, Err(ManagedHostsError::AliasCollision)));
+        assert_eq!(
+            store.load().unwrap(),
+            vec![host("alpha", "alpha.example"), host("zeta", "zeta.example")]
+        );
     }
 
     #[test]
@@ -870,7 +783,7 @@ mod tests {
         let store = ManagedHostsStore::new(&paths);
 
         store
-            .upsert(host("work", "work.example"), &[], None)
+            .insert(host("work", "work.example"), &[])
             .unwrap();
 
         let state = filesystem.state.lock().unwrap();
@@ -900,7 +813,7 @@ mod tests {
         let store = ManagedHostsStore::new(&paths);
 
         store
-            .upsert(host("work", "work.example"), &[], None)
+            .insert(host("work", "work.example"), &[])
             .unwrap();
 
         let state = filesystem.state.lock().unwrap();
@@ -920,7 +833,7 @@ mod tests {
         let paths = paths(filesystem);
         let store = ManagedHostsStore::new(&paths);
 
-        let result = store.upsert(host("work", "work.example"), &[], None);
+        let result = store.insert(host("work", "work.example"), &[]);
 
         assert!(matches!(result, Err(ManagedHostsError::ConcurrentMutation)));
     }

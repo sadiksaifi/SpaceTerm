@@ -15,7 +15,7 @@ need visible together.
 - **Workspaces** for local and remote terminal work
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
 - **Remote terminals** through your existing OpenSSH configuration
-- **Keyboard-first navigation** through the Command Palette and Directory Picker
+- **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 - **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
 
 ## Workspace hierarchy

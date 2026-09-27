@@ -15,7 +15,6 @@ use spaceterm_ui::{
 use super::appearance::ChromeAppearance;
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::appearance::Color;
-use crate::ssh::destination::SshHostAlias;
 use crate::ssh::managed_hosts::{
     ManagedSshHost, ManagedSshHostField, ManagedSshHostValidationError, ManagedSshHostValueError,
 };
@@ -27,7 +26,7 @@ const SAVE_FAILURE_MESSAGE: &str =
     "SpaceTerm couldn\u{2019}t save this SSH host. Check permissions and try again.";
 const COLLISION_MESSAGE: &str = "That SSH host alias is already configured.";
 const HOST_IN_USE_MESSAGE: &str =
-    "This SSH host is in use by a Remote Workspace. Close that Workspace before editing it.";
+    "This SSH host alias is in use by a Remote Workspace. Close that Workspace, then try again.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedHostFormBackendError {
@@ -37,24 +36,13 @@ pub(crate) enum ManagedHostFormBackendError {
 }
 
 pub(super) trait ManagedHostFormBackend: Send + Sync {
-    fn save(
-        &self,
-        host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
-    ) -> Task<Result<(), ManagedHostFormBackendError>>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum SshHostFormMode {
-    Add,
-    Edit(ManagedSshHost),
+    fn save(&self, host: ManagedSshHost) -> Task<Result<(), ManagedHostFormBackendError>>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum SshHostFormEvent {
     StateChanged,
     SavedAndConnect(ManagedSshHost),
-    Saved(ManagedSshHost),
     Cancelled,
 }
 
@@ -161,7 +149,6 @@ pub(super) struct SshHostForm {
     backend: Arc<dyn ManagedHostFormBackend>,
     file_selection: Rc<dyn SystemFileSelection>,
     file_selection_pending: bool,
-    mode: SshHostFormMode,
     alias: Entity<TextInput>,
     host_name: Entity<TextInput>,
     user: Entity<TextInput>,
@@ -184,13 +171,12 @@ impl EventEmitter<SshHostFormEvent> for SshHostForm {}
 
 impl SshHostForm {
     pub(super) fn new(
-        mode: SshHostFormMode,
         backend: Arc<dyn ManagedHostFormBackend>,
         file_selection: Rc<dyn SystemFileSelection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let values = initial_values(&mode);
+        let values = SshHostFormValues::default();
         let alias = text_input(
             "managed-ssh-host-alias",
             "Alias",
@@ -255,7 +241,6 @@ impl SshHostForm {
             backend,
             file_selection,
             file_selection_pending: false,
-            mode,
             alias,
             host_name,
             user,
@@ -328,8 +313,8 @@ impl SshHostForm {
         let initial_focus = self.alias.read(cx).focus_handle();
         let dialog = Dialog::new(
             ModalId::new(FORM_MODAL_ID),
-            self.accessibility_title(),
-            self.visible_title(),
+            "Add SSH host",
+            "Add SSH Host",
             vec![
                 ModalAction::new(
                     SshHostFormAction::Save,
@@ -384,27 +369,6 @@ impl SshHostForm {
     #[cfg(test)]
     pub(super) const fn is_pending(&self) -> bool {
         self.pending
-    }
-
-    fn accessibility_title(&self) -> &'static str {
-        match self.mode {
-            SshHostFormMode::Add => "Add SSH host",
-            SshHostFormMode::Edit(_) => "Edit SSH host",
-        }
-    }
-
-    fn visible_title(&self) -> &'static str {
-        match self.mode {
-            SshHostFormMode::Add => "Add SSH Host",
-            SshHostFormMode::Edit(_) => "Edit SSH Host",
-        }
-    }
-
-    fn editing_alias(&self) -> Option<SshHostAlias> {
-        match &self.mode {
-            SshHostFormMode::Add => None,
-            SshHostFormMode::Edit(host) => Some(host.alias().clone()),
-        }
     }
 
     fn values(&self, cx: &App) -> SshHostFormValues {
@@ -487,7 +451,7 @@ impl SshHostForm {
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
-        let task = self.backend.save(host, self.editing_alias());
+        let task = self.backend.save(host);
         self.set_editable(false, cx);
         cx.emit(SshHostFormEvent::StateChanged);
         cx.notify();
@@ -578,10 +542,7 @@ impl SshHostForm {
                 ..
             } => {
                 if let Some(host) = self.pending_host.take() {
-                    match self.mode {
-                        SshHostFormMode::Add => cx.emit(SshHostFormEvent::SavedAndConnect(host)),
-                        SshHostFormMode::Edit(_) => cx.emit(SshHostFormEvent::Saved(host)),
-                    }
+                    cx.emit(SshHostFormEvent::SavedAndConnect(host));
                 }
             }
             DialogOutcome::Completed {
@@ -842,22 +803,6 @@ fn form_field(
         })
 }
 
-fn initial_values(mode: &SshHostFormMode) -> SshHostFormValues {
-    match mode {
-        SshHostFormMode::Add => SshHostFormValues::default(),
-        SshHostFormMode::Edit(host) => SshHostFormValues {
-            alias: host.alias().as_str().to_owned(),
-            host_name: host.host_name().to_owned(),
-            user: host.user().unwrap_or_default().to_owned(),
-            port: host
-                .port()
-                .map(|port| port.get().to_string())
-                .unwrap_or_default(),
-            identity_file: host.identity_file().unwrap_or_default().to_owned(),
-        },
-    }
-}
-
 fn validate_form_values(values: &SshHostFormValues) -> SshHostFormValidation {
     let port = parse_port(&values.port);
     let errors = SshHostFormErrors {
@@ -1017,15 +962,9 @@ mod tests {
         assert!(!debug.contains("sensitive"));
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct SaveRecord {
-        host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
-    }
-
     struct ScriptedBackend {
         tasks: Mutex<VecDeque<Task<Result<(), ManagedHostFormBackendError>>>>,
-        records: Mutex<Vec<SaveRecord>>,
+        records: Mutex<Vec<ManagedSshHost>>,
     }
 
     impl ScriptedBackend {
@@ -1042,21 +981,14 @@ mod tests {
             Arc::new(Self::new([Task::ready(result)]))
         }
 
-        fn records(&self) -> Vec<SaveRecord> {
+        fn records(&self) -> Vec<ManagedSshHost> {
             self.records.lock().unwrap().clone()
         }
     }
 
     impl ManagedHostFormBackend for ScriptedBackend {
-        fn save(
-            &self,
-            host: ManagedSshHost,
-            editing_alias: Option<SshHostAlias>,
-        ) -> Task<Result<(), ManagedHostFormBackendError>> {
-            self.records.lock().unwrap().push(SaveRecord {
-                host,
-                editing_alias,
-            });
+        fn save(&self, host: ManagedSshHost) -> Task<Result<(), ManagedHostFormBackendError>> {
+            self.records.lock().unwrap().push(host);
             self.tasks
                 .lock()
                 .unwrap()
@@ -1077,7 +1009,6 @@ mod tests {
     }
 
     fn form_window<'a>(
-        mode: SshHostFormMode,
         backend: Arc<ScriptedBackend>,
         cx: &'a mut TestAppContext,
     ) -> FormWindow<'a> {
@@ -1087,7 +1018,6 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let form = cx.new(|cx| {
                 SshHostForm::new(
-                    mode,
                     injected,
                     Rc::new(crate::directory_selection::GpuiFileSelection),
                     window,
@@ -1156,17 +1086,6 @@ mod tests {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), Modifiers::none());
         cx.run_until_parked();
-    }
-
-    fn existing_host() -> ManagedSshHost {
-        ManagedSshHost::new(
-            "work".to_owned(),
-            "old.example".to_owned(),
-            Some("deploy".to_owned()),
-            NonZeroU16::new(2222),
-            Some("~/.ssh/id_ed25519".to_owned()),
-        )
-        .unwrap()
     }
 
     #[test]
@@ -1240,7 +1159,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, _, cx) = form_window(Arc::clone(&backend), cx);
 
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
@@ -1262,7 +1181,7 @@ mod tests {
     #[gpui::test]
     fn typing_and_tab_navigation_should_not_write(cx: &mut TestAppContext) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, _, cx) = form_window(Arc::clone(&backend), cx);
         let (alias, host_name) =
             form.read_with(cx, |form, _| (form.alias.clone(), form.host_name.clone()));
         set_input(&form, &alias, "work", cx);
@@ -1276,7 +1195,7 @@ mod tests {
     #[gpui::test]
     fn cancel_should_close_without_writing(cx: &mut TestAppContext) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, events, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, events, cx) = form_window(Arc::clone(&backend), cx);
 
         click(CANCEL_ACTION_SELECTOR, cx);
 
@@ -1300,7 +1219,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, _, cx) = form_window(Arc::clone(&backend), cx);
         cx.update(|window, cx| {
             form.update(cx, |form, cx| {
                 form.file_selection =
@@ -1326,7 +1245,7 @@ mod tests {
     #[gpui::test]
     fn cancelling_form_rejects_late_identity_file_selection(cx: &mut TestAppContext) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, _, cx) = form_window(Arc::clone(&backend), cx);
         let (sender, receiver) = async_channel::bounded(1);
         cx.update(|window, cx| {
             form.update(cx, |form, cx| {
@@ -1352,7 +1271,7 @@ mod tests {
     #[gpui::test]
     fn add_default_save_should_emit_saved_and_connect(cx: &mut TestAppContext) {
         let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, events, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, events, cx) = form_window(Arc::clone(&backend), cx);
         set_valid_add_values(&form, cx);
 
         cx.simulate_keystrokes("enter");
@@ -1360,7 +1279,6 @@ mod tests {
 
         let records = backend.records();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].editing_alias, None);
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             SshHostFormEvent::SavedAndConnect(host) if host.alias().as_str() == "work"
@@ -1368,39 +1286,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn edit_should_preserve_values_pass_original_alias_and_emit_saved(cx: &mut TestAppContext) {
-        let backend = ScriptedBackend::ready(Ok(()));
-        let (_, form, events, cx) = form_window(
-            SshHostFormMode::Edit(existing_host()),
-            Arc::clone(&backend),
-            cx,
-        );
-        let host_name = form.read_with(cx, |form, _| form.host_name.clone());
-        set_input(&form, &host_name, "new.example", cx);
-
-        click(SAVE_ACTION_SELECTOR, cx);
-
-        let records = backend.records();
-        assert_eq!(records[0].editing_alias.as_ref().unwrap().as_str(), "work");
-        assert_eq!(records[0].host.host_name(), "new.example");
-        assert!(events.borrow().iter().any(|event| matches!(
-            event,
-            SshHostFormEvent::Saved(host) if host.host_name() == "new.example"
-        )));
-        assert!(
-            !events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, SshHostFormEvent::SavedAndConnect(_)))
-        );
-    }
-
-    #[gpui::test]
     fn alias_collision_should_restore_exact_values_inline_and_refocus_alias(
         cx: &mut TestAppContext,
     ) {
         let backend = ScriptedBackend::ready(Err(ManagedHostFormBackendError::AliasCollision));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, backend, cx);
+        let (_, form, _, cx) = form_window(backend, cx);
         set_valid_add_values(&form, cx);
         let before = form.read_with(cx, |form, cx| form.values(cx));
 
@@ -1425,7 +1315,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = ScriptedBackend::ready(Err(ManagedHostFormBackendError::SaveFailed));
-        let (_, form, _, cx) = form_window(SshHostFormMode::Add, backend, cx);
+        let (_, form, _, cx) = form_window(backend, cx);
         set_valid_add_values(&form, cx);
         let before = form.read_with(cx, |form, cx| form.values(cx));
 
@@ -1447,7 +1337,7 @@ mod tests {
                 .spawn(async move { receiver.recv().await.unwrap() })
         });
         let backend = Arc::new(ScriptedBackend::new([task]));
-        let (_, form, events, cx) = form_window(SshHostFormMode::Add, Arc::clone(&backend), cx);
+        let (_, form, events, cx) = form_window(Arc::clone(&backend), cx);
         set_valid_add_values(&form, cx);
         let before = form.read_with(cx, |form, cx| form.values(cx));
 
@@ -1478,7 +1368,7 @@ mod tests {
                 .spawn(async move { receiver.recv().await.unwrap() })
         });
         let backend = Arc::new(ScriptedBackend::new([task]));
-        let (_, form, events, cx) = form_window(SshHostFormMode::Add, backend, cx);
+        let (_, form, events, cx) = form_window(backend, cx);
         set_valid_add_values(&form, cx);
         click(SAVE_ACTION_SELECTOR, cx);
         let presentation = form.read_with(cx, |form, _| form.presentation.clone().unwrap());
@@ -1496,7 +1386,7 @@ mod tests {
         assert!(form.read_with(cx, |form, _| form.is_open()));
         assert!(!events.borrow().iter().any(|event| matches!(
             event,
-            SshHostFormEvent::Saved(_) | SshHostFormEvent::SavedAndConnect(_)
+            SshHostFormEvent::SavedAndConnect(_)
         )));
     }
 }

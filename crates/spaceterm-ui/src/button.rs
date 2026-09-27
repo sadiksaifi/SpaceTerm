@@ -478,6 +478,11 @@ impl ButtonTheme {
         metrics.icon_button_size.unwrap_or(metrics.height)
     }
 
+    /// Returns the outer height of a text button in this theme.
+    pub fn control_height(self, size: ButtonSize) -> Pixels {
+        self.sizes.resolve(size).height
+    }
+
     /// Returns the keyboard focus-ring paint.
     #[cfg(test)]
     pub(crate) fn focus_border(self) -> Rgba {
@@ -1102,6 +1107,12 @@ impl IconButton {
         self
     }
 
+    /// Fits the control's rounded shape to its host's corner geometry.
+    pub fn corner_radius(mut self, radius: Pixels) -> Self {
+        self.core.corner_radius = Some(radius.max(px(0.0)));
+        self
+    }
+
     /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
@@ -1206,6 +1217,7 @@ struct ButtonCore {
     accept_first_mouse: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     icon_button_size: Option<Pixels>,
+    corner_radius: Option<Pixels>,
     #[cfg(feature = "appearance-exerciser")]
     preview_state: Option<crate::ControlPreviewState>,
 }
@@ -1231,6 +1243,7 @@ impl ButtonCore {
             accept_first_mouse: true,
             contextual_style: None,
             icon_button_size: None,
+            corner_radius: None,
             #[cfg(feature = "appearance-exerciser")]
             preview_state: None,
         }
@@ -1251,6 +1264,9 @@ impl ButtonCore {
         }
         if let Some(icon_button_size) = self.icon_button_size {
             style.icon_button_size = icon_button_size;
+        }
+        if let Some(corner_radius) = self.corner_radius {
+            style.corner_radius = corner_radius;
         }
         style
     }

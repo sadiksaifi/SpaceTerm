@@ -56,8 +56,8 @@ pub use combo_box::{
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteFallback, CommandPaletteGeneration,
-    CommandPaletteHint, CommandPaletteItem, CommandPaletteKeybindingProfile,
+    CommandPaletteEmpty, CommandPaletteEmptyAction, CommandPaletteEvent, CommandPaletteFallback,
+    CommandPaletteGeneration, CommandPaletteItem, CommandPaletteKeybindingProfile,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteMetrics,
     CommandPalettePaint, CommandPaletteQuery, CommandPaletteReplacementFocus, CommandPaletteTheme,
     install_command_palette_keybindings,

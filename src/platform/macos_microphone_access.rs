@@ -31,7 +31,6 @@ impl MacosMicrophoneAccess {
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
                 MICROPHONE_SETTINGS_URI,
                 LEGACY_MICROPHONE_SETTINGS_URI,
-                "Open System Settings",
             ),
             _not_send_or_sync: PhantomData,
         }

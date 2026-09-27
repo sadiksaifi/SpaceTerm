@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Render, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent, ModalActionRole, ModalId,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionRole, ModalId,
     ModalPresentationHandle, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
     ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState,
 };
@@ -15,14 +15,12 @@ use super::remote_directory_picker::RemoteDirectoryProvider;
 use super::remote_directory_picker::RemoteDirectoryProviderError;
 use super::ssh_host_form::{
     ManagedHostFormBackend, ManagedHostFormBackendError, SshHostForm, SshHostFormEvent,
-    SshHostFormMode,
 };
 use super::ssh_host_picker::{
     HostDiscoveryProvider, SshHostPicker, SshHostPickerEvent, SshHostPickerLifecycleEvent,
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, SshDestination};
 use crate::ssh::command::ValidatedRemoteLoginShell;
-use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::live_connection::ControlConnectionObserver;
 use crate::ssh::managed_hosts::ManagedSshHost;
@@ -34,8 +32,6 @@ const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
 const CONNECTION_PROGRESS_DETAIL: &str = "Authentication prompts open in a SpaceTerm dialog.";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
 const OPENSSH_ERROR_DETAIL_HEADING: &str = "OpenSSH reported:";
-const DELETE_CONFIRMATION_ID: &str = "remote-workspace-delete-host";
-const DELETE_ERROR_ID: &str = "remote-workspace-delete-error";
 
 /// Content-free progress phases reported by the native SSH connector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,8 +95,6 @@ impl RemoteWorkspaceConnectContext {
 /// Connection detail, when present, is already control-free and bounded to the transient alert
 /// lifetime. Its `Debug` representation remains redacted.
 pub(crate) enum RemoteWorkspaceFlowBackendError {
-    #[error("the managed SSH host could not be deleted")]
-    DeleteFailed,
     #[error("the SSH host is already in use")]
     HostInUse,
     #[error("the remote server is incompatible")]
@@ -142,7 +136,6 @@ impl RemoteWorkspaceFlowBackendError {
 impl fmt::Debug for RemoteWorkspaceFlowBackendError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::DeleteFailed => "DeleteFailed",
             Self::HostInUse => "HostInUse",
             Self::IncompatibleServer => "IncompatibleServer",
             Self::HomeDirectoryUnavailable => "HomeDirectoryUnavailable",
@@ -298,20 +291,10 @@ pub(crate) trait RemoteWorkspaceFlowBackend: Send + Sync {
     /// Performs fresh bounded host discovery and preserves partial-scan diagnostics.
     fn discover_hosts(&self) -> HostDiscovery;
 
-    fn host_in_active_use(&self, alias: &SshHostAlias) -> bool;
-
-    fn managed_host(&self, alias: &SshHostAlias) -> Option<ManagedSshHost>;
-
     fn save_managed_host(
         &self,
         host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
     ) -> Task<Result<(), ManagedHostFormBackendError>>;
-
-    fn delete_managed_host(
-        &self,
-        alias: SshHostAlias,
-    ) -> Task<Result<(), RemoteWorkspaceFlowBackendError>>;
 
     /// Connects with attempt-scoped progress and cancellation, returning singular ownership.
     fn connect(
@@ -351,18 +334,8 @@ struct FlowManagedHostBackend {
 }
 
 impl ManagedHostFormBackend for FlowManagedHostBackend {
-    fn save(
-        &self,
-        host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
-    ) -> Task<Result<(), ManagedHostFormBackendError>> {
-        if editing_alias
-            .as_ref()
-            .is_some_and(|alias| self.backend.host_in_active_use(alias))
-        {
-            return Task::ready(Err(ManagedHostFormBackendError::HostInUse));
-        }
-        self.backend.save_managed_host(host, editing_alias)
+    fn save(&self, host: ManagedSshHost) -> Task<Result<(), ManagedHostFormBackendError>> {
+        self.backend.save_managed_host(host)
     }
 }
 
@@ -499,9 +472,6 @@ pub(crate) enum RemoteWorkspaceFlowStage {
     Idle,
     HostSelection,
     AddingHost,
-    EditingHost,
-    DeleteConfirmation,
-    DeletingHost,
     Connecting(RemoteWorkspaceConnectionProgress),
     ConnectionError,
     PreparingHome,
@@ -515,17 +485,6 @@ enum ConnectionErrorAction {
     Retry,
     Back,
     Cancel,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DeleteAction {
-    Delete,
-    Cancel,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AcknowledgeAction {
-    Acknowledge,
 }
 
 struct ConnectedHost {
@@ -569,18 +528,6 @@ enum RemoteWorkspaceFlowState {
         _form: Entity<SshHostForm>,
         retained: Option<ConnectedHost>,
     },
-    EditingHost {
-        _form: Entity<SshHostForm>,
-        retained: Option<ConnectedHost>,
-    },
-    DeleteConfirmation {
-        alert: Option<ModalPresentationHandle>,
-        retained: Option<ConnectedHost>,
-    },
-    DeletingHost {
-        alert: Option<ModalPresentationHandle>,
-        retained: Option<ConnectedHost>,
-    },
     Connecting(ConnectionAttempt),
     ConnectionReady {
         connection: ConnectedHost,
@@ -612,9 +559,6 @@ impl RemoteWorkspaceFlowState {
             Self::Idle => RemoteWorkspaceFlowStage::Idle,
             Self::HostSelection { .. } => RemoteWorkspaceFlowStage::HostSelection,
             Self::AddingHost { .. } => RemoteWorkspaceFlowStage::AddingHost,
-            Self::EditingHost { .. } => RemoteWorkspaceFlowStage::EditingHost,
-            Self::DeleteConfirmation { .. } => RemoteWorkspaceFlowStage::DeleteConfirmation,
-            Self::DeletingHost { .. } => RemoteWorkspaceFlowStage::DeletingHost,
             Self::Connecting(attempt) => RemoteWorkspaceFlowStage::Connecting(attempt.phase),
             Self::ConnectionReady { phase, .. } => RemoteWorkspaceFlowStage::Connecting(*phase),
             Self::ConnectionFailed { .. } | Self::ConnectionError { .. } => {
@@ -629,11 +573,9 @@ impl RemoteWorkspaceFlowState {
 
     fn take_retained_connection(&mut self) -> Option<ConnectedHost> {
         match self {
-            Self::HostSelection { retained }
-            | Self::AddingHost { retained, .. }
-            | Self::EditingHost { retained, .. }
-            | Self::DeleteConfirmation { retained, .. }
-            | Self::DeletingHost { retained, .. } => retained.take(),
+            Self::HostSelection { retained } | Self::AddingHost { retained, .. } => {
+                retained.take()
+            }
             _ => None,
         }
     }
@@ -672,9 +614,7 @@ impl RemoteWorkspaceFlowState {
             let _ = progress.dismiss(window, cx);
         }
         match self {
-            Self::DeleteConfirmation { alert, .. }
-            | Self::DeletingHost { alert, .. }
-            | Self::ConnectionError { alert, .. } => {
+            Self::ConnectionError { alert, .. } => {
                 if let Some(alert) = alert.take() {
                     let _ = alert.dismiss(window, cx);
                 }
@@ -709,10 +649,7 @@ impl RemoteWorkspaceFlow {
         let discovery: Arc<dyn HostDiscoveryProvider> = Arc::new(FlowHostDiscoveryProvider {
             backend: Arc::clone(&backend),
         });
-        let active_backend = Arc::clone(&backend);
-        let active_use: Arc<dyn Fn(&SshHostAlias) -> bool + Send + Sync> =
-            Arc::new(move |alias| active_backend.host_in_active_use(alias));
-        let host_picker = cx.new(|cx| SshHostPicker::new(discovery, active_use, window, cx));
+        let host_picker = cx.new(|cx| SshHostPicker::new(discovery, window, cx));
         cx.subscribe_in(
             &host_picker,
             window,
@@ -837,49 +774,23 @@ impl RemoteWorkspaceFlow {
             {
                 self.start_connection(destination.clone(), window, cx);
             }
-            SshHostPickerEvent::RequestAddHost(_)
+            SshHostPickerEvent::RequestAddHost
                 if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
             {
-                self.present_host_form(SshHostFormMode::Add, window, cx);
-            }
-            SshHostPickerEvent::RequestEditHost(alias)
-                if self.stage() == RemoteWorkspaceFlowStage::HostSelection =>
-            {
-                if self.backend.host_in_active_use(alias) {
-                    return;
-                }
-                if let Some(host) = self.backend.managed_host(alias) {
-                    self.present_host_form(SshHostFormMode::Edit(host), window, cx);
-                }
-            }
-            SshHostPickerEvent::RequestDeleteHost(alias)
-                if self.stage() == RemoteWorkspaceFlowStage::HostSelection
-                    && !self.backend.host_in_active_use(alias) =>
-            {
-                self.present_delete_confirmation(alias.clone(), window, cx);
+                self.present_host_form(window, cx);
             }
             _ => {}
         }
     }
 
-    fn present_host_form(
-        &mut self,
-        mode: SshHostFormMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn present_host_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        let stage = match mode {
-            SshHostFormMode::Add => RemoteWorkspaceFlowStage::AddingHost,
-            SshHostFormMode::Edit(_) => RemoteWorkspaceFlowStage::EditingHost,
-        };
         let backend: Arc<dyn ManagedHostFormBackend> = Arc::new(FlowManagedHostBackend {
             backend: Arc::clone(&self.backend),
         });
         let form = cx.new(|cx| {
             SshHostForm::new(
-                mode,
                 backend,
                 std::rc::Rc::new(crate::directory_selection::GpuiFileSelection),
                 window,
@@ -898,15 +809,9 @@ impl RemoteWorkspaceFlow {
             return;
         }
         let retained = self.state.take_retained_connection();
-        self.state = match stage {
-            RemoteWorkspaceFlowStage::AddingHost => RemoteWorkspaceFlowState::AddingHost {
-                _form: form,
-                retained,
-            },
-            _ => RemoteWorkspaceFlowState::EditingHost {
-                _form: form,
-                retained,
-            },
+        self.state = RemoteWorkspaceFlowState::AddingHost {
+            _form: form,
+            retained,
         };
         self.publish(cx);
     }
@@ -935,200 +840,12 @@ impl RemoteWorkspaceFlow {
                 };
                 self.start_connection(destination, window, cx);
             }
-            SshHostFormEvent::Saved(_) if self.stage() == RemoteWorkspaceFlowStage::EditingHost => {
-                self.return_to_hosts();
-                self.host_picker
-                    .update(cx, |picker, cx| picker.refresh(window, cx));
-                self.publish(cx);
-            }
-            SshHostFormEvent::Cancelled
-                if matches!(
-                    self.stage(),
-                    RemoteWorkspaceFlowStage::AddingHost | RemoteWorkspaceFlowStage::EditingHost
-                ) =>
-            {
+            SshHostFormEvent::Cancelled if self.stage() == RemoteWorkspaceFlowStage::AddingHost => {
                 self.return_to_hosts();
                 self.publish(cx);
             }
             _ => {}
         }
-    }
-
-    fn present_delete_confirmation(
-        &mut self,
-        alias: SshHostAlias,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.action_generation = self.action_generation.wrapping_add(1);
-        let generation = self.action_generation;
-        let retained = self.state.take_retained_connection();
-        self.state = RemoteWorkspaceFlowState::DeleteConfirmation {
-            alert: None,
-            retained,
-        };
-        let flow = cx.weak_entity();
-        let window_handle = window.window_handle();
-        let expected = alias.clone();
-        let result = Alert::new(
-            ModalId::new(DELETE_CONFIRMATION_ID),
-            "Delete managed SSH host",
-            "Delete SSH Host?",
-            format!("Delete the managed SSH host {}?", alias.as_str()),
-            vec![
-                ModalAction::new(
-                    DeleteAction::Delete,
-                    "Delete",
-                    ModalActionRole::Affirmative,
-                    "remote-workspace-delete-confirm",
-                )
-                .with_intent(ModalActionIntent::Destructive),
-                ModalAction::new(
-                    DeleteAction::Cancel,
-                    "Cancel",
-                    ModalActionRole::Cancel,
-                    "remote-workspace-delete-cancel",
-                ),
-            ],
-        )
-        .intent(AlertIntent::Critical)
-        .present(window, cx, move |outcome, cx| {
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = flow.update(cx, |flow, cx| {
-                    flow.finish_delete_confirmation(generation, expected, outcome, window, cx);
-                });
-            });
-        });
-        match result {
-            Ok(handle) => {
-                if let RemoteWorkspaceFlowState::DeleteConfirmation { alert, .. } = &mut self.state
-                {
-                    *alert = Some(handle);
-                }
-            }
-            Err(_) => self.return_to_hosts(),
-        }
-        self.publish(cx);
-    }
-
-    fn finish_delete_confirmation(
-        &mut self,
-        generation: u64,
-        alias: SshHostAlias,
-        outcome: AlertOutcome<DeleteAction>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.action_generation != generation
-            || self.stage() != RemoteWorkspaceFlowStage::DeleteConfirmation
-        {
-            return;
-        }
-        if let RemoteWorkspaceFlowState::DeleteConfirmation { alert, .. } = &mut self.state {
-            alert.take();
-        }
-        if matches!(
-            outcome,
-            AlertOutcome::Activated {
-                action_id: DeleteAction::Delete,
-                ..
-            }
-        ) {
-            if self.backend.host_in_active_use(&alias) {
-                self.state = RemoteWorkspaceFlowState::DeletingHost {
-                    retained: self.state.take_retained_connection(),
-                    alert: None,
-                };
-                self.present_delete_error(RemoteWorkspaceFlowBackendError::HostInUse, window, cx);
-            } else {
-                self.start_delete(alias, window, cx);
-            }
-        } else {
-            self.return_to_hosts();
-            self.publish(cx);
-        }
-    }
-
-    fn start_delete(&mut self, alias: SshHostAlias, window: &mut Window, cx: &mut Context<Self>) {
-        self.action_generation = self.action_generation.wrapping_add(1);
-        let generation = self.action_generation;
-        self.state = RemoteWorkspaceFlowState::DeletingHost {
-            retained: self.state.take_retained_connection(),
-            alert: None,
-        };
-        let task = self.backend.delete_managed_host(alias);
-        cx.spawn_in(window, async move |flow, cx| {
-            let result = task.await;
-            let _ = flow.update_in(cx, |flow, window, cx| {
-                if flow.action_generation != generation
-                    || flow.stage() != RemoteWorkspaceFlowStage::DeletingHost
-                {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        flow.return_to_hosts();
-                        flow.host_picker
-                            .update(cx, |picker, cx| picker.refresh(window, cx));
-                        flow.publish(cx);
-                    }
-                    Err(error) => flow.present_delete_error(error, window, cx),
-                }
-            });
-        })
-        .detach();
-        self.publish(cx);
-    }
-
-    fn present_delete_error(
-        &mut self,
-        error: RemoteWorkspaceFlowBackendError,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let (title, message) = match error {
-            RemoteWorkspaceFlowBackendError::HostInUse => (
-                "SSH Host Is in Use",
-                "Close the Remote Workspace using this SSH host, then try again.",
-            ),
-            _ => (
-                "Couldn\u{2019}t Delete SSH Host",
-                "Check the managed SSH configuration and try again.",
-            ),
-        };
-        let flow = cx.weak_entity();
-        let window_handle = window.window_handle();
-        let result = Alert::new(
-            ModalId::new(DELETE_ERROR_ID),
-            "SSH host deletion failed",
-            title,
-            message,
-            vec![ModalAction::new(
-                AcknowledgeAction::Acknowledge,
-                "OK",
-                ModalActionRole::Cancel,
-                "remote-workspace-delete-error-ok",
-            )],
-        )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, move |_, cx| {
-            let _ = window_handle.update(cx, |_, _, cx| {
-                let _ = flow.update(cx, |flow, cx| {
-                    if flow.stage() == RemoteWorkspaceFlowStage::DeletingHost {
-                        flow.return_to_hosts();
-                        flow.publish(cx);
-                    }
-                });
-            });
-        });
-        if let Ok(handle) = result {
-            if let RemoteWorkspaceFlowState::DeletingHost { alert, .. } = &mut self.state {
-                *alert = Some(handle);
-            }
-        } else {
-            self.return_to_hosts();
-        }
-        self.publish(cx);
     }
 
     fn start_connection(
@@ -1774,7 +1491,7 @@ impl Render for RemoteWorkspaceFlow {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::collections::VecDeque;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1784,6 +1501,7 @@ mod tests {
     use spaceterm_ui::{ComboBox, ComboBoxItem, ModalLayer};
 
     use super::*;
+    use crate::ssh::destination::SshHostAlias;
     use crate::ui::remote_directory_picker::{
         RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProviderError,
     };
@@ -1901,22 +1619,19 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct SaveRecord {
-        host: ManagedSshHost,
-        editing_alias: Option<SshHostAlias>,
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TestAlertAction {
+        Confirm,
+        Cancel,
+        Acknowledge,
     }
 
     struct FakeBackendState {
-        managed: BTreeMap<SshHostAlias, ManagedSshHost>,
-        active: BTreeSet<SshHostAlias>,
         connections: VecDeque<
             Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>,
         >,
         saves: VecDeque<Task<Result<(), ManagedHostFormBackendError>>>,
-        deletes: VecDeque<Task<Result<(), RemoteWorkspaceFlowBackendError>>>,
-        save_records: Vec<SaveRecord>,
-        delete_records: Vec<SshHostAlias>,
+        save_records: Vec<ManagedSshHost>,
         connect_records: Vec<SshDestination>,
     }
 
@@ -1935,13 +1650,9 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 state: Mutex::new(FakeBackendState {
-                    managed: BTreeMap::new(),
-                    active: BTreeSet::new(),
                     connections: connections.into_iter().collect(),
                     saves: VecDeque::new(),
-                    deletes: VecDeque::new(),
                     save_records: Vec::new(),
-                    delete_records: Vec::new(),
                     connect_records: Vec::new(),
                 }),
                 discoveries: AtomicUsize::new(0),
@@ -1955,31 +1666,6 @@ mod tests {
                 .saves
                 .push_back(Task::ready(result));
         }
-
-        fn push_delete(&self, result: Result<(), RemoteWorkspaceFlowBackendError>) {
-            self.state
-                .lock()
-                .unwrap()
-                .deletes
-                .push_back(Task::ready(result));
-        }
-
-        fn insert_managed(&self, host: ManagedSshHost) {
-            self.state
-                .lock()
-                .unwrap()
-                .managed
-                .insert(host.alias().clone(), host);
-        }
-
-        fn set_active(&self, alias: SshHostAlias, active: bool) {
-            let mut state = self.state.lock().unwrap();
-            if active {
-                state.active.insert(alias);
-            } else {
-                state.active.remove(&alias);
-            }
-        }
     }
 
     impl RemoteWorkspaceFlowBackend for FakeBackend {
@@ -1988,43 +1674,14 @@ mod tests {
             HostDiscovery::default()
         }
 
-        fn host_in_active_use(&self, alias: &SshHostAlias) -> bool {
-            self.state.lock().unwrap().active.contains(alias)
-        }
-
-        fn managed_host(&self, alias: &SshHostAlias) -> Option<ManagedSshHost> {
-            self.state.lock().unwrap().managed.get(alias).cloned()
-        }
-
         fn save_managed_host(
             &self,
             host: ManagedSshHost,
-            editing_alias: Option<SshHostAlias>,
         ) -> Task<Result<(), ManagedHostFormBackendError>> {
             let mut state = self.state.lock().unwrap();
-            state.save_records.push(SaveRecord {
-                host: host.clone(),
-                editing_alias: editing_alias.clone(),
-            });
-            if let Some(editing_alias) = editing_alias {
-                state.managed.remove(&editing_alias);
-            }
-            state.managed.insert(host.alias().clone(), host);
+            state.save_records.push(host);
             state
                 .saves
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Ok(())))
-        }
-
-        fn delete_managed_host(
-            &self,
-            alias: SshHostAlias,
-        ) -> Task<Result<(), RemoteWorkspaceFlowBackendError>> {
-            let mut state = self.state.lock().unwrap();
-            state.delete_records.push(alias.clone());
-            state.managed.remove(&alias);
-            state
-                .deletes
                 .pop_front()
                 .unwrap_or_else(|| Task::ready(Ok(())))
         }
@@ -2104,7 +1761,7 @@ mod tests {
                                         "Focus Blocker",
                                         "Wait before opening the Host Picker.",
                                         vec![ModalAction::new(
-                                            AcknowledgeAction::Acknowledge,
+                                            TestAlertAction::Acknowledge,
                                             "OK",
                                             ModalActionRole::Cancel,
                                             "remote-workspace-focus-blocker-ok",
@@ -2219,17 +1876,6 @@ mod tests {
 
     fn alias(value: &str) -> SshHostAlias {
         SshHostAlias::new(value.to_owned()).unwrap()
-    }
-
-    fn managed_host(value: &str) -> ManagedSshHost {
-        ManagedSshHost::new(
-            value.to_owned(),
-            format!("{value}.example"),
-            None,
-            None,
-            None,
-        )
-        .unwrap()
     }
 
     fn session(closes: &Arc<AtomicUsize>) -> RemoteWorkspaceConnectedSession {
@@ -2562,13 +2208,13 @@ mod tests {
                     "Verify the host key fingerprint before connecting.",
                     vec![
                         ModalAction::new(
-                            DeleteAction::Delete,
+                            TestAlertAction::Confirm,
                             "Trust & Connect",
                             ModalActionRole::Affirmative,
                             "ssh-confirmation-test-confirm",
                         ),
                         ModalAction::new(
-                            DeleteAction::Cancel,
+                            TestAlertAction::Cancel,
                             "Cancel",
                             ModalActionRole::Cancel,
                             "ssh-confirmation-test-cancel",
@@ -2621,18 +2267,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn add_save_and_connect_then_edit_should_preserve_flow_ownership(cx: &mut TestAppContext) {
+    fn add_save_and_connect_should_preserve_flow_ownership(cx: &mut TestAppContext) {
         let backend = FakeBackend::new([Task::ready(Err(
             RemoteWorkspaceFlowBackendError::ConnectionFailed,
         ))]);
-        backend.push_save(Ok(()));
         backend.push_save(Ok(()));
         let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
 
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
                 flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestAddHost(destination("work")),
+                    &SshHostPickerEvent::RequestAddHost,
                     window,
                     cx,
                 );
@@ -2661,187 +2306,9 @@ mod tests {
             RemoteWorkspaceFlowStage::HostSelection
         );
 
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestEditHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::EditingHost
-        );
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::HostSelection
-        );
         let records = backend.state.lock().unwrap().save_records.clone();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].host.alias().as_str(), "work");
-        assert_eq!(records[0].editing_alias, None);
-        assert_eq!(records[1].editing_alias, Some(alias("work")));
-    }
-
-    #[gpui::test]
-    fn active_managed_host_should_disable_delete_and_confirmed_delete_should_refresh(
-        cx: &mut TestAppContext,
-    ) {
-        let backend = FakeBackend::new([]);
-        backend.insert_managed(managed_host("work"));
-        backend.set_active(alias("work"), true);
-        backend.push_delete(Ok(()));
-        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestDeleteHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::HostSelection
-        );
-
-        backend.set_active(alias("work"), false);
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestDeleteHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DeleteConfirmation
-        );
-        click("modal-action-remote-workspace-delete-confirm", cx);
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::HostSelection
-        );
-        assert_eq!(
-            backend.state.lock().unwrap().delete_records,
-            [alias("work")]
-        );
-    }
-
-    #[gpui::test]
-    fn edit_save_should_recheck_active_use_and_retain_entered_values(cx: &mut TestAppContext) {
-        let backend = FakeBackend::new([]);
-        backend.insert_managed(managed_host("work"));
-        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestEditHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        backend.set_active(alias("work"), true);
-
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::EditingHost
-        );
-        assert!(cx.debug_bounds("managed-ssh-host-backend-error").is_some());
-        assert!(backend.state.lock().unwrap().save_records.is_empty());
-        backend.set_active(alias("work"), false);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(
-            backend.state.lock().unwrap().save_records[0]
-                .host
-                .alias()
-                .as_str(),
-            "work"
-        );
-    }
-
-    #[gpui::test]
-    fn delete_commit_should_recheck_active_use_before_backend_mutation(cx: &mut TestAppContext) {
-        let backend = FakeBackend::new([]);
-        backend.insert_managed(managed_host("work"));
-        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestDeleteHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        backend.set_active(alias("work"), true);
-
-        click("modal-action-remote-workspace-delete-confirm", cx);
-
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DeletingHost
-        );
-        assert!(
-            cx.debug_bounds("modal-action-remote-workspace-delete-error-ok")
-                .is_some()
-        );
-        let state = backend.state.lock().unwrap();
-        assert!(state.delete_records.is_empty());
-        assert!(state.managed.contains_key(&alias("work")));
-    }
-
-    #[gpui::test]
-    fn delete_failure_should_show_fixed_recovery_and_return_to_host_selection(
-        cx: &mut TestAppContext,
-    ) {
-        let backend = FakeBackend::new([]);
-        backend.insert_managed(managed_host("work"));
-        backend.push_delete(Err(RemoteWorkspaceFlowBackendError::DeleteFailed));
-        let (_, flow, _, cx) = flow_window(backend, cx);
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestDeleteHost(alias("work")),
-                    window,
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        click("modal-action-remote-workspace-delete-confirm", cx);
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::DeletingHost
-        );
-        assert!(
-            cx.debug_bounds("modal-action-remote-workspace-delete-error-ok")
-                .is_some()
-        );
-
-        click("modal-action-remote-workspace-delete-error-ok", cx);
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::HostSelection
-        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].alias().as_str(), "work");
     }
 
     #[test]
@@ -3181,7 +2648,7 @@ mod tests {
                     "Replacement",
                     "Replacement",
                     vec![ModalAction::new(
-                        AcknowledgeAction::Acknowledge,
+                        TestAlertAction::Acknowledge,
                         "OK",
                         ModalActionRole::Cancel,
                         "remote-workspace-test-replacement-ok",

@@ -468,7 +468,6 @@ pub(crate) fn open(
         native_services: host.adapters.native_services.clone(),
         lifecycle: host.adapters.lifecycle.clone(),
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
-        permission_recovery: host.adapters.permission_recovery.clone(),
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
     };
@@ -761,8 +760,6 @@ pub(crate) struct ApplicationCapabilities {
         Rc<dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory>,
     pub(crate) native_services: crate::terminal::native_services::NativeServiceAdapters,
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
-    pub(crate) permission_recovery:
-        Option<Rc<dyn crate::platform::permission_recovery::PermissionRecoveryOpener>>,
     pub(crate) microphone_access:
         Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
     pub(crate) remote_workspace:
@@ -1010,7 +1007,6 @@ mod runtime_tests {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
-                permission_recovery: None,
                 microphone_access: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
