@@ -2418,7 +2418,10 @@ impl EntityInputHandler for TextInput {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.enabled && self.focus_handle.is_focused(window) {
+            window.blur(cx);
+        }
         let font = crate::control_typography(cx).regular().clone();
         self.initial_value_source = None;
         let entity = cx.entity();

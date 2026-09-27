@@ -1269,6 +1269,9 @@ impl ButtonCore {
         let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
             ButtonState::new(modal_focus_handle, window, cx)
         });
+        if !enabled && state.read(cx).focus_handle.is_focused(window) {
+            window.blur(cx);
+        }
         let modal_press_owner = self
             .modal_press_owner
             .clone()
@@ -2415,6 +2418,24 @@ mod tests {
         cx.simulate_event(KeyUpEvent { keystroke: enter });
 
         assert_eq!(activations.get(), 0);
+    }
+
+    #[gpui::test]
+    fn disabling_a_focused_button_releases_responder_focus(cx: &mut TestAppContext) {
+        let (root, _, _, cx) = button_window(cx, false, true);
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
+        });
+        assert!(cx.debug_bounds("test-button-keyboard-focus").is_some());
+
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| window.focused(cx).is_none()));
     }
 
     #[gpui::test]

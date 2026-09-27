@@ -1341,8 +1341,26 @@ fn runtime_editable_and_enabled_transitions_preserve_selection_and_gate_edits(
         "abc"
     );
     input.update(cx, |input, cx| input.set_enabled(true, cx));
+    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
     cx.simulate_keystrokes("backspace");
     assert_eq!(input.read_with(cx, |input, _| input.value().to_owned()), "");
+}
+
+#[gpui::test]
+fn disabling_a_focused_input_releases_responder_focus(cx: &mut TestAppContext) {
+    let (input, cx) = input(cx, "abc");
+    assert!(input.read_with(cx, |input, _| input.is_focused()));
+
+    input.update(cx, |input, cx| input.set_enabled(false, cx));
+    cx.run_until_parked();
+
+    assert!(!input.read_with(cx, |input, _| input.is_focused()));
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+
+    input.update(cx, |input, cx| input.set_enabled(true, cx));
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
 }
 
 #[gpui::test]
