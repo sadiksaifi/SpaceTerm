@@ -2970,7 +2970,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                 first_window,
                 ErasedPaletteRegistration {
                     token: CommandPaletteRegistration(1),
-                    restore_focus: None,
+                    replacement_focus: Rc::new(|_| None),
                     suspend: Rc::new(move |_, _| {
                         first_flag.set(true);
                         None
@@ -2984,7 +2984,7 @@ fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &m
                 second_window,
                 ErasedPaletteRegistration {
                     token: CommandPaletteRegistration(2),
-                    restore_focus: None,
+                    replacement_focus: Rc::new(|_| None),
                     suspend: Rc::new(move |_, _| {
                         second_flag.set(true);
                         None

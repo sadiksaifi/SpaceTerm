@@ -82,10 +82,11 @@ type SuspendPalette = Rc<dyn Fn(u64, &mut App) -> Option<WeakFocusHandle>>;
 type ResumePalette = Rc<dyn Fn(u64, CommandPaletteRegistration, &mut App)>;
 type ReplacePalette = Rc<dyn Fn(&mut App)>;
 type ReplacePaletteNow = Rc<dyn Fn(&mut Window, &mut App) -> Option<WeakFocusHandle>>;
+type PaletteReplacementFocus = Rc<dyn Fn(&App) -> Option<CommandPaletteReplacementFocus>>;
 
 struct ErasedPaletteRegistration {
     token: CommandPaletteRegistration,
-    restore_focus: Option<WeakFocusHandle>,
+    replacement_focus: PaletteReplacementFocus,
     suspend: SuspendPalette,
     resume: ResumePalette,
     replace: ReplacePalette,
@@ -252,8 +253,6 @@ pub(crate) fn discard_window_command_palette_suspension(
 
 fn register_open_palette<I: Clone + Eq + 'static>(
     owner: WeakEntity<CommandPalette<I>>,
-    restore_focus: Option<WeakFocusHandle>,
-    inherit_previous: bool,
     window: &Window,
     cx: &mut App,
 ) -> (
@@ -264,6 +263,13 @@ fn register_open_palette<I: Clone + Eq + 'static>(
     let window_id = window.window_handle().window_id();
     let window_handle = window.window_handle();
     let suspend_window = window_handle;
+    let focus_owner = owner.clone();
+    let replacement_focus: PaletteReplacementFocus = Rc::new(move |cx| {
+        focus_owner
+            .read_with(cx, |palette, _| palette.captured_replacement_focus())
+            .ok()
+            .flatten()
+    });
     let suspend_owner = owner.clone();
     let suspend: SuspendPalette = Rc::new(move |generation, cx| {
         let predecessor = suspend_owner
@@ -348,27 +354,14 @@ fn register_open_palette<I: Clone + Eq + 'static>(
                     window_id,
                     ErasedPaletteRegistration {
                         token,
-                        restore_focus,
+                        replacement_focus,
                         suspend,
                         resume,
                         replace,
                         replace_now,
                     },
                 )
-                .map(|registration| {
-                    (
-                        registration.replace,
-                        CommandPaletteReplacementFocus {
-                            restore_focus: registration.restore_focus,
-                        },
-                    )
-                });
-            if inherit_previous
-                && let Some((_, predecessor)) = &replaced
-                && let Some(current) = coordinator.registrations.get_mut(&window_id)
-            {
-                current.restore_focus = predecessor.restore_focus.clone();
-            }
+                .map(|registration| (registration.replace, registration.replacement_focus));
             let modal_suspension =
                 coordinator
                     .modal_suspensions
@@ -379,26 +372,12 @@ fn register_open_palette<I: Clone + Eq + 'static>(
                     });
             (token, modal_suspension, replaced)
         });
-    let inherited = replaced.map(|(replaced, predecessor)| {
-        replaced(cx);
+    let inherited = replaced.and_then(|(replace, replacement_focus)| {
+        let predecessor = replacement_focus(cx);
+        replace(cx);
         predecessor
     });
     (token, modal_suspension, inherited)
-}
-
-fn update_registered_palette_focus(
-    window_id: WindowId,
-    registration: CommandPaletteRegistration,
-    restore_focus: Option<WeakFocusHandle>,
-    cx: &mut App,
-) {
-    cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
-        if let Some(current) = coordinator.registrations.get_mut(&window_id)
-            && current.token == registration
-        {
-            current.restore_focus = restore_focus;
-        }
-    });
 }
 
 pub(crate) fn dismiss_active_command_palette_for_replacement(
@@ -2034,17 +2013,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if command_palette_modal_generation(window.window_handle().window_id(), cx).is_some()
             || crate::modal::window_modal_is_open(window, cx)
         {
-            let explicit_replacement = replacement.is_some();
-            let proposed_focus = replacement
-                .as_ref()
-                .and_then(|replacement| replacement.restore_focus.clone());
-            let (registration, modal_suspension, inherited) = register_open_palette(
-                cx.entity().downgrade(),
-                proposed_focus,
-                !explicit_replacement,
-                window,
-                cx,
-            );
+            let (registration, modal_suspension, inherited) =
+                register_open_palette(cx.entity().downgrade(), window, cx);
             if let Some(generation) = modal_suspension {
                 self.coordinator_registration = Some(registration);
                 self.suspended_by_modal = Some(generation);
@@ -2087,25 +2057,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         };
         self.open = true;
         if self.coordinator_registration.is_none() {
-            let (registration, modal_suspension, inherited) = register_open_palette(
-                cx.entity().downgrade(),
-                self.restore_focus.clone(),
-                !explicit_replacement,
-                window,
-                cx,
-            );
+            let (registration, modal_suspension, inherited) =
+                register_open_palette(cx.entity().downgrade(), window, cx);
             self.coordinator_registration = Some(registration);
             self.suspended_by_modal = modal_suspension;
             if !explicit_replacement && let Some(inherited) = inherited {
                 self.restore_focus = inherited.restore_focus;
             }
-        } else if let Some(registration) = self.coordinator_registration {
-            update_registered_palette_focus(
-                window.window_handle().window_id(),
-                registration,
-                self.restore_focus.clone(),
-                cx,
-            );
         }
         crate::tooltip::set_window_tooltip_suppression(
             window.window_handle().window_id(),
@@ -2204,6 +2162,23 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         };
         self.close(CommandPaletteCloseReason::Replaced, window, cx)
             .then_some(replacement)
+    }
+
+    /// Returns the focus owner a replacing palette inherits, once this palette has captured one.
+    ///
+    /// A pending open without an explicit replacement captures its owner only when it finishes.
+    fn captured_replacement_focus(&self) -> Option<CommandPaletteReplacementFocus> {
+        let restore_focus = if self.open {
+            self.restore_focus.clone()
+        } else {
+            self.pending_open
+                .as_ref()?
+                .replacement
+                .as_ref()?
+                .restore_focus
+                .clone()
+        };
+        Some(CommandPaletteReplacementFocus { restore_focus })
     }
 
     /// Returns whether the transient overlay is open.
