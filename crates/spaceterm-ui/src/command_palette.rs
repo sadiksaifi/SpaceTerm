@@ -2716,7 +2716,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return false;
         }
         self.suspended_by_modal = None;
-        if let Some(pending) = self.pending_open.take() {
+        if let Some(mut pending) = self.pending_open.take() {
+            if !pending.transferred_focus
+                && let Some(target) = crate::modal::take_window_modal_focus_restoration(window, cx)
+            {
+                pending.replacement.restore_focus = Some(target);
+            }
             return self.finish_open(Some(pending.replacement), window, cx);
         }
         if !self.open {

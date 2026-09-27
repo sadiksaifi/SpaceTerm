@@ -165,6 +165,17 @@ pub(crate) fn window_modal_predecessor_focus(
     core::window_modal_predecessor_focus(window, cx)
 }
 
+/// Transfers a closed modal sequence's pending focus restoration, successor first.
+///
+/// A transient that resumes over the closed sequence takes over restoration, so the modal no
+/// longer restores focus itself.
+pub(crate) fn take_window_modal_focus_restoration(
+    window: &gpui::Window,
+    cx: &mut gpui::App,
+) -> Option<gpui::WeakFocusHandle> {
+    core::take_window_modal_focus_restoration(window, cx)
+}
+
 pub(crate) fn focus_allows_transient_resume(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::focus_allows_transient_resume(window, cx)
 }
