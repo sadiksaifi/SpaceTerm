@@ -280,6 +280,9 @@ pub(super) struct SshHostPicker {
     rows: Vec<HostPickerRow>,
     open: bool,
     refresh_generation: u64,
+    /// Keeps the palette loading while discovery is pending, because rebuilding rows for a query
+    /// event would otherwise present the previous discovery.
+    discovery_pending: bool,
     retained_query: String,
     retained_selection: Option<SshHostPickerItemId>,
     observed_selection: Option<SshHostPickerItemId>,
@@ -318,6 +321,7 @@ impl SshHostPicker {
             rows: Vec::new(),
             open: false,
             refresh_generation: 0,
+            discovery_pending: false,
             retained_query: String::new(),
             retained_selection: None,
             observed_selection: None,
@@ -399,6 +403,7 @@ impl SshHostPicker {
                 self.capture_selection(cx);
                 self.open = false;
                 self.refresh_generation = self.refresh_generation.wrapping_add(1);
+                self.discovery_pending = false;
                 cx.emit(SshHostPickerEvent::Lifecycle(
                     SshHostPickerLifecycleEvent::Closed(*reason),
                 ));
@@ -433,6 +438,7 @@ impl SshHostPicker {
     fn start_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
         let generation = self.refresh_generation;
+        self.discovery_pending = true;
         self.palette
             .update(cx, |palette, cx| palette.set_loading(true, cx));
         let provider = Arc::clone(&self.discovery_provider);
@@ -456,6 +462,7 @@ impl SshHostPicker {
             return false;
         }
         self.discovery = discovery;
+        self.discovery_pending = false;
         self.rebuild_rows(cx);
         true
     }
@@ -478,6 +485,7 @@ impl SshHostPicker {
             palette.set_empty(empty_state(&self.discovery, &self.retained_query), cx);
             palette.set_preferred_item(self.retained_selection.clone(), cx);
             palette.set_items(items, cx);
+            palette.set_loading(self.discovery_pending, cx);
         });
     }
 
@@ -932,6 +940,29 @@ mod tests {
 
         assert!(diagnostic.description.contains("narrow Include patterns"));
         assert!(diagnostic.description.len() <= MAXIMUM_DISCOVERY_WARNING_BYTES);
+    }
+
+    #[gpui::test]
+    fn pending_discovery_should_show_loading_instead_of_the_empty_state(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let provider: Arc<dyn HostDiscoveryProvider> = Arc::new(
+            ScriptedHostDiscoveryProvider::new([host_discovery("Host work\n", "")]),
+        );
+        let (harness, cx) =
+            cx.add_window_view(move |window, cx| SshHostPickerHarness::new(provider, window, cx));
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| {
+                picker.open(window, cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(cx.debug_bounds("command-palette-loading").is_some());
+        assert!(cx.debug_bounds("command-palette-empty").is_none());
     }
 
     #[gpui::test]
