@@ -1728,14 +1728,31 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         );
         let focus_scope = cx.focus_handle();
-        let focus_subscription = cx.on_focus_out(&focus_scope, window, |palette, _, window, cx| {
-            if palette.open
-                && palette.suspended_by_modal.is_none()
-                && !crate::menu::window_menu_is_open(window, cx)
-            {
-                palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
-            }
-        });
+        let focus_subscription =
+            cx.on_focus_out(&focus_scope, window, |palette, event, window, cx| {
+                if palette.open
+                    && palette.suspended_by_modal.is_none()
+                    && !crate::menu::window_menu_is_open(window, cx)
+                {
+                    // Unmounting removes the focus path before GPUI clears the responder. An
+                    // unchanged responder belongs to the removed palette, not a new focus owner.
+                    let removed_responder = window.is_window_active()
+                        && event
+                            .blurred
+                            .upgrade()
+                            .is_some_and(|focus| focus.is_focused(window));
+                    let predecessor = palette.restore_focus.clone();
+                    if palette.close(CommandPaletteCloseReason::FocusLost, window, cx)
+                        && removed_responder
+                    {
+                        if let Some(predecessor) = predecessor.and_then(|focus| focus.upgrade()) {
+                            predecessor.focus(window, cx);
+                        } else {
+                            window.blur(cx);
+                        }
+                    }
+                }
+            });
         let scrollbar =
             cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar").persistent());
         let scrollbar_subscription = cx.subscribe_in(
