@@ -1601,6 +1601,25 @@ impl ModalWindowOwner {
         {
             target.focus(window, cx);
         }
+        self.clear_focus_restoration();
+    }
+
+    /// Hands a closed modal sequence's pending restoration target to the caller.
+    fn take_focus_restoration(&mut self) -> Option<WeakFocusHandle> {
+        if !self.focus_chain.restoration_pending || self.active.is_some() {
+            return None;
+        }
+        let target = self
+            .focus_chain
+            .successor
+            .as_ref()
+            .map(FocusHandle::downgrade)
+            .or_else(|| self.focus_chain.predecessor.clone());
+        self.clear_focus_restoration();
+        target
+    }
+
+    fn clear_focus_restoration(&mut self) {
         self.focus_chain.restoration_pending = false;
         self.focus_chain.predecessor = None;
         self.focus_chain.successor = None;
@@ -2907,6 +2926,21 @@ pub(crate) fn current_modal_parent(window: &Window, cx: &App) -> Option<ModalPar
 pub(crate) fn focused_modal_parent(window: &Window, cx: &App) -> Option<ModalParentToken> {
     modal_parent_for_focus(&window.focused(cx)?, window, cx)
         .or_else(|| crate::combo_box::focused_combo_box_modal_parent(window, cx))
+}
+
+pub(crate) fn window_modal_predecessor_focus(window: &Window, cx: &App) -> Option<WeakFocusHandle> {
+    modal_owner_for_render(window, cx)?
+        .read(cx)
+        .focus_chain
+        .predecessor
+        .clone()
+}
+
+pub(crate) fn take_window_modal_focus_restoration(
+    window: &Window,
+    cx: &mut App,
+) -> Option<WeakFocusHandle> {
+    modal_owner_for_render(window, cx)?.update(cx, |owner, _| owner.take_focus_restoration())
 }
 
 pub(crate) fn modal_parent_for_focus(
