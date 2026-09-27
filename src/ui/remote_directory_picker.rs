@@ -5,7 +5,7 @@ use gpui::{Action, App};
 use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteConfirm, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus,
     FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
     fuzzy_filter,
@@ -595,7 +595,9 @@ impl RemoteDirectoryPicker {
                 self.descend_to(activation.item_id().clone(), window, cx);
             }
             CommandPaletteEvent::Confirmed => self.confirm_current(window, cx),
-            CommandPaletteEvent::HeaderAction(_) | CommandPaletteEvent::MenuAction(_) => {}
+            CommandPaletteEvent::HeaderAction(_)
+            | CommandPaletteEvent::EmptyAction(_)
+            | CommandPaletteEvent::MenuAction(_) => {}
         }
     }
 
@@ -1065,7 +1067,7 @@ impl RemoteDirectoryPicker {
         .debug_selector("remote-directory-picker-confirm");
         self.palette.update(cx, |palette, cx| {
             palette.set_confirm(Some(confirm), cx);
-            palette.set_no_results_text(self.empty_text(), cx);
+            palette.set_empty(CommandPaletteEmpty::new(self.empty_text()), cx);
             palette.set_loading(loading, cx);
             palette.set_query_editable(!loading, cx);
             palette.set_dismissible(!loading, cx);

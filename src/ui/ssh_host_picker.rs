@@ -8,7 +8,7 @@ use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
-    CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, FuzzyTarget, Icon, IconName, MenuEntry,
     fuzzy_filter,
 };
@@ -308,7 +308,7 @@ impl SshHostPicker {
             );
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
-            palette.set_no_results_text("No matching SSH hosts", cx);
+            palette.set_empty(CommandPaletteEmpty::new("No matching SSH hosts"), cx);
             palette.set_actions_menu_label("Host Actions", cx);
             palette
         });
@@ -435,7 +435,9 @@ impl SshHostPicker {
                 }
             }
             CommandPaletteEvent::MenuAction(action) => self.activate_footer_action(action, cx),
-            CommandPaletteEvent::HeaderAction(_) | CommandPaletteEvent::Confirmed => {}
+            CommandPaletteEvent::HeaderAction(_)
+            | CommandPaletteEvent::EmptyAction(_)
+            | CommandPaletteEvent::Confirmed => {}
         }
     }
 
@@ -482,7 +484,10 @@ impl SshHostPicker {
                 .map(HostPickerRow::into_palette_item),
         );
         self.palette.update(cx, |palette, cx| {
-            palette.set_no_results_text(no_results_text(&self.discovery, &self.retained_query), cx);
+            palette.set_empty(
+                CommandPaletteEmpty::new(no_results_text(&self.discovery, &self.retained_query)),
+                cx,
+            );
             palette.set_preferred_item(self.retained_selection.clone(), cx);
             palette.set_items(items, cx);
         });

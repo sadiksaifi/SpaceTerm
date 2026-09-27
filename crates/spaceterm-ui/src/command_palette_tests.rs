@@ -1364,6 +1364,196 @@ fn footer_should_render_only_with_hints_or_an_actions_menu(cx: &mut TestAppConte
     );
 }
 
+fn show_empty_state(
+    root: &Entity<TestRoot>,
+    palette: &Entity<CommandPalette<u8>>,
+    empty: CommandPaletteEmpty,
+    cx: &mut VisualTestContext,
+) {
+    palette.update(cx, |palette, cx| palette.set_empty(empty, cx));
+    open_palette(root, palette, cx);
+    cx.simulate_keystrokes("z z z");
+    cx.run_until_parked();
+}
+
+fn empty_actions(events: &RefCell<Vec<CommandPaletteEvent<u8>>>) -> Vec<SharedString> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::EmptyAction(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn return_should_activate_the_default_empty_action_without_closing(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .description("Add the host to connect.")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").debug_selector("empty-add"))
+            .action(CommandPaletteEmptyAction::new("help", "Help").debug_selector("empty-help")),
+        cx,
+    );
+
+    for selector in [
+        "command-palette-empty-title",
+        "command-palette-empty-description",
+        "empty-add",
+        "empty-help",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the empty state did not render {selector}"
+        );
+    }
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(empty_actions(&events), vec![SharedString::from("add")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn a_disabled_default_empty_action_should_ignore_return(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").disabled(true))
+            .action(CommandPaletteEmptyAction::new("help", "Help").debug_selector("empty-help")),
+        cx,
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(empty_actions(&events).is_empty());
+
+    let help = cx
+        .debug_bounds("empty-help")
+        .expect("the second empty action was not rendered");
+    cx.simulate_click(help.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(empty_actions(&events), vec![SharedString::from("help")]);
+}
+
+#[gpui::test]
+fn tab_navigation_should_reach_empty_actions_and_return_to_the_query(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .action(CommandPaletteEmptyAction::new("add", "Add Host")),
+        cx,
+    );
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+
+    cx.simulate_keystrokes("shift-tab backspace");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.query().to_owned()),
+        "zz"
+    );
+}
+
+#[gpui::test]
+fn the_panel_should_contain_a_wrapped_empty_description_and_its_actions(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No matching hosts")
+            .description(
+                "This description is long enough to wrap across more than one line inside the \
+                 narrow test palette, so the panel must grow to fit it.",
+            )
+            .action(CommandPaletteEmptyAction::new("add", "Add Host").debug_selector("empty-add")),
+        cx,
+    );
+
+    let metrics = cx.update(|_, cx| command_palette_theme(cx).metrics);
+    let panel = cx
+        .debug_bounds("command-palette-panel")
+        .expect("the palette panel was not rendered");
+    let description = cx
+        .debug_bounds("command-palette-empty-description")
+        .expect("the empty description was not rendered");
+    let action = cx
+        .debug_bounds("empty-add")
+        .expect("the empty action was not rendered");
+
+    assert!(
+        description.size.height > metrics.secondary_line_height,
+        "the description did not wrap: {description:?}"
+    );
+    assert!(
+        action.bottom() + metrics.empty_padding <= panel.bottom(),
+        "the panel clipped the empty state: {panel:?} {action:?}"
+    );
+}
+
+#[gpui::test]
+fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
+        palette.set_confirm_item(Some(3), cx);
+    });
+    open_palette(&root, &palette, cx);
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    let activated = events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::Activated(activation) => Some(*activation.item_id()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(activated, vec![3]);
+}
+
+#[gpui::test]
+fn the_confirm_key_should_ignore_a_disabled_confirm_item(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| palette.set_confirm_item(Some(2), cx));
+    open_palette(&root, &palette, cx);
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
+        "the confirm key activated a disabled item"
+    );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
 #[gpui::test]
 fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);

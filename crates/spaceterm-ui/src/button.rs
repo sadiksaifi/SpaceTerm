@@ -478,6 +478,11 @@ impl ButtonTheme {
         metrics.icon_button_size.unwrap_or(metrics.height)
     }
 
+    /// Returns the outer height of a text button in this theme.
+    pub fn control_height(self, size: ButtonSize) -> Pixels {
+        self.sizes.resolve(size).height
+    }
+
     /// Returns the keyboard focus-ring paint.
     #[cfg(test)]
     pub(crate) fn focus_border(self) -> Rgba {
