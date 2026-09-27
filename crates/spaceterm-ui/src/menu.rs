@@ -6,12 +6,12 @@ use std::{
 };
 
 use gpui::{
-    Anchor, AnyElement, App, BorrowAppContext as _, Bounds, ElementId, Entity, FocusHandle, Font,
-    Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    RenderOnce, Rgba, ScrollHandle, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Task, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
-    div, point, prelude::FluentBuilder as _, px, size,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, ElementId, Entity,
+    FocusHandle, Font, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, RenderOnce, Rgba, ScrollHandle, SharedString, Size,
+    StatefulInteractiveElement as _, Styled as _, Task, WeakEntity, WeakFocusHandle, Window,
+    WindowId, actions, anchored, canvas, div, point, prelude::FluentBuilder as _, px, size,
 };
 
 pub use crate::anchored_placement::{
@@ -2092,10 +2092,25 @@ impl MenuState {
             }
         })
         .detach();
-        cx.on_release(|state, cx| {
+        let release_window_handle = window.window_handle();
+        cx.on_release(move |state, cx| {
             let reservation = state.reservation.take();
             if state.open {
                 state.open = false;
+                let retired_focus = state.focus_handle.clone();
+                let predecessor = state.restore_focus.take();
+                cx.defer(move |cx| {
+                    let _ = cx.update_window(release_window_handle, |_, window, cx| {
+                        if retired_focus.is_focused(window) {
+                            if let Some(predecessor) = predecessor.and_then(|focus| focus.upgrade())
+                            {
+                                predecessor.focus(window, cx);
+                            } else {
+                                window.blur(cx);
+                            }
+                        }
+                    });
+                });
                 state.emit_lifecycle(
                     MenuLifecycleEvent::Closed(MenuCloseReason::TargetDisappeared),
                     cx,
@@ -3605,10 +3620,7 @@ fn place_submenu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{
-        AppContext as _, Context, Entity, Modifiers, Render, TestAppContext, VisualTestContext,
-        rgba,
-    };
+    use gpui::{Context, Entity, Modifiers, Render, TestAppContext, VisualTestContext, rgba};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -5306,6 +5318,8 @@ mod tests {
     #[gpui::test]
     fn disappearing_open_target_should_emit_closed_once(cx: &mut TestAppContext) {
         let (root, lifecycle, _, cx) = lifecycle_window(cx);
+        let prior_focus = root.read_with(cx, |root, _| root.other_focus.clone());
+        cx.update(|window, cx| prior_focus.focus(window, cx));
         let trigger = cx
             .debug_bounds("lifecycle-trigger")
             .unwrap_or_else(|| panic!("lifecycle trigger not painted"));
@@ -5326,6 +5340,7 @@ mod tests {
                 MenuLifecycleEvent::Closed(MenuCloseReason::TargetDisappeared),
             ]
         );
+        assert!(cx.update(|window, _| prior_focus.is_focused(window)));
     }
 
     struct StateHarness {
