@@ -3278,7 +3278,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .flex()
             .flex_row()
             .items_center()
-            .gap(metrics.gap)
+            // Centering the glyph in its slot then gives it equal space on both sides.
+            .gap(metrics.panel_padding)
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
             .when_some(self.input_leading_icon.as_ref(), |editor, icon| {

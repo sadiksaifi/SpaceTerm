@@ -1301,6 +1301,7 @@ fn search_line_icons_should_share_size_and_edge_spacing(cx: &mut TestAppContext)
     let editor = cx.debug_bounds("command-palette-editor").unwrap();
     let leading = cx.debug_bounds("search-leading-glyph").unwrap();
     let trailing = cx.debug_bounds("search-trailing-glyph").unwrap();
+    let input = cx.debug_bounds("command-palette-input").unwrap();
 
     assert_eq!(leading.size, trailing.size);
     assert_eq!(
@@ -1308,6 +1309,10 @@ fn search_line_icons_should_share_size_and_edge_spacing(cx: &mut TestAppContext)
         editor.right() - trailing.right()
     );
     assert_eq!(leading.center().y, trailing.center().y);
+    assert_eq!(
+        input.left() - leading.right(),
+        leading.left() - editor.left()
+    );
 }
 
 #[gpui::test]
