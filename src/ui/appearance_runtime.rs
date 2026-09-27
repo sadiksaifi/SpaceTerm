@@ -12,8 +12,8 @@ use crate::platform::window_frame::WindowFrameGeometry;
 
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
-    AvailableFonts, ChromeFontFamily, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES,
-    FontClass, ResolvedAppearance, SchemeCatalog, SystemAppearance, TerminalFontFamily,
+    AvailableFonts, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES, FontClass,
+    ResolvedAppearance, SchemeCatalog, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -141,7 +141,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     };
     ensure_selected_fonts(&candidate.preferences, cx);
     let fonts = cx.global::<AppearanceRuntime>().fonts.clone();
-    let catalog = SchemeCatalog::from_custom_schemes(&candidate.custom_schemes)
+    let catalog = SchemeCatalog::from_color_schemes(&candidate.color_schemes)
         .map_err(|_| SettingsError::Invalid)?;
     let generation = cx
         .try_global::<InstalledAppearance>()
@@ -329,15 +329,10 @@ fn base_fonts(installed: Vec<AvailableFont>) -> AvailableFonts {
 }
 
 fn selected_font(family: &str, preferences: &AppearancePreferences) -> bool {
-    let chrome = matches!(
-        &preferences.chrome.typography.family,
-        ChromeFontFamily::Named { family: selected } if selected == family
-    );
-    let terminal = match &preferences.terminal.typography.family {
+    match &preferences.terminal.typography.family {
         TerminalFontFamily::DefaultMonospace => DEFAULT_TERMINAL_FAMILIES.contains(&family),
         TerminalFontFamily::Named { family: selected } => selected == family,
-    };
-    chrome || terminal
+    }
 }
 
 /// Enumerate once before the first window, but classify only families that can affect its type.

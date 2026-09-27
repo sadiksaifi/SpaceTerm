@@ -74,7 +74,6 @@ fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
                 "crate::settings",
                 "spaceterm::",
                 "ACTIVE_THEME",
-                "VAGUE_PRO",
             ],
         ),
     ];
@@ -781,5 +780,8 @@ fn main_thread_runner_lists_every_native_platform_fixture() {
             );
         }
     }
-    assert!(fixture_count > 0, "no native main-thread fixtures were found");
+    assert!(
+        fixture_count > 0,
+        "no native main-thread fixtures were found"
+    );
 }

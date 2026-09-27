@@ -2,22 +2,21 @@ use std::collections::BTreeSet;
 
 use super::*;
 
-fn chrome_scheme(id: impl Into<String>, name: impl Into<String>) -> CustomScheme {
-    CustomScheme::Chrome(Box::new(ChromeScheme {
-        window_background: None,
+fn color_scheme(id: impl Into<String>, name: impl Into<String>) -> ColorScheme {
+    ColorScheme {
         id: SchemeId::new(id).unwrap(),
         name: name.into(),
         appearance: Appearance::Dark,
         metadata: SchemeMetadata::default(),
-        colors: ChromeColorOverrides::default(),
-    }))
+        colors: TerminalColorOverrides::default(),
+    }
 }
 
-fn custom_scheme_count(catalog: &SchemeCatalog) -> usize {
+fn imported_scheme_count(catalog: &SchemeCatalog) -> usize {
     catalog
         .schemes()
         .iter()
-        .filter(|scheme| !scheme.id().is_reserved())
+        .filter(|scheme| !scheme.id.is_reserved())
         .count()
 }
 
@@ -28,10 +27,10 @@ fn native_document(scheme: &str) -> String {
 #[test]
 fn native_import_rejects_explicit_null_for_non_nullable_optional_fields() {
     let schemes = [
-        r##"{"kind":"chrome","id":"custom.null-author","name":"Null","appearance":"dark","author":null,"colors":{}}"##,
-        r##"{"kind":"chrome","id":"custom.null-chrome","name":"Null","appearance":"dark","colors":{"background":null}}"##,
-        r##"{"kind":"terminal","id":"custom.null-terminal","name":"Null","appearance":"dark","colors":{"foreground":null}}"##,
-        r##"{"kind":"terminal","id":"custom.null-palette","name":"Null","appearance":"dark","colors":{"normal":null}}"##,
+        r##"{"id":"custom.null-author","name":"Null","appearance":"dark","author":null,"colors":{}}"##,
+        r##"{"id":"custom.null-background","name":"Null","appearance":"dark","colors":{"background":null}}"##,
+        r##"{"id":"custom.null-terminal","name":"Null","appearance":"dark","colors":{"foreground":null}}"##,
+        r##"{"id":"custom.null-palette","name":"Null","appearance":"dark","colors":{"normal":null}}"##,
     ];
 
     for scheme in schemes {
@@ -45,13 +44,11 @@ fn native_import_rejects_explicit_null_for_non_nullable_optional_fields() {
 #[test]
 fn native_import_preserves_the_four_explicitly_nullable_terminal_roles() {
     let document = native_document(
-        r##"{"kind":"terminal","id":"custom.nullable","name":"Nullable","appearance":"dark","colors":{"cursor_text":null,"selection_foreground":null,"find_match_foreground":null,"find_active_match_foreground":null}}"##,
+        r##"{"id":"custom.nullable","name":"Nullable","appearance":"dark","colors":{"cursor_text":null,"selection_foreground":null,"find_match_foreground":null,"find_active_match_foreground":null}}"##,
     );
 
     let parsed = parse_color_document(document.as_bytes()).unwrap();
-    let CustomScheme::Terminal(scheme) = &parsed.schemes[0] else {
-        panic!("expected terminal scheme");
-    };
+    let scheme = &parsed.schemes[0];
     assert_eq!(scheme.colors.cursor_text, OptionalColorOverride::None);
     assert_eq!(
         scheme.colors.selection_foreground,
@@ -81,29 +78,29 @@ fn catalog_rejects_an_empty_batch_without_advancing_revision() {
 #[test]
 fn catalog_replacement_at_capacity_does_not_count_as_an_addition() {
     let schemes = (0..128)
-        .map(|index| chrome_scheme(format!("custom.capacity{index}"), format!("Scheme {index}")))
+        .map(|index| color_scheme(format!("custom.capacity{index}"), format!("Scheme {index}")))
         .collect::<Vec<_>>();
-    let mut catalog = SchemeCatalog::from_custom_schemes(&schemes).unwrap();
-    let replacement = chrome_scheme("custom.capacity64", "Replaced");
-    let replace = BTreeSet::from([replacement.id().clone()]);
+    let mut catalog = SchemeCatalog::from_color_schemes(&schemes).unwrap();
+    let replacement = color_scheme("custom.capacity64", "Replaced");
+    let replace = BTreeSet::from([replacement.id.clone()]);
 
     assert_eq!(
         catalog
             .install_batch(std::slice::from_ref(&replacement), 0, &replace)
             .unwrap(),
-        vec![replacement.id().clone()]
+        vec![replacement.id.clone()]
     );
     assert_eq!(catalog.revision(), 1);
-    assert_eq!(custom_scheme_count(&catalog), 128);
+    assert_eq!(imported_scheme_count(&catalog), 128);
     assert_eq!(
         catalog
-            .chrome(replacement.id())
+            .get(&replacement.id)
             .map(|scheme| scheme.name.as_str()),
         Some("Replaced")
     );
     assert_eq!(
         catalog.install_batch(
-            &[chrome_scheme("custom.over-capacity", "Overflow")],
+            &[color_scheme("custom.over-capacity", "Overflow")],
             1,
             &BTreeSet::new()
         ),
@@ -114,21 +111,21 @@ fn catalog_replacement_at_capacity_does_not_count_as_an_addition() {
 
 #[test]
 fn catalog_requires_replacement_intent_to_exactly_match_incoming_collisions() {
-    let original_a = chrome_scheme("custom.intent-a", "Original A");
-    let original_b = chrome_scheme("custom.intent-b", "Original B");
+    let original_a = color_scheme("custom.intent-a", "Original A");
+    let original_b = color_scheme("custom.intent-b", "Original B");
     let mut catalog =
-        SchemeCatalog::from_custom_schemes(&[original_a.clone(), original_b.clone()]).unwrap();
+        SchemeCatalog::from_color_schemes(&[original_a.clone(), original_b.clone()]).unwrap();
     let before = catalog.schemes();
 
-    let replacement_a = chrome_scheme("custom.intent-a", "Replacement A");
-    let extra_intent = BTreeSet::from([original_a.id().clone(), original_b.id().clone()]);
+    let replacement_a = color_scheme("custom.intent-a", "Replacement A");
+    let extra_intent = BTreeSet::from([original_a.id.clone(), original_b.id.clone()]);
     assert_eq!(
         catalog.install_batch(std::slice::from_ref(&replacement_a), 0, &extra_intent),
         Err(CatalogError::UnknownReplacement)
     );
 
-    let new_scheme = chrome_scheme("custom.intent-new", "New");
-    let nonexistent_intent = BTreeSet::from([new_scheme.id().clone()]);
+    let new_scheme = color_scheme("custom.intent-new", "New");
+    let nonexistent_intent = BTreeSet::from([new_scheme.id.clone()]);
     assert_eq!(
         catalog.install_batch(&[new_scheme], 0, &nonexistent_intent),
         Err(CatalogError::UnknownReplacement)
@@ -146,8 +143,8 @@ fn catalog_requires_replacement_intent_to_exactly_match_incoming_collisions() {
 fn catalog_never_replaces_a_reserved_builtin() {
     let mut catalog = SchemeCatalog::default();
     let before = catalog.schemes();
-    let reserved = chrome_scheme("builtin.spaceterm.chrome.dark", "Overwrite");
-    let replace = BTreeSet::from([reserved.id().clone()]);
+    let reserved = color_scheme("builtin.spaceterm.dark", "Overwrite");
+    let replace = BTreeSet::from([reserved.id.clone()]);
 
     assert_eq!(
         catalog.install_batch(&[reserved], 0, &replace),
@@ -159,12 +156,12 @@ fn catalog_never_replaces_a_reserved_builtin() {
 
 #[test]
 fn catalog_batch_failure_is_atomic_after_valid_entries() {
-    let original = chrome_scheme("custom.atomic-original", "Original");
-    let mut catalog = SchemeCatalog::from_custom_schemes(&[original]).unwrap();
+    let original = color_scheme("custom.atomic-original", "Original");
+    let mut catalog = SchemeCatalog::from_color_schemes(&[original]).unwrap();
     let before = catalog.schemes();
     let batch = [
-        chrome_scheme("custom.atomic-new", "New"),
-        chrome_scheme("custom.atomic-new", "Duplicate"),
+        color_scheme("custom.atomic-new", "New"),
+        color_scheme("custom.atomic-new", "Duplicate"),
     ];
 
     assert_eq!(
@@ -177,7 +174,7 @@ fn catalog_batch_failure_is_atomic_after_valid_entries() {
 
 #[test]
 fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
-    let first = chrome_scheme("custom.first", "First");
+    let first = color_scheme("custom.first", "First");
     let mut catalog = SchemeCatalog::default();
     catalog
         .install_batch(&[first], 0, &BTreeSet::new())
@@ -186,14 +183,14 @@ fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
 
     assert_eq!(
         catalog.install_batch(
-            &[chrome_scheme("custom.stale", "Stale")],
+            &[color_scheme("custom.stale", "Stale")],
             0,
             &BTreeSet::new()
         ),
         Err(CatalogError::RevisionConflict)
     );
-    let oversized = (0..65)
-        .map(|index| chrome_scheme(format!("custom.batch{index}"), format!("Batch {index}")))
+    let oversized = (0..33)
+        .map(|index| color_scheme(format!("custom.batch{index}"), format!("Batch {index}")))
         .collect::<Vec<_>>();
     assert_eq!(
         catalog.install_batch(&oversized, 1, &BTreeSet::new()),
@@ -206,15 +203,14 @@ fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
 #[test]
 fn deterministic_zed_reimport_collides_until_explicitly_replaced() {
     let bytes = include_bytes!("fixtures/vague-pro/theme.json");
-    let imported = import_zed(bytes, 0, &[ZedImportKind::Chrome, ZedImportKind::Terminal]).unwrap();
+    let imported = [import_zed(bytes, 0).unwrap()];
     let mut catalog = SchemeCatalog::default();
     catalog
         .install_batch(&imported, 0, &BTreeSet::new())
         .unwrap();
     let before = catalog.schemes();
 
-    let reimported =
-        import_zed(bytes, 0, &[ZedImportKind::Chrome, ZedImportKind::Terminal]).unwrap();
+    let reimported = [import_zed(bytes, 0).unwrap()];
     assert_eq!(imported, reimported);
     assert_eq!(
         catalog.install_batch(&reimported, 1, &BTreeSet::new()),
@@ -225,7 +221,7 @@ fn deterministic_zed_reimport_collides_until_explicitly_replaced() {
 
     let replace = reimported
         .iter()
-        .map(|scheme| scheme.id().clone())
+        .map(|scheme| scheme.id.clone())
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog.install_batch(&reimported, 1, &replace).unwrap(),
@@ -236,14 +232,14 @@ fn deterministic_zed_reimport_collides_until_explicitly_replaced() {
 
 #[test]
 fn catalog_scheme_listing_is_globally_sorted_and_includes_builtins() {
-    let catalog = SchemeCatalog::from_custom_schemes(&[
-        chrome_scheme("custom.z-last", "Last"),
-        chrome_scheme("custom.a-first", "First"),
+    let catalog = SchemeCatalog::from_color_schemes(&[
+        color_scheme("custom.z-last", "Last"),
+        color_scheme("custom.a-first", "First"),
     ])
     .unwrap();
     let schemes = catalog.schemes();
-    let ids = schemes.iter().map(CustomScheme::id).collect::<Vec<_>>();
+    let ids = schemes.iter().map(|scheme| &scheme.id).collect::<Vec<_>>();
 
-    assert_eq!(schemes.len(), 6);
+    assert_eq!(schemes.len(), 4);
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
 }

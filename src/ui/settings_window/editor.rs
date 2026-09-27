@@ -16,7 +16,7 @@ use std::{
 
 use gpui::{Context, Task};
 
-use crate::appearance::{ResetTarget, SchemeId, SchemeKind, SchemeSummary, SettingsDocument};
+use crate::appearance::{ResetTarget, SchemeId, SchemeSummary, SettingsDocument};
 #[cfg(test)]
 use crate::settings::CommitJob;
 use crate::settings::storage::StorageError;
@@ -121,31 +121,25 @@ impl SettingsEditor {
         Ok(receipt)
     }
 
-    pub(super) fn remove_custom_scheme(
+    pub(super) fn remove_scheme(
         &mut self,
         id: &SchemeId,
         cx: &mut Context<SettingsWindow>,
     ) -> Result<(), SettingsError> {
-        self.draft.remove_custom_scheme(id)?;
+        self.draft.remove_scheme(id)?;
         self.schedule(cx);
         Ok(())
     }
 
-    pub(super) fn scheme_summaries(
-        &self,
-        kind: SchemeKind,
-    ) -> Result<Vec<SchemeSummary>, SettingsError> {
-        self.draft.scheme_summaries(kind)
+    pub(super) fn scheme_summaries(&self) -> Result<Vec<SchemeSummary>, SettingsError> {
+        self.draft.scheme_summaries()
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
         self.draft.export_document()
     }
 
-    pub(super) fn export_definitions(
-        &self,
-        schemes: &[(SchemeKind, SchemeId)],
-    ) -> Result<String, SettingsError> {
+    pub(super) fn export_definitions(&self, schemes: &[SchemeId]) -> Result<String, SettingsError> {
         self.draft.export_definitions(schemes)
     }
 

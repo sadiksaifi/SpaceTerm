@@ -10,9 +10,9 @@ use super::{Color, builtin};
 
 pub(crate) const MAX_SCHEME_ID_BYTES: usize = 128;
 pub(crate) const MAX_SCHEME_NAME_CHARACTERS: usize = 128;
-pub(crate) const MAX_CUSTOM_SCHEMES: usize = 128;
-/// One Zed family can contain 32 themes and produce one scheme for each of two surfaces.
-const MAX_INSTALL_BATCH_SCHEMES: usize = 64;
+pub(crate) const MAX_COLOR_SCHEMES: usize = 128;
+/// One Zed family can contain 32 themes.
+const MAX_INSTALL_BATCH_SCHEMES: usize = 32;
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
     deserializer: D,
@@ -29,13 +29,6 @@ where
 pub(crate) enum Appearance {
     Light,
     Dark,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SchemeKind {
-    Chrome,
-    Terminal,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -166,63 +159,11 @@ pub(crate) struct SchemeMetadata {
 
 macro_rules! define_chrome_colors {
     ($($field:ident),+ $(,)?) => {
-        #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-        #[serde(deny_unknown_fields)]
+        #[derive(Clone, Debug, Eq, PartialEq)]
         pub(crate) struct ChromeColors {
             $(pub(crate) $field: Color,)+
         }
 
-        #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-        #[serde(deny_unknown_fields)]
-        pub(crate) struct ChromeColorOverrides {
-            $(#[serde(default, deserialize_with = "deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
-            pub(crate) $field: Option<Color>,)+
-        }
-
-        impl ChromeColors {
-            #[cfg(test)]
-            pub(crate) fn apply(&mut self, overrides: &ChromeColorOverrides) {
-                $(if let Some(value) = overrides.$field { self.$field = value; })+
-            }
-
-            pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                if self.border_transparent.a != 0 { return Err(CatalogError::UnsupportedAlpha); }
-                Ok(())
-            }
-        }
-
-        impl ChromeColorOverrides {
-            pub(crate) fn validate(&self) -> Result<(), CatalogError> {
-                if self.border_transparent.is_some_and(|color| color.a != 0) { return Err(CatalogError::UnsupportedAlpha); }
-                Ok(())
-            }
-
-            pub(super) fn remove_role(&mut self, role: &str) -> bool {
-                match role {
-                    $(stringify!($field) => {
-                        self.$field = None;
-                        true
-                    },)+
-                    _ => false,
-                }
-            }
-
-            #[allow(
-                dead_code,
-                reason = "validates typed role constructors used by field-reset adapters"
-            )]
-            pub(super) fn supports_role(role: &str) -> bool {
-                matches!(role, $(stringify!($field))|+)
-            }
-
-            pub(super) fn is_empty(&self) -> bool {
-                self == &Self::default()
-            }
-
-            pub(crate) fn complete(colors: &ChromeColors) -> Self {
-                Self { $($field: Some(colors.$field),)+ }
-            }
-        }
     };
 }
 chrome_color_fields!(define_chrome_colors);
@@ -362,14 +303,6 @@ impl TerminalPaletteOverrides {
 
     pub(crate) fn complete(colors: [Color; 8]) -> Self {
         Self(colors.map(Some))
-    }
-
-    pub(super) fn retain_missing_from(&mut self, retired: Self) {
-        for (current, retired) in self.0.iter_mut().zip(retired.0) {
-            if current.is_none() {
-                *current = retired;
-            }
-        }
     }
 
     #[cfg(test)]
@@ -586,7 +519,6 @@ pub(crate) struct SchemeSummary {
     pub(crate) id: SchemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
-    pub(crate) kind: SchemeKind,
     /// Built-in schemes cannot be removed, and their identifiers are reserved.
     pub(crate) builtin: bool,
     /// Representative resolved colors, ordered for a left-to-right preview strip.
@@ -595,25 +527,7 @@ pub(crate) struct SchemeSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ChromeScheme {
-    /// Authored source metadata; application `BackgroundPreferences` govern native window effects.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub(crate) window_background: Option<super::WindowBackgroundAppearance>,
-    pub(crate) id: SchemeId,
-    pub(crate) name: String,
-    pub(crate) appearance: Appearance,
-    #[serde(default, flatten)]
-    pub(crate) metadata: SchemeMetadata,
-    pub(crate) colors: ChromeColorOverrides,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TerminalScheme {
+pub(crate) struct ColorScheme {
     pub(crate) id: SchemeId,
     pub(crate) name: String,
     pub(crate) appearance: Appearance,
@@ -622,57 +536,34 @@ pub(crate) struct TerminalScheme {
     pub(crate) colors: TerminalColorOverrides,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum CustomScheme {
-    Chrome(Box<ChromeScheme>),
-    Terminal(Box<TerminalScheme>),
-}
-
-impl CustomScheme {
-    pub(crate) fn id(&self) -> &SchemeId {
-        match self {
-            Self::Chrome(v) => &v.id,
-            Self::Terminal(v) => &v.id,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct SchemeCatalog {
     revision: u64,
-    chrome: BTreeMap<SchemeId, Arc<ChromeScheme>>,
-    terminal: BTreeMap<SchemeId, Arc<TerminalScheme>>,
+    schemes: BTreeMap<SchemeId, Arc<ColorScheme>>,
 }
 
 impl Default for SchemeCatalog {
     fn default() -> Self {
-        Self::new().expect("built-in appearance catalog is valid")
+        Self {
+            revision: 0,
+            schemes: builtin::builtin_schemes()
+                .into_iter()
+                .map(|scheme| (scheme.id.clone(), Arc::new(scheme)))
+                .collect(),
+        }
     }
 }
 
 impl SchemeCatalog {
-    pub(crate) fn new() -> Result<Self, CatalogError> {
-        let mut catalog = Self {
-            revision: 0,
-            chrome: BTreeMap::new(),
-            terminal: BTreeMap::new(),
-        };
-        for scheme in builtin::builtin_schemes() {
-            catalog.insert_unchecked(scheme);
-        }
-        Ok(catalog)
-    }
-
-    pub(crate) fn from_custom_schemes(schemes: &[CustomScheme]) -> Result<Self, CatalogError> {
-        if schemes.len() > MAX_CUSTOM_SCHEMES {
+    pub(crate) fn from_color_schemes(schemes: &[ColorScheme]) -> Result<Self, CatalogError> {
+        if schemes.len() > MAX_COLOR_SCHEMES {
             return Err(CatalogError::TooManySchemes);
         }
-        let mut catalog = Self::new()?;
+        let mut catalog = Self::default();
         let mut seen = BTreeSet::new();
         for scheme in schemes {
             validate_scheme(scheme, true)?;
-            if !seen.insert(scheme.id().clone()) || catalog.contains(scheme.id()) {
+            if !seen.insert(scheme.id.clone()) || catalog.contains(&scheme.id) {
                 return Err(CatalogError::DuplicateId);
             }
             catalog.insert_unchecked(scheme.clone());
@@ -684,90 +575,44 @@ impl SchemeCatalog {
         self.revision
     }
 
-    /// Lists one kind's schemes as identity and resolved swatches, without cloning every role.
-    ///
-    /// A settings surface needs names, appearance, and a small preview. Resolving the complete
-    /// color set for every installed scheme to draw a list would be wasteful, so the summary
-    /// carries only what a row presents.
-    pub(crate) fn summaries(&self, kind: SchemeKind) -> Vec<SchemeSummary> {
-        match kind {
-            SchemeKind::Chrome => self
-                .chrome
-                .values()
-                .map(|scheme| {
-                    let colors = super::compiler::compile_chrome(
-                        scheme.appearance,
-                        &scheme.colors,
-                        &ChromeColorOverrides::default(),
-                    )
-                    .colors;
-                    SchemeSummary {
-                        id: scheme.id.clone(),
-                        name: scheme.name.clone(),
-                        appearance: scheme.appearance,
-                        kind,
-                        builtin: scheme.id.is_reserved(),
-                        swatches: vec![
-                            colors.background,
-                            colors.panel_background,
-                            colors.text,
-                            colors.text_accent,
-                            colors.border,
-                            colors.element_selected,
-                        ],
-                    }
-                })
-                .collect(),
-            SchemeKind::Terminal => self
-                .terminal
-                .values()
-                .map(|scheme| {
-                    let mut colors = builtin::terminal_base(scheme.appearance);
-                    colors.apply(&scheme.colors);
-                    SchemeSummary {
-                        id: scheme.id.clone(),
-                        name: scheme.name.clone(),
-                        appearance: scheme.appearance,
-                        kind,
-                        builtin: scheme.id.is_reserved(),
-                        swatches: std::iter::once(colors.background)
-                            .chain(std::iter::once(colors.foreground))
-                            .chain(colors.normal.into_iter().skip(1).take(6))
-                            .collect(),
-                    }
-                })
-                .collect(),
-        }
+    /// Lists installed schemes with resolved preview swatches.
+    pub(crate) fn summaries(&self) -> Vec<SchemeSummary> {
+        self.schemes
+            .values()
+            .map(|scheme| {
+                let mut colors = builtin::terminal_base(scheme.appearance);
+                colors.apply(&scheme.colors);
+                SchemeSummary {
+                    id: scheme.id.clone(),
+                    name: scheme.name.clone(),
+                    appearance: scheme.appearance,
+                    builtin: scheme.id.is_reserved(),
+                    swatches: std::iter::once(colors.background)
+                        .chain(std::iter::once(colors.foreground))
+                        .chain(colors.normal.into_iter().skip(1).take(6))
+                        .collect(),
+                }
+            })
+            .collect()
     }
 
-    pub(crate) fn schemes(&self) -> Vec<CustomScheme> {
-        let mut schemes = self
-            .chrome
+    pub(crate) fn schemes(&self) -> Vec<ColorScheme> {
+        self.schemes
             .values()
-            .map(|scheme| CustomScheme::Chrome(Box::new(scheme.as_ref().clone())))
-            .chain(
-                self.terminal
-                    .values()
-                    .map(|scheme| CustomScheme::Terminal(Box::new(scheme.as_ref().clone()))),
-            )
-            .collect::<Vec<_>>();
-        schemes.sort_unstable_by(|left, right| left.id().cmp(right.id()));
-        schemes
+            .map(|scheme| scheme.as_ref().clone())
+            .collect()
     }
 
     pub(crate) fn contains(&self, id: &SchemeId) -> bool {
-        self.chrome.contains_key(id) || self.terminal.contains_key(id)
+        self.schemes.contains_key(id)
     }
-    pub(crate) fn chrome(&self, id: &SchemeId) -> Option<&ChromeScheme> {
-        self.chrome.get(id).map(AsRef::as_ref)
-    }
-    pub(crate) fn terminal(&self, id: &SchemeId) -> Option<&TerminalScheme> {
-        self.terminal.get(id).map(AsRef::as_ref)
+    pub(crate) fn get(&self, id: &SchemeId) -> Option<&ColorScheme> {
+        self.schemes.get(id).map(AsRef::as_ref)
     }
 
     pub(crate) fn install_batch(
         &mut self,
-        schemes: &[CustomScheme],
+        schemes: &[ColorScheme],
         expected_revision: u64,
         replace: &BTreeSet<SchemeId>,
     ) -> Result<Vec<SchemeId>, CatalogError> {
@@ -783,7 +628,7 @@ impl SchemeCatalog {
         let mut seen = BTreeSet::new();
         for scheme in schemes {
             validate_scheme(scheme, true)?;
-            if !seen.insert(scheme.id().clone()) {
+            if !seen.insert(scheme.id.clone()) {
                 return Err(CatalogError::DuplicateId);
             }
         }
@@ -797,24 +642,23 @@ impl SchemeCatalog {
         }
         if schemes
             .iter()
-            .any(|scheme| self.contains(scheme.id()) && !replace.contains(scheme.id()))
+            .any(|scheme| self.contains(&scheme.id) && !replace.contains(&scheme.id))
         {
             return Err(CatalogError::DuplicateId);
         }
         if self
-            .custom_count()
+            .imported_count()
             .saturating_sub(replace.len())
             .saturating_add(schemes.len())
-            > MAX_CUSTOM_SCHEMES
+            > MAX_COLOR_SCHEMES
         {
             return Err(CatalogError::TooManySchemes);
         }
 
         let mut next = self.clone();
         for scheme in schemes {
-            if replace.contains(scheme.id()) {
-                next.chrome.remove(scheme.id());
-                next.terminal.remove(scheme.id());
+            if replace.contains(&scheme.id) {
+                next.schemes.remove(&scheme.id);
             }
             next.insert_unchecked(scheme.clone());
         }
@@ -822,45 +666,26 @@ impl SchemeCatalog {
             .revision
             .checked_add(1)
             .ok_or(CatalogError::RevisionOverflow)?;
-        let installed = schemes.iter().map(|scheme| scheme.id().clone()).collect();
+        let installed = schemes.iter().map(|scheme| scheme.id.clone()).collect();
         *self = next;
         Ok(installed)
     }
 
-    fn custom_count(&self) -> usize {
-        self.chrome
-            .keys()
-            .chain(self.terminal.keys())
-            .filter(|id| !id.is_reserved())
-            .count()
+    fn imported_count(&self) -> usize {
+        self.schemes.keys().filter(|id| !id.is_reserved()).count()
     }
 
-    fn insert_unchecked(&mut self, scheme: CustomScheme) {
-        match scheme {
-            CustomScheme::Chrome(scheme) => {
-                self.chrome.insert(scheme.id.clone(), Arc::from(scheme));
-            }
-            CustomScheme::Terminal(scheme) => {
-                self.terminal.insert(scheme.id.clone(), Arc::from(scheme));
-            }
-        }
+    fn insert_unchecked(&mut self, scheme: ColorScheme) {
+        self.schemes.insert(scheme.id.clone(), Arc::new(scheme));
     }
 }
 
-pub(super) fn validate_scheme(scheme: &CustomScheme, custom: bool) -> Result<(), CatalogError> {
-    if custom && scheme.id().is_reserved() {
+pub(super) fn validate_scheme(scheme: &ColorScheme, imported: bool) -> Result<(), CatalogError> {
+    if imported && scheme.id.is_reserved() {
         return Err(CatalogError::ReservedId);
     }
-    let (name, metadata) = match scheme {
-        CustomScheme::Chrome(value) => {
-            value.colors.validate()?;
-            (&value.name, &value.metadata)
-        }
-        CustomScheme::Terminal(value) => {
-            value.colors.validate()?;
-            (&value.name, &value.metadata)
-        }
-    };
+    scheme.colors.validate()?;
+    let (name, metadata) = (&scheme.name, &scheme.metadata);
     validate_text(name, MAX_SCHEME_NAME_CHARACTERS)?;
     if let Some(origin) = &metadata.origin {
         if let Some(id) = &origin.package_id {

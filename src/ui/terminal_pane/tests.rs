@@ -5,7 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use gpui::{EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{
+    EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
+};
 
 use super::*;
 use crate::appearance::{Color, TerminalColors};
@@ -2291,7 +2293,8 @@ fn queued_appearance_screens_cannot_revert_the_latest_terminal_request(cx: &mut 
             assert!(pane.handle_event(SessionEvent::Screen(Arc::new(latest)), cx));
         });
         let terminal_generation = pane.read_with(cx, |pane, _| pane.requested_terminal_generation);
-        preferences.chrome.typography.base_size = 24.0;
+
+        preferences.window.density = crate::appearance::ChromeDensity::Comfortable;
         publish_terminal_preferences(preferences, cx);
         pane.update(cx, |pane, cx| {
             pane.refresh_appearance(window, cx);
@@ -2547,14 +2550,14 @@ fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size(
+fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type(
     cx: &mut TestAppContext,
 ) {
     let (_, cx, _) = connected_terminal_pane(cx);
     cx.update(|_, cx| {
         let mut preferences = crate::appearance::AppearancePreferences::default();
-        preferences.chrome.typography.base_size = 24.0;
-        preferences.chrome.density = crate::appearance::ChromeDensity::Comfortable;
+
+        preferences.window.density = crate::appearance::ChromeDensity::Comfortable;
         publish_terminal_preferences(preferences, cx);
         let resolved = super::super::appearance_runtime::current(cx);
         let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
@@ -2605,7 +2608,7 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_at_maximum_chrome_size
 }
 
 #[gpui::test]
-fn terminal_find_field_contains_maximum_chrome_line_height_in_both_densities(
+fn terminal_find_field_contains_fixed_chrome_line_height_in_both_densities(
     cx: &mut TestAppContext,
 ) {
     let (_, cx, _) = connected_terminal_pane(cx);
@@ -2617,8 +2620,8 @@ fn terminal_find_field_contains_maximum_chrome_line_height_in_both_densities(
     ] {
         let line_height = cx.update(|window, cx| {
             let mut preferences = crate::appearance::AppearancePreferences::default();
-            preferences.chrome.typography.base_size = 24.0;
-            preferences.chrome.density = density;
+
+            preferences.window.density = density;
             publish_terminal_preferences(preferences, cx);
             let resolved = super::super::appearance_runtime::current(cx);
             let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
@@ -6329,7 +6332,9 @@ impl gpui::PlatformAtlas for FailImageAtlas {
     fn get_or_insert_with<'a>(
         &self,
         key: gpui::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>>,
+        build: &mut dyn FnMut() -> anyhow::Result<
+            Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>,
+        >,
     ) -> anyhow::Result<Option<gpui::AtlasTile>> {
         if matches!(key, gpui::AtlasKey::Image(_)) {
             let lookup = self.image_lookups.fetch_add(1, Ordering::Relaxed) + 1;
@@ -6380,14 +6385,11 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
         image_lookups: AtomicUsize::new(0),
         fail_at_lookup: AtomicUsize::new(0),
     });
-    let mut cx = gpui::HeadlessAppContext::with_platform(
-        Arc::new(gpui::NoopTextSystem),
-        Arc::new(()),
-        {
+    let mut cx =
+        gpui::HeadlessAppContext::with_platform(Arc::new(gpui::NoopTextSystem), Arc::new(()), {
             let atlas = Arc::clone(&atlas);
             move || Ok(Some(Box::new(FailImageRenderer(Arc::clone(&atlas)))))
-        },
-    );
+        });
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -6397,9 +6399,10 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
         test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-image-test")),
     );
     let handle = cx
-        .open_window(gpui::size(gpui::px(800.0), gpui::px(600.0)), move |window, cx| {
-            cx.new(|cx| TerminalPane::new(session_factory, window, cx))
-        })
+        .open_window(
+            gpui::size(gpui::px(800.0), gpui::px(600.0)),
+            move |window, cx| cx.new(|cx| TerminalPane::new(session_factory, window, cx)),
+        )
         .unwrap();
     handle
         .update(&mut cx, |pane, window, cx| {
@@ -6439,18 +6442,29 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
             (
                 pane.last_valid_screen.generation,
                 pane.pane_state.failure().map(TerminalFailure::class),
-                pane.graphics_cache.read_with(cx, |cache, _| cache.cached_image_keys()),
-                pane.graphics_cache.read_with(cx, |cache, _| cache.staged_image_keys()),
+                pane.graphics_cache
+                    .read_with(cx, |cache, _| cache.cached_image_keys()),
+                pane.graphics_cache
+                    .read_with(cx, |cache, _| cache.staged_image_keys()),
                 pane.scene_submission_attempts[submissions_before..].to_vec(),
             )
         })
         .unwrap();
     assert_eq!(last_valid, crate::terminal::PresentationGeneration::test(1));
     assert_eq!(failure, Some(crate::terminal::FailureClass::Resource));
-    assert_eq!(cached, vec![crate::terminal::ImageKey { image_id: 1, generation: 1 }]);
+    assert_eq!(
+        cached,
+        vec![crate::terminal::ImageKey {
+            image_id: 1,
+            generation: 1
+        }]
+    );
     assert!(staged.is_empty());
     assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(submissions.last(), Some(&crate::terminal::PresentationGeneration::test(1)));
+    assert_eq!(
+        submissions.last(),
+        Some(&crate::terminal::PresentationGeneration::test(1))
+    );
 }
 
 #[gpui::test]

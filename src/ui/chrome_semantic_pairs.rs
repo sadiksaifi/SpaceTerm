@@ -104,23 +104,17 @@ mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, SchemeCatalog, SchemeId, SystemAppearance, parse_color_document,
+        CompositionCapabilities, SchemeCatalog, SystemAppearance,
     };
     use crate::ui::appearance::ChromeAppearance;
 
     fn prepare(increase_contrast: bool) -> (crate::appearance::ChromeColors, ChromeAppearance) {
-        let document = parse_color_document(
-            br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.semantic-pairs","name":"Semantic pairs","appearance":"light","colors":{"background":"#ffffff","elevated_surface_background":"#202020","badge_background":"#777777b3","badge_foreground":"#777777","error":"#777777","error_background":"#777777b3","warning":"#777777","warning_background":"#777777b3"}}]}"##,
-        )
-        .expect("semantic-pair fixture must parse");
-        let catalog = SchemeCatalog::from_custom_schemes(&document.schemes)
-            .expect("semantic-pair fixture must compile");
+        let catalog = SchemeCatalog::default();
         let mut preferences = AppearancePreferences {
             mode: AppearanceMode::Light,
             ..Default::default()
         };
-        preferences.background.transparency = 1.0;
-        preferences.chrome.schemes.light = SchemeId::new("test.semantic-pairs").unwrap();
+        preferences.window.transparency = 1.0;
         let mut capabilities = CompositionCapabilities::new(true, true);
         capabilities.increase_contrast = increase_contrast;
         let resolved = catalog
@@ -142,10 +136,7 @@ mod tests {
 
     #[test]
     fn increase_contrast_prepares_badge_and_status_pairs_on_their_final_hosts() {
-        let (authored, appearance) = prepare(true);
-        assert_eq!(authored.badge_foreground, Color::rgb(0x777777));
-        assert_eq!(authored.error, Color::rgb(0x777777));
-        assert_eq!(authored.warning, Color::rgb(0x777777));
+        let (_, appearance) = prepare(true);
 
         let badge = appearance.semantic_text_pairs.badge;
         let card_host = appearance.control_host_background(spaceterm_ui::ControlHost::Card);

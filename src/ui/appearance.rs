@@ -16,7 +16,7 @@ use super::{
 use gpui::{App, Font, FontWeight, Global, Pixels, Window, font, px, rgba};
 
 use crate::appearance::{
-    Appearance, ChromeColors, ChromeDensity, Color, ColorProvenance, CompositionCapabilities,
+    Appearance, ChromeColors, ChromeDensity, Color, CompositionCapabilities,
     ResolvedChromeAppearance, ResolvedFontDescriptor, SurfaceMaterials, SurfaceRole,
 };
 
@@ -117,7 +117,7 @@ pub(crate) struct ChromeAppearance {
     /// Content-free families whose authored constraints required a safe fallback.
     ///
     /// Most families use opaque state fills when no translucent solution exists. An
-    /// unrepresentable host-relative step can instead retain the legacy safe presentation, which
+    /// unrepresentable host-relative step can instead retain the safe presentation, which
     /// may remain translucent.
     pub(crate) floating_fallbacks: Vec<FloatingControlFamily>,
     /// Content-free disabled-state failures collected across every prepared host.
@@ -128,10 +128,6 @@ pub(crate) struct ChromeAppearance {
     pub(crate) text_scale: f32,
     pub(crate) spacing_scale: f32,
     pub(crate) settings_hosts: Option<settings::SettingsHostBackgrounds>,
-    /// The built-in Light definition owns a boundary and surface policy of its own.
-    pub(crate) built_in_light: bool,
-    /// The built-in Dark definition separates internal rules from independent surface edges.
-    pub(crate) built_in_dark: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -323,8 +319,6 @@ impl Default for ChromeAppearance {
             text_scale: 1.0,
             spacing_scale: 1.0,
             settings_hosts: None,
-            built_in_light: false,
-            built_in_dark: false,
         }
     }
 }
@@ -1713,7 +1707,7 @@ fn resolve_floating_control_colors_detailed(
             &[]
         },
     );
-    macro_rules! legacy_toggle_family {
+    macro_rules! fallback_toggle_family {
         () => {{
             macro_rules! toggle_state_with_boundary {
                 ($fill:ident, $minimum:expr, $mark:ident, $border:ident) => {{
@@ -1897,7 +1891,7 @@ fn resolve_floating_control_colors_detailed(
         }
         Err(_) => {
             fallback_families.push(FloatingControlFamily::Toggle);
-            legacy_toggle_family!();
+            fallback_toggle_family!();
         }
     }
     let (toggle_off_background, text_accent) = resolve_floating_progress_accent(
@@ -2896,7 +2890,7 @@ fn non_floating_control_host_background(
 }
 
 /// Moves one prepared semantic target only when its modeled material composite cannot carry the
-/// requested contrast floor. The resolved scheme remains untouched, and rendering consumes the
+/// requested contrast floor. The compiled colors remain untouched, and rendering consumes the
 /// returned target through the ordinary material path.
 fn feasible_non_floating_material_target(
     materials: SurfaceMaterials,
@@ -3111,14 +3105,11 @@ fn prepare_app_state_boundary<const N: usize>(
 /// The separation a chip rim must reach, or `None` to keep the authored one as painted.
 ///
 /// A chip rim is a lift, not a boundary: it catches the light a raised edge would so a Tab or a
-/// selected row reads as sitting above the strip behind it, and both built-in schemes author it
+/// selected row reads as sitting above the strip behind it, and both built-in appearances author it
 /// well under the Pane rim that does state a boundary. Raising it to the boundary floor would
-/// draw an outline around every chip, which is the frame this avoids. A custom definition keeps
-/// the floor, because its rim is the only edge the application can count on, and Increase
-/// Contrast keeps it everywhere, because a reader who asks for stronger boundaries is asking for
-/// exactly the outline the built-ins decline.
-const fn app_owned_hairline(built_in: bool, increase_contrast: bool) -> Option<f64> {
-    if built_in && !increase_contrast {
+/// draw an outline around every chip. Increase Contrast applies the stronger boundary floor.
+const fn app_owned_hairline(increase_contrast: bool) -> Option<f64> {
+    if !increase_contrast {
         None
     } else {
         Some(FloatingContrastFloors::STANDARD.boundary)
@@ -3305,10 +3296,6 @@ fn prepare_app_owned_tabs(
     );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "host preparation receives material, window state, and authored-role policies together"
-)]
 fn prepare_state_control_host(
     authored: &ChromeColors,
     (host, final_host): (Color, Color),
@@ -3316,9 +3303,7 @@ fn prepare_state_control_host(
     materials: SurfaceMaterials,
     state: ChromeStatePolicy,
     floors: FloatingContrastFloors,
-    explicit_segmented_track: bool,
     built_in_light: bool,
-    built_in_dark: bool,
 ) -> PreparedControlHost {
     let (mut reference, mut fallback_families) = rehost_control_reference(authored, host);
     if host_role == spaceterm_ui::ControlHost::Panel
@@ -3357,10 +3342,7 @@ fn prepare_state_control_host(
             semantic_host,
             final_host,
             FloatingContrastFloors::for_increase_contrast(state.capabilities.increase_contrast),
-            app_owned_hairline(
-                built_in_light || built_in_dark,
-                state.capabilities.increase_contrast,
-            ),
+            app_owned_hairline(state.capabilities.increase_contrast),
         );
     }
     let colors = resolve_material_control_colors(
@@ -3390,7 +3372,7 @@ fn prepare_state_control_host(
         &reference,
         &colors,
         materials,
-        explicit_segmented_track,
+        built_in_light,
     );
     if segmented.used_host_fallback {
         fallback_families.push(FloatingControlFamily::Segmented);
@@ -3401,7 +3383,7 @@ fn prepare_state_control_host(
         final_host,
         floors,
         state.capabilities.increase_contrast || state.capabilities.show_borders,
-        explicit_segmented_track,
+        built_in_light,
     );
     let reference = with_final_host_content(reference, &colors);
     PreparedControlHost {
@@ -3930,7 +3912,7 @@ impl ChromeAppearance {
 
     /// The deterministic in-window backdrop beneath controls on a host.
     ///
-    /// The native desktop is intentionally outside this contract. The scheme's opaque reference
+    /// The native desktop is intentionally outside this contract. The opaque color reference
     /// backs the same Sheet, Base and Surface paints that the corresponding window roots render.
     /// Floating callers that need transmission bounds use the shell's two endpoint backgrounds;
     /// its value here is the opaque semantic reference only.
@@ -3982,30 +3964,22 @@ impl ChromeAppearance {
 
     /// Functional rules take the quiet boundary where one definition ranks its own edges.
     fn rule_seed(&self) -> Color {
-        if self.built_in_light || self.built_in_dark {
-            self.colors.border_variant
-        } else {
-            self.colors.border
-        }
+        self.colors.border_variant
     }
 
     fn rule_band(&self) -> separator::SeparatorBand {
-        if self.built_in_light {
+        if self.appearance == Appearance::Light {
             built_in_light::RULE_BAND
-        } else if self.built_in_dark {
-            built_in_dark::RULE_BAND
         } else {
-            separator::SeparatorBand::FUNCTIONAL
+            built_in_dark::RULE_BAND
         }
     }
 
     fn surface_band(&self) -> separator::SeparatorBand {
-        if self.built_in_light {
+        if self.appearance == Appearance::Light {
             built_in_light::SURFACE_BAND
-        } else if self.built_in_dark {
-            built_in_dark::SURFACE_BAND
         } else {
-            separator::SeparatorBand::FUNCTIONAL
+            built_in_dark::SURFACE_BAND
         }
     }
 
@@ -4084,20 +4058,8 @@ impl ChromeAppearance {
         self.surface(SurfaceRole::Surface, terminal_background)
     }
 
-    /// Prepares the Pane boundary independently of selected-row rims and short Tab separators.
-    pub(crate) fn pane_rim(&self) -> Color {
-        if self.built_in_light || self.built_in_dark {
-            return self.surface_edge(spaceterm_ui::ControlHost::Window);
-        }
-        self.materials
-            .edge(self.colors.panel_background, self.colors.tab_separator)
-    }
-
     /// Resolves the Pane rim against the Terminal surface it is actually painted over.
     pub(crate) fn pane_rim_on(&self, terminal_background: Color) -> Color {
-        if !self.built_in_light && !self.built_in_dark {
-            return self.pane_rim();
-        }
         let pane = self
             .pane_surface(terminal_background)
             .source_over(self.control_host_background(spaceterm_ui::ControlHost::Window));
@@ -4125,10 +4087,8 @@ impl ChromeAppearance {
             ];
             let edge = if self.capabilities.increase_contrast || self.capabilities.show_borders {
                 readable_on_material(self.colors.border, tone, wash, 3.0)
-            } else if self.built_in_light || self.built_in_dark {
-                self.surface_edge_on(endpoints, self.floating_colors.text)
             } else {
-                self.colors.shadow.with_alpha(115)
+                self.surface_edge_on(endpoints, self.floating_colors.text)
             };
             let divider = separator::prepare_in_band(
                 self.rule_seed(),
@@ -4203,11 +4163,7 @@ impl ChromeAppearance {
     fn prepare_variant(resolved: &ResolvedChromeAppearance, active: bool) -> Self {
         let capabilities = resolved.composition.capabilities;
         let built_in_light = built_in_light::applies(resolved);
-        let built_in_dark = resolved.effective_scheme == crate::appearance::builtin_dark_chrome();
-        let explicit_segmented_track = matches!(
-            resolved.provenance.get("segmented_track_background"),
-            Some(ColorProvenance::Authored | ColorProvenance::Overridden)
-        );
+        let explicit_segmented_track = built_in_light;
         let state = ChromeStatePolicy {
             active,
             capabilities,
@@ -4261,10 +4217,7 @@ impl ChromeAppearance {
         if capabilities.increase_contrast || !built_in_light {
             let app_owned_floors =
                 FloatingContrastFloors::for_increase_contrast(capabilities.increase_contrast);
-            let hairline = app_owned_hairline(
-                built_in_light || built_in_dark,
-                capabilities.increase_contrast,
-            );
+            let hairline = app_owned_hairline(capabilities.increase_contrast);
             prepare_app_owned_rows(
                 &mut colors,
                 resolved.composition.materials,
@@ -4283,7 +4236,7 @@ impl ChromeAppearance {
             );
         }
         let floating_reference = if built_in_light {
-            built_in_light::floating_reference(&authored, resolved)
+            built_in_light::floating_reference(&authored)
         } else {
             authored.floating_presentation()
         };
@@ -4381,9 +4334,7 @@ impl ChromeAppearance {
             resolved.composition.materials,
             state,
             floating_contrast_floors,
-            explicit_segmented_track,
             built_in_light,
-            built_in_dark,
         );
         let card_host = non_floating_control_host_background(
             resolved.composition.materials,
@@ -4398,9 +4349,7 @@ impl ChromeAppearance {
             resolved.composition.materials,
             state,
             floating_contrast_floors,
-            explicit_segmented_track,
             built_in_light,
-            built_in_dark,
         );
         let title_bar_controls = prepare_state_control_host(
             &authored,
@@ -4421,9 +4370,7 @@ impl ChromeAppearance {
             resolved.composition.materials,
             state,
             floating_contrast_floors,
-            explicit_segmented_track,
             built_in_light,
-            built_in_dark,
         );
         let FloatingColorResolution {
             colors: floating_control_colors,
@@ -4526,8 +4473,6 @@ impl ChromeAppearance {
             text_scale: resolved.typography.body.size / 13.0,
             spacing_scale: Self::density_spacing_scale(resolved.density),
             settings_hosts: None,
-            built_in_light,
-            built_in_dark,
         }
     }
 
@@ -4563,8 +4508,8 @@ impl ChromeAppearance {
 #[cfg(test)]
 mod typography_tests {
     use super::{
-        ChromeAppearance, FloatingContrastFloors, floating_constraint, floating_host_constraint,
-        floating_state, host_relative_fill, relative_luminance, resolve_floating_control_colors,
+        FloatingContrastFloors, floating_constraint, floating_host_constraint, floating_state,
+        host_relative_fill, relative_luminance, resolve_floating_control_colors,
         resolve_floating_field_colors, resolve_floating_frame, resolve_floating_segmented_colors,
         resolve_floating_state_at_alpha, resolve_material_control_colors,
     };
@@ -4854,8 +4799,6 @@ mod typography_tests {
                 },
                 super::FloatingContrastFloors::STANDARD,
                 false,
-                false,
-                false,
             );
             for (fill, actual) in [
                 (
@@ -5065,43 +5008,6 @@ mod typography_tests {
 
         assert_ne!(resolved.warning_border, resolved.warning);
         assert!(resolved.warning_border.contrast_ratio(Color::rgb(0xffffff)) >= 3.0,);
-    }
-
-    #[test]
-    fn prepared_field_surfaces_match_compiler_backing_without_flattening_authored_intent() {
-        use crate::appearance::*;
-        let document = parse_color_document(br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"test.translucent","name":"Translucent","appearance":"light","colors":{"background":"#ffffff80","panel_background":"#00000040","input_background":"#00000000"}}]}"##).unwrap();
-        let catalog = SchemeCatalog::from_custom_schemes(&document.schemes).unwrap();
-        let mut preferences = AppearancePreferences {
-            mode: AppearanceMode::Light,
-            ..Default::default()
-        };
-        preferences.chrome.schemes.light = SchemeId::new("test.translucent").unwrap();
-        let resolved = catalog
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable(),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        let prepared = ChromeAppearance::prepare(&resolved.chrome);
-        assert_eq!(resolved.chrome.colors.background.a, 128);
-        assert_eq!(resolved.chrome.colors.input_background.a, 0);
-        assert_eq!(prepared.colors.background, Color::rgb(0xffffff));
-        assert_eq!(
-            prepared.colors.input_background,
-            prepared.colors.panel_background
-        );
-        assert_eq!(prepared.colors.input_background.a, 255);
-        assert!(
-            prepared
-                .colors
-                .input_text
-                .source_over(prepared.colors.input_background)
-                .contrast_ratio(prepared.colors.input_background)
-                >= 4.5
-        );
     }
 }
 

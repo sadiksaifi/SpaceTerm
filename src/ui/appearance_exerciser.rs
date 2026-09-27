@@ -23,8 +23,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, AppearanceMode, ChromeDensity, ChromeFontFamily, ResetTarget, TerminalFontFamily,
-    ZedImportKind, export_settings, parse_settings,
+    Appearance, AppearanceMode, ChromeDensity, ResetTarget, TerminalFontFamily, export_settings,
+    parse_settings,
 };
 use crate::settings::{PreviewToken, SchemeImport};
 
@@ -268,16 +268,8 @@ impl AppearanceExerciser {
             self.ensure_preview(cx)?;
             let settings = Self::settings(cx);
             let mut candidate = (*settings.snapshot().candidate).clone();
-            let alternate = candidate.preferences.chrome.typography.base_size == 13.0;
-            candidate.preferences.chrome.typography.family = if alternate {
-                ChromeFontFamily::Named {
-                    family: String::from("Helvetica Neue"),
-                }
-            } else {
-                ChromeFontFamily::SystemUi
-            };
-            candidate.preferences.chrome.typography.base_size = if alternate { 24.0 } else { 13.0 };
-            candidate.preferences.chrome.density = if alternate {
+            let alternate = candidate.preferences.window.density == ChromeDensity::Compact;
+            candidate.preferences.window.density = if alternate {
                 ChromeDensity::Comfortable
             } else {
                 ChromeDensity::Compact
@@ -298,7 +290,7 @@ impl AppearanceExerciser {
                 .map_err(|_| "Typography preview rejected")
         })();
         self.status = result
-            .map(|()| "Independent chrome/terminal fonts, sizes and density toggled")
+            .map(|()| "Terminal typography and window density toggled")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -324,10 +316,8 @@ impl AppearanceExerciser {
     }
 
     fn reset_next_group(&mut self, cx: &mut Context<Self>) {
-        const GROUPS: [ResetTarget; 6] = [
-            ResetTarget::ChromeColors,
-            ResetTarget::ChromeTypography,
-            ResetTarget::ChromeDensity,
+        const GROUPS: [ResetTarget; 4] = [
+            ResetTarget::Density,
             ResetTarget::TerminalColors,
             ResetTarget::TerminalTypography,
             ResetTarget::TerminalRendering,
@@ -352,27 +342,19 @@ impl AppearanceExerciser {
 
     fn reset_next_field(&mut self, cx: &mut Context<Self>) {
         let resolved = appearance_runtime::current(cx);
-        let target = match self.field_reset_index % 17 {
+        let target = match self.field_reset_index % 13 {
             0 => ResetTarget::AppearanceMode,
-            1 => ResetTarget::ChromeScheme(Appearance::Dark),
-            2 => ResetTarget::ChromeFontFamily,
-            3 => ResetTarget::ChromeBaseSize,
-            4 => ResetTarget::ChromeRegularWeight,
-            5 => ResetTarget::ChromeEmphasisWeight,
-            6 => ResetTarget::ChromeHeadingWeight,
-            7 => ResetTarget::TerminalScheme(Appearance::Dark),
-            8 => ResetTarget::TerminalFontFamily,
-            9 => ResetTarget::TerminalBaseSize,
-            10 => ResetTarget::TerminalRegularWeight,
-            11 => ResetTarget::TerminalBoldWeight,
-            12 => ResetTarget::TerminalLineHeight,
-            13 => ResetTarget::TerminalItalic,
-            14 => ResetTarget::TerminalBoldAsBright,
-            15 => ResetTarget::chrome_color_override(
-                resolved.chrome.effective_scheme.clone(),
-                "background",
-            )
-            .unwrap(),
+            1 => ResetTarget::Transparency,
+            2 => ResetTarget::Blur,
+            3 => ResetTarget::Density,
+            4 => ResetTarget::TerminalScheme(Appearance::Dark),
+            5 => ResetTarget::TerminalFontFamily,
+            6 => ResetTarget::TerminalBaseSize,
+            7 => ResetTarget::TerminalRegularWeight,
+            8 => ResetTarget::TerminalBoldWeight,
+            9 => ResetTarget::TerminalLineHeight,
+            10 => ResetTarget::TerminalItalic,
+            11 => ResetTarget::TerminalBoldAsBright,
             _ => ResetTarget::terminal_color_override(
                 resolved.terminal.effective_scheme.clone(),
                 "foreground",
@@ -403,7 +385,7 @@ impl AppearanceExerciser {
                 .map_err(|_| "Reset preview rejected")
         })();
         self.status = result
-            .map(|()| "All appearance preferences reset; custom schemes retained")
+            .map(|()| "All appearance preferences reset; imported schemes retained")
             .unwrap_or_else(|error| error)
             .to_owned();
         self.export_settings_to_editor(cx);
@@ -640,7 +622,6 @@ impl AppearanceExerciser {
                     SchemeImport::Zed {
                         bytes: bytes.as_bytes(),
                         candidate_index,
-                        kinds: &[ZedImportKind::Chrome, ZedImportKind::Terminal],
                     },
                     &BTreeSet::new(),
                 )
@@ -750,13 +731,12 @@ impl AppearanceExerciser {
         let current = appearance_runtime::current(cx);
         let settings = Self::settings(cx).snapshot();
         format!(
-            "generation={} revision={} phase={:?} storage={:?} chrome requested={} effective={} terminal requested={} effective={} diagnostics={:?}",
+            "generation={} revision={} phase={:?} storage={:?} appearance={:?} terminal requested={} effective={} diagnostics={:?}",
             current.generation.get(),
             settings.committed.revision,
             settings.phase,
             settings.status,
-            current.chrome.requested_scheme,
-            current.chrome.effective_scheme,
+            current.chrome.appearance,
             current.terminal.requested_scheme,
             current.terminal.effective_scheme,
             current.diagnostics
@@ -909,7 +889,7 @@ impl AppearanceExerciser {
                     "Toggle Terminal Rendering",
                     Self::toggle_terminal,
                 ))
-                .child(action("appearance-toggle-type", "Toggle Fonts/Density", Self::toggle_typography))
+                .child(action("appearance-toggle-type", "Toggle Terminal Type/Density", Self::toggle_typography))
                 .child(action("appearance-system", "Follow System", Self::follow_system))
                 .child(action("appearance-reset-field", "Reset Next Field", Self::reset_next_field))
                 .child(action("appearance-reset-group", "Reset Next Group", Self::reset_next_group))

@@ -1,84 +1,42 @@
-use super::scheme::{
-    ChromeColorOverrides, ChromeScheme, CustomScheme, SchemeMetadata, TerminalColorOverrides,
-    TerminalScheme,
-};
-use super::{Appearance, ChromeColors, Color, SchemeId, SchemeKind, TerminalColors};
+use super::scheme::{ColorScheme, SchemeMetadata, TerminalColorOverrides};
+use super::{Appearance, ChromeColors, Color, SchemeId, TerminalColors};
 
-pub(crate) fn dark_chrome_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.chrome.dark")
-}
 pub(crate) fn dark_terminal_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.terminal.dark")
-}
-pub(crate) fn light_chrome_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.chrome.light")
+    SchemeId::builtin("builtin.spaceterm.dark")
 }
 pub(crate) fn light_terminal_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.terminal.light")
+    SchemeId::builtin("builtin.spaceterm.light")
 }
-
-pub(crate) fn fallback_id(kind: SchemeKind, appearance: Appearance) -> SchemeId {
-    match (kind, appearance) {
-        (SchemeKind::Chrome, Appearance::Dark) => dark_chrome_id(),
-        (SchemeKind::Terminal, Appearance::Dark) => dark_terminal_id(),
-        (SchemeKind::Chrome, Appearance::Light) => light_chrome_id(),
-        (SchemeKind::Terminal, Appearance::Light) => light_terminal_id(),
+pub(crate) fn fallback_id(appearance: Appearance) -> SchemeId {
+    match appearance {
+        Appearance::Dark => dark_terminal_id(),
+        Appearance::Light => light_terminal_id(),
     }
 }
-
-pub(crate) fn builtin_schemes() -> Vec<CustomScheme> {
-    let chrome_metadata = SchemeMetadata {
-        origin: None,
-        author: Some(String::from("SpaceTerm contributors")),
-        license: Some(String::from("MIT")),
-        description: Some(String::from("SpaceTerm-owned Chrome appearance")),
-    };
-    let terminal_metadata = SchemeMetadata {
-        origin: None,
-        author: Some(String::from("SpaceTerm contributors")),
-        license: Some(String::from("MIT")),
-        description: Some(String::from("SpaceTerm-owned Terminal appearance")),
-    };
-    vec![
-        CustomScheme::Chrome(Box::new(ChromeScheme {
-            window_background: None,
-            id: dark_chrome_id(),
-            name: String::from("SpaceTerm Dark"),
-            appearance: Appearance::Dark,
-            metadata: chrome_metadata.clone(),
-            colors: chrome_definition(Appearance::Dark),
-        })),
-        CustomScheme::Terminal(Box::new(TerminalScheme {
-            id: dark_terminal_id(),
-            name: String::from("SpaceTerm Dark"),
-            appearance: Appearance::Dark,
-            metadata: terminal_metadata.clone(),
+pub(crate) fn builtin_schemes() -> Vec<ColorScheme> {
+    [Appearance::Dark, Appearance::Light]
+        .into_iter()
+        .map(|appearance| ColorScheme {
+            id: fallback_id(appearance),
+            name: match appearance {
+                Appearance::Dark => "SpaceTerm Dark",
+                Appearance::Light => "SpaceTerm Light",
+            }
+            .into(),
+            appearance,
+            metadata: SchemeMetadata {
+                author: Some("SpaceTerm contributors".into()),
+                license: Some("MIT".into()),
+                description: Some("SpaceTerm-owned Terminal appearance".into()),
+                ..Default::default()
+            },
             colors: TerminalColorOverrides::default(),
-        })),
-        CustomScheme::Chrome(Box::new(ChromeScheme {
-            window_background: None,
-            id: light_chrome_id(),
-            name: String::from("SpaceTerm Light"),
-            appearance: Appearance::Light,
-            metadata: chrome_metadata,
-            colors: chrome_definition(Appearance::Light),
-        })),
-        CustomScheme::Terminal(Box::new(TerminalScheme {
-            id: light_terminal_id(),
-            name: String::from("SpaceTerm Light"),
-            appearance: Appearance::Light,
-            metadata: terminal_metadata,
-            colors: TerminalColorOverrides::default(),
-        })),
-    ]
+        })
+        .collect()
 }
-
 #[cfg(test)]
 pub(crate) fn chrome_base(appearance: Appearance) -> ChromeColors {
-    match appearance {
-        Appearance::Dark => spaceterm_dark_chrome(),
-        Appearance::Light => spaceterm_light_chrome(),
-    }
+    super::compiler::compile_builtin_chrome(appearance)
 }
 
 pub(crate) fn terminal_base(appearance: Appearance) -> TerminalColors {
@@ -101,23 +59,8 @@ impl Default for TerminalColors {
 }
 
 fn spaceterm_dark_chrome() -> ChromeColors {
-    super::compiler::compile_chrome(
-        Appearance::Dark,
-        &chrome_definition(Appearance::Dark),
-        &ChromeColorOverrides::default(),
-    )
-    .colors
+    super::compiler::compile_builtin_chrome(Appearance::Dark)
 }
-#[cfg(test)]
-fn spaceterm_light_chrome() -> ChromeColors {
-    super::compiler::compile_chrome(
-        Appearance::Light,
-        &chrome_definition(Appearance::Light),
-        &ChromeColorOverrides::default(),
-    )
-    .colors
-}
-
 /// The authored SpaceTerm Chrome identity: one achromatic surface ladder per appearance plus a
 /// small set of restrained semantic accents.
 ///
@@ -146,7 +89,7 @@ fn spaceterm_light_chrome() -> ChromeColors {
 /// compiler would otherwise hold to a readability floor against its own fill: control outlines,
 /// switch indicators, and the labels on filled actions. Those floors protect a glyph, and applying
 /// them to a ring or a knob collapses a quiet palette into pure black and white.
-pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides {
+pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
     let palette = match appearance {
         Appearance::Dark => ChromePalette {
             root: 0x151515,
@@ -154,7 +97,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell_inactive: 0x161616,
             raised: 0x202020,
             field: 0x262626,
-            control_fill: Some(0x272727),
+            control_fill: 0x272727,
             segmented_track: None,
             control_hover: 0x2f2f2f,
             control_pressed: 0x363636,
@@ -217,7 +160,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             shell_inactive: 0xe5e5e5,
             raised: 0xfafafa,
             field: 0xfafafa,
-            control_fill: Some(0xfafafa),
+            control_fill: 0xfafafa,
             segmented_track: Some(0xe5e5e5),
             control_hover: 0xe9e9e9,
             control_pressed: 0xdcdcdc,
@@ -251,7 +194,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeColorOverrides 
             control_outline: Color::rgba(0x0000002b),
             control_outline_strong: Color::rgba(0x00000040),
             tab_separator: Color::rgba(0x00000028),
-            // The rim belongs to the chip, not to the strip behind it. A dark scheme states it
+            // The rim belongs to the chip, not to the strip behind it. Dark states it
             // as light on the far side of the fill, where it reads as the chip's own lit edge
             // and the chip gains a little mass. A bright fill sits at the top of the range with
             // no room above it, so this states the same edge inward instead, and it has to stop
@@ -302,7 +245,7 @@ struct ChromePalette {
     ///
     /// Floating preparation may strengthen the equivalent overlay without changing this authored
     /// composite when a transmitting host would otherwise make its content unreadable.
-    control_fill: Option<u32>,
+    control_fill: u32,
     /// An explicit track gives selected chips their own host, independent of button fills.
     segmented_track: Option<u32>,
     /// Filled and unfilled controls have independent interaction steps.
@@ -394,12 +337,100 @@ struct ChromePalette {
     shadow: u32,
 }
 
+pub(super) struct ChromeDefinition {
+    pub(super) background: Color,
+    pub(super) panel_background: Color,
+    pub(super) title_bar_background: Color,
+    pub(super) title_bar_inactive_background: Color,
+    pub(super) elevated_surface_background: Color,
+    pub(super) input_background: Color,
+    pub(super) text: Color,
+    pub(super) text_secondary: Color,
+    pub(super) text_muted: Color,
+    pub(super) text_placeholder: Color,
+    pub(super) text_disabled: Color,
+    pub(super) text_accent: Color,
+    pub(super) link_text_hover: Color,
+    pub(super) link_text_pressed: Color,
+    pub(super) border: Color,
+    pub(super) border_variant: Color,
+    pub(super) border_disabled: Color,
+    pub(super) input_border: Color,
+    pub(super) outline_border: Color,
+    pub(super) outline_hover_border: Color,
+    pub(super) outline_pressed_border: Color,
+    pub(super) outline_disabled_border: Color,
+    pub(super) element_background: Color,
+    pub(super) segmented_track_background: Option<Color>,
+    pub(super) element_hover: Color,
+    pub(super) element_active: Color,
+    pub(super) element_selected: Color,
+    pub(super) ghost_element_hover: Color,
+    pub(super) ghost_element_active: Color,
+    pub(super) selection_background: Color,
+    pub(super) row_background: Color,
+    pub(super) row_hover_background: Color,
+    pub(super) row_selected_background: Color,
+    pub(super) row_selected_hover_background: Option<Color>,
+    pub(super) navigation_selected_background: Option<Color>,
+    pub(super) row_selected_border: Color,
+    pub(super) row_selected_hover_border: Color,
+    pub(super) row_selected_foreground: Color,
+    pub(super) row_selected_hover_foreground: Color,
+    pub(super) row_selected_secondary: Color,
+    pub(super) row_selected_hover_secondary: Color,
+    pub(super) tab_active_background: Color,
+    pub(super) tab_active_hover_background: Option<Color>,
+    pub(super) tab_active_foreground: Color,
+    pub(super) tab_active_border: Color,
+    pub(super) tab_active_hover_foreground: Color,
+    pub(super) tab_inactive_selected_background: Color,
+    pub(super) tab_inactive_selected_foreground: Color,
+    pub(super) tab_inactive_selected_border: Color,
+    pub(super) tab_separator: Color,
+    pub(super) primary_background: Color,
+    pub(super) primary_hover_background: Color,
+    pub(super) primary_pressed_background: Color,
+    pub(super) primary_foreground: Color,
+    pub(super) primary_hover_foreground: Color,
+    pub(super) primary_pressed_foreground: Color,
+    pub(super) destructive_background: Color,
+    pub(super) destructive_hover_background: Color,
+    pub(super) destructive_pressed_background: Color,
+    pub(super) destructive_foreground: Color,
+    pub(super) destructive_hover_foreground: Color,
+    pub(super) destructive_pressed_foreground: Color,
+    pub(super) toggle_off_background: Color,
+    pub(super) toggle_off_mark: Color,
+    pub(super) toggle_off_hover_mark: Color,
+    pub(super) toggle_off_pressed_mark: Color,
+    pub(super) toggle_off_border: Color,
+    pub(super) toggle_off_hover_border: Color,
+    pub(super) toggle_off_pressed_border: Color,
+    pub(super) toggle_on_background: Color,
+    pub(super) toggle_on_hover_background: Color,
+    pub(super) toggle_on_pressed_background: Color,
+    pub(super) toggle_on_border: Color,
+    pub(super) toggle_on_hover_border: Color,
+    pub(super) toggle_on_pressed_border: Color,
+    pub(super) toggle_on_mark: Color,
+    pub(super) toggle_on_hover_mark: Color,
+    pub(super) toggle_on_pressed_mark: Color,
+    pub(super) toggle_on_disabled_mark: Color,
+    pub(super) scrollbar_thumb_background: Color,
+    pub(super) info: Color,
+    pub(super) success: Color,
+    pub(super) warning: Color,
+    pub(super) error: Color,
+    pub(super) shadow: Color,
+}
+
 impl ChromePalette {
-    fn into_definition(self) -> ChromeColorOverrides {
-        let opaque = |value: u32| Some(Color::rgb(value));
-        let translucent = |value: u32| Some(Color::rgba(value));
+    fn into_definition(self) -> ChromeDefinition {
+        let opaque = |value: u32| Color::rgb(value);
+        let translucent = |value: u32| Color::rgba(value);
         let on_emphasis = opaque(self.on_emphasis);
-        ChromeColorOverrides {
+        ChromeDefinition {
             background: opaque(self.root),
             panel_background: opaque(self.shell),
             title_bar_background: opaque(self.shell),
@@ -416,18 +447,18 @@ impl ChromePalette {
             link_text_hover: opaque(self.accent_hover),
             link_text_pressed: opaque(self.accent_pressed),
 
-            border: Some(self.separator),
-            border_variant: Some(self.separator_quiet),
-            border_disabled: Some(self.separator_disabled),
-            input_border: Some(self.field_outline),
-            outline_border: Some(self.control_outline),
-            outline_hover_border: Some(self.control_outline_strong),
+            border: self.separator,
+            border_variant: self.separator_quiet,
+            border_disabled: self.separator_disabled,
+            input_border: self.field_outline,
+            outline_border: self.control_outline,
+            outline_hover_border: self.control_outline_strong,
             // A press is carried by the fill. Thickening the ring as well would make an
             // outlined action jump against the quiet separators around it.
-            outline_pressed_border: Some(self.control_outline),
-            outline_disabled_border: Some(self.separator_disabled),
+            outline_pressed_border: self.control_outline,
+            outline_disabled_border: self.separator_disabled,
 
-            element_background: self.control_fill.map(Color::rgb),
+            element_background: Color::rgb(self.control_fill),
             segmented_track_background: self.segmented_track.map(Color::rgb),
             element_hover: opaque(self.control_hover),
             element_active: opaque(self.control_pressed),
@@ -445,8 +476,8 @@ impl ChromePalette {
             navigation_selected_background: self.navigation_selected.map(Color::rgb),
             // A rim appears only where the fill cannot state the chip's shape by itself, and it
             // steps up on hover because the fill of a selected row has nowhere left to move.
-            row_selected_border: Some(self.selected_rim),
-            row_selected_hover_border: Some(self.selected_rim_hover),
+            row_selected_border: self.selected_rim,
+            row_selected_hover_border: self.selected_rim_hover,
             row_selected_foreground: opaque(self.row_selected_text),
             row_selected_hover_foreground: opaque(self.row_selected_text),
             row_selected_secondary: opaque(self.row_selected_secondary),
@@ -457,12 +488,12 @@ impl ChromePalette {
             // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
             // hover identically, and both take the same rim.
             tab_active_foreground: opaque(self.row_selected_text),
-            tab_active_border: Some(self.selected_rim),
+            tab_active_border: self.selected_rim,
             tab_active_hover_foreground: opaque(self.row_selected_text),
             tab_inactive_selected_background: opaque(self.selected_inactive),
             tab_inactive_selected_foreground: opaque(self.text_secondary),
-            tab_inactive_selected_border: Some(self.selected_rim_inactive),
-            tab_separator: Some(self.tab_separator),
+            tab_inactive_selected_border: self.selected_rim_inactive,
+            tab_separator: self.tab_separator,
 
             primary_background: opaque(self.emphasis),
             primary_hover_background: opaque(self.emphasis_hover),
@@ -510,7 +541,6 @@ impl ChromePalette {
             error: opaque(self.error),
 
             shadow: translucent(self.shadow),
-            ..ChromeColorOverrides::default()
         }
     }
 }

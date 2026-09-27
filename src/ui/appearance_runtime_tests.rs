@@ -152,7 +152,7 @@ fn a_new_named_font_is_classified_before_appearance_resolution() {
     let (settings, _) = start(&mut cx);
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.typography.family = ChromeFontFamily::Named {
+    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
         family: "Arial".to_owned(),
     };
     settings.update_preview(&token, document).unwrap();
@@ -277,8 +277,8 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     );
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.background.transparency = 0.5;
-    document.preferences.background.blur = false;
+    document.preferences.window.transparency = 0.5;
+    document.preferences.window.blur = false;
     settings.update_preview(&token, document).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -623,15 +623,18 @@ fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
     let (settings, _) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.chrome.schemes.dark = SchemeId::new("custom.missing").unwrap();
+    candidate.preferences.terminal.schemes.dark = SchemeId::new("custom.missing").unwrap();
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
         let resolved = current(cx);
-        assert_eq!(resolved.chrome.requested_scheme.as_str(), "custom.missing");
         assert_eq!(
-            resolved.chrome.effective_scheme.as_str(),
-            "builtin.spaceterm.chrome.dark"
+            resolved.terminal.requested_scheme.as_str(),
+            "custom.missing"
+        );
+        assert_eq!(
+            resolved.terminal.effective_scheme.as_str(),
+            "builtin.spaceterm.dark"
         );
         assert!(!resolved.diagnostics.is_empty());
     });
@@ -705,38 +708,6 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(current(cx).chrome.appearance, Appearance::Light));
-}
-
-#[gpui::test]
-fn chrome_palette_and_typography_preview_preserve_native_classification_and_terminal(
-    cx: &mut TestAppContext,
-) {
-    let (settings, platform) = start(cx);
-    let before = cx.update(|cx| current(cx));
-    let native_calls = platform.applied.borrow().len();
-    let token = settings.begin_preview(0).unwrap();
-    let mut candidate = SettingsDocument::default();
-    candidate.preferences.chrome.typography.base_size = 17.0;
-    candidate.preferences.chrome.overrides.insert(
-        before.chrome.effective_scheme.clone(),
-        crate::appearance::ChromeColorOverrides {
-            background: Some(crate::appearance::Color::rgb(0x20252a)),
-            ..Default::default()
-        },
-    );
-    settings.update_preview(&token, candidate).unwrap();
-    cx.run_until_parked();
-    cx.update(|cx| {
-        let after = current(cx);
-        assert_eq!(after.terminal, before.terminal);
-        assert_ne!(after.chrome.colors, before.chrome.colors);
-        assert_ne!(after.chrome.typography, before.chrome.typography);
-    });
-    assert_eq!(platform.applied.borrow().len(), native_calls);
-    drop(token);
-    cx.run_until_parked();
-    cx.update(|cx| assert_eq!(current(cx).chrome, before.chrome));
-    assert_eq!(platform.applied.borrow().len(), native_calls);
 }
 
 /// Comfortable density grows the titlebar, so each window's native traffic lights must move down

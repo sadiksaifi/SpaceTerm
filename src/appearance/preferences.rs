@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::scheme::{CatalogError, ChromeColorOverrides, TerminalColorOverrides, validate_text};
-use super::{Appearance, SchemeId, SchemeKind, builtin};
+use super::scheme::{CatalogError, TerminalColorOverrides, validate_text};
+use super::{Appearance, SchemeId, builtin};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +33,7 @@ impl From<Appearance> for AppearanceMode {
     }
 }
 
-/// The scheme identities one appearance domain wears in each shared Appearance Mode slot.
+/// Terminal scheme identities for each Appearance Mode slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SchemeSlots {
@@ -63,13 +63,6 @@ impl SchemeSlots {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ChromeFontFamily {
-    SystemUi,
-    Named { family: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TerminalFontFamily {
     DefaultMonospace,
     Named { family: String },
@@ -81,45 +74,6 @@ pub(crate) enum ChromeDensity {
     #[default]
     Compact,
     Comfortable,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ChromeTypographyPreferences {
-    pub(crate) family: ChromeFontFamily,
-    pub(crate) base_size: f32,
-    pub(crate) regular_weight: u16,
-    pub(crate) emphasis_weight: u16,
-    pub(crate) heading_weight: u16,
-}
-
-impl Default for ChromeTypographyPreferences {
-    fn default() -> Self {
-        Self {
-            family: ChromeFontFamily::SystemUi,
-            base_size: 13.0,
-            regular_weight: 400,
-            emphasis_weight: 600,
-            heading_weight: 600,
-        }
-    }
-}
-
-impl ChromeTypographyPreferences {
-    pub(crate) fn validate(&self) -> Result<(), PreferenceError> {
-        finite_range(self.base_size, 10.0, 24.0)?;
-        for weight in [
-            self.regular_weight,
-            self.emphasis_weight,
-            self.heading_weight,
-        ] {
-            valid_weight(weight)?;
-        }
-        if let ChromeFontFamily::Named { family } = &self.family {
-            validate_family(family)?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -175,30 +129,6 @@ impl Default for TerminalRenderingPreferences {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ChromePreferences {
-    pub(crate) schemes: SchemeSlots,
-    pub(crate) typography: ChromeTypographyPreferences,
-    pub(crate) density: ChromeDensity,
-    #[serde(default)]
-    pub(crate) overrides: BTreeMap<SchemeId, ChromeColorOverrides>,
-}
-
-impl Default for ChromePreferences {
-    fn default() -> Self {
-        Self {
-            schemes: SchemeSlots {
-                light: builtin::fallback_id(SchemeKind::Chrome, Appearance::Light),
-                dark: builtin::dark_chrome_id(),
-            },
-            typography: ChromeTypographyPreferences::default(),
-            density: ChromeDensity::Compact,
-            overrides: BTreeMap::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct TerminalPreferences {
     pub(crate) schemes: SchemeSlots,
     pub(crate) typography: TerminalTypographyPreferences,
@@ -211,7 +141,7 @@ impl Default for TerminalPreferences {
     fn default() -> Self {
         Self {
             schemes: SchemeSlots {
-                light: builtin::fallback_id(SchemeKind::Terminal, Appearance::Light),
+                light: builtin::fallback_id(Appearance::Light),
                 dark: builtin::dark_terminal_id(),
             },
             typography: TerminalTypographyPreferences::default(),
@@ -221,17 +151,19 @@ impl Default for TerminalPreferences {
     }
 }
 
-/// Window surface presentation, independent of authored Chrome and Terminal colors.
+/// Chrome density and window background presentation, independent of Terminal colors.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct BackgroundPreferences {
+#[serde(deny_unknown_fields)]
+pub(crate) struct WindowPreferences {
+    pub(crate) density: ChromeDensity,
     pub(crate) transparency: f32,
     pub(crate) blur: bool,
 }
 
-impl Default for BackgroundPreferences {
+impl Default for WindowPreferences {
     fn default() -> Self {
         Self {
+            density: ChromeDensity::Compact,
             transparency: 0.35,
             blur: true,
         }
@@ -242,25 +174,16 @@ impl Default for BackgroundPreferences {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppearancePreferences {
     pub(crate) mode: AppearanceMode,
-    #[serde(default)]
-    pub(crate) background: BackgroundPreferences,
-    pub(crate) chrome: ChromePreferences,
+    pub(crate) window: WindowPreferences,
     pub(crate) terminal: TerminalPreferences,
 }
 
 impl AppearancePreferences {
     pub(crate) fn validate(&self) -> Result<(), PreferenceError> {
-        finite_range(self.background.transparency, 0.0, 1.0)?;
-        self.chrome.typography.validate()?;
+        finite_range(self.window.transparency, 0.0, 1.0)?;
         self.terminal.typography.validate()?;
-        if self.chrome.overrides.len() > 128 || self.terminal.overrides.len() > 128 {
+        if self.terminal.overrides.len() > 128 {
             return Err(PreferenceError::TooManyOverrides);
-        }
-        for overrides in self.chrome.overrides.values() {
-            overrides.validate().map_err(|error| match error {
-                CatalogError::UnsupportedAlpha => PreferenceError::UnsupportedAlpha,
-                _ => PreferenceError::InvalidValue,
-            })?;
         }
         for overrides in self.terminal.overrides.values() {
             overrides.validate().map_err(|error| match error {
@@ -275,29 +198,8 @@ impl AppearancePreferences {
         let defaults = Self::default();
         match target {
             ResetTarget::AppearanceMode => self.mode = defaults.mode,
-            ResetTarget::Transparency => {
-                self.background.transparency = defaults.background.transparency
-            }
-            ResetTarget::BackgroundBlur => self.background.blur = defaults.background.blur,
-            ResetTarget::ChromeScheme(appearance) => {
-                *self.chrome.schemes.get_mut(appearance) =
-                    defaults.chrome.schemes.get(appearance).clone();
-            }
-            ResetTarget::ChromeFontFamily => {
-                self.chrome.typography.family = defaults.chrome.typography.family
-            }
-            ResetTarget::ChromeBaseSize => {
-                self.chrome.typography.base_size = defaults.chrome.typography.base_size
-            }
-            ResetTarget::ChromeRegularWeight => {
-                self.chrome.typography.regular_weight = defaults.chrome.typography.regular_weight
-            }
-            ResetTarget::ChromeEmphasisWeight => {
-                self.chrome.typography.emphasis_weight = defaults.chrome.typography.emphasis_weight
-            }
-            ResetTarget::ChromeHeadingWeight => {
-                self.chrome.typography.heading_weight = defaults.chrome.typography.heading_weight
-            }
+            ResetTarget::Transparency => self.window.transparency = defaults.window.transparency,
+            ResetTarget::Blur => self.window.blur = defaults.window.blur,
             ResetTarget::TerminalScheme(appearance) => {
                 *self.terminal.schemes.get_mut(appearance) =
                     defaults.terminal.schemes.get(appearance).clone();
@@ -324,14 +226,6 @@ impl AppearancePreferences {
             ResetTarget::TerminalBoldAsBright => {
                 self.terminal.rendering.bold_as_bright = defaults.terminal.rendering.bold_as_bright
             }
-            ResetTarget::ChromeColorOverride { scheme, role } => {
-                if let Some(overrides) = self.chrome.overrides.get_mut(&scheme) {
-                    overrides.remove_role(role.as_str());
-                    if overrides.is_empty() {
-                        self.chrome.overrides.remove(&scheme);
-                    }
-                }
-            }
             ResetTarget::TerminalColorOverride { scheme, role } => {
                 if let Some(overrides) = self.terminal.overrides.get_mut(&scheme) {
                     overrides.remove_role(role.as_str());
@@ -340,12 +234,7 @@ impl AppearancePreferences {
                     }
                 }
             }
-            ResetTarget::ChromeColors => {
-                self.chrome.schemes = defaults.chrome.schemes;
-                self.chrome.overrides.clear();
-            }
-            ResetTarget::ChromeTypography => self.chrome.typography = defaults.chrome.typography,
-            ResetTarget::ChromeDensity => self.chrome.density = defaults.chrome.density,
+            ResetTarget::Density => self.window.density = defaults.window.density,
             ResetTarget::TerminalColors => {
                 self.terminal.schemes = defaults.terminal.schemes;
                 self.terminal.overrides.clear();
@@ -367,13 +256,7 @@ impl AppearancePreferences {
 pub(crate) enum ResetTarget {
     AppearanceMode,
     Transparency,
-    BackgroundBlur,
-    ChromeScheme(Appearance),
-    ChromeFontFamily,
-    ChromeBaseSize,
-    ChromeRegularWeight,
-    ChromeEmphasisWeight,
-    ChromeHeadingWeight,
+    Blur,
     TerminalScheme(Appearance),
     TerminalFontFamily,
     TerminalBaseSize,
@@ -382,17 +265,11 @@ pub(crate) enum ResetTarget {
     TerminalLineHeight,
     TerminalItalic,
     TerminalBoldAsBright,
-    ChromeColorOverride {
-        scheme: SchemeId,
-        role: ChromeColorRole,
-    },
     TerminalColorOverride {
         scheme: SchemeId,
         role: TerminalColorRole,
     },
-    ChromeColors,
-    ChromeTypography,
-    ChromeDensity,
+    Density,
     TerminalColors,
     TerminalTypography,
     TerminalRendering,
@@ -404,39 +281,11 @@ impl ResetTarget {
         dead_code,
         reason = "individual color-role reset awaits the color override editor"
     )]
-    pub(crate) fn chrome_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
-        Some(Self::ChromeColorOverride {
-            scheme,
-            role: ChromeColorRole::new(role)?,
-        })
-    }
-
-    #[allow(
-        dead_code,
-        reason = "individual color-role reset awaits the color override editor"
-    )]
     pub(crate) fn terminal_color_override(scheme: SchemeId, role: &'static str) -> Option<Self> {
         Some(Self::TerminalColorOverride {
             scheme,
             role: TerminalColorRole::new(role)?,
         })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ChromeColorRole(&'static str);
-
-impl ChromeColorRole {
-    #[allow(
-        dead_code,
-        reason = "individual color-role reset awaits the color override editor"
-    )]
-    pub(crate) fn new(role: &'static str) -> Option<Self> {
-        ChromeColorOverrides::supports_role(role).then_some(Self(role))
-    }
-
-    pub(crate) const fn as_str(self) -> &'static str {
-        self.0
     }
 }
 

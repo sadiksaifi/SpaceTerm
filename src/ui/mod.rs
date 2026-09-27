@@ -18,8 +18,6 @@ mod floating_surface_tests;
 mod light_hover_tests;
 #[cfg(test)]
 mod light_inactive_tests;
-#[cfg(test)]
-mod light_theme_preservation_tests;
 mod menu_theme;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;

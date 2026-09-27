@@ -1,4 +1,4 @@
-//! Requested native backdrop and effective presentation are independent from scheme classification.
+//! Window backdrop and surface composition for the built-in appearances.
 use serde::{Deserialize, Serialize};
 
 use super::ChromeColors;
@@ -68,9 +68,7 @@ pub(crate) enum SurfaceRole {
 
 /// Whether the Chrome painted over a material is bright enough to hide what the material admits.
 ///
-/// This is a fact about the compiled colors, not about the Light or Dark slot a scheme occupies.
-/// A definition may be filed under Light and paint a near-black window root, and what a reader
-/// sees through that root is what a dark scheme sees: the desktop arriving as light against dark.
+/// Tone comes from the compiled window root and controls its transmission curve.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChromeTone {
     /// Near-white paint, whose surfaces lift with white ink that has little room left to work in.
@@ -475,7 +473,7 @@ pub(crate) struct ResolvedWindowComposition {
 
 impl ResolvedWindowComposition {
     pub(crate) fn resolve(
-        preferences: &super::preferences::BackgroundPreferences,
+        preferences: &super::preferences::WindowPreferences,
         capabilities: CompositionCapabilities,
         tone: ChromeTone,
     ) -> Self {
@@ -704,7 +702,7 @@ mod tests {
 
     #[test]
     fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
-        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let preferences = crate::appearance::preferences::WindowPreferences::default();
         let capabilities = CompositionCapabilities {
             increase_contrast: true,
             ..CompositionCapabilities::new(true, true)
@@ -737,7 +735,7 @@ mod tests {
 
     #[test]
     fn non_transparency_accessibility_capabilities_do_not_change_composition() {
-        let preferences = crate::appearance::preferences::BackgroundPreferences::default();
+        let preferences = crate::appearance::preferences::WindowPreferences::default();
         let baseline = ResolvedWindowComposition::resolve(
             &preferences,
             CompositionCapabilities::new(true, true),

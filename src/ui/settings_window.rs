@@ -43,8 +43,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, AppearanceMode, ChromeDensity, ChromeFontFamily, Color, FontClass, SchemeId,
-    SchemeKind, SettingsDocument, TerminalFontFamily,
+    Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
+    FontClass, SchemeCatalog, SchemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
 #[cfg(test)]
@@ -561,15 +561,12 @@ impl SettingsWindow {
         }
     }
 
-    /// Both scheme engines use the shared mode while retaining their own light and dark slots.
+    /// Auto exposes both Terminal slots.
     fn row_applies(&self, row: SettingsRowId) -> bool {
         let auto = self.editor.document().preferences.mode == AppearanceMode::Auto;
         match row {
-            SettingsRowId::ChromeScheme | SettingsRowId::TerminalScheme => !auto,
-            SettingsRowId::ChromeLightScheme
-            | SettingsRowId::ChromeDarkScheme
-            | SettingsRowId::TerminalLightScheme
-            | SettingsRowId::TerminalDarkScheme => auto,
+            SettingsRowId::TerminalScheme => !auto,
+            SettingsRowId::TerminalLightScheme | SettingsRowId::TerminalDarkScheme => auto,
             _ => true,
         }
     }
@@ -1045,7 +1042,6 @@ impl SettingsWindow {
                             .child(Icon::inherited(
                                 match section {
                                     SettingsSectionId::Appearance => IconName::SunMoon,
-                                    SettingsSectionId::Interface => IconName::AppWindow,
                                     SettingsSectionId::Terminal => IconName::Terminal,
                                     SettingsSectionId::ColorSchemes => IconName::Palette,
                                     SettingsSectionId::Privacy => IconName::Shield,
@@ -1347,66 +1343,30 @@ impl SettingsWindow {
         match row {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
-            SettingsRowId::BackgroundBlur => self.render_background_blur(cx),
-            SettingsRowId::ChromeScheme => {
-                self.render_scheme_picker(row, SchemeKind::Chrome, None, appearance, cx)
+            SettingsRowId::Blur => self.render_blur(cx),
+            SettingsRowId::TerminalScheme => self.render_scheme_picker(row, None, appearance, cx),
+            SettingsRowId::TerminalLightScheme => {
+                self.render_scheme_picker(row, Some(Appearance::Light), appearance, cx)
             }
-            SettingsRowId::ChromeLightScheme => self.render_scheme_picker(
-                row,
-                SchemeKind::Chrome,
-                Some(Appearance::Light),
-                appearance,
-                cx,
-            ),
-            SettingsRowId::ChromeDarkScheme => self.render_scheme_picker(
-                row,
-                SchemeKind::Chrome,
-                Some(Appearance::Dark),
-                appearance,
-                cx,
-            ),
-            SettingsRowId::TerminalScheme => {
-                self.render_scheme_picker(row, SchemeKind::Terminal, None, appearance, cx)
+            SettingsRowId::TerminalDarkScheme => {
+                self.render_scheme_picker(row, Some(Appearance::Dark), appearance, cx)
             }
-            SettingsRowId::TerminalLightScheme => self.render_scheme_picker(
-                row,
-                SchemeKind::Terminal,
-                Some(Appearance::Light),
-                appearance,
-                cx,
-            ),
-            SettingsRowId::TerminalDarkScheme => self.render_scheme_picker(
-                row,
-                SchemeKind::Terminal,
-                Some(Appearance::Dark),
-                appearance,
-                cx,
-            ),
-            SettingsRowId::ChromeDensity => self.render_density(appearance, cx),
-            SettingsRowId::ChromeFontFamily => self.render_chrome_font(appearance, cx),
+            SettingsRowId::Density => self.render_density(appearance, cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
-            SettingsRowId::ChromeBaseSize => self.render_chrome_size(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
             SettingsRowId::TerminalLineHeight => self.render_line_height(appearance, cx),
-            SettingsRowId::ChromeRegularWeight
-            | SettingsRowId::ChromeEmphasisWeight
-            | SettingsRowId::ChromeHeadingWeight
-            | SettingsRowId::TerminalRegularWeight
-            | SettingsRowId::TerminalBoldWeight => self.render_weight(row, appearance, cx),
+            SettingsRowId::TerminalRegularWeight | SettingsRowId::TerminalBoldWeight => {
+                self.render_weight(row, appearance, cx)
+            }
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
-            SettingsRowId::InterfaceSchemes => {
-                self.render_installed_schemes(SchemeKind::Chrome, appearance, cx)
-            }
-            SettingsRowId::TerminalSchemes => {
-                self.render_installed_schemes(SchemeKind::Terminal, appearance, cx)
-            }
+            SettingsRowId::TerminalSchemes => self.render_installed_schemes(appearance, cx),
             SettingsRowId::SchemeInterchange => self.render_scheme_interchange(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
         }
     }
 
-    /// One mode chooses the light or dark slot for both independent scheme engines.
+    /// One mode selects Chrome appearance and the matching Terminal slot.
     fn render_appearance_mode(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.editor.document().preferences.mode;
         let selector = "settings-appearance-mode";
@@ -1440,28 +1400,39 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// The miniature window previews the Interface scheme in each persistent slot.
+    /// Each miniature previews built-in Chrome and its matching Terminal slot.
     ///
     /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
-    fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<Vec<Color>> {
-        let slots = &self.editor.document().preferences.chrome.schemes;
-        let summaries = self.editor.scheme_summaries(SchemeKind::Chrome).ok();
-        let pick = |appearance| {
-            summaries
-                .as_ref()
-                .and_then(|summaries| {
-                    summaries
-                        .iter()
-                        .find(|summary| summary.id == *slots.get(appearance))
-                })
-                .map(|summary| summary.swatches.clone())
-                .unwrap_or_default()
+    fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
+        let document = self.editor.document();
+        let catalog = SchemeCatalog::from_color_schemes(&document.color_schemes).unwrap_or_default();
+        let pick = |appearance: Appearance| {
+            let mut preferences = document.preferences.clone();
+            preferences.mode = appearance.into();
+            let resolved = catalog
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &preferences,
+                    SystemAppearance::unavailable(),
+                    &AvailableFonts::default(),
+                )
+                .ok()?;
+            let chrome = &resolved.chrome.colors;
+            let terminal = &resolved.terminal.colors;
+            Some(ModePreviewPalette {
+                root: chrome.background,
+                title_bar: chrome.title_bar_background,
+                terminal_background: terminal.background,
+                terminal_foreground: terminal.foreground,
+                terminal_accent: terminal.normal[4],
+            })
         };
-        match mode {
-            AppearanceMode::Light => vec![pick(Appearance::Light)],
-            AppearanceMode::Dark => vec![pick(Appearance::Dark)],
-            AppearanceMode::Auto => vec![pick(Appearance::Light), pick(Appearance::Dark)],
-        }
+        let appearances = match mode {
+            AppearanceMode::Light => &[Appearance::Light][..],
+            AppearanceMode::Dark => &[Appearance::Dark][..],
+            AppearanceMode::Auto => &[Appearance::Light, Appearance::Dark][..],
+        };
+        appearances.iter().copied().filter_map(pick).collect()
     }
 
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
@@ -1472,21 +1443,17 @@ impl SettingsWindow {
     fn render_scheme_picker(
         &mut self,
         row: SettingsRowId,
-        kind: SchemeKind,
         slot: Option<Appearance>,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preferences = &self.editor.document().preferences;
-        let schemes = match kind {
-            SchemeKind::Chrome => &preferences.chrome.schemes,
-            SchemeKind::Terminal => &preferences.terminal.schemes,
-        };
+        let schemes = &preferences.terminal.schemes;
         let restrict = slot.unwrap_or_else(|| self.fixed_appearance());
         let current = schemes.get(restrict).clone();
         let summaries = self
             .editor
-            .scheme_summaries(kind)
+            .scheme_summaries()
             .unwrap_or_default()
             .into_iter()
             .filter(|summary| summary.appearance == restrict)
@@ -1519,29 +1486,18 @@ impl SettingsWindow {
         )
         .disabled(!self.editor.editable())
         .on_accept(move |acceptance, _, cx| {
-            let Some(id) = Some(acceptance.item_id().clone()) else {
-                return;
-            };
+            let id = acceptance.item_id().clone();
             let _ = owner.update(cx, |settings, cx| {
-                settings.set_scheme(kind, restrict, id, cx);
+                settings.set_scheme(restrict, id, cx);
             });
         })
         .into_any_element()
     }
 
-    fn set_scheme(
-        &mut self,
-        kind: SchemeKind,
-        slot: Appearance,
-        id: SchemeId,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_scheme(&mut self, slot: Appearance, id: SchemeId, cx: &mut Context<Self>) {
         self.edit(
             move |draft| {
-                let schemes = match kind {
-                    SchemeKind::Chrome => &mut draft.preferences.chrome.schemes,
-                    SchemeKind::Terminal => &mut draft.preferences.terminal.schemes,
-                };
+                let schemes = &mut draft.preferences.terminal.schemes;
                 schemes.set(slot, id);
             },
             cx,
@@ -1554,83 +1510,26 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let _ = appearance;
-        let current = self.editor.document().preferences.chrome.density;
+        let current = self.editor.document().preferences.window.density;
         let owner = cx.weak_entity();
         SegmentedControl::new(
-            "settings-chrome-density",
+            "settings-density",
             "Density",
             &current,
             vec![
                 SegmentedOption::new(ChromeDensity::Compact, "Compact")
-                    .debug_selector("settings-chrome-density-compact"),
+                    .debug_selector("settings-density-compact"),
                 SegmentedOption::new(ChromeDensity::Comfortable, "Comfortable")
-                    .debug_selector("settings-chrome-density-comfortable"),
+                    .debug_selector("settings-density-comfortable"),
             ],
         )
         .expect("two densities are within the bounded option set")
         .disabled(!self.editor.editable())
-        .debug_selector("settings-chrome-density")
+        .debug_selector("settings-density")
         .on_change(move |change, _, cx| {
             let density = *change.requested();
             let _ = owner.update(cx, |settings, cx| {
-                settings.edit(move |draft| draft.preferences.chrome.density = density, cx);
-            });
-        })
-        .into_any_element()
-    }
-
-    fn render_chrome_font(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let fonts = crate::ui::appearance_runtime::available_fonts(cx);
-        let current = match &self.editor.document().preferences.chrome.typography.family {
-            ChromeFontFamily::SystemUi => None,
-            ChromeFontFamily::Named { family } => Some(family.clone()),
-        };
-        let mut items =
-            vec![ComboBoxItem::new(None, "System").debug_selector("settings-chrome-font-system")];
-        items.extend(fonts.installed.iter().map(|font| {
-            ComboBoxItem::new(
-                Some(font.family.clone()),
-                SharedString::from(font.family.clone()),
-            )
-        }));
-        if let Some(family) = &current {
-            retain_selected_item(
-                &mut items,
-                ComboBoxItem::new(
-                    current.clone(),
-                    SharedString::from(format!("{family} (Unavailable)")),
-                )
-                .debug_selector("settings-chrome-font-unavailable"),
-            );
-        }
-        let owner = cx.weak_entity();
-        settings_selector(
-            "settings-chrome-font-family".to_owned(),
-            "Interface font",
-            Some(current),
-            "Choose an interface font",
-            items,
-            appearance,
-        )
-        .disabled(!self.editor.editable())
-        .on_accept(move |acceptance, _, cx| {
-            let Some(choice) = Some(acceptance.item_id().clone()) else {
-                return;
-            };
-            let _ = owner.update(cx, |settings, cx| {
-                settings.edit(
-                    move |draft| {
-                        draft.preferences.chrome.typography.family = match choice {
-                            Some(family) => ChromeFontFamily::Named { family },
-                            None => ChromeFontFamily::SystemUi,
-                        };
-                    },
-                    cx,
-                );
+                settings.edit(move |draft| draft.preferences.window.density = density, cx);
             });
         })
         .into_any_element()
@@ -1706,7 +1605,7 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let value = self.editor.document().preferences.background.transparency;
+        let value = self.editor.document().preferences.window.transparency;
         let owner = cx.weak_entity();
         Stepper::new(
             "settings-transparency",
@@ -1719,7 +1618,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let value = &mut draft.preferences.background.transparency;
+                        let value = &mut draft.preferences.window.transparency;
                         *value = (((*value * 20.0).round() + delta as f32) / 20.0).clamp(0.0, 1.0);
                     },
                     cx,
@@ -1730,56 +1629,21 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    fn render_background_blur(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let value = self.editor.document().preferences.background.blur;
+    fn render_blur(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let value = self.editor.document().preferences.window.blur;
         let owner = cx.weak_entity();
-        Switch::new("settings-background-blur", "Blur background", value)
+        Switch::new("settings-blur", "Blur background", value)
             .size(ToggleSize::Regular)
             .label_hidden(true)
             .disabled(!self.editor.editable())
-            .debug_selector("settings-background-blur")
+            .debug_selector("settings-blur")
             .on_change(move |change, _, cx| {
                 let blur = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
-                    settings.edit(move |draft| draft.preferences.background.blur = blur, cx);
+                    settings.edit(move |draft| draft.preferences.window.blur = blur, cx);
                 });
             })
             .into_any_element()
-    }
-
-    fn render_chrome_size(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let value = self
-            .editor
-            .document()
-            .preferences
-            .chrome
-            .typography
-            .base_size;
-        let owner = cx.weak_entity();
-        Stepper::new(
-            "settings-chrome-base-size",
-            "interface font size",
-            format!("{value:.0} pt"),
-        )
-        .bounds(value > 10.0, value < 24.0)
-        .enabled(self.editor.editable())
-        .on_step(move |delta, _, cx| {
-            let _ = owner.update(cx, |settings, cx| {
-                settings.edit(
-                    move |draft| {
-                        let size = &mut draft.preferences.chrome.typography.base_size;
-                        *size = (*size + f32::from(delta as i16)).clamp(10.0, 24.0);
-                    },
-                    cx,
-                );
-            });
-        })
-        .render(appearance)
-        .into_any_element()
     }
 
     fn render_terminal_size(
@@ -1867,9 +1731,6 @@ impl SettingsWindow {
     ) -> AnyElement {
         let typography = &self.editor.document().preferences;
         let current = match row {
-            SettingsRowId::ChromeRegularWeight => typography.chrome.typography.regular_weight,
-            SettingsRowId::ChromeEmphasisWeight => typography.chrome.typography.emphasis_weight,
-            SettingsRowId::ChromeHeadingWeight => typography.chrome.typography.heading_weight,
             SettingsRowId::TerminalRegularWeight => typography.terminal.typography.regular_weight,
             _ => typography.terminal.typography.bold_weight,
         };
@@ -1902,15 +1763,6 @@ impl SettingsWindow {
                     move |draft| {
                         let preferences = &mut draft.preferences;
                         match row {
-                            SettingsRowId::ChromeRegularWeight => {
-                                preferences.chrome.typography.regular_weight = weight
-                            }
-                            SettingsRowId::ChromeEmphasisWeight => {
-                                preferences.chrome.typography.emphasis_weight = weight
-                            }
-                            SettingsRowId::ChromeHeadingWeight => {
-                                preferences.chrome.typography.heading_weight = weight
-                            }
                             SettingsRowId::TerminalRegularWeight => {
                                 preferences.terminal.typography.regular_weight = weight
                             }
@@ -2223,12 +2075,25 @@ impl SettingsWindow {
     }
 }
 
-/// A miniature scheme preview for one appearance-mode card.
+/// The colors one appearance-mode miniature paints: built-in Chrome around its Terminal slot.
+#[derive(Clone, Debug, PartialEq)]
+struct ModePreviewPalette {
+    root: Color,
+    title_bar: Color,
+    terminal_background: Color,
+    terminal_foreground: Color,
+    terminal_accent: Color,
+}
+
 /// A miniature SpaceTerm window for each palette, split evenly when there is more than one.
 ///
 /// Each part clips one full-size miniature from its own side, so a split reads as one window
 /// crossing from light to dark. A hairline edge keeps a light miniature visible on a light surface.
-fn mode_preview(palettes: &[Vec<Color>], edge: Color, extent: gpui::Pixels) -> impl IntoElement {
+fn mode_preview(
+    palettes: &[ModePreviewPalette],
+    edge: Color,
+    extent: gpui::Pixels,
+) -> impl IntoElement {
     let width = extent * 1.5;
     let last = palettes.len().saturating_sub(1);
     div()
@@ -2252,21 +2117,22 @@ fn mode_preview(palettes: &[Vec<Color>], edge: Color, extent: gpui::Pixels) -> i
         }))
 }
 
-fn mode_miniature(swatches: &[Color], width: gpui::Pixels, extent: gpui::Pixels) -> gpui::Div {
-    let background = swatches.first().copied().unwrap_or(Color::rgb(0x000000));
-    let bar = swatches.get(1).copied().unwrap_or(Color::rgb(0xffffff));
-    let accent = swatches.get(3).copied().unwrap_or(bar);
+fn mode_miniature(
+    palette: &ModePreviewPalette,
+    width: gpui::Pixels,
+    extent: gpui::Pixels,
+) -> gpui::Div {
     div()
         .w(width)
         .h(extent)
-        .bg(gpui_color(background))
+        .bg(gpui_color(palette.root))
         .flex()
         .flex_col()
         .child(
             div()
                 .w_full()
                 .h(extent * 0.22)
-                .bg(gpui_color(bar))
+                .bg(gpui_color(palette.title_bar))
                 .opacity(0.35),
         )
         .child(
@@ -2274,11 +2140,27 @@ fn mode_miniature(swatches: &[Color], width: gpui::Pixels, extent: gpui::Pixels)
                 .flex()
                 .flex_col()
                 .flex_1()
+                .bg(gpui_color(palette.terminal_background))
                 .gap(px(2.0))
                 .p(px(3.0))
-                .child(div().w(extent * 0.8).h(px(2.0)).bg(gpui_color(bar)))
-                .child(div().w(extent * 0.55).h(px(2.0)).bg(gpui_color(accent)))
-                .child(div().w(extent * 0.65).h(px(2.0)).bg(gpui_color(bar))),
+                .child(
+                    div()
+                        .w(extent * 0.8)
+                        .h(px(2.0))
+                        .bg(gpui_color(palette.terminal_foreground)),
+                )
+                .child(
+                    div()
+                        .w(extent * 0.55)
+                        .h(px(2.0))
+                        .bg(gpui_color(palette.terminal_accent)),
+                )
+                .child(
+                    div()
+                        .w(extent * 0.65)
+                        .h(px(2.0))
+                        .bg(gpui_color(palette.terminal_foreground)),
+                ),
         )
 }
 
@@ -2347,9 +2229,9 @@ fn control_selector(row: SettingsRowId) -> String {
 /// the only row in its box, so the group's own title names them and the content spans the row.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::InterfaceSchemes
-        | SettingsRowId::TerminalSchemes
-        | SettingsRowId::SchemeInterchange => SettingsRowLayout::Full,
+        SettingsRowId::TerminalSchemes | SettingsRowId::SchemeInterchange => {
+            SettingsRowLayout::Full
+        }
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -2361,9 +2243,9 @@ impl SettingsWindow {
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
-            SettingsRowId::Transparency | SettingsRowId::BackgroundBlur => {
+            SettingsRowId::Transparency | SettingsRowId::Blur => {
                 let zero_transparency =
-                    self.editor.document().preferences.background.transparency == 0.0;
+                    self.editor.document().preferences.window.transparency == 0.0;
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();

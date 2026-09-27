@@ -199,19 +199,19 @@ mod scheme;
 mod tests;
 
 pub(crate) use crate::theme::Color;
-pub(crate) use compiler::{CaptionPaint, ColorProvenance, SemanticPaint, StatusPaint};
+pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     WindowBackgroundAppearance,
 };
 pub(crate) use document::{
-    ImportCandidate, ImportError, SettingsDocument, SettingsDocumentError, ZedImportKind,
-    export_resolved_schemes, export_schemes, export_settings, import_zed, list_zed_candidates,
-    parse_color_document, parse_settings,
+    ImportCandidate, ImportError, SettingsDocument, SettingsDocumentError, export_resolved_schemes,
+    export_schemes, export_settings, import_zed, list_zed_candidates, parse_color_document,
+    parse_settings,
 };
 pub(crate) use preferences::{
-    AppearanceMode, AppearancePreferences, ChromeDensity, ChromeFontFamily, ResetTarget,
-    SchemeSlots, TerminalFontFamily,
+    AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, SchemeSlots,
+    TerminalFontFamily,
 };
 pub(crate) use resolution::{
     AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
@@ -220,14 +220,9 @@ pub(crate) use resolution::{
     ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use scheme::{
-    Appearance, CatalogError, ChromeColors, CustomScheme, SchemeCatalog, SchemeId, SchemeKind,
-    SchemeSummary, TerminalColors,
+    Appearance, CatalogError, ChromeColors, ColorScheme, SchemeCatalog, SchemeId, SchemeSummary,
+    TerminalColors,
 };
-
-/// The definition whose presentation policy ships as SpaceTerm's Dark identity.
-pub(crate) use builtin::dark_chrome_id as builtin_dark_chrome;
-/// The definition whose presentation policy ships as SpaceTerm's Light identity.
-pub(crate) use builtin::light_chrome_id as builtin_light_chrome;
 
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
@@ -239,10 +234,4 @@ pub(crate) use resolution::AppearanceDiagnostic;
 #[cfg(test)]
 pub(crate) use resolution::ResolutionError;
 #[cfg(test)]
-pub(crate) use scheme::{
-    ChromeColorOverrides, ChromeScheme, OptionalColorOverride, SchemeMetadata,
-    TerminalColorOverrides, TerminalScheme,
-};
-
-#[cfg(test)]
-pub(crate) use document::export_effective_schemes;
+pub(crate) use scheme::{OptionalColorOverride, SchemeMetadata, TerminalColorOverrides};

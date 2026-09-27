@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, ChromeFontFamily,
-    SchemeCatalog, SchemeId, SchemeKind, TerminalColors, TerminalFontFamily, builtin,
-    preferences::PreferenceError,
+    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, SchemeCatalog, SchemeId,
+    TerminalColors, TerminalFontFamily, builtin, preferences::PreferenceError,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -181,13 +180,8 @@ pub(crate) struct ResolvedTerminalTypography {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedChromeAppearance {
-    pub(crate) requested_scheme: SchemeId,
-    pub(crate) effective_scheme: SchemeId,
     pub(crate) appearance: Appearance,
     pub(crate) colors: ChromeColors,
-    pub(crate) provenance:
-        std::collections::BTreeMap<&'static str, super::compiler::ColorProvenance>,
-    pub(crate) readability: Vec<super::compiler::ChromeReadabilityDiagnostic>,
     pub(crate) composition: super::ResolvedWindowComposition,
     pub(crate) typography: ResolvedChromeTypography,
     pub(crate) density: ChromeDensity,
@@ -206,9 +200,7 @@ pub(crate) struct ResolvedTerminalAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AppearanceDiagnostic {
     SystemAppearanceUnavailable,
-    ChromeSchemeUnavailable { appearance: Appearance },
     TerminalSchemeUnavailable { appearance: Appearance },
-    ChromeFontUnavailable,
     TerminalFontUnavailable,
     TerminalFontNotMonospace,
 }
@@ -272,26 +264,10 @@ impl SchemeCatalog {
         let capabilities = system.composition;
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
-        let requested_chrome = preferences.chrome.schemes.get(appearance);
         let requested_terminal = preferences.terminal.schemes.get(appearance);
-        let (effective_chrome, compiled_chrome, found_chrome) = self.resolve_chrome_scheme(
-            requested_chrome,
-            appearance,
-            preferences.chrome.overrides.get(requested_chrome),
-        )?;
-        let chrome_colors = compiled_chrome.colors;
-        if !found_chrome {
-            diagnostics.push(AppearanceDiagnostic::ChromeSchemeUnavailable { appearance });
-        }
-        chrome_colors
-            .validate()
-            .map_err(|_| ResolutionError::UnsupportedAlpha)?;
-        // The window's tint rests under this Chrome, and how much backdrop it must give up to
-        // show through is a question of what is painted over it, not of the slot the definition
-        // is filed under. A scheme offered for Light may paint a near-black root, and a reader
-        // sees the desktop through that root exactly as they would through a dark scheme's.
+        let chrome_colors = super::compiler::compile_builtin_chrome(appearance);
         let composition = super::ResolvedWindowComposition::resolve(
-            &preferences.background,
+            &preferences.window,
             capabilities,
             super::ChromeTone::of(chrome_colors.background),
         );
@@ -308,20 +284,16 @@ impl SchemeCatalog {
         terminal_colors
             .validate()
             .map_err(|_| ResolutionError::UnsupportedAlpha)?;
-        let chrome_typography = resolve_chrome_typography(preferences, fonts, &mut diagnostics);
+        let chrome_typography = resolve_chrome_typography(fonts);
         let terminal_typography = resolve_terminal_typography(preferences, fonts, &mut diagnostics);
         Ok(ResolvedAppearance {
             generation,
             chrome: Arc::new(ResolvedChromeAppearance {
-                requested_scheme: requested_chrome.clone(),
-                effective_scheme: effective_chrome.clone(),
                 appearance,
                 colors: chrome_colors,
-                provenance: compiled_chrome.provenance,
-                readability: compiled_chrome.readability,
                 composition,
                 typography: chrome_typography,
-                density: preferences.chrome.density,
+                density: preferences.window.density,
             }),
             terminal: Arc::new(ResolvedTerminalAppearance {
                 requested_scheme: requested_terminal.clone(),
@@ -335,44 +307,12 @@ impl SchemeCatalog {
         })
     }
 
-    fn resolve_chrome_scheme(
-        &self,
-        requested: &SchemeId,
-        appearance: Appearance,
-        overrides: Option<&super::scheme::ChromeColorOverrides>,
-    ) -> Result<(SchemeId, super::compiler::CompiledChrome, bool), ResolutionError> {
-        if let Some(scheme) = self.chrome(requested) {
-            if scheme.appearance != appearance {
-                return Err(ResolutionError::AppearanceMismatch);
-            }
-            let colors = super::compiler::compile_chrome(
-                appearance,
-                &scheme.colors,
-                overrides.unwrap_or(&super::scheme::ChromeColorOverrides::default()),
-            );
-            return Ok((requested.clone(), colors, true));
-        }
-        if self.terminal(requested).is_some() {
-            return Err(ResolutionError::WrongSchemeKind);
-        }
-        let id = builtin::fallback_id(SchemeKind::Chrome, appearance);
-        Ok((
-            id,
-            super::compiler::compile_chrome(
-                appearance,
-                &builtin::chrome_definition(appearance),
-                &super::scheme::ChromeColorOverrides::default(),
-            ),
-            false,
-        ))
-    }
-
     fn resolve_terminal_scheme(
         &self,
         requested: &SchemeId,
         appearance: Appearance,
     ) -> Result<(SchemeId, TerminalColors, bool), ResolutionError> {
-        if let Some(scheme) = self.terminal(requested) {
+        if let Some(scheme) = self.get(requested) {
             if scheme.appearance != appearance {
                 return Err(ResolutionError::AppearanceMismatch);
             }
@@ -380,43 +320,31 @@ impl SchemeCatalog {
             colors.apply(&scheme.colors);
             return Ok((requested.clone(), colors, true));
         }
-        if self.chrome(requested).is_some() {
-            return Err(ResolutionError::WrongSchemeKind);
-        }
-        let id = builtin::fallback_id(SchemeKind::Terminal, appearance);
+        let id = builtin::fallback_id(appearance);
         Ok((id, builtin::terminal_base(appearance), false))
     }
 }
 
-fn resolve_chrome_typography(
-    preferences: &AppearancePreferences,
-    fonts: &AvailableFonts,
-    diagnostics: &mut Vec<AppearanceDiagnostic>,
-) -> ResolvedChromeTypography {
-    let requested = &preferences.chrome.typography;
-    let font = match &requested.family {
-        ChromeFontFamily::SystemUi => &fonts.system_ui,
-        ChromeFontFamily::Named { family } => fonts.named(family).unwrap_or_else(|| {
-            diagnostics.push(AppearanceDiagnostic::ChromeFontUnavailable);
-            &fonts.system_ui
-        }),
-    };
+fn resolve_chrome_typography(fonts: &AvailableFonts) -> ResolvedChromeTypography {
+    const BASE_SIZE: f32 = 13.0;
+    const REGULAR_WEIGHT: u16 = 400;
+    const EMPHASIS_WEIGHT: u16 = 600;
+    const HEADING_WEIGHT: u16 = 600;
     let base = descriptor(
-        font,
-        requested.base_size,
-        requested.regular_weight,
+        &fonts.system_ui,
+        BASE_SIZE,
+        REGULAR_WEIGHT,
         FontStyle::Normal,
         Vec::new(),
     );
-    let scale = requested.base_size / 13.0;
     ResolvedChromeTypography {
         body: base.clone(),
-        small: base.with_role(11.0 * scale, requested.regular_weight),
-        control: base.with_role(13.0 * scale, requested.regular_weight),
-        navigation: base.with_role(12.0 * scale, requested.emphasis_weight),
-        caption: base.with_role(12.65 * scale, 400),
-        heading: base.with_role(14.0 * scale, requested.heading_weight),
-        shortcut: base.with_role(11.0 * scale, requested.regular_weight),
+        small: base.with_role(11.0, REGULAR_WEIGHT),
+        control: base.with_role(13.0, REGULAR_WEIGHT),
+        navigation: base.with_role(12.0, EMPHASIS_WEIGHT),
+        caption: base.with_role(12.65, REGULAR_WEIGHT),
+        heading: base.with_role(14.0, HEADING_WEIGHT),
+        shortcut: base.with_role(11.0, REGULAR_WEIGHT),
     }
 }
 
@@ -549,8 +477,6 @@ fn interaction_colors(colors: &TerminalColors) -> impl PartialEq + '_ {
 pub(crate) enum ResolutionError {
     #[error("invalid appearance preferences")]
     Preferences(#[source] PreferenceError),
-    #[error("scheme kind does not match selection")]
-    WrongSchemeKind,
     #[error("scheme appearance does not match selection")]
     AppearanceMismatch,
     #[error("resolved color has unsupported alpha")]

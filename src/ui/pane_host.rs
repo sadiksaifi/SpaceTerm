@@ -1496,7 +1496,7 @@ impl PaneHost {
         let surface_terminal = terminal.clone();
         let surface_appearance = appearance.clone();
         let radius = frame.pane_radius();
-        let pane_rim = if appearance.built_in_light || appearance.built_in_dark {
+        let pane_rim = {
             let rim_terminal = terminal.clone();
             let rim_appearance = appearance.clone();
             gpui::canvas(
@@ -1513,16 +1513,6 @@ impl PaneHost {
             .absolute()
             .inset_0()
             .into_any_element()
-        } else {
-            // Retain the existing declarative paint path for custom
-            // definitions, whose Pane rim is independent of the Terminal surface.
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(radius)
-                .border_1()
-                .border_color(gpui_color(appearance.pane_rim()))
-                .into_any_element()
         };
 
         div()
@@ -2507,7 +2497,7 @@ mod tests {
             },
             ..crate::appearance::AppearancePreferences::default()
         };
-        preferences.background.transparency = transparency;
+        preferences.window.transparency = transparency;
         let resolved = crate::appearance::SchemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,

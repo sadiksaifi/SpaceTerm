@@ -1,751 +1,314 @@
-//! One acyclic, source-local completion program for every Chrome definition.
-use super::scheme::ChromeColorOverrides;
+//! Dependency completion for the two built-in Chrome palettes.
 use super::{Appearance, ChromeColors, Color};
-use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ColorProvenance {
-    Authored,
-    Overridden,
-    Derived,
-    NeutralFallback,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CompiledChrome {
-    pub(crate) colors: ChromeColors,
-    pub(crate) readability: Vec<ChromeReadabilityDiagnostic>,
-    pub(crate) provenance: BTreeMap<&'static str, ColorProvenance>,
-}
-
-/// Content-free readability findings. Explicit authored paint is preserved.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChromeReadabilityDiagnostic {
-    Text,
-    Placeholder,
-    Primary,
-    Destructive,
-    SelectedRow,
-    Focus,
-    Scrollbar,
-}
-
-fn readability_diagnostics(authored: &ChromeColors) -> Vec<ChromeReadabilityDiagnostic> {
-    let c = authored.opaque_presentation();
-    use ChromeReadabilityDiagnostic::*;
-    [
-        (Text, c.text, c.background, 4.5),
-        (Placeholder, c.input_placeholder, c.input_background, 4.5),
-        (Primary, c.primary_foreground, c.primary_background, 4.5),
-        (
-            Destructive,
-            c.destructive_foreground,
-            c.destructive_background,
-            4.5,
-        ),
-        (
-            SelectedRow,
-            c.row_selected_foreground,
-            c.row_selected_background,
-            4.5,
-        ),
-        (Focus, c.border_focused, c.background, 3.0),
-        (
-            Scrollbar,
-            c.scrollbar_thumb_background,
-            c.panel_background,
-            3.0,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(kind, foreground, background, minimum)| {
-        let background = background.source_over(c.background.with_alpha(255));
-        (foreground
-            .source_over(background)
-            .contrast_ratio(background)
-            < minimum)
-            .then_some(kind)
-    })
-    .collect()
-}
-
-/// Semantic defaults for omitted statuses, adjusted against the definition's own background.
-/// Explicit authored values and overrides take precedence; no built-in Color Scheme is inherited.
-struct StatusSeeds {
-    success: Color,
-    warning: Color,
-    error: Color,
-}
-
-fn status_seeds(appearance: Appearance) -> StatusSeeds {
-    match appearance {
-        Appearance::Dark => StatusSeeds {
-            success: Color::rgb(0x32d74b),
-            warning: Color::rgb(0xff9f0a),
-            error: Color::rgb(0xff453a),
-        },
-        Appearance::Light => StatusSeeds {
-            success: Color::rgb(0x1e8a3b),
-            warning: Color::rgb(0xb25f00),
-            error: Color::rgb(0xc0332b),
-        },
-    }
-}
-
-/// Overrides precede authored values; missing roles follow the effective dependencies below.
-/// Background, text, and omitted statuses use fallback seeds. Other missing roles derive from
-/// this definition's effective dependencies, never a built-in parent.
-pub(crate) fn compile_chrome(
-    appearance: Appearance,
-    authored: &ChromeColorOverrides,
-    overrides: &ChromeColorOverrides,
-) -> CompiledChrome {
-    let mut provenance = BTreeMap::new();
-    let status_seed = status_seeds(appearance);
-    macro_rules! resolve {
-        ($role:ident, $fallback:expr) => {{
-            let (value, origin) = if let Some(value) = overrides.$role {
-                (value, ColorProvenance::Overridden)
-            } else if let Some(value) = authored.$role {
-                (value, ColorProvenance::Authored)
-            } else {
-                (
-                    $fallback,
-                    if matches!(stringify!($role), "background" | "text") {
-                        ColorProvenance::NeutralFallback
-                    } else {
-                        ColorProvenance::Derived
-                    },
-                )
-            };
-            provenance.insert(stringify!($role), origin);
-            value
-        }};
-    }
-    let background = resolve!(
-        background,
-        match appearance {
-            Appearance::Dark => Color::rgb(0x202020),
-            Appearance::Light => Color::rgb(0xfafafa),
-        }
-    );
+pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
+    let authored = super::builtin::chrome_definition(appearance);
+    let background = authored.background;
     // Foundation native windows have an opaque root backing of the root's own RGB.
     // Derivation and opaque_presentation use identical backing rules.
     let root_surface = background.with_alpha(255);
     let contrast = |foreground: Color, surface: Color, minimum| {
         contrast(foreground, surface.source_over(root_surface), minimum)
     };
-    let text = resolve!(text, contrast(Color::rgb(0x202020), background, 4.5));
-    let panel_background = resolve!(panel_background, background);
-    let elevated_surface_background = resolve!(elevated_surface_background, background);
-    let title_bar_background = resolve!(title_bar_background, background);
-    let title_bar_inactive_background = resolve!(title_bar_inactive_background, background);
-    let text_accent = resolve!(text_accent, text);
-    let text_secondary = resolve!(
-        text_secondary,
-        contrast(text.mix(background, 0.25), background, 4.5)
-    );
-    let text_muted = resolve!(
-        text_muted,
-        contrast(text.mix(background, 0.35), background, 4.5)
-    );
-    let text_placeholder = resolve!(text_placeholder, text_muted);
-    let text_disabled = resolve!(text_disabled, text.mix(background, 0.55));
-    let link_text = resolve!(link_text, contrast(text_accent, background, 4.5));
-    let link_text_hover = resolve!(link_text_hover, link_text);
-    let icon = resolve!(icon, text);
-    let icon_muted = resolve!(icon_muted, text_muted);
-    let icon_disabled = resolve!(icon_disabled, text_disabled);
-    let border = resolve!(border, text.mix(background, 0.7));
-    let border_variant = resolve!(border_variant, border);
-    let border_focused = resolve!(border_focused, contrast(text_accent, background, 3.0));
-    let focus_ring = resolve!(focus_ring, border_focused);
+    let text = authored.text;
+    let panel_background = authored.panel_background;
+    let elevated_surface_background = authored.elevated_surface_background;
+    let title_bar_background = authored.title_bar_background;
+    let title_bar_inactive_background = authored.title_bar_inactive_background;
+    let text_accent = authored.text_accent;
+    let text_secondary = authored.text_secondary;
+    let text_muted = authored.text_muted;
+    let text_placeholder = authored.text_placeholder;
+    let text_disabled = authored.text_disabled;
+    let link_text = contrast(text_accent, background, 4.5);
+    let link_text_hover = authored.link_text_hover;
+    let icon = text;
+    let icon_muted = text_muted;
+    let icon_disabled = text_disabled;
+    let border = authored.border;
+    let border_variant = authored.border_variant;
+    let border_focused = contrast(text_accent, background, 3.0);
+    let focus_ring = border_focused;
     // Selection remains independent of the keyboard-focus color.
-    let border_selected = resolve!(border_selected, border.mix(text, 0.35));
-    let border_disabled = resolve!(border_disabled, border);
-    let border_transparent = resolve!(border_transparent, Color::rgba(0));
-    let element_background = resolve!(element_background, background);
-    let segmented_track_background = resolve!(segmented_track_background, element_background);
-    let element_hover = resolve!(element_hover, element_background.mix(text, 0.08));
-    let element_active = resolve!(element_active, element_background.mix(text, 0.14));
+    let border_selected = border.mix(text, 0.35);
+    let border_disabled = authored.border_disabled;
+    let border_transparent = Color::rgba(0);
+    let element_background = authored.element_background;
+    let segmented_track_background = authored
+        .segmented_track_background
+        .unwrap_or(element_background);
+    let element_hover = authored.element_hover;
+    let element_active = authored.element_active;
     // Persistent selection follows the definition's foreground/background contrast.
-    let element_selected = resolve!(element_selected, background.mix(text, 0.16));
-    let element_disabled = resolve!(element_disabled, background);
-    let element_foreground = resolve!(element_foreground, contrast(text, element_background, 4.5));
-    let element_hover_foreground =
-        resolve!(element_hover_foreground, contrast(text, element_hover, 4.5));
-    let element_active_foreground = resolve!(
-        element_active_foreground,
-        contrast(text, element_active, 4.5)
-    );
-    let element_disabled_foreground = resolve!(element_disabled_foreground, text_disabled);
-    let ghost_element_background = resolve!(ghost_element_background, Color::rgba(0));
-    let ghost_element_hover = resolve!(
-        ghost_element_hover,
-        ghost_element_background
-            .source_over(root_surface)
-            .mix(text, 0.08)
-    );
-    let ghost_element_active = resolve!(
-        ghost_element_active,
-        ghost_element_background
-            .source_over(root_surface)
-            .mix(text, 0.14)
-    );
-    let ghost_element_selected = resolve!(ghost_element_selected, element_selected);
-    let ghost_element_disabled = resolve!(ghost_element_disabled, Color::rgba(0));
-    let ghost_element_foreground = resolve!(
-        ghost_element_foreground,
-        contrast(text, ghost_element_background, 4.5)
-    );
-    let ghost_element_hover_foreground = resolve!(
-        ghost_element_hover_foreground,
-        contrast(text, ghost_element_hover, 4.5)
-    );
-    let ghost_element_active_foreground = resolve!(
-        ghost_element_active_foreground,
-        contrast(text, ghost_element_active, 4.5)
-    );
-    let ghost_element_selected_foreground = resolve!(
-        ghost_element_selected_foreground,
-        contrast(text, ghost_element_selected, 4.5)
-    );
-    let ghost_element_disabled_foreground =
-        resolve!(ghost_element_disabled_foreground, text_disabled);
-    let sidebar_focus = resolve!(sidebar_focus, border_focused);
-    let info = resolve!(info, text_accent);
-    let status_surface = background.source_over(root_surface);
-    let readable_status = |seed: Color| {
-        seed.readable_preserving_chroma(&[status_surface], 3.0)
-            .unwrap_or_else(|| contrast(seed, status_surface, 3.0))
-    };
-    let success = resolve!(success, readable_status(status_seed.success));
-    let warning = resolve!(warning, readable_status(status_seed.warning));
-    let error = resolve!(error, readable_status(status_seed.error));
-    let info_background = resolve!(info_background, info.multiply_opacity(0x1a));
-    let info_border = resolve!(info_border, info);
-    let success_background = resolve!(success_background, success.multiply_opacity(0x1a));
-    let success_border = resolve!(success_border, success);
-    let warning_background = resolve!(warning_background, warning.multiply_opacity(0x1a));
-    let warning_border = resolve!(warning_border, warning);
-    let error_background = resolve!(error_background, error.multiply_opacity(0x1a));
-    let error_border = resolve!(error_border, error);
-    let input_background = resolve!(input_background, background);
+    let element_selected = authored.element_selected;
+    let element_disabled = background;
+    let element_foreground = contrast(text, element_background, 4.5);
+    let element_hover_foreground = contrast(text, element_hover, 4.5);
+    let element_active_foreground = contrast(text, element_active, 4.5);
+    let element_disabled_foreground = text_disabled;
+    let ghost_element_background = Color::rgba(0);
+    let ghost_element_hover = authored.ghost_element_hover;
+    let ghost_element_active = authored.ghost_element_active;
+    let ghost_element_selected = element_selected;
+    let ghost_element_disabled = Color::rgba(0);
+    let ghost_element_foreground = contrast(text, ghost_element_background, 4.5);
+    let ghost_element_hover_foreground = contrast(text, ghost_element_hover, 4.5);
+    let ghost_element_active_foreground = contrast(text, ghost_element_active, 4.5);
+    let ghost_element_selected_foreground = contrast(text, ghost_element_selected, 4.5);
+    let ghost_element_disabled_foreground = text_disabled;
+    let sidebar_focus = border_focused;
+    let info = authored.info;
+    let success = authored.success;
+    let warning = authored.warning;
+    let error = authored.error;
+    let info_background = info.multiply_opacity(0x1a);
+    let info_border = info;
+    let success_background = success.multiply_opacity(0x1a);
+    let success_border = success;
+    let warning_background = warning.multiply_opacity(0x1a);
+    let warning_border = warning;
+    let error_background = error.multiply_opacity(0x1a);
+    let error_border = error;
+    let input_background = authored.input_background;
     let input_surface = input_background.source_over(panel_background.source_over(root_surface));
-    let input_text = resolve!(input_text, contrast(text, input_surface, 4.5));
-    let input_placeholder = resolve!(
-        input_placeholder,
-        contrast(text_placeholder, input_surface, 4.5)
+    let input_text = contrast(text, input_surface, 4.5);
+    let input_placeholder = contrast(text_placeholder, input_surface, 4.5);
+    let input_disabled_background = input_background;
+    let input_disabled_text = text_disabled;
+    let input_caret = input_text;
+    let input_selection_background = text_accent.multiply_opacity(0x66);
+    let input_selection_foreground = contrast(
+        input_text,
+        input_selection_background.source_over(input_surface),
+        4.5,
     );
-    let input_disabled_background = resolve!(input_disabled_background, input_background);
-    let input_disabled_text = resolve!(input_disabled_text, text_disabled);
-    let input_caret = resolve!(input_caret, input_text);
-    let input_selection_background = resolve!(
-        input_selection_background,
-        text_accent.multiply_opacity(0x66)
+    let input_border = authored.input_border;
+    let input_focused_border = contrast(border_focused, input_surface, 3.0);
+    let input_invalid_border = contrast(error, input_surface, 3.0);
+    let input_disabled_border = border_disabled;
+    let modal_scrim = background.multiply_opacity(0x99);
+    let scrollbar_track = Color::rgba(0);
+    let scrollbar_track_border = Color::rgba(0);
+    let scrollbar_thumb_background = authored.scrollbar_thumb_background;
+    let scrollbar_thumb_border = Color::rgba(0);
+    let scrollbar_thumb_hover_background = contrast(
+        scrollbar_thumb_background.mix(text, 0.15),
+        panel_background,
+        3.0,
     );
-    let input_selection_foreground = resolve!(
-        input_selection_foreground,
-        contrast(
-            input_text,
-            input_selection_background.source_over(input_surface),
-            4.5
-        )
+    let scrollbar_thumb_active_background = contrast(
+        scrollbar_thumb_hover_background.mix(text, 0.2),
+        panel_background,
+        3.0,
     );
-    let input_border = resolve!(input_border, border);
-    let input_focused_border = resolve!(
-        input_focused_border,
-        contrast(border_focused, input_surface, 3.0)
-    );
-    let input_invalid_border = resolve!(input_invalid_border, contrast(error, input_surface, 3.0));
-    let input_disabled_border = resolve!(input_disabled_border, border_disabled);
-    let modal_scrim = resolve!(modal_scrim, background.multiply_opacity(0x99));
-    let scrollbar_track = resolve!(scrollbar_track, Color::rgba(0));
-    let scrollbar_track_border = resolve!(scrollbar_track_border, Color::rgba(0));
-    let scrollbar_thumb_background = resolve!(
-        scrollbar_thumb_background,
-        contrast(text_muted, panel_background, 3.0)
-    );
-    let scrollbar_thumb_border = resolve!(scrollbar_thumb_border, Color::rgba(0));
-    let scrollbar_thumb_hover_background = resolve!(
-        scrollbar_thumb_hover_background,
-        contrast(
-            scrollbar_thumb_background.mix(text, 0.15),
-            panel_background,
-            3.0
-        )
-    );
-    let scrollbar_thumb_active_background = resolve!(
-        scrollbar_thumb_active_background,
-        contrast(
-            scrollbar_thumb_hover_background.mix(text, 0.2),
-            panel_background,
-            3.0
-        )
-    );
-    let resize_idle = resolve!(resize_idle, border);
-    let resize_focused = resolve!(resize_focused, border_focused);
+    let resize_idle = border;
+    let resize_focused = border_focused;
     // Pointer hover strengthens the divider independently of its keyboard-focus indicator.
-    let resize_hovered = resolve!(resize_hovered, resize_idle.mix(text, 0.35));
-    let resize_dragged = resolve!(resize_dragged, border_selected);
-    let resize_disabled = resolve!(resize_disabled, border_disabled);
-    let shadow = resolve!(shadow, Color::rgba(0x00000033));
-    let primary_background = resolve!(primary_background, text_accent);
-    let primary_foreground = resolve!(
-        primary_foreground,
-        contrast(text, primary_background.source_over(background), 4.5)
+    let resize_hovered = resize_idle.mix(text, 0.35);
+    let resize_dragged = border_selected;
+    let resize_disabled = border_disabled;
+    let shadow = authored.shadow;
+    let primary_background = authored.primary_background;
+    let primary_foreground = authored.primary_foreground;
+    let primary_icon = primary_foreground;
+    let primary_border = primary_background;
+    let primary_hover_background = authored.primary_hover_background;
+    let primary_hover_foreground = authored.primary_hover_foreground;
+    let primary_hover_icon = primary_hover_foreground;
+    let primary_hover_border = primary_hover_background;
+    let primary_pressed_background = authored.primary_pressed_background;
+    let primary_pressed_foreground = authored.primary_pressed_foreground;
+    let primary_pressed_icon = primary_pressed_foreground;
+    let primary_pressed_border = primary_pressed_background;
+    let primary_disabled_background = primary_background.mix(background, 0.65);
+    let primary_disabled_foreground = text_disabled;
+    let primary_disabled_icon = primary_disabled_foreground;
+    let primary_disabled_border = primary_disabled_background;
+    let destructive_background = authored.destructive_background;
+    let destructive_foreground = authored.destructive_foreground;
+    let destructive_icon = destructive_foreground;
+    let destructive_border = destructive_background;
+    let destructive_hover_background = authored.destructive_hover_background;
+    let destructive_hover_foreground = authored.destructive_hover_foreground;
+    let destructive_hover_icon = destructive_hover_foreground;
+    let destructive_hover_border = destructive_hover_background;
+    let destructive_pressed_background = authored.destructive_pressed_background;
+    let destructive_pressed_foreground = authored.destructive_pressed_foreground;
+    let destructive_pressed_icon = destructive_pressed_foreground;
+    let destructive_pressed_border = destructive_pressed_background;
+    let destructive_disabled_background = destructive_background.mix(background, 0.65);
+    let destructive_disabled_foreground = text_disabled;
+    let destructive_disabled_icon = destructive_disabled_foreground;
+    let destructive_disabled_border = destructive_disabled_background;
+    let selection_background = authored.selection_background;
+    let selection_foreground = contrast(text, selection_background.source_over(background), 4.5);
+    let selection_icon = selection_foreground;
+    let selection_border = selection_background;
+    let selection_hover_background = selection_background.mix(text, 0.06);
+    let selection_hover_foreground = contrast(
+        text,
+        selection_hover_background.source_over(background),
+        4.5,
     );
-    let primary_icon = resolve!(primary_icon, primary_foreground);
-    let primary_border = resolve!(primary_border, primary_background);
-    let primary_hover_background = resolve!(
-        primary_hover_background,
-        primary_background.mix(primary_foreground, 0.10)
+    let selection_hover_icon = selection_hover_foreground;
+    let selection_hover_border = selection_hover_background;
+    let selection_pressed_background = selection_background.mix(text, 0.18);
+    let selection_pressed_foreground = contrast(
+        text,
+        selection_pressed_background.source_over(background),
+        4.5,
     );
-    let primary_hover_foreground = resolve!(
-        primary_hover_foreground,
-        contrast(text, primary_hover_background.source_over(background), 4.5)
+    let selection_pressed_icon = selection_pressed_foreground;
+    let selection_pressed_border = selection_pressed_background;
+    let selection_disabled_background = selection_background.mix(background, 0.65);
+    let selection_disabled_foreground = text_disabled;
+    let selection_disabled_icon = selection_disabled_foreground;
+    let selection_disabled_border = selection_disabled_background;
+    let toggle_off_background = authored.toggle_off_background;
+    let progress_track = toggle_off_background;
+    let progress_indicator = text_accent;
+    let toggle_off_mark = authored.toggle_off_mark;
+    let toggle_off_border = authored.toggle_off_border;
+    let toggle_off_label = text;
+    let toggle_off_hover_background = toggle_off_background.mix(toggle_off_mark, 0.08);
+    let toggle_off_hover_mark = authored.toggle_off_hover_mark;
+    let toggle_off_hover_border = authored.toggle_off_hover_border;
+    let toggle_off_hover_label = text;
+    let toggle_off_pressed_background = toggle_off_background.mix(toggle_off_mark, 0.16);
+    let toggle_off_pressed_mark = authored.toggle_off_pressed_mark;
+    let toggle_off_pressed_border = authored.toggle_off_pressed_border;
+    let toggle_off_pressed_label = text;
+    let toggle_off_disabled_background = toggle_off_background.mix(background, 0.65);
+    let toggle_off_disabled_mark = contrast(
+        text,
+        toggle_off_disabled_background.source_over(background),
+        4.5,
     );
-    let primary_hover_icon = resolve!(primary_hover_icon, primary_hover_foreground);
-    let primary_hover_border = resolve!(primary_hover_border, primary_hover_background);
-    let primary_pressed_background = resolve!(
-        primary_pressed_background,
-        primary_background.mix(primary_foreground, 0.18)
-    );
-    let primary_pressed_foreground = resolve!(
-        primary_pressed_foreground,
-        contrast(
-            text,
-            primary_pressed_background.source_over(background),
-            4.5
-        )
-    );
-    let primary_pressed_icon = resolve!(primary_pressed_icon, primary_pressed_foreground);
-    let primary_pressed_border = resolve!(primary_pressed_border, primary_pressed_background);
-    let primary_disabled_background = resolve!(
-        primary_disabled_background,
-        primary_background.mix(background, 0.65)
-    );
-    let primary_disabled_foreground = resolve!(primary_disabled_foreground, text_disabled);
-    let primary_disabled_icon = resolve!(primary_disabled_icon, primary_disabled_foreground);
-    let primary_disabled_border = resolve!(primary_disabled_border, primary_disabled_background);
-    let destructive_background = resolve!(destructive_background, error);
-    let destructive_foreground = resolve!(
-        destructive_foreground,
-        contrast(text, destructive_background.source_over(background), 4.5)
-    );
-    let destructive_icon = resolve!(destructive_icon, destructive_foreground);
-    let destructive_border = resolve!(destructive_border, destructive_background);
-    let destructive_hover_background = resolve!(
-        destructive_hover_background,
-        destructive_background.mix(destructive_foreground, 0.10)
-    );
-    let destructive_hover_foreground = resolve!(
-        destructive_hover_foreground,
-        contrast(
-            text,
-            destructive_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let destructive_hover_icon = resolve!(destructive_hover_icon, destructive_hover_foreground);
-    let destructive_hover_border = resolve!(destructive_hover_border, destructive_hover_background);
-    let destructive_pressed_background = resolve!(
-        destructive_pressed_background,
-        destructive_background.mix(destructive_foreground, 0.18)
-    );
-    let destructive_pressed_foreground = resolve!(
-        destructive_pressed_foreground,
-        contrast(
-            text,
-            destructive_pressed_background.source_over(background),
-            4.5
-        )
-    );
-    let destructive_pressed_icon =
-        resolve!(destructive_pressed_icon, destructive_pressed_foreground);
-    let destructive_pressed_border =
-        resolve!(destructive_pressed_border, destructive_pressed_background);
-    let destructive_disabled_background = resolve!(
-        destructive_disabled_background,
-        destructive_background.mix(background, 0.65)
-    );
-    let destructive_disabled_foreground = resolve!(destructive_disabled_foreground, text_disabled);
-    let destructive_disabled_icon =
-        resolve!(destructive_disabled_icon, destructive_disabled_foreground);
-    let destructive_disabled_border =
-        resolve!(destructive_disabled_border, destructive_disabled_background);
-    let selection_background = resolve!(selection_background, element_selected);
-    let selection_foreground = resolve!(
-        selection_foreground,
-        contrast(text, selection_background.source_over(background), 4.5)
-    );
-    let selection_icon = resolve!(selection_icon, selection_foreground);
-    let selection_border = resolve!(selection_border, selection_background);
-    let selection_hover_background = resolve!(
-        selection_hover_background,
-        selection_background.mix(text, 0.06)
-    );
-    let selection_hover_foreground = resolve!(
-        selection_hover_foreground,
-        contrast(
-            text,
-            selection_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let selection_hover_icon = resolve!(selection_hover_icon, selection_hover_foreground);
-    let selection_hover_border = resolve!(selection_hover_border, selection_hover_background);
-    let selection_pressed_background = resolve!(
-        selection_pressed_background,
-        selection_background.mix(text, 0.18)
-    );
-    let selection_pressed_foreground = resolve!(
-        selection_pressed_foreground,
-        contrast(
-            text,
-            selection_pressed_background.source_over(background),
-            4.5
-        )
-    );
-    let selection_pressed_icon = resolve!(selection_pressed_icon, selection_pressed_foreground);
-    let selection_pressed_border = resolve!(selection_pressed_border, selection_pressed_background);
-    let selection_disabled_background = resolve!(
-        selection_disabled_background,
-        selection_background.mix(background, 0.65)
-    );
-    let selection_disabled_foreground = resolve!(selection_disabled_foreground, text_disabled);
-    let selection_disabled_icon = resolve!(selection_disabled_icon, selection_disabled_foreground);
-    let selection_disabled_border =
-        resolve!(selection_disabled_border, selection_disabled_background);
-    let toggle_off_background = resolve!(toggle_off_background, input_background);
-    let progress_track = resolve!(progress_track, toggle_off_background);
-    let progress_indicator = resolve!(progress_indicator, text_accent);
-    let toggle_off_mark = resolve!(
-        toggle_off_mark,
-        contrast(text, toggle_off_background.source_over(background), 4.5)
-    );
-    let toggle_off_border = resolve!(
-        toggle_off_border,
-        contrast(border, toggle_off_background.source_over(background), 3.0)
-    );
-    let toggle_off_label = resolve!(toggle_off_label, text);
-    let toggle_off_hover_background = resolve!(
-        toggle_off_hover_background,
-        toggle_off_background.mix(toggle_off_mark, 0.08)
-    );
-    let toggle_off_hover_mark = resolve!(
-        toggle_off_hover_mark,
-        contrast(
-            text,
-            toggle_off_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let toggle_off_hover_border = resolve!(
-        toggle_off_hover_border,
-        contrast(
-            border,
-            toggle_off_hover_background.source_over(background),
-            3.0
-        )
-    );
-    let toggle_off_hover_label = resolve!(toggle_off_hover_label, text);
-    let toggle_off_pressed_background = resolve!(
-        toggle_off_pressed_background,
-        toggle_off_background.mix(toggle_off_mark, 0.16)
-    );
-    let toggle_off_pressed_mark = resolve!(
-        toggle_off_pressed_mark,
-        contrast(
-            text,
-            toggle_off_pressed_background.source_over(background),
-            4.5
-        )
-    );
-    let toggle_off_pressed_border = resolve!(
-        toggle_off_pressed_border,
-        contrast(
-            border,
-            toggle_off_pressed_background.source_over(background),
-            3.0
-        )
-    );
-    let toggle_off_pressed_label = resolve!(toggle_off_pressed_label, text);
-    let toggle_off_disabled_background = resolve!(
-        toggle_off_disabled_background,
-        toggle_off_background.mix(background, 0.65)
-    );
-    let toggle_off_disabled_mark = resolve!(
-        toggle_off_disabled_mark,
-        contrast(
-            text,
-            toggle_off_disabled_background.source_over(background),
-            4.5
-        )
-    );
-    let toggle_off_disabled_border = resolve!(toggle_off_disabled_border, border_disabled);
-    let toggle_off_disabled_label = resolve!(toggle_off_disabled_label, text_disabled);
+    let toggle_off_disabled_border = border_disabled;
+    let toggle_off_disabled_label = text_disabled;
     // Enabled toggles share filled-action emphasis, not the link foreground.
-    let toggle_on_background = resolve!(toggle_on_background, primary_background);
-    let toggle_on_mark = resolve!(
-        toggle_on_mark,
-        contrast(text, toggle_on_background.source_over(background), 4.5)
+    let toggle_on_background = authored.toggle_on_background;
+    let toggle_on_mark = authored.toggle_on_mark;
+    let toggle_on_border = authored.toggle_on_border;
+    let toggle_on_label = text;
+    let toggle_on_hover_background = authored.toggle_on_hover_background;
+    let toggle_on_hover_mark = authored.toggle_on_hover_mark;
+    let toggle_on_hover_border = authored.toggle_on_hover_border;
+    let toggle_on_hover_label = text;
+    let toggle_on_pressed_background = authored.toggle_on_pressed_background;
+    let toggle_on_pressed_mark = authored.toggle_on_pressed_mark;
+    let toggle_on_pressed_border = authored.toggle_on_pressed_border;
+    let toggle_on_pressed_label = text;
+    let toggle_on_disabled_background = toggle_on_background.mix(background, 0.65);
+    let toggle_on_disabled_mark = authored.toggle_on_disabled_mark;
+    let toggle_on_disabled_border = border_disabled;
+    let toggle_on_disabled_label = text_disabled;
+    let row_background = authored.row_background;
+    let row_foreground = contrast(text, row_background.source_over(background), 4.5);
+    let row_secondary = contrast(text_secondary, row_background.source_over(background), 4.5);
+    let row_icon = row_foreground;
+    let row_match = contrast(text_accent, row_background.source_over(background), 4.5);
+    let row_border = border_transparent;
+    let row_hover_background = authored.row_hover_background;
+    let row_hover_foreground = contrast(text, row_hover_background.source_over(background), 4.5);
+    let row_hover_secondary = contrast(
+        text_secondary,
+        row_hover_background.source_over(background),
+        4.5,
     );
-    let toggle_on_border = resolve!(
-        toggle_on_border,
-        contrast(border, toggle_on_background.source_over(background), 3.0)
+    let row_hover_icon = row_hover_foreground;
+    let row_hover_match = contrast(
+        text_accent,
+        row_hover_background.source_over(background),
+        4.5,
     );
-    let toggle_on_label = resolve!(toggle_on_label, text);
-    let toggle_on_hover_background = resolve!(
-        toggle_on_hover_background,
-        toggle_on_background.mix(toggle_on_mark, 0.08)
+    let row_hover_border = border_transparent;
+    let row_selected_background = authored.row_selected_background;
+    let row_selected_foreground = authored.row_selected_foreground;
+    let row_selected_secondary = authored.row_selected_secondary;
+    let row_selected_icon = row_selected_foreground;
+    let navigation_selected_background = authored
+        .navigation_selected_background
+        .unwrap_or(row_selected_background);
+    let navigation_selected_foreground = row_selected_foreground;
+    let navigation_selected_secondary = row_selected_secondary;
+    let navigation_selected_icon = row_selected_icon;
+    let row_selected_match = contrast(
+        text_accent,
+        row_selected_background.source_over(background),
+        4.5,
     );
-    let toggle_on_hover_mark = resolve!(
-        toggle_on_hover_mark,
-        contrast(
-            text,
-            toggle_on_hover_background.source_over(background),
-            4.5
-        )
+    let row_selected_border = authored.row_selected_border;
+    let row_selected_hover_background = authored
+        .row_selected_hover_background
+        .unwrap_or_else(|| row_selected_background.mix(text, 0.06));
+    let row_selected_hover_foreground = authored.row_selected_hover_foreground;
+    let row_selected_hover_secondary = authored.row_selected_hover_secondary;
+    let row_selected_hover_icon = row_selected_hover_foreground;
+    let row_selected_hover_match = contrast(
+        text_accent,
+        row_selected_hover_background.source_over(background),
+        4.5,
     );
-    let toggle_on_hover_border = resolve!(
-        toggle_on_hover_border,
-        contrast(
-            border,
-            toggle_on_hover_background.source_over(background),
-            3.0
-        )
-    );
-    let toggle_on_hover_label = resolve!(toggle_on_hover_label, text);
-    let toggle_on_pressed_background = resolve!(
-        toggle_on_pressed_background,
-        toggle_on_background.mix(toggle_on_mark, 0.16)
-    );
-    let toggle_on_pressed_mark = resolve!(
-        toggle_on_pressed_mark,
-        contrast(
-            text,
-            toggle_on_pressed_background.source_over(background),
-            4.5
-        )
-    );
-    let toggle_on_pressed_border = resolve!(
-        toggle_on_pressed_border,
-        contrast(
-            border,
-            toggle_on_pressed_background.source_over(background),
-            3.0
-        )
-    );
-    let toggle_on_pressed_label = resolve!(toggle_on_pressed_label, text);
-    let toggle_on_disabled_background = resolve!(
-        toggle_on_disabled_background,
-        toggle_on_background.mix(background, 0.65)
-    );
-    let toggle_on_disabled_mark = resolve!(
-        toggle_on_disabled_mark,
-        contrast(
-            text,
-            toggle_on_disabled_background.source_over(background),
-            4.5
-        )
-    );
-    let toggle_on_disabled_border = resolve!(toggle_on_disabled_border, border_disabled);
-    let toggle_on_disabled_label = resolve!(toggle_on_disabled_label, text_disabled);
-    let row_background = resolve!(row_background, background);
-    let row_foreground = resolve!(
-        row_foreground,
-        contrast(text, row_background.source_over(background), 4.5)
-    );
-    let row_secondary = resolve!(
-        row_secondary,
-        contrast(text_secondary, row_background.source_over(background), 4.5)
-    );
-    let row_icon = resolve!(row_icon, row_foreground);
-    let row_match = resolve!(
-        row_match,
-        contrast(text_accent, row_background.source_over(background), 4.5)
-    );
-    let row_border = resolve!(row_border, border_transparent);
-    let row_hover_background = resolve!(row_hover_background, row_background.mix(text, 0.08));
-    let row_hover_foreground = resolve!(
-        row_hover_foreground,
-        contrast(text, row_hover_background.source_over(background), 4.5)
-    );
-    let row_hover_secondary = resolve!(
-        row_hover_secondary,
-        contrast(
-            text_secondary,
-            row_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let row_hover_icon = resolve!(row_hover_icon, row_hover_foreground);
-    let row_hover_match = resolve!(
-        row_hover_match,
-        contrast(
-            text_accent,
-            row_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let row_hover_border = resolve!(row_hover_border, border_transparent);
-    let row_selected_background = resolve!(row_selected_background, selection_background);
-    let row_selected_foreground = resolve!(
-        row_selected_foreground,
-        contrast(text, row_selected_background.source_over(background), 4.5)
-    );
-    let row_selected_secondary = resolve!(
-        row_selected_secondary,
-        contrast(
-            text_secondary,
-            row_selected_background.source_over(background),
-            4.5
-        )
-    );
-    let row_selected_icon = resolve!(row_selected_icon, row_selected_foreground);
-    let navigation_selected_background =
-        resolve!(navigation_selected_background, row_selected_background);
-    let navigation_selected_foreground =
-        resolve!(navigation_selected_foreground, row_selected_foreground);
-    let navigation_selected_secondary =
-        resolve!(navigation_selected_secondary, row_selected_secondary);
-    let navigation_selected_icon = resolve!(navigation_selected_icon, row_selected_icon);
-    let row_selected_match = resolve!(
-        row_selected_match,
-        contrast(
-            text_accent,
-            row_selected_background.source_over(background),
-            4.5
-        )
-    );
-    let row_selected_border = resolve!(row_selected_border, border_transparent);
-    let row_selected_hover_background = resolve!(
-        row_selected_hover_background,
-        row_selected_background.mix(text, 0.06)
-    );
-    let row_selected_hover_foreground = resolve!(
-        row_selected_hover_foreground,
-        contrast(
-            text,
-            row_selected_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let row_selected_hover_secondary = resolve!(
-        row_selected_hover_secondary,
-        contrast(
-            text_secondary,
-            row_selected_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let row_selected_hover_icon = resolve!(row_selected_hover_icon, row_selected_hover_foreground);
-    let row_selected_hover_match = resolve!(
-        row_selected_hover_match,
-        contrast(
-            text_accent,
-            row_selected_hover_background.source_over(background),
-            4.5
-        )
-    );
-    let row_selected_hover_border = resolve!(row_selected_hover_border, border_transparent);
-    let element_icon = resolve!(element_icon, element_foreground);
-    let element_hover_icon = resolve!(element_hover_icon, element_hover_foreground);
-    let element_active_icon = resolve!(element_active_icon, element_active_foreground);
-    let element_disabled_icon = resolve!(element_disabled_icon, element_disabled_foreground);
-    let ghost_element_icon = resolve!(ghost_element_icon, ghost_element_foreground);
-    let ghost_element_hover_icon =
-        resolve!(ghost_element_hover_icon, ghost_element_hover_foreground);
-    let ghost_element_active_icon =
-        resolve!(ghost_element_active_icon, ghost_element_active_foreground);
-    let ghost_element_disabled_icon = resolve!(
-        ghost_element_disabled_icon,
-        ghost_element_disabled_foreground
-    );
-    let badge_background = resolve!(badge_background, panel_background);
-    let badge_foreground = resolve!(
-        badge_foreground,
-        contrast(text_secondary, badge_background, 4.5)
-    );
-    let preview_background = resolve!(preview_background, elevated_surface_background);
-    let preview_foreground = resolve!(
-        preview_foreground,
-        contrast(text_secondary, preview_background, 4.5)
-    );
-    let tab_active_background = resolve!(tab_active_background, element_selected);
-    let tab_inactive_background = resolve!(tab_inactive_background, title_bar_background);
-    let tab_active_foreground = resolve!(
-        tab_active_foreground,
-        contrast(text, tab_active_background, 4.5)
-    );
-    let tab_inactive_foreground = resolve!(
-        tab_inactive_foreground,
-        contrast(text_secondary, tab_inactive_background, 4.5)
-    );
-    let tab_inactive_selected_background =
-        resolve!(tab_inactive_selected_background, tab_active_background);
-    let tab_inactive_selected_foreground = resolve!(
-        tab_inactive_selected_foreground,
-        contrast(text, tab_inactive_selected_background, 4.5)
-    );
-    let element_border = resolve!(element_border, border_transparent);
-    let element_hover_border = resolve!(element_hover_border, border_transparent);
-    let element_active_border = resolve!(element_active_border, border_transparent);
-    let element_disabled_border = resolve!(element_disabled_border, border_transparent);
-    let ghost_element_border = resolve!(ghost_element_border, border_transparent);
-    let ghost_element_hover_border = resolve!(ghost_element_hover_border, border_transparent);
-    let ghost_element_active_border = resolve!(ghost_element_active_border, border_transparent);
-    let ghost_element_disabled_border = resolve!(ghost_element_disabled_border, border_disabled);
-    let outline_border = resolve!(outline_border, border);
-    let outline_hover_border = resolve!(outline_hover_border, border);
-    let outline_pressed_border = resolve!(outline_pressed_border, border);
-    let outline_disabled_border = resolve!(outline_disabled_border, border_disabled);
-    let tab_hover_background = resolve!(tab_hover_background, row_hover_background);
-    let tab_hover_foreground = resolve!(
-        tab_hover_foreground,
-        contrast(text, tab_hover_background, 4.5)
-    );
-    let tab_hover_icon = resolve!(tab_hover_icon, tab_hover_foreground);
-    let tab_active_icon = resolve!(tab_active_icon, tab_active_foreground);
-    let tab_inactive_icon = resolve!(tab_inactive_icon, tab_inactive_foreground);
-    let tab_inactive_selected_icon =
-        resolve!(tab_inactive_selected_icon, tab_inactive_selected_foreground);
+    let row_selected_hover_border = authored.row_selected_hover_border;
+    let element_icon = element_foreground;
+    let element_hover_icon = element_hover_foreground;
+    let element_active_icon = element_active_foreground;
+    let element_disabled_icon = element_disabled_foreground;
+    let ghost_element_icon = ghost_element_foreground;
+    let ghost_element_hover_icon = ghost_element_hover_foreground;
+    let ghost_element_active_icon = ghost_element_active_foreground;
+    let ghost_element_disabled_icon = ghost_element_disabled_foreground;
+    let badge_background = panel_background;
+    let badge_foreground = contrast(text_secondary, badge_background, 4.5);
+    let preview_background = elevated_surface_background;
+    let preview_foreground = contrast(text_secondary, preview_background, 4.5);
+    let tab_active_background = authored.tab_active_background;
+    let tab_inactive_background = title_bar_background;
+    let tab_active_foreground = authored.tab_active_foreground;
+    let tab_inactive_foreground = contrast(text_secondary, tab_inactive_background, 4.5);
+    let tab_inactive_selected_background = authored.tab_inactive_selected_background;
+    let tab_inactive_selected_foreground = authored.tab_inactive_selected_foreground;
+    let element_border = border_transparent;
+    let element_hover_border = border_transparent;
+    let element_active_border = border_transparent;
+    let element_disabled_border = border_transparent;
+    let ghost_element_border = border_transparent;
+    let ghost_element_hover_border = border_transparent;
+    let ghost_element_active_border = border_transparent;
+    let ghost_element_disabled_border = border_disabled;
+    let outline_border = authored.outline_border;
+    let outline_hover_border = authored.outline_hover_border;
+    let outline_pressed_border = authored.outline_pressed_border;
+    let outline_disabled_border = authored.outline_disabled_border;
+    let tab_hover_background = row_hover_background;
+    let tab_hover_foreground = contrast(text, tab_hover_background, 4.5);
+    let tab_hover_icon = tab_hover_foreground;
+    let tab_active_icon = tab_active_foreground;
+    let tab_inactive_icon = tab_inactive_foreground;
+    let tab_inactive_selected_icon = tab_inactive_selected_foreground;
     // The Active Tab carries the selected-row hierarchy in its own roles: a rim that stays put, and a
     // hover that gains weight from the Tab's material rather than from a list row's.
-    let tab_active_border = resolve!(tab_active_border, border_transparent);
-    let tab_active_hover_background = resolve!(
-        tab_active_hover_background,
-        tab_active_background.mix(text, 0.06)
-    );
-    let tab_active_hover_foreground = resolve!(
-        tab_active_hover_foreground,
-        contrast(
-            tab_active_foreground,
-            tab_active_hover_background.source_over(background),
-            4.5
-        )
-    );
+    let tab_active_border = authored.tab_active_border;
+    let tab_active_hover_background = authored
+        .tab_active_hover_background
+        .unwrap_or_else(|| tab_active_background.mix(text, 0.06));
+    let tab_active_hover_foreground = authored.tab_active_hover_foreground;
     // Close rests on the selected-hover fill whenever the pointer is anywhere over the Active Tab,
     // so its glyph follows the hovered title and keeps a non-text contrast against that fill.
-    let tab_active_hover_icon = resolve!(
-        tab_active_hover_icon,
-        contrast(
-            tab_active_hover_foreground,
-            tab_active_hover_background.source_over(background),
-            3.0
-        )
+    let tab_active_hover_icon = contrast(
+        tab_active_hover_foreground,
+        tab_active_hover_background.source_over(background),
+        3.0,
     );
-    let tab_inactive_selected_border = resolve!(tab_inactive_selected_border, tab_active_border);
+    let tab_inactive_selected_border = authored.tab_inactive_selected_border;
     // The mark between two inactive Tabs is its own decision rather than a control outline or a
     // full-length divider. Missing, it takes the inactive title a step back into the bar it rests
-    // on, so it follows the scheme's own title weight: seen as a short hairline, quieter than text.
-    let tab_separator = resolve!(
-        tab_separator,
-        tab_inactive_foreground.mix(title_bar_background.source_over(root_surface), 0.6)
-    );
-    let link_text_pressed = resolve!(link_text_pressed, link_text_hover);
-    let link_text_disabled = resolve!(link_text_disabled, text_disabled);
-    let colors = ChromeColors {
+    // on, so it follows the built-in title weight: seen as a short hairline, quieter than text.
+    let tab_separator = authored.tab_separator;
+    let link_text_pressed = authored.link_text_pressed;
+    let link_text_disabled = text_disabled;
+    ChromeColors {
         background,
         panel_background,
         elevated_surface_background,
@@ -981,11 +544,6 @@ pub(crate) fn compile_chrome(
         tab_active_hover_icon,
         tab_inactive_selected_border,
         tab_separator,
-    };
-    CompiledChrome {
-        readability: readability_diagnostics(&colors),
-        colors,
-        provenance,
     }
 }
 
@@ -1085,7 +643,7 @@ impl ChromeColors {
     /// Resolves semantic status colors against the control's current surface.
     ///
     /// The surface is composed over the opaque Chrome background. Resolving per surface guarantees
-    /// contrast even when a custom scheme gives different Tab states opposing backgrounds.
+    /// contrast across active and inactive Tab surfaces.
     pub(crate) fn status(&self, surface: Color) -> StatusPaint {
         let base = self.background.with_alpha(255);
         let surface = surface.source_over(base);
@@ -1100,615 +658,8 @@ impl ChromeColors {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        AppearanceGeneration, AppearancePreferences, AvailableFonts, SchemeCatalog,
-        SystemAppearance, builtin,
-    };
+    use super::super::builtin;
     use super::*;
-
-    #[test]
-    fn sparse_definitions_are_total_deterministic_and_source_local() {
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let authored = ChromeColorOverrides {
-                background: Some(Color::rgb(0x010203)),
-                text: Some(Color::rgb(0xfefefe)),
-                ..Default::default()
-            };
-            let result = compile_chrome(appearance, &authored, &Default::default());
-            assert_eq!(
-                result,
-                compile_chrome(appearance, &authored, &Default::default())
-            );
-            assert_eq!(result.colors.input_background, Color::rgb(0x010203));
-            assert_eq!(result.colors.link_text, Color::rgb(0xfefefe));
-            assert_eq!(result.provenance["background"], ColorProvenance::Authored);
-            assert_eq!(
-                result.provenance["input_background"],
-                ColorProvenance::Derived
-            );
-            assert!(result.colors.validate().is_ok());
-        }
-    }
-
-    #[test]
-    fn sparse_support_roles_derive_from_their_exact_semantic_fallbacks() {
-        let compiled = compile_chrome(
-            Appearance::Dark,
-            &ChromeColorOverrides {
-                toggle_off_background: Some(Color::rgb(0x101112)),
-                text_accent: Some(Color::rgb(0x202122)),
-                border_focused: Some(Color::rgb(0x303132)),
-                row_selected_background: Some(Color::rgb(0x404142)),
-                row_selected_foreground: Some(Color::rgb(0x505152)),
-                row_selected_secondary: Some(Color::rgb(0x606162)),
-                row_selected_icon: Some(Color::rgb(0x707172)),
-                ..Default::default()
-            },
-            &Default::default(),
-        );
-        assert_eq!(compiled.colors.progress_track, Color::rgb(0x101112));
-        assert_eq!(compiled.colors.progress_indicator, Color::rgb(0x202122));
-        assert_eq!(compiled.colors.focus_ring, Color::rgb(0x303132));
-        assert_eq!(
-            compiled.colors.navigation_selected_background,
-            Color::rgb(0x404142)
-        );
-        assert_eq!(
-            compiled.colors.navigation_selected_foreground,
-            Color::rgb(0x505152)
-        );
-        assert_eq!(
-            compiled.colors.navigation_selected_secondary,
-            Color::rgb(0x606162)
-        );
-        assert_eq!(
-            compiled.colors.navigation_selected_icon,
-            Color::rgb(0x707172)
-        );
-        for role in [
-            "progress_track",
-            "progress_indicator",
-            "focus_ring",
-            "navigation_selected_background",
-            "navigation_selected_foreground",
-            "navigation_selected_secondary",
-            "navigation_selected_icon",
-        ] {
-            assert_eq!(compiled.provenance[role], ColorProvenance::Derived);
-        }
-    }
-
-    #[test]
-    fn segmented_track_falls_back_to_element_and_preserves_explicit_rgba() {
-        let element = Color::rgba(0x11223388);
-        let fallback = compile_chrome(
-            Appearance::Dark,
-            &ChromeColorOverrides {
-                element_background: Some(element),
-                ..Default::default()
-            },
-            &Default::default(),
-        );
-        assert_eq!(fallback.colors.segmented_track_background, element);
-        assert_eq!(
-            fallback.provenance["segmented_track_background"],
-            ColorProvenance::Derived
-        );
-
-        let authored = Color::rgba(0x44556699);
-        let explicit = compile_chrome(
-            Appearance::Light,
-            &ChromeColorOverrides {
-                segmented_track_background: Some(authored),
-                ..Default::default()
-            },
-            &Default::default(),
-        );
-        assert_eq!(explicit.colors.segmented_track_background, authored);
-        assert_eq!(
-            explicit.provenance["segmented_track_background"],
-            ColorProvenance::Authored
-        );
-
-        let overridden = Color::rgba(0x778899aa);
-        let explicit = compile_chrome(
-            Appearance::Light,
-            &ChromeColorOverrides {
-                segmented_track_background: Some(authored),
-                ..Default::default()
-            },
-            &ChromeColorOverrides {
-                segmented_track_background: Some(overridden),
-                ..Default::default()
-            },
-        );
-        assert_eq!(explicit.colors.segmented_track_background, overridden);
-        assert_eq!(
-            explicit.provenance["segmented_track_background"],
-            ColorProvenance::Overridden
-        );
-    }
-
-    #[test]
-    fn accent_changes_do_not_recolor_missing_status_selection_or_divider_hover_roles() {
-        let authored = ChromeColorOverrides {
-            background: Some(Color::rgb(0x101010)),
-            text: Some(Color::rgb(0xeeeeee)),
-            border: Some(Color::rgb(0x454545)),
-            ..Default::default()
-        };
-        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default()).colors;
-        let changed = compile_chrome(
-            Appearance::Dark,
-            &authored,
-            &ChromeColorOverrides {
-                text_accent: Some(Color::rgb(0xff00ff)),
-                ..Default::default()
-            },
-        )
-        .colors;
-        assert_eq!(changed.success, baseline.success);
-        assert_eq!(changed.warning, baseline.warning);
-        assert_eq!(changed.error, baseline.error);
-        assert_eq!(changed.element_selected, baseline.element_selected);
-        assert_eq!(changed.resize_hovered, baseline.resize_hovered);
-    }
-
-    #[test]
-    fn omitted_status_roles_remain_distinct_and_readable_on_midtones() {
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let background = Color::rgb(0x777777);
-            let colors = compile_chrome(
-                appearance,
-                &ChromeColorOverrides {
-                    background: Some(background),
-                    ..Default::default()
-                },
-                &Default::default(),
-            )
-            .colors;
-            let statuses = [colors.success, colors.warning, colors.error];
-
-            assert!(
-                statuses
-                    .iter()
-                    .all(|status| status.contrast_ratio(background) >= 3.0),
-                "{appearance:?} status roles must remain readable: {statuses:?}"
-            );
-            assert!(
-                statuses[0] != statuses[1]
-                    && statuses[0] != statuses[2]
-                    && statuses[1] != statuses[2],
-                "{appearance:?} status roles must remain distinct: {statuses:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn authored_status_values_remain_exact() {
-        let compiled = compile_chrome(
-            Appearance::Light,
-            &ChromeColorOverrides {
-                success: Some(Color::rgba(0x11223344)),
-                warning: Some(Color::rgba(0x55667788)),
-                error: Some(Color::rgba(0x99aabbcc)),
-                ..Default::default()
-            },
-            &Default::default(),
-        );
-        assert_eq!(compiled.colors.success, Color::rgba(0x11223344));
-        assert_eq!(compiled.colors.warning, Color::rgba(0x55667788));
-        assert_eq!(compiled.colors.error, Color::rgba(0x99aabbcc));
-    }
-
-    #[test]
-    fn omitted_toggle_on_background_derives_from_overridden_primary_background() {
-        let primary = Color::rgb(0x123456);
-        let compiled = compile_chrome(
-            Appearance::Dark,
-            &Default::default(),
-            &ChromeColorOverrides {
-                primary_background: Some(primary),
-                ..Default::default()
-            },
-        );
-        assert_eq!(compiled.colors.toggle_on_background, primary);
-        assert_eq!(
-            compiled.provenance["toggle_on_background"],
-            ColorProvenance::Derived
-        );
-    }
-
-    #[test]
-    fn dependencies_follow_overrides_while_authored_values_retain_intent() {
-        let authored = ChromeColorOverrides {
-            background: Some(Color::rgb(0x123456)),
-            error: Some(Color::rgb(0xff0000)),
-            ..Default::default()
-        };
-        let overrides = ChromeColorOverrides {
-            background: Some(Color::rgb(0x654321)),
-            error: Some(Color::rgb(0x00ff00)),
-            ..Default::default()
-        };
-        let result = compile_chrome(Appearance::Dark, &authored, &overrides);
-        assert_eq!(result.colors.modal_scrim, Color::rgba(0x65432199));
-        assert_eq!(result.colors.error_background, Color::rgba(0x00ff001a));
-        assert_eq!(result.provenance["background"], ColorProvenance::Overridden);
-        let authored = ChromeColorOverrides {
-            modal_scrim: Some(Color::rgba(0x11223344)),
-            error_background: Some(Color::rgba(0x55667788)),
-            ..authored
-        };
-        let result = compile_chrome(Appearance::Dark, &authored, &overrides);
-        assert_eq!(result.colors.modal_scrim, Color::rgba(0x11223344));
-        assert_eq!(result.colors.error_background, Color::rgba(0x55667788));
-        assert_eq!(result.provenance["modal_scrim"], ColorProvenance::Authored);
-    }
-
-    #[test]
-    fn emphasis_selection_status_and_static_surfaces_are_independent() {
-        let authored = builtin::chrome_definition(Appearance::Dark);
-        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default()).colors;
-        let changed = compile_chrome(
-            Appearance::Dark,
-            &authored,
-            &ChromeColorOverrides {
-                primary_background: Some(Color::rgb(0xff00ff)),
-                destructive_background: Some(Color::rgb(0x00ffff)),
-                element_active: Some(Color::rgb(0xffff00)),
-                ..Default::default()
-            },
-        )
-        .colors;
-        assert_ne!(changed.primary_background, baseline.primary_background);
-        assert_eq!(changed.selection_background, baseline.selection_background);
-        assert_eq!(changed.badge_background, baseline.badge_background);
-        assert_eq!(changed.preview_background, baseline.preview_background);
-        assert_eq!(changed.error_background, baseline.error_background);
-        assert_eq!(
-            changed.row_selected_background,
-            baseline.row_selected_background
-        );
-    }
-
-    #[test]
-    fn semantic_selection_and_row_overrides_drive_their_missing_hover_states() {
-        let mut authored = super::super::builtin::chrome_definition(Appearance::Dark);
-        authored.row_hover_background = None;
-        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default());
-        let overrides = ChromeColorOverrides {
-            selection_background: Some(Color::rgb(0xff0000)),
-            row_selected_background: Some(Color::rgb(0x00ff00)),
-            row_background: Some(Color::rgb(0x0000ff)),
-            ..Default::default()
-        };
-        let changed = compile_chrome(Appearance::Dark, &authored, &overrides);
-        assert_ne!(
-            changed.colors.selection_hover_background,
-            baseline.colors.selection_hover_background
-        );
-        assert_ne!(
-            changed.colors.row_selected_hover_background,
-            baseline.colors.row_selected_hover_background
-        );
-        assert_ne!(
-            changed.colors.row_hover_background,
-            baseline.colors.row_hover_background
-        );
-        assert!(
-            changed.colors.selection_hover_background.r
-                > changed.colors.selection_hover_background.g
-        );
-        assert!(
-            changed.colors.row_selected_hover_background.g
-                > changed.colors.row_selected_hover_background.r
-        );
-        let authored = ChromeColorOverrides {
-            selection_hover_background: Some(Color::rgb(0x123456)),
-            row_selected_hover_background: Some(Color::rgb(0x654321)),
-            row_hover_background: Some(Color::rgb(0x246813)),
-            ..authored
-        };
-        let preserved = compile_chrome(Appearance::Dark, &authored, &overrides);
-        assert_eq!(
-            preserved.colors.selection_hover_background,
-            Color::rgb(0x123456)
-        );
-        assert_eq!(
-            preserved.colors.row_selected_hover_background,
-            Color::rgb(0x654321)
-        );
-        assert_eq!(preserved.colors.row_hover_background, Color::rgb(0x246813));
-    }
-
-    #[test]
-    fn active_tab_hover_icon_is_completed_against_its_rendered_fill_and_preserves_authored_intent()
-    {
-        let authored = ChromeColorOverrides {
-            background: Some(Color::rgb(0x111111)),
-            text: Some(Color::rgb(0xffffff)),
-            tab_active_hover_background: Some(Color::rgba(0xffffffcc)),
-            tab_active_hover_foreground: Some(Color::rgb(0x000000)),
-            ..Default::default()
-        };
-        let completed = compile_chrome(Appearance::Dark, &authored, &Default::default());
-        let rendered_fill = completed
-            .colors
-            .tab_active_hover_background
-            .source_over(completed.colors.background);
-        assert!(
-            completed
-                .colors
-                .tab_active_hover_icon
-                .contrast_ratio(rendered_fill)
-                >= 3.0
-        );
-        assert_eq!(
-            completed.provenance["tab_active_hover_icon"],
-            ColorProvenance::Derived
-        );
-
-        let authored_icon = Color::rgb(0xff00ff);
-        let authored = ChromeColorOverrides {
-            tab_active_hover_icon: Some(authored_icon),
-            ..authored
-        };
-        let preserved = compile_chrome(Appearance::Dark, &authored, &Default::default());
-        assert_eq!(preserved.colors.tab_active_hover_icon, authored_icon);
-        assert_eq!(
-            preserved.provenance["tab_active_hover_icon"],
-            ColorProvenance::Authored
-        );
-    }
-
-    /// The Tab separator and an outlined control's ring are separate authorable decisions.
-    #[test]
-    fn tab_separator_is_its_own_role_independent_of_outlined_controls() {
-        let authored = builtin::chrome_definition(Appearance::Dark);
-        let baseline = compile_chrome(Appearance::Dark, &authored, &Default::default());
-        assert_eq!(
-            baseline.provenance["tab_separator"],
-            ColorProvenance::Authored
-        );
-
-        let outline = Color::rgb(0xff00ff);
-        let retuned_outline = compile_chrome(
-            Appearance::Dark,
-            &ChromeColorOverrides {
-                outline_border: Some(outline),
-                ..authored.clone()
-            },
-            &Default::default(),
-        );
-        assert_eq!(retuned_outline.colors.outline_border, outline);
-        assert_eq!(
-            retuned_outline.colors.tab_separator,
-            baseline.colors.tab_separator
-        );
-
-        let separator = Color::rgb(0x00ffff);
-        let retuned_separator = compile_chrome(
-            Appearance::Dark,
-            &authored,
-            &ChromeColorOverrides {
-                tab_separator: Some(separator),
-                ..Default::default()
-            },
-        );
-        assert_eq!(retuned_separator.colors.tab_separator, separator);
-        assert_eq!(
-            retuned_separator.provenance["tab_separator"],
-            ColorProvenance::Overridden
-        );
-        assert_eq!(
-            ChromeColors {
-                tab_separator: baseline.colors.tab_separator,
-                ..retuned_separator.colors
-            },
-            baseline.colors,
-            "retuning the Tab separator should move no other role"
-        );
-
-        // A sparse scheme that outlines its controls loudly still derives a quiet separator.
-        let sparse = ChromeColorOverrides {
-            background: Some(Color::rgb(0x101010)),
-            text: Some(Color::rgb(0xeeeeee)),
-            outline_border: Some(Color::rgb(0xffffff)),
-            ..Default::default()
-        };
-        let derived = compile_chrome(Appearance::Dark, &sparse, &Default::default());
-        assert_eq!(
-            derived.provenance["tab_separator"],
-            ColorProvenance::Derived
-        );
-        assert_ne!(derived.colors.tab_separator, derived.colors.outline_border);
-    }
-
-    /// A missing separator follows the scheme's own inactive title a step back into the bar, so it
-    /// is visible as a short hairline yet quieter than the titles it divides, whether the window is
-    /// focused or not.
-    #[test]
-    fn derived_tab_separator_is_visible_but_quiet_on_both_title_bar_surfaces() {
-        for (appearance, background, text) in [
-            (Appearance::Dark, 0x010203, 0xfefefe),
-            (Appearance::Dark, 0x141415, 0xcdcdcd),
-            (Appearance::Dark, 0x2d2a3e, 0xd8d4f0),
-            (Appearance::Light, 0xffffff, 0x000000),
-            (Appearance::Light, 0xf6f1e4, 0x3b3226),
-            (Appearance::Light, 0xdcdcdc, 0x202020),
-        ] {
-            let authored = ChromeColorOverrides {
-                background: Some(Color::rgb(background)),
-                text: Some(Color::rgb(text)),
-                ..Default::default()
-            };
-            let c = compile_chrome(appearance, &authored, &Default::default())
-                .colors
-                .opaque_presentation();
-            for bar in [c.title_bar_background, c.title_bar_inactive_background] {
-                let separator = c.tab_separator.source_over(bar).contrast_ratio(bar);
-                let title = c.tab_inactive_foreground.contrast_ratio(bar);
-                assert!(
-                    (1.4..=3.0).contains(&separator) && separator < title,
-                    "{appearance:?} {background:06x}/{text:06x}: separator {separator:.2} \
-                     against title {title:.2}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn translucent_fields_derive_against_the_same_backing_that_is_rendered() {
-        for (panel, input) in [
-            (Color::rgb(0xffffff), Color::rgba(0)),
-            (Color::rgba(0xff000080), Color::rgba(0x0000ff80)),
-        ] {
-            let authored = ChromeColorOverrides {
-                background: Some(Color::rgb(0xffffff)),
-                text: Some(Color::rgb(0x000000)),
-                panel_background: Some(panel),
-                input_background: Some(input),
-                input_selection_background: Some(Color::rgba(0xffffff80)),
-                ..Default::default()
-            };
-            let result = compile_chrome(Appearance::Light, &authored, &Default::default());
-            assert_eq!(result.colors.input_background, input);
-            let rendered = result.colors.opaque_presentation();
-            assert_eq!(
-                rendered.input_background,
-                input.source_over(panel.source_over(Color::rgb(0xffffff)))
-            );
-            assert!(
-                rendered
-                    .input_text
-                    .contrast_ratio(rendered.input_background)
-                    >= 4.5
-            );
-            assert!(
-                rendered
-                    .input_placeholder
-                    .contrast_ratio(rendered.input_background)
-                    >= 4.5
-            );
-            assert!(
-                rendered
-                    .input_focused_border
-                    .contrast_ratio(rendered.input_background)
-                    >= 3.0
-            );
-            assert!(
-                rendered.input_selection_foreground.contrast_ratio(
-                    rendered
-                        .input_selection_background
-                        .source_over(rendered.input_background)
-                ) >= 4.5
-            );
-            assert_eq!(rendered.ghost_element_background.a, 0);
-        }
-    }
-
-    #[test]
-    fn translucent_interaction_and_static_surfaces_have_readable_derived_foregrounds() {
-        let authored = ChromeColorOverrides {
-            background: Some(Color::rgb(0xffffff)),
-            text: Some(Color::rgb(0)),
-            element_background: Some(Color::rgba(0)),
-            preview_background: Some(Color::rgba(0)),
-            badge_background: Some(Color::rgba(0)),
-            tab_active_background: Some(Color::rgba(0)),
-            ..Default::default()
-        };
-        let result = compile_chrome(Appearance::Light, &authored, &Default::default());
-        let p = result.colors.opaque_presentation();
-        for (foreground, surface) in [
-            (p.element_foreground, p.element_background),
-            (p.preview_foreground, p.preview_background),
-            (p.badge_foreground, p.badge_background),
-            (p.tab_active_foreground, p.tab_active_background),
-            (p.tab_active_hover_foreground, p.tab_active_hover_background),
-        ] {
-            assert!(foreground.contrast_ratio(surface) >= 4.5);
-        }
-        let authored = ChromeColorOverrides {
-            input_selection_foreground: Some(Color::rgb(0x123456)),
-            ..authored
-        };
-        assert_eq!(
-            compile_chrome(Appearance::Light, &authored, &Default::default())
-                .colors
-                .input_selection_foreground,
-            Color::rgb(0x123456)
-        );
-    }
-
-    #[test]
-    fn minimal_no_accent_actions_and_toggles_retain_default_interaction_feedback() {
-        let authored = ChromeColorOverrides {
-            background: Some(Color::rgb(0x101010)),
-            text: Some(Color::rgb(0xeeeeee)),
-            ..Default::default()
-        };
-        let c = compile_chrome(Appearance::Dark, &authored, &Default::default()).colors;
-        for (normal, hover, pressed) in [
-            (
-                c.primary_background,
-                c.primary_hover_background,
-                c.primary_pressed_background,
-            ),
-            (
-                c.destructive_background,
-                c.destructive_hover_background,
-                c.destructive_pressed_background,
-            ),
-            (
-                c.toggle_on_background,
-                c.toggle_on_hover_background,
-                c.toggle_on_pressed_background,
-            ),
-        ] {
-            assert_ne!(normal, hover);
-            assert_ne!(hover, pressed);
-        }
-        let authored = ChromeColorOverrides {
-            primary_hover_background: Some(c.primary_background),
-            ..authored
-        };
-        assert_eq!(
-            compile_chrome(Appearance::Dark, &authored, &Default::default())
-                .colors
-                .primary_hover_background,
-            c.primary_background
-        );
-    }
-
-    #[test]
-    fn complete_authored_paints_are_preserved_even_when_unreadable() {
-        let baseline = builtin::chrome_base(Appearance::Light);
-        let mut authored = ChromeColorOverrides::complete(&baseline);
-        authored.primary_foreground = Some(Color::rgb(0x123456));
-        authored.primary_background = Some(Color::rgb(0x123456));
-        let result = compile_chrome(
-            Appearance::Light,
-            &authored,
-            &ChromeColorOverrides {
-                text_accent: Some(Color::rgb(0xabcdef)),
-                ..Default::default()
-            },
-        );
-        assert!(
-            result
-                .readability
-                .contains(&ChromeReadabilityDiagnostic::Primary)
-        );
-        assert_eq!(result.colors.primary_foreground, Color::rgb(0x123456));
-        assert_eq!(result.colors.primary_background, Color::rgb(0x123456));
-        assert_eq!(
-            result.colors.selection_background,
-            baseline.selection_background
-        );
-    }
-
     #[test]
     fn builtins_pass_supported_text_and_control_contrast_pairs() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1779,7 +730,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn captions_resolve_all_control_states_on_opposite_and_program_surfaces() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1818,7 +768,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn status_marks_read_on_every_tab_surface_they_rest_on() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1853,7 +802,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn status_fallback_meets_contrast_on_opposing_surfaces() {
         let surfaces = [Color::rgb(0x000000), Color::rgb(0xffffff)];
@@ -1865,72 +813,5 @@ mod tests {
             let mark = colors.status(surface).attention;
             assert!(mark.contrast_ratio(surface) >= 3.0);
         }
-    }
-
-    #[test]
-    fn live_builtin_overrides_recompile_dependencies_and_preserve_terminal() {
-        let catalog = SchemeCatalog::default();
-        let mut preferences = AppearancePreferences::default();
-        let before = catalog
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable(),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        preferences.chrome.overrides.insert(
-            before.chrome.effective_scheme.clone(),
-            ChromeColorOverrides {
-                background: Some(Color::rgb(0x123456)),
-                ..Default::default()
-            },
-        );
-        let after = catalog
-            .resolve(
-                AppearanceGeneration::INITIAL,
-                &preferences,
-                SystemAppearance::unavailable(),
-                &AvailableFonts::default(),
-            )
-            .unwrap();
-        assert_eq!(after.chrome.colors.modal_scrim, Color::rgba(0x12345699));
-        assert_eq!(before.terminal, after.terminal);
-        assert_eq!(
-            after.chrome.provenance["background"],
-            ColorProvenance::Overridden
-        );
-    }
-
-    #[test]
-    fn schema_lists_exact_registry_and_agrees_on_chrome_alpha_and_null() {
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../docs/schema/color-scheme-definitions-v1.schema.json"
-        ))
-        .unwrap();
-        let roles = schema["$defs"]["chromeColors"]["propertyNames"]["enum"]
-            .as_array()
-            .unwrap();
-        let resolved = compile_chrome(Appearance::Dark, &Default::default(), &Default::default());
-        assert_eq!(roles.len(), resolved.provenance.len());
-        for role in roles {
-            let role = role.as_str().unwrap();
-            assert!(resolved.provenance.contains_key(role));
-            let value = serde_json::json!({role:"#12345680"});
-            let overrides: ChromeColorOverrides = serde_json::from_value(value).unwrap();
-            assert_eq!(overrides.validate().is_ok(), role != "border_transparent");
-            assert!(
-                serde_json::from_value::<ChromeColorOverrides>(serde_json::json!({role: null}))
-                    .is_err()
-            );
-        }
-        assert!(
-            serde_json::from_value::<ChromeColorOverrides>(
-                serde_json::json!({"border_transparent":"#1230"})
-            )
-            .unwrap()
-            .validate()
-            .is_ok()
-        );
     }
 }

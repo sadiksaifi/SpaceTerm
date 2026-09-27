@@ -189,21 +189,14 @@ pub(super) fn catalog(
         appearance.capabilities.increase_contrast || appearance.capabilities.show_borders;
     let light = appearance.appearance == Appearance::Light;
     // Light controls need a stronger edge than their card or popup host.
-    let (rest_edge, selected_edge) = if appearance.built_in_light {
-        (
-            super::appearance::built_in_light::CONTROL_EDGE,
-            super::appearance::built_in_light::SELECTED_EDGE,
-        )
-    } else {
-        (Color::rgba(0x00000026), Color::rgba(0x0000001f))
-    };
+    let rest_edge = super::appearance::built_in_light::CONTROL_EDGE;
+    let selected_edge = super::appearance::built_in_light::SELECTED_EDGE;
     let border = (light && !preserve_accessibility_border).then_some(gpui_color(rest_edge));
     let catalog = catalog.toggle_segmented_elevation(
         if light { shadow } else { ControlShadow::none() },
         border,
         shadow,
-        (light && (!appearance.built_in_light || !preserve_accessibility_border))
-            .then_some(gpui_color(selected_edge)),
+        (light && !preserve_accessibility_border).then_some(gpui_color(selected_edge)),
     );
 
     if !light {
@@ -211,7 +204,7 @@ pub(super) fn catalog(
     }
 
     let catalog = catalog.ordinary_control_elevation(shadow, border);
-    if appearance.built_in_light && !preserve_accessibility_border {
+    if !preserve_accessibility_border {
         let interaction_edge = if appearance.active {
             super::appearance::built_in_light::INTERACTION_EDGE
         } else {
@@ -1199,25 +1192,6 @@ mod tests {
     }
 
     #[test]
-    fn material_row_fill_preserves_a_custom_chromatic_state_as_a_relative_overlay() {
-        let surface = Color::rgb(0x202020);
-        let state = Color::rgb(0x603028);
-        let row = OverlayRow::resolve(
-            (state, surface),
-            (state, Color::rgba(0x202020b3)),
-            [Color::rgb(0xffffff); 4],
-            Color::rgba(0),
-        );
-        let fill = row.fill;
-
-        assert!(fill.a > 0 && fill.a < 128);
-        assert!(
-            fill.r > fill.g && fill.r > fill.b,
-            "the red authored direction must survive host-relative reconstruction: {fill:?}"
-        );
-    }
-
-    #[test]
     fn dark_selected_row_lifts_from_its_semantic_host_even_when_material_rgb_is_lighter() {
         let surface = Color::rgb(0x202020);
         let selected = Color::rgb(0x262626);
@@ -1271,9 +1245,9 @@ mod tests {
             let reference = builtin_chrome_base(appearance).opaque_presentation();
             let rows_at = |transparency: f32| {
                 let mut preferences = AppearancePreferences::default();
-                preferences.background.transparency = transparency;
+                preferences.window.transparency = transparency;
                 let materials = ResolvedWindowComposition::resolve(
-                    &preferences.background,
+                    &preferences.window,
                     crate::appearance::CompositionCapabilities::new(true, true),
                     crate::appearance::ChromeTone::of(reference.background),
                 )
@@ -1416,7 +1390,7 @@ mod tests {
                 },
                 ..AppearancePreferences::default()
             };
-            preferences.background.transparency = 1.0;
+            preferences.window.transparency = 1.0;
             let resolved = SchemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,

@@ -9,7 +9,7 @@ fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {
         mode: AppearanceMode::Light,
         ..Default::default()
     };
-    preferences.background.transparency = transparency;
+    preferences.window.transparency = transparency;
     SchemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -201,41 +201,6 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
 }
 
 #[test]
-fn light_settings_preserves_an_explicit_group_surface_override() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Light,
-        ..Default::default()
-    };
-    preferences.background.transparency = 0.0;
-    let group = Color::rgb(0xe8eef4);
-    preferences.chrome.overrides.insert(
-        crate::appearance::builtin_light_chrome(),
-        crate::appearance::ChromeColorOverrides {
-            elevated_surface_background: Some(group),
-            ..Default::default()
-        },
-    );
-    let resolved = SchemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &preferences,
-            SystemAppearance::available(Appearance::Light),
-            &AvailableFonts::default(),
-        )
-        .unwrap();
-    let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-    let (settings, _) =
-        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
-    assert_eq!(
-        settings
-            .surface(super::appearance::settings::SettingsSurfaceRole::Card)
-            .paint,
-        group,
-        "A built-in scheme override must remain the authored group color, not a mixed tone"
-    );
-}
-
-#[test]
 fn light_settings_keeps_accessibility_group_boundaries() {
     for increase_contrast in [false, true] {
         let mut resolved = resolve_light(0.35);
@@ -318,7 +283,7 @@ fn every_chip_lifts_without_drawing_a_border() {
                 mode,
                 ..Default::default()
             };
-            preferences.background.transparency = transparency;
+            preferences.window.transparency = transparency;
             let resolved = SchemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -445,5 +410,47 @@ fn chip_geometry_matches_across_appearances() {
     assert_eq!(
         sizes[0], sizes[1],
         "chip geometry must not follow appearance"
+    );
+}
+
+#[gpui::test]
+fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut preferences = crate::appearance::AppearancePreferences {
+        mode: AppearanceMode::Light,
+        ..Default::default()
+    };
+    preferences.window.transparency = 0.0;
+    let resolved = SchemeCatalog::default()
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::available(Appearance::Light),
+            &AvailableFonts::default(),
+        )
+        .unwrap();
+    let prepared = ChromeAppearance::prepare(&resolved.chrome);
+    let catalog =
+        super::control_theme_catalog::catalog(&prepared, spaceterm_ui::ProgressMotion::Standard);
+    cx.update(|cx| spaceterm_ui::init(cx, catalog)).unwrap();
+    let paints = cx.update(|cx| {
+        cx.global::<spaceterm_ui::ButtonTheme>()
+            .paints(spaceterm_ui::ButtonVariant::Secondary)
+    });
+    let edge_strength = |paint: spaceterm_ui::ButtonPaint| {
+        let fill =
+            Color::rgba(u32::from(paint.background())).source_over(prepared.colors.background);
+        Color::rgba(u32::from(paint.border()))
+            .source_over(fill)
+            .contrast_ratio(fill)
+    };
+    assert!(
+        edge_strength(paints.hovered()) > edge_strength(paints.normal()) + 0.15,
+        "Light ordinary control hover should visibly strengthen its edge, not merely change the host underneath the same border"
+    );
+    assert!(
+        edge_strength(paints.disabled()) < edge_strength(paints.normal()),
+        "Light disabled controls should have quieter edges than enabled controls"
     );
 }

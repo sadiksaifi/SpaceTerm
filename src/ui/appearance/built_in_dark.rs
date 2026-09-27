@@ -1,4 +1,4 @@
-//! Boundary policy for the built-in Dark definition. Custom definitions retain their own policy.
+//! Boundary policy for the built-in Dark definition.
 
 use super::separator::SeparatorBand;
 

@@ -300,7 +300,7 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
 }
 
 #[gpui::test]
-fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppContext) {
+fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     click_new_workspace_menu("new-workspace-menu-create-local", cx);
 
@@ -309,8 +309,8 @@ fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppCo
         crate::appearance::ChromeDensity::Comfortable,
     ] {
         let mut preferences = crate::appearance::AppearancePreferences::default();
-        preferences.chrome.typography.base_size = 24.0;
-        preferences.chrome.density = density;
+
+        preferences.window.density = density;
         let resolved = crate::appearance::SchemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
@@ -319,7 +319,7 @@ fn sidebar_rows_contain_large_semantic_text_in_both_densities(cx: &mut TestAppCo
                     .with_composition(crate::appearance::CompositionCapabilities::new(true, true)),
                 &crate::appearance::AvailableFonts::default(),
             )
-            .expect("maximum supported Chrome typography should resolve");
+            .expect("built-in appearance should resolve");
         let (active, inactive) =
             crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
         cx.update(|window, cx| {
@@ -7498,7 +7498,7 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
 }
 
 #[gpui::test]
-fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
+fn inline_rename_contains_fixed_chrome_line_height_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
@@ -7509,8 +7509,8 @@ fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut 
     ] {
         let line_height = cx.update(|window, cx| {
             let mut preferences = crate::appearance::AppearancePreferences::default();
-            preferences.chrome.typography.base_size = 24.0;
-            preferences.chrome.density = density;
+
+            preferences.window.density = density;
             let resolved = crate::appearance::SchemeCatalog::default()
                 .resolve(
                     crate::appearance::AppearanceGeneration::INITIAL,
@@ -7520,7 +7520,7 @@ fn inline_rename_contains_maximum_chrome_line_height_in_both_densities(cx: &mut 
                     ),
                     &crate::appearance::AvailableFonts::default(),
                 )
-                .expect("maximum supported Chrome typography should resolve");
+                .expect("built-in appearance should resolve");
             let (active, inactive) =
                 crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
             let line_height = active

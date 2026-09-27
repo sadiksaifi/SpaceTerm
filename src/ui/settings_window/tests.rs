@@ -3,8 +3,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
 use crate::appearance::{
-    Appearance, AppearanceMode, ChromeDensity, SchemeKind, SettingsDocument,
-    builtin_fallback_scheme,
+    Appearance, AppearanceMode, ChromeDensity, SettingsDocument, builtin_fallback_scheme,
 };
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
@@ -87,7 +86,6 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
     let selector: &'static str = match section {
         SettingsSectionId::Appearance => "settings-navigation-settings-section-appearance",
-        SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
         SettingsSectionId::Terminal => "settings-navigation-settings-section-terminal",
         SettingsSectionId::ColorSchemes => "settings-navigation-settings-section-color-schemes",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
@@ -125,13 +123,13 @@ fn an_edit_previews_at_once_and_writes_after_it_settles(cx: &mut TestAppContext)
     let (window, harness, cx) = open_settings(cx);
     let before = cx.update(|_, cx| appearance_runtime::current(cx).generation.get());
 
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
 
     // The preview is live before anything is written.
     assert_eq!(harness.storage.writes(), 0);
     assert_eq!(status(&window, cx), SaveStatus::Saving);
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Comfortable
     );
     let previewing = cx.update(|_, cx| appearance_runtime::current(cx).generation.get());
@@ -150,7 +148,7 @@ fn an_edit_previews_at_once_and_writes_after_it_settles(cx: &mut TestAppContext)
             .document()
             .expect("the retained document should parse")
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -188,11 +186,11 @@ fn an_edit_that_cannot_reach_the_preview_is_re_pushed_rather_than_lost(cx: &mut 
         .begin_preview(harness.settings.snapshot().committed.revision)
         .expect("the fixture should obtain the first preview");
 
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
 
     // The draft carries the change even though the live preview could not.
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Comfortable
     );
     settle(cx);
@@ -212,7 +210,7 @@ fn an_edit_that_cannot_reach_the_preview_is_re_pushed_rather_than_lost(cx: &mut 
             .document()
             .expect("the retained document should parse")
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -224,7 +222,7 @@ fn a_failed_write_keeps_the_change_applied_and_retry_writes_it(cx: &mut TestAppC
     let (window, harness, cx) = open_settings(cx);
     harness.storage.fail_writes(Some(StorageError::Unavailable));
 
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     settle(cx);
 
     assert!(matches!(status(&window, cx), SaveStatus::Failed(_)));
@@ -235,7 +233,7 @@ fn a_failed_write_keeps_the_change_applied_and_retry_writes_it(cx: &mut TestAppC
             .snapshot()
             .candidate
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -253,7 +251,7 @@ fn a_failed_write_keeps_the_change_applied_and_retry_writes_it(cx: &mut TestAppC
             .document()
             .expect("the retained document should parse")
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -270,9 +268,9 @@ fn an_unreadable_document_refuses_edits_until_it_is_reloaded(cx: &mut TestAppCon
     assert!(cx.debug_bounds("settings-banner").is_some());
 
     // Controls are disabled, so nothing reaches the document.
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Compact
     );
     assert_eq!(harness.storage.writes(), 0);
@@ -290,7 +288,7 @@ fn a_document_published_without_identity_pauses_editing_until_reload(cx: &mut Te
     let (window, harness, cx) = open_settings(cx);
     harness.storage.drop_identity(true);
 
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     settle(cx);
 
     assert!(matches!(
@@ -305,7 +303,7 @@ fn a_document_published_without_identity_pauses_editing_until_reload(cx: &mut Te
 #[gpui::test]
 fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     assert_eq!(harness.storage.writes(), 0);
 
     cx.update(|_, cx| {
@@ -320,7 +318,7 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
             .document()
             .expect("the retained document should parse")
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -342,13 +340,13 @@ fn appearance_mode_switches_both_surfaces_without_changing_any_scheme_slot(
         click(selector, cx);
         let after = document_of(&window, cx).preferences;
         assert_eq!(after.mode, mode);
-        assert_eq!(after.chrome, before.chrome);
+        assert_eq!(after.window, before.window);
         assert_eq!(after.terminal, before.terminal);
     }
 }
 
 #[gpui::test]
-fn fixed_mode_offers_two_scheme_rows_and_auto_offers_four(cx: &mut TestAppContext) {
+fn fixed_mode_offers_one_scheme_row_and_auto_offers_two(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     for (selector, automatic) in [
         ("settings-appearance-mode-light", false),
@@ -357,30 +355,20 @@ fn fixed_mode_offers_two_scheme_rows_and_auto_offers_four(cx: &mut TestAppContex
     ] {
         click(selector, cx);
         let rows = window.read_with(cx, |settings, _| {
-            settings.rows_for(SettingsSectionId::Appearance)
+            settings.rows_for(SettingsSectionId::Terminal)
         });
-        for row in [SettingsRowId::ChromeScheme, SettingsRowId::TerminalScheme] {
-            assert_eq!(rows.contains(&row), !automatic);
-        }
+        assert_eq!(rows.contains(&SettingsRowId::TerminalScheme), !automatic);
         for row in [
-            SettingsRowId::ChromeLightScheme,
-            SettingsRowId::ChromeDarkScheme,
             SettingsRowId::TerminalLightScheme,
             SettingsRowId::TerminalDarkScheme,
         ] {
             assert_eq!(rows.contains(&row), automatic);
         }
-        assert_eq!(
-            rows.iter()
-                .filter(|row| **row == SettingsRowId::AppearanceMode)
-                .count(),
-            1
-        );
     }
 }
 
 #[gpui::test]
-fn changing_one_scheme_slot_preserves_the_mode_and_other_three_slots(cx: &mut TestAppContext) {
+fn changing_one_scheme_slot_preserves_the_mode_and_other_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     for mode in [
         AppearanceMode::Light,
@@ -388,20 +376,17 @@ fn changing_one_scheme_slot_preserves_the_mode_and_other_three_slots(cx: &mut Te
         AppearanceMode::Auto,
     ] {
         cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
-        for kind in [SchemeKind::Chrome, SchemeKind::Terminal] {
+        {
             for slot in [Appearance::Light, Appearance::Dark] {
                 let before = document_of(&window, cx).preferences;
                 let id = crate::appearance::SchemeId::new(
-                    format!("custom.{kind:?}.{slot:?}").to_ascii_lowercase(),
+                    format!("custom.{slot:?}").to_ascii_lowercase(),
                 )
                 .unwrap();
                 let mut expected = before.clone();
-                match kind {
-                    SchemeKind::Chrome => expected.chrome.schemes.set(slot, id.clone()),
-                    SchemeKind::Terminal => expected.terminal.schemes.set(slot, id.clone()),
-                }
+                expected.terminal.schemes.set(slot, id.clone());
                 cx.update(|_, cx| {
-                    window.update(cx, |settings, cx| settings.set_scheme(kind, slot, id, cx))
+                    window.update(cx, |settings, cx| settings.set_scheme(slot, id, cx))
                 });
                 assert_eq!(document_of(&window, cx).preferences, expected);
             }
@@ -423,40 +408,24 @@ fn resetting_appearance_mode_preserves_all_scheme_choices(cx: &mut TestAppContex
 #[gpui::test]
 fn scheme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    for (mode, kind, slot, row) in [
+    for (mode, slot, row) in [
         (
             AppearanceMode::Light,
-            SchemeKind::Chrome,
             Appearance::Light,
-            SettingsRowId::ChromeScheme,
+            SettingsRowId::TerminalScheme,
         ),
         (
             AppearanceMode::Dark,
-            SchemeKind::Terminal,
             Appearance::Dark,
             SettingsRowId::TerminalScheme,
         ),
         (
             AppearanceMode::Auto,
-            SchemeKind::Chrome,
-            Appearance::Light,
-            SettingsRowId::ChromeLightScheme,
-        ),
-        (
-            AppearanceMode::Auto,
-            SchemeKind::Chrome,
-            Appearance::Dark,
-            SettingsRowId::ChromeDarkScheme,
-        ),
-        (
-            AppearanceMode::Auto,
-            SchemeKind::Terminal,
             Appearance::Light,
             SettingsRowId::TerminalLightScheme,
         ),
         (
             AppearanceMode::Auto,
-            SchemeKind::Terminal,
             Appearance::Dark,
             SettingsRowId::TerminalDarkScheme,
         ),
@@ -465,7 +434,6 @@ fn scheme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContex
             window.update(cx, |settings, cx| {
                 settings.set_appearance_mode(mode, cx);
                 settings.set_scheme(
-                    kind,
                     slot,
                     crate::appearance::SchemeId::new("user.unavailable").unwrap(),
                     cx,
@@ -476,20 +444,16 @@ fn scheme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContex
         let before = document_of(&window, cx).preferences;
         let selector = super::control_selector(row);
         click(leaked_owned(selector.clone()), cx);
-        let chosen = builtin_fallback_scheme(kind, slot);
+        let chosen = builtin_fallback_scheme(slot);
         click(leaked_owned(format!("{selector}-{}", chosen.as_str())), cx);
         let mut expected = before;
-        match kind {
-            SchemeKind::Chrome => expected.chrome.schemes.set(slot, chosen),
-            SchemeKind::Terminal => expected.terminal.schemes.set(slot, chosen),
-        }
+        expected.terminal.schemes.set(slot, chosen);
         assert_eq!(document_of(&window, cx).preferences, expected);
 
         // Use a different unavailable choice so reset exists for both builtin-default and alternate slots.
         cx.update(|_, cx| {
             window.update(cx, |settings, cx| {
                 settings.set_scheme(
-                    kind,
                     slot,
                     crate::appearance::SchemeId::new("user.reset-me").unwrap(),
                     cx,
@@ -512,23 +476,23 @@ fn scheme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContex
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::ChromeDensity)
+        window.differs_from_default(SettingsRowId::Density)
     }));
 
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
 
     assert!(window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::ChromeDensity)
+        window.differs_from_default(SettingsRowId::Density)
     }));
 
-    click("settings-row-chrome-density-reset", cx);
+    click("settings-row-density-reset", cx);
 
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Compact
     );
     assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::ChromeDensity)
+        window.differs_from_default(SettingsRowId::Density)
     }));
 }
 
@@ -614,10 +578,10 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
     const RESET_SLOT: &str = "settings-row-terminal-bold-as-bright-reset-slot";
 
     let mut document = SettingsDocument::default();
-    // The largest chrome type with the roomiest density, where the reset is furthest from its
+    // The fixed Chrome type with the roomiest density, where the reset is furthest from its
     // default size.
-    document.preferences.chrome.typography.base_size = 24.0;
-    document.preferences.chrome.density = ChromeDensity::Comfortable;
+
+    document.preferences.window.density = ChromeDensity::Comfortable;
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Terminal, cx);
 
@@ -732,8 +696,8 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     cx: &mut TestAppContext,
 ) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.density = ChromeDensity::Comfortable;
-    document.custom_schemes = crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
+    document.preferences.window.density = ChromeDensity::Comfortable;
+    document.color_schemes = crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
         .expect("fixture color package")
         .schemes;
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
@@ -747,18 +711,18 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     settle(cx);
 
     let after = document_of(&window, cx);
-    assert_eq!(after.preferences.chrome.density, ChromeDensity::Compact);
+    assert_eq!(after.preferences.window.density, ChromeDensity::Compact);
     assert!(
-        after.custom_schemes.is_empty(),
+        after.color_schemes.is_empty(),
         "Reset All should empty the imported catalog, got {} schemes",
-        after.custom_schemes.len()
+        after.color_schemes.len()
     );
     let retained = harness
         .storage
         .document()
         .expect("the retained document should parse");
     assert!(
-        retained.custom_schemes.is_empty(),
+        retained.color_schemes.is_empty(),
         "the emptied catalog should reach storage"
     );
 }
@@ -768,16 +732,16 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
 #[gpui::test]
 fn resetting_everything_releases_a_selected_imported_scheme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument {
-        custom_schemes: crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
+        color_schemes: crate::appearance::parse_color_document(IMPORTABLE_PACKAGE)
             .expect("fixture color package")
             .schemes,
         ..Default::default()
     };
-    let imported = document.custom_schemes[0].id().clone();
-    document.preferences.chrome.schemes.light = imported.clone();
+    let imported = document.color_schemes[0].id.clone();
+    document.preferences.terminal.schemes.light = imported.clone();
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.schemes.light,
+        document_of(&window, cx).preferences.terminal.schemes.light,
         imported,
         "the fixture should select the imported scheme"
     );
@@ -788,10 +752,14 @@ fn resetting_everything_releases_a_selected_imported_scheme(cx: &mut TestAppCont
 
     let after = document_of(&window, cx);
     assert_eq!(
-        after.preferences.chrome.schemes.light,
-        SettingsDocument::default().preferences.chrome.schemes.light
+        after.preferences.terminal.schemes.light,
+        SettingsDocument::default()
+            .preferences
+            .terminal
+            .schemes
+            .light
     );
-    assert!(after.custom_schemes.is_empty());
+    assert!(after.color_schemes.is_empty());
     after
         .validate()
         .expect("the reset document should stay valid");
@@ -904,21 +872,21 @@ fn search_reveals_the_first_match_available_in_auto_mode(cx: &mut TestAppContext
         });
     });
 
-    set_query(&window, "Interface", cx);
+    set_query(&window, "scheme", cx);
 
     assert_eq!(
         window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::ChromeLightScheme)
+        Some(SettingsRowId::TerminalLightScheme)
     );
 }
 
 #[gpui::test]
 fn changing_appearance_mode_resynchronizes_the_revealed_search_result(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    set_query(&window, "Interface", cx);
+    set_query(&window, "scheme", cx);
     assert_eq!(
         window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::ChromeScheme)
+        Some(SettingsRowId::TerminalScheme)
     );
 
     cx.update(|_, cx| {
@@ -929,7 +897,7 @@ fn changing_appearance_mode_resynchronizes_the_revealed_search_result(cx: &mut T
 
     assert_eq!(
         window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::ChromeLightScheme)
+        Some(SettingsRowId::TerminalLightScheme)
     );
 }
 
@@ -1158,7 +1126,7 @@ fn escape_inside_a_confirmation_dismisses_it_rather_than_clearing_search(cx: &mu
 #[gpui::test]
 fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     settle(cx);
     let writes = harness.storage.writes();
 
@@ -1170,7 +1138,7 @@ fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
         "the reset confirmation should be presented"
     );
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Comfortable,
         "the unanswered confirmation must not have reset anything"
     );
@@ -1184,7 +1152,7 @@ fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
 #[gpui::test]
 fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     settle(cx);
     let writes = harness.storage.writes();
 
@@ -1193,7 +1161,7 @@ fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
     settle(cx);
 
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Comfortable
     );
     assert_eq!(harness.storage.writes(), writes);
@@ -1202,7 +1170,7 @@ fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
 #[gpui::test]
 fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     settle(cx);
 
     click("settings-reset-all", cx);
@@ -1210,7 +1178,7 @@ fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
     settle(cx);
 
     assert_eq!(
-        document_of(&window, cx).preferences.chrome.density,
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Compact
     );
     assert_eq!(
@@ -1219,7 +1187,7 @@ fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
             .document()
             .expect("the retained document should parse")
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Compact
     );
@@ -1302,12 +1270,12 @@ fn settings_backdrop_tracks_blur_and_accessibility_live(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(harness.platform.backdrop_presence(), vec![false, true]);
 
-    click("settings-background-blur", cx);
+    click("settings-blur", cx);
     assert_eq!(
         harness.platform.backdrop_presence(),
         vec![false, true, false]
     );
-    click("settings-background-blur", cx);
+    click("settings-blur", cx);
     harness.platform.set_reduce_transparency(true);
     cx.run_until_parked();
     assert_eq!(
@@ -1336,16 +1304,16 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
             .contains("Floating surfaces still use your transparency choice")
     );
     assert!(
-        guidance(SettingsRowId::BackgroundBlur, cx)
+        guidance(SettingsRowId::Blur, cx)
             .unwrap()
             .contains("Floating surfaces still use your blur choice")
     );
 
     // The fallback must not disable editing the choices that will apply when support returns.
     click("settings-transparency-increase", cx);
-    click("settings-background-blur", cx);
+    click("settings-blur", cx);
     settle(cx);
-    let retained = harness.storage.document().unwrap().preferences.background;
+    let retained = harness.storage.document().unwrap().preferences.window;
     assert_eq!(retained.transparency, 0.4);
     assert!(!retained.blur);
 
@@ -1353,9 +1321,9 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
         .platform
         .set_native_window_transparency_supported(true);
     cx.run_until_parked();
-    assert_eq!(document_of(&window, cx).preferences.background, retained);
+    assert_eq!(document_of(&window, cx).preferences.window, retained);
     assert_eq!(
-        guidance(SettingsRowId::BackgroundBlur, cx),
+        guidance(SettingsRowId::Blur, cx),
         Some("Soften the desktop behind the window and content behind floating surfaces.")
     );
     assert!(
@@ -1377,9 +1345,9 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
             .unwrap()
             .contains("Floating surfaces still use your transparency choice")
     );
-    assert_eq!(document_of(&window, cx).preferences.background, retained);
+    assert_eq!(document_of(&window, cx).preferences.window, retained);
     assert_eq!(
-        harness.storage.document().unwrap().preferences.background,
+        harness.storage.document().unwrap().preferences.window,
         retained
     );
 }
@@ -1389,7 +1357,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
     cx: &mut TestAppContext,
 ) {
     let (window, harness, cx) = open_settings(cx);
-    let retained = document_of(&window, cx).preferences.background;
+    let retained = document_of(&window, cx).preferences.window;
     harness
         .platform
         .set_native_window_transparency_supported(true);
@@ -1401,7 +1369,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
                 .row_description(SettingsRowId::Transparency, cx)
                 .unwrap(),
             settings
-                .row_description(SettingsRowId::BackgroundBlur, cx)
+                .row_description(SettingsRowId::Blur, cx)
                 .unwrap(),
         )
     });
@@ -1411,7 +1379,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
     harness.platform.set_reduce_transparency(false);
     harness.platform.set_increase_contrast(true);
     cx.run_until_parked();
-    for row in [SettingsRowId::Transparency, SettingsRowId::BackgroundBlur] {
+    for row in [SettingsRowId::Transparency, SettingsRowId::Blur] {
         let guidance = window
             .read_with(cx, |settings, cx| settings.row_description(row, cx))
             .unwrap();
@@ -1425,7 +1393,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
     harness.platform.set_increase_contrast(false);
     harness.platform.set_show_borders(true);
     cx.run_until_parked();
-    for row in [SettingsRowId::Transparency, SettingsRowId::BackgroundBlur] {
+    for row in [SettingsRowId::Transparency, SettingsRowId::Blur] {
         let guidance = window
             .read_with(cx, |settings, cx| settings.row_description(row, cx))
             .unwrap();
@@ -1435,7 +1403,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
             "{row:?}: {guidance}"
         );
     }
-    assert_eq!(document_of(&window, cx).preferences.background, retained);
+    assert_eq!(document_of(&window, cx).preferences.window, retained);
 }
 
 #[gpui::test]
@@ -1443,7 +1411,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
     cx: &mut TestAppContext,
 ) {
     let mut document = SettingsDocument::default();
-    document.preferences.background.transparency = 0.0;
+    document.preferences.window.transparency = 0.0;
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     for supported in [false, true] {
         harness
@@ -1456,7 +1424,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
                     .row_description(SettingsRowId::Transparency, cx)
                     .unwrap(),
                 settings
-                    .row_description(SettingsRowId::BackgroundBlur, cx)
+                    .row_description(SettingsRowId::Blur, cx)
                     .unwrap(),
             )
         });
@@ -1465,8 +1433,8 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
         assert!(!transparency.contains("accessibility"));
         assert!(!blur.contains("accessibility"));
         assert_eq!(
-            document_of(&window, cx).preferences.background,
-            document.preferences.background
+            document_of(&window, cx).preferences.window,
+            document.preferences.window
         );
     }
 }
@@ -1475,28 +1443,28 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
 fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     assert_eq!(
-        document_of(&window, cx).preferences.background.transparency,
+        document_of(&window, cx).preferences.window.transparency,
         0.35
     );
     for _ in 0..8 {
         click("settings-transparency-decrease", cx);
     }
     assert_eq!(
-        document_of(&window, cx).preferences.background.transparency,
+        document_of(&window, cx).preferences.window.transparency,
         0.0
     );
     for _ in 0..21 {
         click("settings-transparency-increase", cx);
     }
     assert_eq!(
-        document_of(&window, cx).preferences.background.transparency,
+        document_of(&window, cx).preferences.window.transparency,
         1.0
     );
-    click("settings-background-blur", cx);
+    click("settings-blur", cx);
     settle(cx);
     let saved = harness.storage.document().unwrap();
-    assert_eq!(saved.preferences.background.transparency, 1.0);
-    assert!(!saved.preferences.background.blur);
+    assert_eq!(saved.preferences.window.transparency, 1.0);
+    assert!(!saved.preferences.window.blur);
     window.update(cx, |settings, cx| {
         settings.edit(
             |draft| {
@@ -1509,8 +1477,8 @@ fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) 
     });
     settle(cx);
     let saved = harness.storage.document().unwrap();
-    assert_eq!(saved.preferences.background.transparency, 0.35);
-    assert!(!saved.preferences.background.blur);
+    assert_eq!(saved.preferences.window.transparency, 0.35);
+    assert!(!saved.preferences.window.blur);
 }
 
 /// Nothing is wrong by default, and a warning that says so is noise rather than information.
@@ -1521,208 +1489,13 @@ fn the_scheme_library_warns_only_when_something_could_not_be_resolved(cx: &mut T
 
     assert_eq!(cx.debug_bounds("settings-diagnostics-notice"), None);
     assert!(
-        cx.debug_bounds("settings-installed-schemes-chrome")
+        cx.debug_bounds("settings-installed-schemes-terminal")
             .is_some(),
         "the library lists what is installed"
     );
 }
 
 // Layout ---------------------------------------------------------------------------------------
-
-#[gpui::test]
-fn settings_surfaces_keep_complete_paints_with_opposite_authored_materials(
-    cx: &mut TestAppContext,
-) {
-    use crate::appearance::{ChromeColors, Color};
-    use gpui::prelude::*;
-    use gpui::{DivInspectorState, ScrollDelta, ScrollWheelEvent, TouchPhase, div, point};
-    use std::cell::RefCell;
-
-    let (settings, harness, cx) = open_settings(cx);
-    harness.storage.fail_writes(Some(StorageError::Unavailable));
-    click("settings-chrome-density-comfortable", cx);
-    settle(cx);
-    assert!(matches!(status(&settings, cx), SaveStatus::Failed(_)));
-    let authored = ChromeColors {
-        background: Color::rgb(0x777777),
-        text: Color::rgb(0x777777),
-        text_muted: Color::rgb(0x777777),
-        panel_background: Color::rgb(0xf0f0f0),
-        elevated_surface_background: Color::rgb(0x202020),
-        row_background: Color::rgb(0x111122),
-        row_foreground: Color::rgb(0x777777),
-        row_selected_background: Color::rgb(0xffffdd),
-        row_selected_foreground: Color::rgb(0x777777),
-        row_selected_secondary: Color::rgb(0x777777),
-        info_background: Color::rgb(0xfefefe),
-        error: Color::rgb(0x101010),
-        error_background: Color::rgb(0xffffff),
-        warning: Color::rgb(0x101010),
-        warning_background: Color::rgb(0xffffff),
-        ..ChromeColors::default()
-    };
-    let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
-    let observed_styles = observed.clone();
-    let expected = cx.update(|window, cx| {
-        let installed = appearance_runtime::current(cx);
-        let mut resolved = installed.chrome.as_ref().clone();
-        resolved.colors = authored;
-        resolved.composition.capabilities.increase_contrast = true;
-        let (active, inactive) =
-            crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved);
-        let installed_active = Arc::new(active.clone());
-        let installed_inactive = Arc::new(inactive.clone());
-        let (settings_active, settings_inactive) =
-            crate::ui::appearance::settings::prepare_variants(&resolved, active, inactive);
-        let settings_active = Arc::new(settings_active);
-        let settings_inactive = Arc::new(settings_inactive);
-        let appearance = settings_active.chrome.as_ref();
-        let root = appearance
-            .host_colors(spaceterm_ui::ControlHost::Window)
-            .clone();
-        let panel = appearance
-            .host_colors(spaceterm_ui::ControlHost::Panel)
-            .clone();
-        let card = appearance
-            .host_colors(spaceterm_ui::ControlHost::Card)
-            .clone();
-        for (foreground, host) in [
-            (root.text, root.background),
-            (card.text, card.elevated_surface_background),
-        ] {
-            assert!(
-                foreground.contrast_ratio(host) >= 7.0,
-                "Increase Contrast must resolve {foreground:?} on its final host {host:?}"
-            );
-        }
-        let navigation_row_fill = super::navigation_chip_paint(false, true, &panel)
-            .raised_on(appearance, panel.panel_background)
-            .fill
-            .expect("the authored idle navigation row has a fill");
-        assert!(
-            panel.row_foreground.contrast_ratio(navigation_row_fill) >= 7.0,
-            "Increase Contrast must resolve the navigation foreground on its rendered row fill"
-        );
-        let expected = [
-            settings_active
-                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Sidebar)
-                .paint,
-            settings_active
-                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Canvas)
-                .paint,
-            navigation_row_fill,
-            settings_active
-                .surface(crate::ui::appearance::settings::SettingsSurfaceRole::Card)
-                .paint,
-            super::controls::highlighted_row_background(appearance),
-            card.row_selected_foreground,
-            root.text_muted,
-        ];
-        cx.set_global(crate::ui::appearance::InstalledChrome {
-            active: installed_active,
-            inactive: installed_inactive,
-        });
-        cx.set_global(crate::ui::appearance::settings::InstalledSettingsChrome {
-            active: settings_active,
-            inactive: settings_inactive,
-        });
-        cx.register_inspector_element(move |_, _| {
-            let observed_styles = Rc::clone(&observed_styles);
-            move |_, state: &DivInspectorState, _, _| {
-                observed_styles.borrow_mut().push(state.clone());
-                gpui::Empty
-            }
-        });
-        cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
-            div()
-                .children(inspector.render_inspector_states(window, cx))
-                .into_any_element()
-        }));
-        window.refresh();
-        expected
-    });
-    cx.run_until_parked();
-    set_query(&settings, "line height", cx);
-    for (selector, expected_background, expected_foreground) in [
-        ("settings-sidebar", Some(expected[0]), None),
-        ("settings-canvas", Some(expected[1]), None),
-        (
-            "settings-navigation-chip-settings-section-interface",
-            Some(expected[2]),
-            None,
-        ),
-        (
-            "settings-section-terminal-group-font-card",
-            Some(expected[3]),
-            None,
-        ),
-        ("settings-row-terminal-line-height", Some(expected[4]), None),
-        (
-            "settings-row-terminal-line-height-label",
-            None,
-            Some(expected[5]),
-        ),
-        ("settings-save-status", None, Some(expected[6])),
-    ] {
-        cx.update(|window, cx| window.toggle_inspector(cx));
-        cx.run_until_parked();
-        let bounds = cx
-            .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector} should render"));
-        let position = bounds.center();
-        observed.borrow_mut().clear();
-        cx.simulate_mouse_move(position, None, Modifiers::none());
-        cx.run_until_parked();
-        let matches = || {
-            observed.borrow().iter().any(|state| {
-                state.bounds == bounds
-                    && expected_background.is_none_or(|color| {
-                        state.base_style.background
-                            == Some(super::controls::gpui_color(color).into())
-                    })
-                    && expected_foreground.is_none_or(|color| {
-                        state.base_style.text.color
-                            == Some(super::controls::gpui_color(color).into())
-                    })
-            })
-        };
-        for _ in 0..24 {
-            if matches() {
-                break;
-            }
-            cx.simulate_event(ScrollWheelEvent {
-                position,
-                delta: ScrollDelta::Pixels(point(px(0.0), px(36.0))),
-                modifiers: Modifiers::none(),
-                touch_phase: TouchPhase::Moved,
-            });
-            cx.run_until_parked();
-        }
-        assert!(
-            matches(),
-            "{selector} must render its complete authored paint pair"
-        );
-        if selector == "settings-section-terminal-group-font-card" {
-            assert!(
-                observed
-                    .borrow()
-                    .iter()
-                    .filter(|state| state.bounds == bounds)
-                    .any(|state| {
-                        let widths = &state.base_style.border_widths;
-                        [widths.top, widths.right, widths.bottom, widths.left]
-                            .into_iter()
-                            .all(|width| {
-                                width.is_some_and(|width| width.to_pixels(px(16.0)) == px(1.0))
-                            })
-                    }),
-                "a Settings card must paint its fixed one-point edge"
-            );
-        }
-        cx.update(|window, cx| window.toggle_inspector(cx));
-        cx.run_until_parked();
-    }
-}
 
 /// Every row belongs to a titled box, and every box frames the rows the catalog put in it.
 ///
@@ -1829,17 +1602,17 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
 fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     let card = cx
-        .debug_bounds("settings-section-appearance-group-background-card")
-        .expect("the Background group must render its card");
+        .debug_bounds("settings-section-appearance-group-window-card")
+        .expect("the Window group must render its card");
     let top = cx
         .debug_bounds("settings-row-transparency")
-        .expect("the first Background row must render");
+        .expect("the Transparency row must render");
     let bottom = cx
-        .debug_bounds("settings-row-background-blur")
-        .expect("the second Background row must render");
+        .debug_bounds("settings-row-blur")
+        .expect("the Blur row must render");
     let separator = cx
-        .debug_bounds("settings-section-appearance-group-background-card-separator-1")
-        .expect("adjacent Background rows must render a separator");
+        .debug_bounds("settings-section-appearance-group-window-card-separator-2")
+        .expect("adjacent Window rows must render a separator");
 
     assert_eq!(bottom.top(), top.bottom());
     assert_eq!(separator.size.height, px(1.0));
@@ -1908,12 +1681,10 @@ fn the_footer_strip_meets_the_content_gutter_on_every_settings_page(cx: &mut Tes
 }
 
 #[gpui::test]
-fn the_footer_strip_tracks_the_content_gutter_with_larger_type_and_comfortable_density(
-    cx: &mut TestAppContext,
-) {
+fn the_footer_strip_tracks_the_content_gutter_with_comfortable_density(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.typography.base_size = 20.0;
-    document.preferences.chrome.density = ChromeDensity::Comfortable;
+
+    document.preferences.window.density = ChromeDensity::Comfortable;
     assert_reset_all_leads_the_content_footer(document, cx);
 }
 
@@ -2041,10 +1812,10 @@ fn client_chrome_extends_both_columns_to_the_top_edge(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn client_chrome_geometry_tracks_larger_type_and_comfortable_density(cx: &mut TestAppContext) {
+fn client_chrome_geometry_tracks_comfortable_density(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.typography.base_size = 20.0;
-    document.preferences.chrome.density = ChromeDensity::Comfortable;
+
+    document.preferences.window.density = ChromeDensity::Comfortable;
     assert_client_chrome_geometry(document, cx);
 }
 
@@ -2238,7 +2009,7 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
         .debug_bounds("settings-row-appearance-mode")
         .expect("the appearance row should render");
     let density = cx
-        .debug_bounds("settings-row-chrome-density")
+        .debug_bounds("settings-row-density")
         .expect("the density row should render");
 
     // The caption is the only thing in this row under the label, so the label column's own extent
@@ -2311,13 +2082,13 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
 #[gpui::test]
 fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Terminal, cx);
 
     let selector = cx
-        .debug_bounds("settings-row-chrome-regular-weight-control")
+        .debug_bounds("settings-row-terminal-regular-weight-control")
         .expect("the weight selector should render");
     let stepper = cx
-        .debug_bounds("settings-chrome-base-size")
+        .debug_bounds("settings-terminal-base-size")
         .expect("the size stepper should render");
 
     assert_eq!(
@@ -2337,11 +2108,12 @@ fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppC
 /// with a stranded chevron. Hugging is what makes a column of them read as values.
 #[gpui::test]
 fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
+    let (window, _harness, cx) = open_settings(cx);
 
+    set_query(&window, "scheme", cx);
     let trigger = cx
-        .debug_bounds("settings-row-chrome-scheme-control")
-        .expect("the interface scheme selector should render");
+        .debug_bounds("settings-row-terminal-scheme-control")
+        .expect("the terminal scheme selector should render");
     let value = cx
         .debug_bounds("combo-box-trigger-label")
         .expect("the selector should show its value");
@@ -2362,9 +2134,11 @@ fn every_scheme_strip_shares_one_width(cx: &mut TestAppContext) {
     select_section(SettingsSectionId::ColorSchemes, cx);
 
     let ids = window.read_with(cx, |window, _| {
-        [SchemeKind::Chrome, SchemeKind::Terminal]
+        window
+            .editor
+            .scheme_summaries()
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
             .map(|summary| summary.id.as_str().to_owned())
             .collect::<Vec<_>>()
     });
@@ -2388,58 +2162,17 @@ fn every_scheme_strip_shares_one_width(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn one_appearance_mode_is_presented_for_both_surfaces(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
-    assert!(cx.debug_bounds("settings-appearance-mode").is_some());
-    assert!(cx.debug_bounds("settings-chrome-appearance-mode").is_none());
-    assert!(
-        cx.debug_bounds("settings-terminal-appearance-mode")
-            .is_none()
-    );
-}
-
-/// The library groups schemes by the surface they dress, so the two kinds never run together.
-#[gpui::test]
-fn the_scheme_library_separates_the_interface_from_the_terminal(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::ColorSchemes, cx);
-
-    let interface = cx
-        .debug_bounds("settings-installed-schemes-chrome")
-        .expect("the interface schemes should render");
-    let terminal = cx
-        .debug_bounds("settings-installed-schemes-terminal")
-        .expect("the terminal schemes should render");
-
-    assert!(
-        interface.bottom() <= terminal.top(),
-        "the two kinds should not interleave, got {interface:?} and {terminal:?}"
-    );
-    // Each kind is titled by its own group rather than by a heading inside a shared list, so the
-    // library reads the same way as every other page.
-    for group in [
-        "settings-section-color-schemes-group-interface-title",
-        "settings-section-color-schemes-group-terminal-title",
-    ] {
-        assert!(
-            cx.debug_bounds(leaked(group)).is_some(),
-            "{group} is absent"
-        );
-    }
-}
-
-#[gpui::test]
 fn a_row_label_is_centered_against_the_control_it_names(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Terminal, cx);
 
-    // The interface font row pairs a short label with the tallest control in the form.
+    // The terminal weight row pairs a short label with the tallest control in the form.
     let label = cx
-        .debug_bounds("settings-row-chrome-font-family-label")
-        .expect("the interface font label should render");
+        .debug_bounds("settings-row-terminal-regular-weight-label")
+        .expect("the terminal weight label should render");
     let control = cx
-        .debug_bounds("settings-chrome-font-family")
-        .expect("the interface font control should render");
+        .debug_bounds("settings-row-terminal-regular-weight-control")
+        .expect("the terminal weight control should render");
 
     assert!(
         (label.center().y - control.center().y).abs() < px(1.0),
@@ -2452,10 +2185,10 @@ fn a_control_hugs_its_content_rather_than_filling_the_row(cx: &mut TestAppContex
     let (_window, _harness, cx) = open_settings(cx);
 
     let row = cx
-        .debug_bounds("settings-row-chrome-density")
+        .debug_bounds("settings-row-density")
         .expect("the density row should render");
     let control = cx
-        .debug_bounds("settings-chrome-density")
+        .debug_bounds("settings-density")
         .expect("the density control should render");
 
     assert!(
@@ -2487,9 +2220,11 @@ fn every_installed_scheme_row_keeps_one_line(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::ColorSchemes, cx);
     let ids = window.read_with(cx, |window, _| {
-        [SchemeKind::Chrome, SchemeKind::Terminal]
+        window
+            .editor
+            .scheme_summaries()
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
             .map(|summary| summary.id.as_str().to_owned())
             .collect::<Vec<_>>()
     });
@@ -2519,9 +2254,11 @@ fn every_installed_scheme_reserves_the_in_use_status_slot(cx: &mut TestAppContex
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::ColorSchemes, cx);
     let ids = window.read_with(cx, |window, _| {
-        [SchemeKind::Chrome, SchemeKind::Terminal]
+        window
+            .editor
+            .scheme_summaries()
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|kind| window.editor.scheme_summaries(kind).unwrap_or_default())
             .map(|summary| summary.id.as_str().to_owned())
             .collect::<Vec<_>>()
     });
@@ -2553,18 +2290,15 @@ fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext)
     for (section, selectors) in [
         (
             SettingsSectionId::Appearance,
-            [
-                "settings-row-chrome-scheme-control",
-                "settings-chrome-density",
-            ]
-            .as_slice(),
+            ["settings-density"].as_slice(),
         ),
         (
-            SettingsSectionId::Interface,
+            SettingsSectionId::Terminal,
             [
-                "settings-chrome-font-family",
-                "settings-chrome-base-size",
-                "settings-row-chrome-regular-weight-control",
+                "settings-row-terminal-scheme-control",
+                "settings-terminal-font-family",
+                "settings-terminal-base-size",
+                "settings-row-terminal-regular-weight-control",
             ]
             .as_slice(),
         ),
@@ -2589,18 +2323,18 @@ fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext)
 #[gpui::test]
 fn an_open_selector_matches_its_filter_and_row_heights(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Terminal, cx);
 
-    click("settings-row-chrome-regular-weight-control", cx);
+    click("settings-row-terminal-regular-weight-control", cx);
 
     let filter = cx
         .debug_bounds("combo-box-input-row")
         .expect("the filter row should render");
     let first = cx
-        .debug_bounds("settings-row-chrome-regular-weight-control-300")
+        .debug_bounds("settings-row-terminal-regular-weight-control-300")
         .expect("the first weight should render");
     let second = cx
-        .debug_bounds("settings-row-chrome-regular-weight-control-400")
+        .debug_bounds("settings-row-terminal-regular-weight-control-400")
         .expect("the second weight should render");
 
     assert_eq!(filter.size.height, first.size.height);
@@ -2610,9 +2344,9 @@ fn an_open_selector_matches_its_filter_and_row_heights(cx: &mut TestAppContext) 
 #[gpui::test]
 fn an_open_selector_shows_its_filter_glyph_and_marks_the_current_value(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Terminal, cx);
 
-    click("settings-row-chrome-regular-weight-control", cx);
+    click("settings-row-terminal-regular-weight-control", cx);
 
     assert!(
         cx.debug_bounds("combo-box-input-leading").is_some(),
@@ -2671,16 +2405,14 @@ fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
 
 // Helpers --------------------------------------------------------------------------------------
 
-const IMPORTABLE_PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"kind":"chrome","id":"custom.sample","name":"Sample","appearance":"light","colors":{"text":"#112233"}}]}"##;
+const IMPORTABLE_PACKAGE: &[u8] = br##"{"schema_version":1,"schemes":[{"id":"custom.sample","name":"Sample","appearance":"light","colors":{"foreground":"#112233"}}]}"##;
 
 fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> SettingsDocument {
     window.read_with(cx, |window, _| window.editor.document().clone())
 }
 
 fn installed_count(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> usize {
-    window.read_with(cx, |window, _| {
-        window.editor.document().custom_schemes.len()
-    })
+    window.read_with(cx, |window, _| window.editor.document().color_schemes.len())
 }
 
 /// `debug_bounds` takes a `'static` selector, and section and row selectors are already static
@@ -2709,7 +2441,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     cx: &mut TestAppContext,
 ) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
@@ -2750,7 +2482,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
 fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppContext) {
     for failure in [StorageError::Unavailable, StorageError::Conflict] {
         let (window, harness, cx) = open_settings(cx);
-        click("settings-chrome-density-comfortable", cx);
+        click("settings-density-comfortable", cx);
         harness.storage.fail_writes(Some(failure));
         let handle = cx.update(|native, _| native.window_handle());
 
@@ -2759,7 +2491,7 @@ fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppCo
 
         assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
         assert_eq!(
-            document_of(&window, cx).preferences.chrome.density,
+            document_of(&window, cx).preferences.window.density,
             ChromeDensity::Comfortable
         );
         assert!(cx.debug_bounds("settings-banner").is_some());
@@ -2773,7 +2505,7 @@ fn a_failed_close_retains_the_draft_and_its_recovery_controls(cx: &mut TestAppCo
 #[gpui::test]
 fn a_failed_application_quit_save_reports_failure(cx: &mut TestAppContext) {
     let (_, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     harness.storage.fail_writes(Some(StorageError::Unavailable));
     let outcome = Rc::new(std::cell::Cell::new(None));
     let recorded_outcome = Rc::clone(&outcome);
@@ -2797,7 +2529,7 @@ fn a_failed_application_quit_save_reports_failure(cx: &mut TestAppContext) {
 #[gpui::test]
 fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
@@ -2848,7 +2580,7 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
 #[gpui::test]
 fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContext) {
     let (_, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     assert_eq!(harness.storage.writes(), 0);
 
     cx.cx.update(|cx| cx.shutdown());
@@ -2859,7 +2591,7 @@ fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContex
             .document()
             .unwrap()
             .preferences
-            .chrome
+            .window
             .density,
         ChromeDensity::Comfortable
     );
@@ -2869,7 +2601,7 @@ fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContex
 #[gpui::test]
 fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    click("settings-chrome-density-comfortable", cx);
+    click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
     });
@@ -2904,15 +2636,15 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
 #[gpui::test]
 fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.chrome.schemes.dark =
-        crate::appearance::SchemeId::new("custom.previous.chrome").unwrap();
+    document.preferences.terminal.schemes.dark =
+        crate::appearance::SchemeId::new("custom.previous.terminal").unwrap();
     document.preferences.terminal.schemes.dark =
         crate::appearance::SchemeId::new("custom.previous.terminal").unwrap();
     let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.editor.reset(
-                crate::appearance::ResetTarget::ChromeScheme(Appearance::Dark),
+                crate::appearance::ResetTarget::TerminalScheme(Appearance::Dark),
                 cx,
             );
             settings.editor.reset(
@@ -2926,7 +2658,7 @@ fn resetting_scheme_choices_survives_an_appearance_mode_round_trip(cx: &mut Test
     });
     let preferences = document_of(&window, cx).preferences;
     let defaults = SettingsDocument::default().preferences;
-    assert_eq!(preferences.chrome.schemes, defaults.chrome.schemes);
+    assert_eq!(preferences.terminal.schemes, defaults.terminal.schemes);
     assert_eq!(preferences.terminal.schemes, defaults.terminal.schemes);
 }
 
@@ -2935,18 +2667,15 @@ fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut Te
     let (window, harness, cx) = open_settings(cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            for kind in [SchemeKind::Chrome, SchemeKind::Terminal] {
-                for slot in [Appearance::Light, Appearance::Dark] {
-                    settings.set_scheme(
-                        kind,
-                        slot,
-                        crate::appearance::SchemeId::new(
-                            format!("user.saved.{kind:?}.{slot:?}").to_ascii_lowercase(),
-                        )
-                        .unwrap(),
-                        cx,
-                    );
-                }
+            for slot in [Appearance::Light, Appearance::Dark] {
+                settings.set_scheme(
+                    slot,
+                    crate::appearance::SchemeId::new(
+                        format!("user.saved.{slot:?}").to_ascii_lowercase(),
+                    )
+                    .unwrap(),
+                    cx,
+                );
             }
         })
     });
@@ -2990,7 +2719,7 @@ fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut Test
         px(super::WINDOW_HEIGHT),
     ));
     cx.run_until_parked();
-    select_section(SettingsSectionId::Interface, cx);
+    select_section(SettingsSectionId::Terminal, cx);
     select_section(SettingsSectionId::Appearance, cx);
 
     let row = cx
@@ -3003,4 +2732,44 @@ fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut Test
         label.top() >= row.top() && label.bottom() <= row.bottom(),
         "label {label:?} must stay inside its row {row:?}"
     );
+}
+
+#[gpui::test]
+fn appearance_thumbnails_preview_each_terminal_slot(cx: &mut TestAppContext) {
+    use crate::appearance::{Color, TerminalColorOverrides};
+    let mut document = SettingsDocument::default();
+    let light = document.preferences.terminal.schemes.light.clone();
+    let dark = document.preferences.terminal.schemes.dark.clone();
+    for (id, background) in [(light, Color::rgb(0xeeeecc)), (dark, Color::rgb(0x102030))] {
+        document.preferences.terminal.overrides.insert(
+            id,
+            TerminalColorOverrides {
+                background: Some(background),
+                ..Default::default()
+            },
+        );
+    }
+    let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    let previews = window.read_with(cx, |settings, _| {
+        settings.mode_preview_palettes(AppearanceMode::Auto)
+    });
+    assert_eq!(
+        previews[0].root,
+        crate::appearance::builtin_chrome_base(Appearance::Light).background
+    );
+    assert_eq!(
+        previews[1].root,
+        crate::appearance::builtin_chrome_base(Appearance::Dark).background
+    );
+    assert_eq!(previews[0].terminal_background, Color::rgb(0xeeeecc));
+    assert_eq!(previews[1].terminal_background, Color::rgb(0x102030));
+    for (mode, expected) in [
+        (AppearanceMode::Light, &previews[0]),
+        (AppearanceMode::Dark, &previews[1]),
+    ] {
+        assert_eq!(
+            window.read_with(cx, |settings, _| settings.mode_preview_palettes(mode)),
+            vec![expected.clone()]
+        );
+    }
 }

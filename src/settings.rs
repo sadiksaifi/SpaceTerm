@@ -19,11 +19,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 
-#[cfg(test)]
-use crate::appearance::SchemeKind;
 use crate::appearance::{
-    CatalogError, CustomScheme, ImportCandidate, ImportError, ResetTarget, SchemeCatalog, SchemeId,
-    SettingsDocument, SettingsDocumentError, ZedImportKind, export_settings, parse_settings,
+    CatalogError, ColorScheme, ImportCandidate, ImportError, ResetTarget, SchemeCatalog, SchemeId,
+    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
 use storage::{Durability, SettingsStorage, StorageError};
@@ -131,32 +129,25 @@ pub(crate) enum SchemeImport<'a> {
     Zed {
         bytes: &'a [u8],
         candidate_index: usize,
-        kinds: &'a [ZedImportKind],
     },
     ZedFamily {
         bytes: &'a [u8],
-        kinds: &'a [ZedImportKind],
     },
 }
 
 impl SchemeImport<'_> {
-    fn parse(self) -> Result<Vec<CustomScheme>, ImportError> {
+    fn parse(self) -> Result<Vec<ColorScheme>, ImportError> {
         match self {
             Self::SpaceTerm(bytes) => Ok(crate::appearance::parse_color_document(bytes)?.schemes),
             Self::Zed {
                 bytes,
                 candidate_index,
-                kinds,
-            } => crate::appearance::import_zed(bytes, candidate_index, kinds),
-            Self::ZedFamily { bytes, kinds } => {
+            } => crate::appearance::import_zed(bytes, candidate_index).map(|scheme| vec![scheme]),
+            Self::ZedFamily { bytes } => {
                 let candidates = crate::appearance::list_zed_candidates(bytes)?;
-                let mut schemes = Vec::with_capacity(candidates.len().saturating_mul(kinds.len()));
+                let mut schemes = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
-                    schemes.extend(crate::appearance::import_zed(
-                        bytes,
-                        candidate.index,
-                        kinds,
-                    )?);
+                    schemes.push(crate::appearance::import_zed(bytes, candidate.index)?);
                 }
                 Ok(schemes)
             }
@@ -413,7 +404,7 @@ impl UserSettings {
         ))
     }
 
-    pub(crate) fn remove_custom_scheme_preview(
+    pub(crate) fn remove_scheme_preview(
         &self,
         token: &PreviewToken,
         catalog_revision: u64,
@@ -425,7 +416,7 @@ impl UserSettings {
         let Transaction::Preview { candidate, .. } = &state.transaction else {
             return Err(SettingsError::Stale);
         };
-        let candidate = remove_custom_scheme(candidate, id)?;
+        let candidate = remove_scheme(candidate, id)?;
         state.transaction = Transaction::Preview {
             id: token.id,
             candidate: Arc::new(candidate),
@@ -438,9 +429,9 @@ impl UserSettings {
 
     #[allow(
         dead_code,
-        reason = "direct custom scheme deletion is available without a preview UI"
+        reason = "direct imported scheme deletion is available without a preview UI"
     )]
-    pub(crate) fn remove_custom_scheme_committed(
+    pub(crate) fn remove_scheme_committed(
         &self,
         revision: u64,
         catalog_revision: u64,
@@ -449,7 +440,7 @@ impl UserSettings {
         let mut state = self.0.lock();
         state.require_idle(revision)?;
         state.require_catalog_revision(catalog_revision)?;
-        let candidate = remove_custom_scheme(&state.committed, id)?;
+        let candidate = remove_scheme(&state.committed, id)?;
         self.prepare_direct_commit(&mut state, candidate)
     }
 
@@ -457,9 +448,9 @@ impl UserSettings {
         dead_code,
         reason = "complete scheme listing remains available to interchange surfaces"
     )]
-    pub(crate) fn list_schemes(&self) -> Result<Vec<CustomScheme>, SettingsError> {
+    pub(crate) fn list_schemes(&self) -> Result<Vec<ColorScheme>, SettingsError> {
         let snapshot = self.snapshot();
-        Ok(SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?.schemes())
+        Ok(SchemeCatalog::from_color_schemes(&snapshot.candidate.color_schemes)?.schemes())
     }
 
     pub(crate) fn list_import_candidates(
@@ -474,23 +465,9 @@ impl UserSettings {
         resolved: &crate::appearance::ResolvedAppearance,
     ) -> Result<String, SettingsError> {
         let snapshot = self.snapshot();
-        let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
+        let catalog = SchemeCatalog::from_color_schemes(&snapshot.candidate.color_schemes)?;
         Ok(crate::appearance::export_resolved_schemes(
             &catalog, resolved,
-        )?)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn export_schemes(
-        &self,
-        schemes: &[(SchemeKind, SchemeId)],
-    ) -> Result<String, SettingsError> {
-        let snapshot = self.snapshot();
-        let catalog = SchemeCatalog::from_custom_schemes(&snapshot.candidate.custom_schemes)?;
-        Ok(crate::appearance::export_effective_schemes(
-            &catalog,
-            &snapshot.candidate.preferences,
-            schemes,
         )?)
     }
 
@@ -727,16 +704,16 @@ fn restore_preview_after_failure(state: &mut State) {
 
 fn install_schemes(
     document: &SettingsDocument,
-    schemes: Vec<CustomScheme>,
+    schemes: Vec<ColorScheme>,
     replace: &BTreeSet<SchemeId>,
 ) -> Result<(SettingsDocument, Vec<SchemeId>), SettingsError> {
-    let mut catalog = SchemeCatalog::from_custom_schemes(&document.custom_schemes)?;
+    let mut catalog = SchemeCatalog::from_color_schemes(&document.color_schemes)?;
     let installed = catalog.install_batch(&schemes, catalog.revision(), replace)?;
     let mut candidate = document.clone();
     candidate
-        .custom_schemes
-        .retain(|scheme| !replace.contains(scheme.id()));
-    candidate.custom_schemes.extend(schemes);
+        .color_schemes
+        .retain(|scheme| !replace.contains(&scheme.id));
+    candidate.color_schemes.extend(schemes);
     Ok((validate_candidate(candidate, document.revision)?, installed))
 }
 
@@ -744,7 +721,7 @@ fn install_schemes(
     dead_code,
     reason = "shared validation for the optional preview and direct deletion operations"
 )]
-fn remove_custom_scheme(
+fn remove_scheme(
     document: &SettingsDocument,
     id: &SchemeId,
 ) -> Result<SettingsDocument, SettingsError> {
@@ -752,9 +729,9 @@ fn remove_custom_scheme(
         return Err(CatalogError::ReservedId.into());
     }
     let mut candidate = document.clone();
-    let before = candidate.custom_schemes.len();
-    candidate.custom_schemes.retain(|scheme| scheme.id() != id);
-    if candidate.custom_schemes.len() == before {
+    let before = candidate.color_schemes.len();
+    candidate.color_schemes.retain(|scheme| &scheme.id != id);
+    if candidate.color_schemes.len() == before {
         return Err(CatalogError::UnknownReplacement.into());
     }
     validate_candidate(candidate, document.revision)
