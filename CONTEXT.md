@@ -105,11 +105,8 @@ The Focused Pane presented alone while its Pane Layout remains intact.
 **Workspace Switcher**:
 The transient chooser for selecting an existing Workspace or naming a new Local Workspace or Remote Workspace.
 
-**Directory Picker**:
-The directory navigator used to select a Pinned Directory explicitly.
-
 **System Directory Selection**:
-The system chooser available as an explicit fallback from the Directory Picker.
+The system chooser used to select a Local Workspace's Pinned Directory explicitly.
 
 ## Workspace sources and remote identity
 

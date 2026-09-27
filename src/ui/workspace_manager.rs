@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use super::directory_picker::{DirectoryPicker, DirectoryPickerEvent};
 use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
@@ -59,7 +58,6 @@ use crate::domain::{
     WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
-use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
@@ -177,7 +175,6 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-    pub(crate) permission_recovery: Option<Rc<dyn PermissionRecoveryOpener>>,
 }
 
 struct PendingRemoteActivation {
@@ -211,14 +208,15 @@ impl Drop for RemoteWorkspaceRuntime {
 
 /// Owns directory selection and its Workspace target.
 struct WorkspaceTransientUi {
-    picker: Entity<DirectoryPicker>,
     pin_target: Option<WorkspaceId>,
+    local_selection_pending: bool,
 }
 
-impl WorkspaceTransientUi {
-    fn show_picker(&mut self, window: &mut Window, cx: &mut App) {
-        self.picker.update(cx, |picker, cx| picker.open(window, cx));
-    }
+/// The outcome of one System Directory Selection for a Local Workspace pin.
+enum LocalPinSelection {
+    Chosen(Result<ValidatedLocalDirectory, LocalFilesystemError>),
+    Cancelled,
+    Failed,
 }
 
 /// A Workspace the switcher creates from its query.
@@ -241,7 +239,7 @@ pub(crate) struct WorkspaceManager {
     pane_construction: PaneConstruction,
     local_home_directory_path: PathBuf,
     local_home_identity: LocalDirectoryIdentity,
-    directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
+    directory_selection: Rc<dyn SystemDirectorySelection>,
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
     remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
@@ -278,7 +276,6 @@ impl WorkspaceManager {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection: Rc::new(GpuiDirectorySelection),
-                permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
             },
@@ -288,10 +285,10 @@ impl WorkspaceManager {
     }
 
     #[cfg(test)]
-    fn new_with_directory_selection_fallback(
+    fn new_with_directory_selection(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
-        directory_selection_fallback: Rc<dyn SystemDirectorySelection>,
+        directory_selection: Rc<dyn SystemDirectorySelection>,
         remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -305,8 +302,7 @@ impl WorkspaceManager {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: directory_selection_fallback,
-                permission_recovery: None,
+                directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
             },
@@ -334,7 +330,6 @@ impl WorkspaceManager {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection: Rc::new(GpuiDirectorySelection),
-                permission_recovery: None,
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
             },
@@ -370,8 +365,7 @@ impl WorkspaceManager {
             accessibility: accessibility_adapter_factory,
             native_services: native_service_adapters,
             lifecycle: lifecycle_dependencies,
-            directory_selection: directory_selection_fallback,
-            permission_recovery,
+            directory_selection,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
         } = adapters;
@@ -422,25 +416,6 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        let directory_picker_home =
-            Self::directory_picker_starting_directory(&local_home_directory_path);
-        let directory_picker = cx.new(|cx| {
-            DirectoryPicker::new(
-                directory_picker_home,
-                Arc::new(local_filesystem.clone()),
-                permission_recovery,
-                window,
-                cx,
-            )
-        });
-        cx.subscribe_in(
-            &directory_picker,
-            window,
-            |manager, _, event: &DirectoryPickerEvent, window, cx| {
-                manager.handle_directory_picker_event(event, window, cx);
-            },
-        )
-        .detach();
         let mut remote_unavailable_reason = remote_workspace_backend_factory.unavailable_reason();
         let remote_workspace_backend = if remote_unavailable_reason.is_some() {
             None
@@ -466,8 +441,8 @@ impl WorkspaceManager {
             window_appearance,
             window_traffic_lights,
             transient: WorkspaceTransientUi {
-                picker: directory_picker,
                 pin_target: None,
+                local_selection_pending: false,
             },
             workspace_switcher: ComboBoxHandle::default(),
             remote_workspace_name: None,
@@ -478,7 +453,7 @@ impl WorkspaceManager {
             pane_construction,
             local_home_directory_path,
             local_home_identity,
-            directory_selection_fallback,
+            directory_selection,
             remote_workspace_backend,
             remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
@@ -731,11 +706,10 @@ impl WorkspaceManager {
         cx: &App,
     ) -> Option<TerminalFocusBlocker> {
         TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
-            picker: self.transient.picker.read(cx).blocks_terminal_input()
-                || self
-                    .remote_pin_picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
+            picker: self
+                .remote_pin_picker
+                .as_ref()
+                .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
             remote_flow: self
                 .remote_workspace_flow
                 .as_ref()
@@ -780,16 +754,6 @@ impl WorkspaceManager {
     pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window_modal_is_open(window, cx) {
             return;
-        }
-        if self.transient.picker.read(cx).is_open() {
-            let dismissed = self
-                .transient
-                .picker
-                .update(cx, |picker, cx| picker.dismiss(window, cx));
-            if !dismissed {
-                return;
-            }
-            self.transient.pin_target = None;
         }
         if let Some(picker) = self.remote_pin_picker.take() {
             picker.update(cx, |picker, cx| picker.cancel(window, cx));
@@ -1025,10 +989,6 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn directory_picker_starting_directory(configured_home: &std::path::Path) -> PathBuf {
-        configured_home.to_path_buf()
-    }
-
     fn apply_validated_local_pin(
         &mut self,
         workspace_id: WorkspaceId,
@@ -1162,9 +1122,6 @@ impl WorkspaceManager {
         )
         .detach();
         self.remote_pin_picker = Some(picker.clone());
-        self.transient
-            .picker
-            .update(cx, |picker, cx| picker.dismiss(window, cx));
         picker.update(cx, |picker, cx| {
             picker.open(window, cx);
         });
@@ -1172,7 +1129,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn open_pin_directory_picker(
+    fn choose_pin_directory(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
@@ -1183,9 +1140,12 @@ impl WorkspaceManager {
             window.defer(cx, move |window, cx| {
                 spaceterm_ui::dismiss_active_menu(window, cx);
                 manager.update(cx, |manager, cx| {
-                    manager.open_pin_directory_picker(workspace_id, window, cx)
+                    manager.choose_pin_directory(workspace_id, window, cx)
                 });
             });
+            return;
+        }
+        if self.transient.local_selection_pending {
             return;
         }
 
@@ -1201,38 +1161,65 @@ impl WorkspaceManager {
             self.open_remote_pin_picker(workspace_id, window, cx);
             return;
         }
-
-        if self.transient.picker.read(cx).is_open() {
-            self.transient
-                .picker
-                .update(cx, |picker, cx| picker.refocus_path(window, cx));
-            return;
-        }
-        if spaceterm_ui::window_menu_is_open(window, cx) {
-            let manager = cx.entity();
-            window.defer(cx, move |window, cx| {
-                spaceterm_ui::dismiss_active_menu(window, cx);
-                manager.update(cx, |manager, cx| {
-                    manager.present_directory_picker(window, cx)
-                });
-            });
-            return;
-        }
-        self.present_directory_picker(window, cx);
+        self.choose_local_pin_directory(workspace_id, window, cx);
     }
 
-    fn present_directory_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.transient.picker.read(cx).is_open() {
-            self.transient
-                .picker
-                .update(cx, |picker, cx| picker.refocus_path(window, cx));
-            return;
-        }
+    /// Selects a Local Workspace's Pinned Directory through System Directory Selection.
+    fn choose_local_pin_directory(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.dismiss_editing(window, cx);
         });
-        self.transient.show_picker(window, cx);
-        self.sync_terminal_focus_blocker(window, cx);
+        self.transient.local_selection_pending = true;
+        let operation = self.pin_operation;
+        let selection = self.directory_selection.choose(cx);
+        let filesystem = self.local_filesystem.clone();
+        cx.spawn_in(window, async move |manager, cx| {
+            let selection = match selection.await {
+                Ok(Some(path)) => LocalPinSelection::Chosen(
+                    cx.background_executor()
+                        .spawn(async move { filesystem.validate_directory(&path) })
+                        .await,
+                ),
+                Ok(None) => LocalPinSelection::Cancelled,
+                Err(_) => LocalPinSelection::Failed,
+            };
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                manager.finish_local_pin_selection(workspace_id, operation, selection, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_local_pin_selection(
+        &mut self,
+        workspace_id: WorkspaceId,
+        operation: u64,
+        selection: LocalPinSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transient.local_selection_pending = false;
+        if self.pin_operation != operation || self.transient.pin_target != Some(workspace_id) {
+            return;
+        }
+        self.transient.pin_target = None;
+        let pinned = match selection {
+            LocalPinSelection::Cancelled => return,
+            LocalPinSelection::Chosen(Ok(directory)) => {
+                self.apply_validated_local_pin(workspace_id, directory, window, cx)
+            }
+            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => false,
+        };
+        if pinned {
+            self.focus(window, cx);
+        } else {
+            Self::show_pin_error(window, cx);
+        }
         cx.notify();
     }
 
@@ -2119,69 +2106,6 @@ impl WorkspaceManager {
         }
     }
 
-    fn handle_directory_picker_event(
-        &mut self,
-        event: &DirectoryPickerEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            DirectoryPickerEvent::StateChanged => {
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-            }
-            DirectoryPickerEvent::Escaped => {
-                self.transient.pin_target = None;
-            }
-            DirectoryPickerEvent::DirectorySelectionRequested => {
-                let identity = self
-                    .transient
-                    .picker
-                    .read(cx)
-                    .directory_selection_request_identity();
-                let selection = self.directory_selection_fallback.choose(cx);
-                cx.spawn_in(window, async move |manager, cx| {
-                    let result = selection.await;
-                    let _ = manager.update_in(cx, |manager, window, cx| {
-                        manager.transient.picker.update(cx, |picker, cx| {
-                            picker
-                                .complete_directory_selection_request(identity, result, window, cx);
-                        });
-                        manager.sync_terminal_focus_blocker(window, cx);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            DirectoryPickerEvent::Confirmed(directory) => {
-                let activated = self.transient.pin_target.is_some_and(|workspace_id| {
-                    self.apply_validated_local_pin(workspace_id, directory.clone(), window, cx)
-                });
-                if activated {
-                    self.transient.pin_target = None;
-                }
-                let picker = self.transient.picker.clone();
-                let owner = cx.entity();
-                window.defer(cx, move |window, cx| {
-                    picker.update(cx, |picker, cx| {
-                        if activated {
-                            picker.complete_activation(window, cx);
-                        } else {
-                            picker.activation_failed(window, cx);
-                        }
-                    });
-                    if activated {
-                        owner.update(cx, |manager, cx| {
-                            manager.sync_terminal_focus_blocker(window, cx);
-                            manager.focus(window, cx);
-                            cx.notify();
-                        });
-                    }
-                });
-            }
-        }
-    }
-
     fn local_home_directory(&self) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
         self.local_filesystem
             .validate_directory(&self.local_home_directory_path)
@@ -2598,9 +2522,6 @@ impl WorkspaceManager {
         if self.transient.pin_target == Some(workspace_id) {
             self.pin_operation = self.pin_operation.wrapping_add(1);
             self.transient.pin_target = None;
-            self.transient
-                .picker
-                .update(cx, |picker, cx| picker.dismiss(window, cx));
             if let Some(picker) = self.remote_pin_picker.take() {
                 picker.update(cx, |picker, cx| picker.cancel(window, cx));
             }
@@ -2688,7 +2609,7 @@ impl WorkspaceManager {
     ) {
         match command {
             WorkspaceMenuCommand::PinDirectory => {
-                self.open_pin_directory_picker(workspace_id, window, cx)
+                self.choose_pin_directory(workspace_id, window, cx)
             }
             WorkspaceMenuCommand::UnpinDirectory => {
                 self.apply_directory_pin(workspace_id, None, window, cx);
@@ -3283,8 +3204,7 @@ impl WorkspaceManager {
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
-            .children(self.remote_pin_picker.iter().cloned())
-            .child(self.transient.picker.clone());
+            .children(self.remote_pin_picker.iter().cloned());
         ModalLayer::new(content).transient(transients)
     }
 }

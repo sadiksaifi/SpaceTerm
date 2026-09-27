@@ -1,6 +1,6 @@
 use super::*;
 use std::os::unix::fs::symlink;
-fn workspace_manager_with_picker(
+fn workspace_manager_with_directory_selection(
     selections: impl IntoIterator<
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
@@ -15,7 +15,7 @@ fn workspace_manager_with_picker(
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let directory_selection_fallback: Rc<dyn SystemDirectorySelection> =
+    let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_adapters(
@@ -26,8 +26,8 @@ fn workspace_manager_with_picker(
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(), directory_selection: directory_selection_fallback,
-                permission_recovery: None,
+                lifecycle: PaneLifecycleDependencies::testing(),
+                directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
             },
@@ -50,10 +50,10 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     fs::create_dir_all(&project).unwrap();
     symlink(&project, &equivalent).unwrap();
     let selections = [Ok(Some(project.clone())), Ok(Some(equivalent.clone()))];
-    let (manager, records, cx) = workspace_manager_with_picker(selections, cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection(selections, cx);
 
-    choose_with_directory_selection_fallback(&manager, cx);
-    choose_with_directory_selection_fallback(&manager, cx);
+    choose_pin_directory(&manager, cx);
+    choose_pin_directory(&manager, cx);
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-d");
@@ -86,7 +86,7 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
     let project = root.join("project");
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_picker([], cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
     let directory = manager.read_with(cx, |manager, _| {
         manager
             .local_filesystem
@@ -134,8 +134,8 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_sessions(
     let project = root.join("project");
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    choose_with_directory_selection_fallback(&manager, cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    choose_pin_directory(&manager, cx);
     let original_counts = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces

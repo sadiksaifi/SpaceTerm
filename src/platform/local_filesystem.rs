@@ -12,7 +12,6 @@ use thiserror::Error;
 
 use crate::domain::ValidatedLocalDirectory;
 
-pub(crate) mod picker;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum LocalFilesystemError {

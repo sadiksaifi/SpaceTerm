@@ -80,7 +80,6 @@ fn desktop_profile(
         crate::desktop_profile::keybindings::bindings(),
         DesktopPresentation::new(
             DesktopWording {
-                directory_selection: "Choose with Finder",
                 file_preview: "Quick Look",
             },
             "⌘↩",
@@ -193,14 +192,6 @@ fn compose(
                 file_preview: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
             },
             lifecycle,
-            permission_recovery: Some(Rc::new(
-                super::permission_recovery::PermissionRecovery::new(
-                    Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
-                    "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders",
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
-                    "Open System Settings",
-                ),
-            )),
             microphone_access: if cfg!(any(
                 feature = "development-app",
                 feature = "appearance-exerciser"
@@ -392,10 +383,6 @@ mod tests {
                 "⌥⌘C"
             );
             assert_eq!(presentation.command_palette_confirm_shortcut(), "⌘↩");
-            assert_eq!(
-                presentation.wording().directory_selection,
-                "Choose with Finder"
-            );
             assert_eq!(presentation.wording().file_preview, "Quick Look");
         });
     }

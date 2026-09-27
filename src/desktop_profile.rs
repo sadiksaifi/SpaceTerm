@@ -9,7 +9,6 @@ use spaceterm_ui::{
 
 #[derive(Clone, Copy)]
 pub(crate) struct DesktopWording {
-    pub(crate) directory_selection: &'static str,
     pub(crate) file_preview: &'static str,
 }
 
@@ -226,7 +225,6 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
 
     DesktopPresentation::new(
         DesktopWording {
-            directory_selection: "Choose Directory",
             file_preview: "Preview File",
         },
         "Primary+Enter",

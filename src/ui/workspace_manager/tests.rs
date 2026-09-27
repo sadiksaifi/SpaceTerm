@@ -1081,7 +1081,6 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
                 native_services,
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection: Rc::new(GpuiDirectorySelection),
-            permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
             },
@@ -1131,7 +1130,6 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection: Rc::new(GpuiDirectorySelection),
-                permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
             },
@@ -1379,7 +1377,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     (manager, platform, cx)
 }
 
-fn workspace_manager_with_picker(
+fn workspace_manager_with_directory_selection(
     selections: impl IntoIterator<
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
@@ -1394,13 +1392,13 @@ fn workspace_manager_with_picker(
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let directory_selection_fallback: Rc<dyn SystemDirectorySelection> =
+    let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_directory_selection_fallback(
+        WorkspaceManager::new_with_directory_selection(
             session_factory,
             std::env::temp_dir(),
-            directory_selection_fallback,
+            directory_selection,
             test_remote_backend_factory(),
             window,
             cx,
@@ -1451,10 +1449,10 @@ fn present_test_alert(
     })
 }
 
-fn open_directory_picker(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+fn choose_pin_directory(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
+            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
         })
     });
     cx.run_until_parked();
@@ -1552,15 +1550,6 @@ fn install_remote_completion_directly(
                 .unwrap_or_else(|_| panic!("direct Remote Workspace installation failed"));
         });
     });
-    cx.run_until_parked();
-}
-
-fn choose_with_directory_selection_fallback(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) {
-    open_directory_picker(manager, cx);
-    click("directory-picker-directory-selection", cx);
     cx.run_until_parked();
 }
 
@@ -1720,60 +1709,6 @@ fn workspace_switcher_reentry_should_not_steal_focus_from_an_active_modal(cx: &m
     cx.update(|window, cx| presentation.dismiss(window, cx).unwrap());
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| window_modal_is_open(window, cx)));
-}
-
-#[gpui::test]
-fn directory_picker_reentry_should_not_steal_focus_from_an_active_modal(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.present_directory_picker(window, cx)
-        });
-    });
-    cx.run_until_parked();
-    let presentation = present_test_alert(&manager, "directory-picker-modal-priority", cx);
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
-            manager.open_pin_directory_picker(manager.workspaces.active_workspace_id(), window, cx);
-        });
-    });
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-    let focus_contained = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        window_modal_is_open(window, cx)
-            && !manager
-                .transient
-                .picker
-                .read(cx)
-                .path_input_is_focused(window, cx)
-    });
-
-    assert!(focus_contained);
-    assert!(cx.debug_bounds("modal-surface-1").is_some());
-
-    cx.update(|window, cx| {
-        presentation
-            .dismiss(window, cx)
-            .expect("directory-picker modal should dismiss")
-    });
-    cx.run_until_parked();
-
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .transient
-            .picker
-            .read(cx)
-            .path_input_is_focused(window, cx)
-    }));
 }
 
 #[gpui::test]
@@ -2092,9 +2027,9 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
 fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
     cx: &mut TestAppContext,
 ) {
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(None)], cx);
 
-    choose_with_directory_selection_fallback(&manager, cx);
+    choose_pin_directory(&manager, cx);
 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -2156,7 +2091,6 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
             let manager = manager.read(cx);
             (
                 window_combo_box_is_open(window, cx),
-                manager.transient.picker.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
@@ -2168,7 +2102,7 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
                 records.starts().len(),
             )
         }),
-        (false, false, None, true, 2, 2)
+        (false, None, true, 2, 2)
     );
 }
 
@@ -2351,25 +2285,6 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     assert_eq!(create_calls.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(records.starts().len(), 1);
-}
-
-#[gpui::test]
-fn pin_directory_selection_should_present_the_picker_without_the_panel(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-
-    open_directory_picker(&manager, cx);
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.transient.picker.read(cx).is_open(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-            )
-        }),
-        (true, false, Some(TerminalFocusBlocker::Modal))
-    );
 }
 
 #[gpui::test]
@@ -4124,148 +4039,36 @@ fn unavailable_initial_remote_channel_should_close_completion_and_offer_retry(
 }
 
 #[gpui::test]
-fn dismissing_pin_picker_should_restore_terminal_without_opening_creation_panel(
+fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
     cx: &mut TestAppContext,
 ) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_directory_picker(&manager, cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.transient.picker.read(cx).is_open(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-            )
-        }),
-        (false, false, None)
-    );
-}
-
-#[gpui::test]
-fn failed_pin_keeps_picker_focus_and_escape_restores_terminal(cx: &mut TestAppContext) {
-    let project = temporary_directory("activation-panel-origin");
+    let project = temporary_directory("activation-failure");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    open_directory_picker(&manager, cx);
-    // The picker retains its valid background authority; activation independently fails.
-    manager.update(cx, |manager, _| {
-        manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
-            crate::platform::local_filesystem::LocalFilesystemError::Capacity,
-        );
+    let (manager, records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
+            // Selection validation retains its valid authority; activation independently fails.
+            manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
+                crate::platform::local_filesystem::LocalFilesystemError::Capacity,
+            );
+        })
     });
-    click("directory-picker-directory-selection", cx);
     cx.run_until_parked();
+
     assert_eq!(records.starts().len(), 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .transient
-            .picker
-            .read(cx)
-            .path_input_is_focused(window, cx)
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace().pinned_directory().is_none()
     }));
-    cx.simulate_keystrokes("escape");
+    assert!(cx.debug_bounds("modal-action-workspace-pin-error-ok").is_some());
+    click("modal-action-workspace-pin-error-ok", cx);
     cx.run_until_parked();
     assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.transient.picker.read(cx).is_open(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-            )
-        }),
-        (false, false, None)
+        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+        None
     );
     fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-
-    open_directory_picker(&manager, cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.transient.picker.read(cx).is_open(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-            )
-        }),
-        (false, false, None)
-    );
-}
-
-#[gpui::test]
-fn directory_picker_should_block_mutating_parent_shortcuts_but_yield_to_switcher(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    open_directory_picker(&manager, cx);
-    let baseline = manager.read_with(cx, |manager, cx| {
-        (
-            manager.workspaces.len(),
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .aggregate_counts(cx),
-            records.starts().len(),
-        )
-    });
-
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        baseline.0
-    );
-
-    cx.simulate_keystrokes("cmd-t");
-    cx.simulate_keystrokes("cmd-w");
-    let hierarchy = manager.read_with(cx, |manager, cx| {
-        (
-            manager.workspaces.len(),
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .aggregate_counts(cx),
-            records.starts().len(),
-        )
-    });
-    assert_eq!(hierarchy, baseline);
-
-    cx.simulate_keystrokes("cmd-shift-k");
-    let switcher_state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            manager.transient.picker.read(cx).is_open(),
-            window_combo_box_is_open(window, cx),
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx),
-        )
-    });
-    assert_eq!(switcher_state, (false, true, false));
 }
 
 #[gpui::test]
@@ -4276,12 +4079,9 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     let project = root.join("project");
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    choose_with_directory_selection_fallback(&manager, cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    choose_pin_directory(&manager, cx);
     assert_eq!(records.starts().len(), 1);
-    assert!(!manager.read_with(cx, |manager, cx| {
-        manager.transient.picker.read(cx).is_open()
-    }));
 
     fs::rename(&project, &parked).unwrap();
     cx.simulate_keystrokes("cmd-t");
@@ -4324,9 +4124,9 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
 #[gpui::test]
 fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppContext) {
     let missing = temporary_directory("missing");
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(missing))], cx);
 
-    choose_with_directory_selection_fallback(&manager, cx);
+    choose_pin_directory(&manager, cx);
 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -6320,9 +6120,9 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
 fn workspace_pin_indicator_should_track_explicit_pin_state(cx: &mut TestAppContext) {
     let directory = temporary_directory("pinned-directory");
     fs::create_dir_all(&directory).unwrap();
-    let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(directory.clone()))], cx);
+    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
     assert!(cx.debug_bounds("workspace-row-pin-1").is_none());
-    choose_with_directory_selection_fallback(&manager, cx);
+    choose_pin_directory(&manager, cx);
     assert!(cx.debug_bounds("workspace-row-pin-1").is_some());
     assert_eq!(records.starts().len(), 1);
     assert_eq!(
@@ -6541,8 +6341,8 @@ fn collapsed_workspace_switcher_should_stop_at_the_tab_item_maximum(cx: &mut Tes
 fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut TestAppContext) {
     let directory = temporary_directory("collapsed-pin");
     fs::create_dir_all(&directory).unwrap();
-    let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(directory.clone()))], cx);
-    choose_with_directory_selection_fallback(&manager, cx);
+    let (manager, _, cx) = workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
+    choose_pin_directory(&manager, cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -8077,7 +7877,7 @@ fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mu
     emit_remote_workspace_completion(&flow, completion, cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.open_pin_directory_picker(WorkspaceId::new(2), window, cx)
+            manager.choose_pin_directory(WorkspaceId::new(2), window, cx)
         })
     });
     cx.run_until_parked();

@@ -6,7 +6,6 @@ pub(crate) enum PermissionRecoveryError {
 }
 
 pub(crate) trait PermissionRecoveryOpener {
-    fn label(&self) -> &'static str;
     fn open(&self) -> Result<(), PermissionRecoveryError>;
 }
 
@@ -14,15 +13,11 @@ pub(crate) struct PermissionRecovery {
     launcher: Box<dyn UrlLauncher>,
     preferred: &'static str,
     fallback: &'static str,
-    label: &'static str,
 }
 
 impl PermissionRecoveryOpener for PermissionRecovery {
-    fn label(&self) -> &'static str {
-        self.label
-    }
     fn open(&self) -> Result<(), PermissionRecoveryError> {
-        open_files_and_folders(self.launcher.as_ref(), self.preferred, self.fallback)
+        open_settings_url(self.launcher.as_ref(), self.preferred, self.fallback)
     }
 }
 
@@ -37,7 +32,7 @@ pub(crate) trait UrlLauncher {
     fn open_url(&self, uri: &'static str) -> Result<(), UrlLaunchError>;
 }
 
-fn open_files_and_folders(
+fn open_settings_url(
     launcher: &dyn UrlLauncher,
     preferred: &'static str,
     fallback: &'static str,
@@ -68,13 +63,11 @@ impl PermissionRecovery {
         launcher: Box<dyn UrlLauncher>,
         preferred: &'static str,
         fallback: &'static str,
-        label: &'static str,
     ) -> Self {
         Self {
             launcher,
             preferred,
             fallback,
-            label,
         }
     }
 }
@@ -84,9 +77,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    const PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI: &str = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders";
-    const FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI: &str =
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+    const PREFERRED_SETTINGS_URI: &str = "x-spaceterm-test:preferred";
+    const FALLBACK_SETTINGS_URI: &str = "x-spaceterm-test:fallback";
 
     struct RecordingUrlLauncher {
         results: RefCell<VecDeque<Result<(), UrlLaunchError>>>,
@@ -116,15 +108,15 @@ mod tests {
     fn preferred_success_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Ok(())]);
 
-        let result = open_files_and_folders(
+        let result = open_settings_url(
             &launcher,
-            PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-            FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+            PREFERRED_SETTINGS_URI,
+            FALLBACK_SETTINGS_URI,
         );
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
-            (Ok(()), vec![PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI])
+            (Ok(()), vec![PREFERRED_SETTINGS_URI])
         );
     }
 
@@ -132,10 +124,10 @@ mod tests {
     fn preferred_rejection_launches_successful_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::Rejected), Ok(())]);
 
-        let result = open_files_and_folders(
+        let result = open_settings_url(
             &launcher,
-            PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-            FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+            PREFERRED_SETTINGS_URI,
+            FALLBACK_SETTINGS_URI,
         );
 
         assert_eq!(
@@ -143,8 +135,8 @@ mod tests {
             (
                 Ok(()),
                 vec![
-                    PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-                    FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+                    PREFERRED_SETTINGS_URI,
+                    FALLBACK_SETTINGS_URI,
                 ]
             )
         );
@@ -157,10 +149,10 @@ mod tests {
             Err(UrlLaunchError::Rejected),
         ]);
 
-        let result = open_files_and_folders(
+        let result = open_settings_url(
             &launcher,
-            PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-            FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+            PREFERRED_SETTINGS_URI,
+            FALLBACK_SETTINGS_URI,
         );
 
         assert_eq!(
@@ -168,8 +160,8 @@ mod tests {
             (
                 Err(PermissionRecoveryError::PlatformRejected),
                 vec![
-                    PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-                    FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+                    PREFERRED_SETTINGS_URI,
+                    FALLBACK_SETTINGS_URI,
                 ]
             )
         );
@@ -179,17 +171,17 @@ mod tests {
     fn non_appkit_failure_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::OffMainThread)]);
 
-        let result = open_files_and_folders(
+        let result = open_settings_url(
             &launcher,
-            PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-            FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+            PREFERRED_SETTINGS_URI,
+            FALLBACK_SETTINGS_URI,
         );
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
             (
                 Err(PermissionRecoveryError::OffMainThread),
-                vec![PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI]
+                vec![PREFERRED_SETTINGS_URI]
             )
         );
     }
@@ -198,31 +190,17 @@ mod tests {
     fn platform_unavailability_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::Unavailable)]);
 
-        let result = open_files_and_folders(
+        let result = open_settings_url(
             &launcher,
-            PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-            FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
+            PREFERRED_SETTINGS_URI,
+            FALLBACK_SETTINGS_URI,
         );
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
             (
                 Err(PermissionRecoveryError::PlatformUnavailable),
-                vec![PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI]
-            )
-        );
-    }
-
-    #[test]
-    fn files_and_folders_uri_constants_are_exact() {
-        assert_eq!(
-            (
-                PREFERRED_FILES_AND_FOLDERS_SETTINGS_URI,
-                FALLBACK_FILES_AND_FOLDERS_SETTINGS_URI,
-            ),
-            (
-                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+                vec![PREFERRED_SETTINGS_URI]
             )
         );
     }
