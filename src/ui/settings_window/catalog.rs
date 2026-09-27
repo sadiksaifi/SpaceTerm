@@ -155,21 +155,38 @@ pub(super) struct SettingsRowMatch {
 }
 
 pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
-    fuzzy_filter(ROWS, query, |descriptor| {
-        descriptor
-            .keywords
-            .iter()
-            .fold(FuzzyTarget::new(descriptor.label), |target, keyword| {
-                target.field(keyword)
+    let fields = ROWS
+        .iter()
+        .enumerate()
+        .flat_map(|(row_index, descriptor)| {
+            std::iter::once((row_index, true, descriptor.label)).chain(
+                descriptor
+                    .keywords
+                    .iter()
+                    .map(move |keyword| (row_index, false, *keyword)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut seen_rows = vec![false; ROWS.len()];
+
+    fuzzy_filter(&fields, query, |(_, _, text)| FuzzyTarget::new(text))
+        .into_iter()
+        .filter_map(|matched| {
+            let (row_index, is_label, _) = fields[matched.item_index()];
+            if std::mem::replace(&mut seen_rows[row_index], true) {
+                return None;
+            }
+            Some(SettingsRowMatch {
+                id: ROWS[row_index].id,
+                score: matched.score(),
+                matched_indices: if is_label {
+                    matched.field_highlight_indices(0)
+                } else {
+                    Vec::new()
+                },
             })
-    })
-    .into_iter()
-    .map(|matched| SettingsRowMatch {
-        id: ROWS[matched.item_index()].id,
-        score: matched.score(),
-        matched_indices: matched.field_highlight_indices(0),
-    })
-    .collect()
+        })
+        .collect()
 }
 
 /// Returns the rows answering `query`, or every row when the query is empty.
@@ -195,6 +212,7 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "mode",
             "theme",
             "interface",
+            "chrome",
             "terminal",
         ],
         selector: "settings-row-appearance-mode",
@@ -228,7 +246,15 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Terminal,
         group: "Color scheme",
         label: "Scheme",
-        keywords: &["color", "colour", "palette", "theme", "scheme", "ansi"],
+        keywords: &[
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+        ],
         selector: "settings-row-terminal-scheme",
     },
     SettingsRowDescriptor {
@@ -237,7 +263,14 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         group: "Color scheme",
         label: "Light",
         keywords: &[
-            "color", "colour", "palette", "theme", "scheme", "ansi", "light",
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+            "light",
         ],
         selector: "settings-row-terminal-light-scheme",
     },
@@ -247,7 +280,14 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         group: "Color scheme",
         label: "Dark",
         keywords: &[
-            "color", "colour", "palette", "theme", "scheme", "ansi", "dark",
+            "color",
+            "colour",
+            "palette",
+            "theme",
+            "scheme",
+            "color scheme",
+            "ansi",
+            "dark",
         ],
         selector: "settings-row-terminal-dark-scheme",
     },
@@ -322,6 +362,7 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
             "fallback",
             "missing",
             "ansi",
+            "theme",
         ],
         selector: "settings-row-terminal-schemes",
     },
@@ -468,6 +509,50 @@ mod tests {
         assert_eq!(
             matching_rows("line height"),
             vec![SettingsRowId::TerminalLineHeight]
+        );
+    }
+
+    #[test]
+    fn chrome_search_matches_only_appearance_mode() {
+        assert_eq!(matching_rows("chrome"), vec![SettingsRowId::AppearanceMode]);
+    }
+
+    #[test]
+    fn theme_search_matches_only_appearance_and_color_schemes() {
+        assert_eq!(
+            matching_rows("theme").into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                SettingsRowId::AppearanceMode,
+                SettingsRowId::TerminalScheme,
+                SettingsRowId::TerminalLightScheme,
+                SettingsRowId::TerminalDarkScheme,
+                SettingsRowId::TerminalSchemes,
+            ])
+        );
+    }
+
+    #[test]
+    fn color_scheme_search_reaches_terminal_scheme_rows() {
+        assert_eq!(
+            matching_rows("color scheme").into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                SettingsRowId::TerminalScheme,
+                SettingsRowId::TerminalLightScheme,
+                SettingsRowId::TerminalDarkScheme,
+            ])
+        );
+    }
+
+    #[test]
+    fn blur_search_matches_only_blur() {
+        assert_eq!(matching_rows("blur"), vec![SettingsRowId::Blur]);
+    }
+
+    #[test]
+    fn interface_search_matches_only_appearance_mode() {
+        assert_eq!(
+            matching_rows("interface"),
+            vec![SettingsRowId::AppearanceMode]
         );
     }
 
