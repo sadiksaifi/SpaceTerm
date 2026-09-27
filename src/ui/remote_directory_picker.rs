@@ -2,10 +2,10 @@ use std::{cmp::Ordering, fmt, sync::Arc};
 
 use gpui::prelude::*;
 use gpui::{Action, App};
-use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
+use gpui::{Context, Entity, EventEmitter, Render, SharedString, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
-    CommandPaletteConfirm, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    Alert, AlertOutcome, CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
+    CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteItem,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus,
     FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
     fuzzy_filter,
@@ -27,6 +27,7 @@ use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
 const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
+const CURRENT_DIRECTORY_SELECTOR: &str = "remote-directory-picker-current";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
@@ -248,6 +249,7 @@ pub(super) fn filter_remote_workspace_rows(
         .collect()
 }
 
+#[derive(Clone)]
 struct RemoteDirectoryRowMatch {
     row: RemoteDirectoryRow,
     matched_indices: Vec<usize>,
@@ -356,11 +358,17 @@ enum RemoteDirectoryPickerBusy {
     AwaitingActivation,
 }
 
+/// Identifies one Remote Directory Picker row within one operation generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RemoteDirectoryPickerItemId {
-    row: RemoteDirectoryRow,
-    directory: RemoteDirectory,
-    operation_generation: u64,
+enum RemoteDirectoryPickerItemId {
+    /// Pins to, or creates, the exact directory the path names.
+    Current { operation_generation: u64 },
+    /// Descends into one listed child directory.
+    Child {
+        row: RemoteDirectoryRow,
+        directory: RemoteDirectory,
+        operation_generation: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -401,7 +409,8 @@ pub(super) struct RemoteDirectoryPicker {
     account: Option<RemoteWorkspaceAccount>,
     parsed: Option<ParsedRemoteDirectory>,
     snapshot: Option<LoadedRemoteDirectorySnapshot>,
-    rows: Vec<RemoteDirectoryRow>,
+    rows: Vec<RemoteDirectoryRowMatch>,
+    rows_directory: Option<RemoteDirectory>,
     listing_error: Option<RemoteDirectoryProviderError>,
     listing_truncated: bool,
     status: RemoteDirectoryPickerStatus,
@@ -422,7 +431,6 @@ impl RemoteDirectoryPicker {
     ) -> Self {
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
-            palette.set_hints(vec![CommandPaletteHint::new("Enter directory", "↵")], cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
@@ -446,6 +454,7 @@ impl RemoteDirectoryPicker {
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
+            rows_directory: None,
             listing_error: None,
             listing_truncated: false,
             status: RemoteDirectoryPickerStatus::DiscoveringAccount,
@@ -477,7 +486,7 @@ impl RemoteDirectoryPicker {
         self.account = None;
         self.parsed = None;
         self.snapshot = None;
-        self.rows.clear();
+        self.clear_rows();
         self.listing_error = None;
         self.listing_truncated = false;
         self.status = RemoteDirectoryPickerStatus::DiscoveringAccount;
@@ -591,13 +600,21 @@ impl RemoteDirectoryPicker {
             CommandPaletteEvent::QueryChanged(query) => {
                 self.refresh_for_input(query.text().to_owned(), window, cx);
             }
-            CommandPaletteEvent::Activated(activation) => {
-                self.descend_to(activation.item_id().clone(), window, cx);
-            }
-            CommandPaletteEvent::Confirmed => self.confirm_current(window, cx),
-            CommandPaletteEvent::HeaderAction(_)
-            | CommandPaletteEvent::EmptyAction(_)
-            | CommandPaletteEvent::MenuAction(_) => {}
+            CommandPaletteEvent::Activated(activation) => match activation.item_id() {
+                RemoteDirectoryPickerItemId::Current {
+                    operation_generation,
+                } => {
+                    if *operation_generation == self.operation_generation {
+                        self.confirm_current(window, cx);
+                    }
+                }
+                RemoteDirectoryPickerItemId::Child {
+                    row,
+                    directory,
+                    operation_generation,
+                } => self.descend_to(row, directory, *operation_generation, window, cx),
+            },
+            _ => {}
         }
     }
 
@@ -610,7 +627,7 @@ impl RemoteDirectoryPicker {
         self.account = None;
         self.parsed = None;
         self.snapshot = None;
-        self.rows.clear();
+        self.clear_rows();
         self.listing_error = None;
         self.listing_truncated = false;
         self.busy = None;
@@ -651,7 +668,7 @@ impl RemoteDirectoryPicker {
                     }
                     Err(error) => {
                         picker.status = status_for_provider_error(error);
-                        picker.clear_rows(cx);
+                        picker.clear_rows();
                         picker.publish(cx);
                     }
                 }
@@ -672,7 +689,7 @@ impl RemoteDirectoryPicker {
                 self.listing_error = None;
                 self.listing_truncated = false;
                 self.operation_generation = self.operation_generation.wrapping_add(1);
-                self.clear_rows(cx);
+                self.clear_rows();
                 self.publish(cx);
                 return;
             }
@@ -687,9 +704,9 @@ impl RemoteDirectoryPicker {
         if listing_needed {
             self.listing_error = None;
             self.listing_truncated = false;
-            self.clear_rows(cx);
+            self.clear_rows();
         } else {
-            self.rebuild_rows(cx);
+            self.rebuild_rows();
         }
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
@@ -740,13 +757,13 @@ impl RemoteDirectoryPicker {
                     directory: completion.parsed.enumeration_directory().clone(),
                     listing,
                 });
-                self.rebuild_rows(cx);
+                self.rebuild_rows();
             }
             Some(Err(error)) => {
                 self.snapshot = None;
                 self.listing_error = Some(error);
                 self.listing_truncated = false;
-                self.clear_rows(cx);
+                self.clear_rows();
             }
             None => {}
         }
@@ -760,63 +777,44 @@ impl RemoteDirectoryPicker {
         self.publish(cx);
     }
 
-    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+    fn rebuild_rows(&mut self) {
         let (Some(parsed), Some(snapshot)) = (self.parsed.as_ref(), self.snapshot.as_ref()) else {
             return;
         };
         if snapshot.directory != *parsed.enumeration_directory() {
             return;
         }
-        let matches = match_remote_workspace_rows(parsed, snapshot.listing.rows());
-        self.rows = matches.iter().map(|matched| matched.row.clone()).collect();
-        let directory = snapshot.directory.clone();
-        let operation_generation = self.operation_generation;
-        let truncated = self.listing_truncated;
-        let items = matches
-            .into_iter()
-            .enumerate()
-            .map(|(index, matched)| {
-                remote_directory_palette_item(
-                    RemoteDirectoryPickerItemId {
-                        row: matched.row,
-                        directory: directory.clone(),
-                        operation_generation,
-                    },
-                    truncated && index == 0,
-                )
-                .matched_indices(matched.matched_indices)
-            })
-            .collect();
-        self.palette
-            .update(cx, |palette, cx| palette.set_items(items, cx));
+        self.rows = match_remote_workspace_rows(parsed, snapshot.listing.rows());
+        self.rows_directory = Some(snapshot.directory.clone());
     }
 
-    fn clear_rows(&mut self, cx: &mut Context<Self>) {
+    fn clear_rows(&mut self) {
         self.rows.clear();
-        self.palette
-            .update(cx, |palette, cx| palette.set_items(Vec::new(), cx));
+        self.rows_directory = None;
     }
 
     fn descend_to(
         &mut self,
-        item: RemoteDirectoryPickerItemId,
+        row: &RemoteDirectoryRow,
+        directory: &RemoteDirectory,
+        operation_generation: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.busy.is_some()
-            || item.operation_generation != self.operation_generation
+            || operation_generation != self.operation_generation
             || self
                 .parsed
                 .as_ref()
                 .map(ParsedRemoteDirectory::enumeration_directory)
-                != Some(&item.directory)
+                != Some(directory)
         {
             return;
         }
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
-        let Ok(directory) = descend_remote_workspace_query(parsed, &item.row) else {
+        let Ok(directory) = descend_remote_workspace_query(parsed, row) else {
             self.status = RemoteDirectoryPickerStatus::Other;
             self.publish(cx);
             return;
@@ -870,7 +868,7 @@ impl RemoteDirectoryPicker {
             "Create remote directory",
             "Create Remote Directory?",
             format!(
-                "Create {}? Missing parent directorys will also be created.",
+                "Create {}? Missing parent directories will also be created.",
                 parsed.display()
             ),
             vec![
@@ -1031,42 +1029,109 @@ impl RemoteDirectoryPicker {
         }
     }
 
-    fn empty_text(&self) -> &'static str {
-        if self.listing_truncated {
-            return "Only the first 1024 directorys are shown; type an exact path to continue";
+    /// Explains why the path cannot be pinned, or `None` while it can be or may become pinnable.
+    fn blocked_reason(&self) -> Option<&'static str> {
+        match self.status {
+            RemoteDirectoryPickerStatus::Loading
+            | RemoteDirectoryPickerStatus::Readable
+            | RemoteDirectoryPickerStatus::Missing => None,
+            RemoteDirectoryPickerStatus::DiscoveringAccount => {
+                Some("Discovering remote home\u{2026}")
+            }
+            RemoteDirectoryPickerStatus::NotDirectory => Some("Not a remote directory"),
+            RemoteDirectoryPickerStatus::PermissionDenied => {
+                Some("Permission denied for this remote directory")
+            }
+            RemoteDirectoryPickerStatus::ConnectionLost => Some("SSH connection was lost"),
+            RemoteDirectoryPickerStatus::UnsupportedLoginShell => {
+                Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
+            }
+            RemoteDirectoryPickerStatus::Other => {
+                Some("SpaceTerm couldn\u{2019}t read this remote directory")
+            }
+            RemoteDirectoryPickerStatus::Invalid(error) => Some(error.message()),
         }
+    }
+
+    /// Returns the row that pins to or creates the exact path, present whenever the path parses.
+    fn current_directory_item(
+        &self,
+        shortcut: SharedString,
+    ) -> Option<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
+        let parsed = self.parsed.as_ref()?;
+        let description = self
+            .blocked_reason()
+            .or_else(|| self.listing_error.map(listing_error_text))
+            .unwrap_or_else(|| parsed.display());
+        let icon = if self.status == RemoteDirectoryPickerStatus::Missing {
+            IconName::Plus
+        } else {
+            IconName::Pin
+        };
+        Some(
+            CommandPaletteItem::new(
+                RemoteDirectoryPickerItemId::Current {
+                    operation_generation: self.operation_generation,
+                },
+                self.confirmation_label(),
+            )
+            .description(description.to_owned())
+            .leading_icon(move |foreground, size| {
+                Icon::new(icon, size, foreground).into_any_element()
+            })
+            .trailing(CommandPaletteAccessory::Shortcut(shortcut))
+            .disabled(!self.can_confirm())
+            .debug_selector(CURRENT_DIRECTORY_SELECTOR),
+        )
+    }
+
+    fn child_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
+        let Some(directory) = self.rows_directory.as_ref() else {
+            return Vec::new();
+        };
+        self.rows
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, matched)| {
+                child_directory_item(
+                    matched.row,
+                    directory.clone(),
+                    self.operation_generation,
+                    self.listing_truncated && index == 0,
+                )
+                .matched_indices(matched.matched_indices)
+            })
+            .collect()
+    }
+
+    fn empty_text(&self) -> &'static str {
         if let Some(error) = self.listing_error {
             return listing_error_text(error);
         }
-        match self.status {
-            RemoteDirectoryPickerStatus::DiscoveringAccount => "Discovering remote home\u{2026}",
-            RemoteDirectoryPickerStatus::Loading => "Reading remote directory\u{2026}",
-            RemoteDirectoryPickerStatus::Readable => "No directorys here",
-            RemoteDirectoryPickerStatus::Missing => "No such remote directory",
-            RemoteDirectoryPickerStatus::NotDirectory => "Not a remote directory",
-            RemoteDirectoryPickerStatus::PermissionDenied => {
-                "Permission denied for this remote directory"
-            }
-            RemoteDirectoryPickerStatus::ConnectionLost => "SSH connection was lost",
-            RemoteDirectoryPickerStatus::UnsupportedLoginShell => UNSUPPORTED_LOGIN_SHELL_MESSAGE,
-            RemoteDirectoryPickerStatus::Other => {
-                "SpaceTerm couldn\u{2019}t read this remote directory"
-            }
-            RemoteDirectoryPickerStatus::Invalid(error) => error.message(),
-        }
+        self.blocked_reason().unwrap_or("No directories here")
     }
 
     fn sync_palette(&self, cx: &mut Context<Self>) {
         let loading = self.busy.is_some();
-        let confirm = CommandPaletteConfirm::new(
-            self.confirmation_label(),
-            cx.global::<crate::desktop_profile::DesktopPresentation>()
-                .command_palette_confirm_shortcut(),
-        )
-        .disabled(!self.can_confirm())
-        .debug_selector("remote-directory-picker-confirm");
+        let shortcut = cx
+            .global::<crate::desktop_profile::DesktopPresentation>()
+            .command_palette_confirm_shortcut();
+        let current = self.current_directory_item(shortcut.into());
+        let confirm_item = current.as_ref().map(|item| item.id().clone());
+        let children = self.child_items();
+        let first_child = children.first().map(|item| item.id().clone());
+        let items = current.into_iter().chain(children).collect::<Vec<_>>();
         self.palette.update(cx, |palette, cx| {
-            palette.set_confirm(Some(confirm), cx);
+            // A stable selection survives republishing; otherwise Return descends into the first
+            // child, and the confirm key pins regardless of selection.
+            let retained = palette
+                .selected_item_id()
+                .filter(|selected| items.iter().any(|item| item.id() == *selected))
+                .cloned();
+            palette.set_preferred_item(retained.or(first_child), cx);
+            palette.set_items(items, cx);
+            palette.set_confirm_item(confirm_item, cx);
             palette.set_empty(CommandPaletteEmpty::new(self.empty_text()), cx);
             palette.set_loading(loading, cx);
             palette.set_query_editable(!loading, cx);
@@ -1086,7 +1151,10 @@ impl RemoteDirectoryPicker {
 
     #[cfg(test)]
     fn row_names(&self) -> Vec<String> {
-        self.rows.iter().map(|row| row.name().to_owned()).collect()
+        self.rows
+            .iter()
+            .map(|matched| matched.row.name().to_owned())
+            .collect()
     }
 }
 
@@ -1159,19 +1227,26 @@ impl Render for RemoteDirectoryPicker {
     }
 }
 
-fn remote_directory_palette_item(
-    item: RemoteDirectoryPickerItemId,
+fn child_directory_item(
+    row: RemoteDirectoryRow,
+    directory: RemoteDirectory,
+    operation_generation: u64,
     show_truncation_notice: bool,
 ) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
-    let selector = format!("remote-directory-picker-row-{}", item.row.name());
-    let label = format!("{}/", item.row.name());
-    let palette_item = CommandPaletteItem::new(item, label)
+    let selector = format!("remote-directory-picker-row-{}", row.name());
+    let label = format!("{}/", row.name());
+    let id = RemoteDirectoryPickerItemId::Child {
+        row,
+        directory,
+        operation_generation,
+    };
+    let palette_item = CommandPaletteItem::new(id, label)
         .leading_icon(move |foreground, size| {
             Icon::new(IconName::Folder, size, foreground).into_any_element()
         })
         .debug_selector(selector);
     if show_truncation_notice {
-        palette_item.section("First 1024 directorys shown; type an exact path for others")
+        palette_item.section("First 1024 directories shown; type an exact path for others")
     } else {
         palette_item
     }
@@ -1506,7 +1581,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn missing_remote_path_changes_the_sole_confirmation_to_create(cx: &mut TestAppContext) {
+    fn missing_remote_path_turns_the_current_row_into_create(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(RemoteDirectoryExactPathState::Missing)],
@@ -1522,7 +1597,75 @@ mod tests {
             )),
             ("Create Directory", true)
         );
-        assert!(cx.debug_bounds("remote-directory-picker-confirm").is_some());
+        assert!(cx.debug_bounds(CURRENT_DIRECTORY_SELECTOR).is_some());
+        assert!(matches!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
+            Some(RemoteDirectoryPickerItemId::Current { .. })
+        ));
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-create")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn the_confirm_key_should_pin_the_current_directory_while_a_child_is_selected(
+        cx: &mut TestAppContext,
+    ) {
+        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(remote_rows(["Projects"]))],
+            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [],
+            [Ok(identity.clone())],
+        );
+        let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        assert!(matches!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
+            Some(RemoteDirectoryPickerItemId::Child { .. })
+        ));
+
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            provider.state.lock().unwrap().validated_directories,
+            vec![remote_directory(HOME_DISPLAY)]
+        );
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            RemoteDirectoryPickerEvent::Confirmed(selection)
+                if selection.physical_directory() == &identity
+        )));
+    }
+
+    #[gpui::test]
+    fn an_unusable_path_should_disable_the_current_row_and_ignore_the_confirm_key(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = scripted_provider(
+            [Ok(remote_rows(["Projects"]))],
+            [Err(RemoteDirectoryProviderError::PermissionDenied)],
+            [],
+            [],
+        );
+        let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        assert!(cx.debug_bounds(CURRENT_DIRECTORY_SELECTOR).is_some());
+        assert!(!picker.read_with(cx, |picker, _| picker.can_confirm()));
+
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert!(provider.state.lock().unwrap().validated_directories.is_empty());
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, RemoteDirectoryPickerEvent::Confirmed(_)))
+        );
     }
 
     #[gpui::test]
@@ -1658,9 +1801,16 @@ mod tests {
             [],
         );
         let (picker, _, cx) = remote_directory_picker(provider, cx);
-        let stale_item = picker.read_with(cx, |picker, cx| {
-            picker.palette.read(cx).selected_item_id().cloned().unwrap()
-        });
+        let Some(RemoteDirectoryPickerItemId::Child {
+            row,
+            directory,
+            operation_generation,
+        }) = picker.read_with(cx, |picker, cx| {
+            picker.palette.read(cx).selected_item_id().cloned()
+        })
+        else {
+            panic!("the first child directory should be selected");
+        };
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
@@ -1672,7 +1822,9 @@ mod tests {
         let current_query =
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned());
         cx.update(|window, cx| {
-            picker.update(cx, |picker, cx| picker.descend_to(stale_item, window, cx));
+            picker.update(cx, |picker, cx| {
+                picker.descend_to(&row, &directory, operation_generation, window, cx);
+            });
         });
 
         assert_eq!(
@@ -1736,10 +1888,8 @@ mod tests {
             MAXIMUM_REMOTE_DIRECTORY_ROWS
         );
         assert!(picker.read_with(cx, |picker, _| picker.listing_truncated));
-        assert_eq!(
-            picker.read_with(cx, |picker, _| picker.empty_text()),
-            "Only the first 1024 directorys are shown; type an exact path to continue"
-        );
+        assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
+        assert!(cx.debug_bounds(CURRENT_DIRECTORY_SELECTOR).is_some());
     }
 
     #[gpui::test]
