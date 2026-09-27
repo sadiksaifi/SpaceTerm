@@ -28,6 +28,8 @@ use crate::ssh::remote_account::RemoteWorkspaceAccount;
 const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 const CURRENT_DIRECTORY_SELECTOR: &str = "remote-directory-picker-current";
+const TRUNCATED_LISTING_NOTICE: &str =
+    "First 1024 directories shown; type an exact path for others";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
@@ -1068,21 +1070,24 @@ impl RemoteDirectoryPicker {
         } else {
             IconName::Pin
         };
-        Some(
-            CommandPaletteItem::new(
-                RemoteDirectoryPickerItemId::Current {
-                    operation_generation: self.operation_generation,
-                },
-                self.confirmation_label(),
-            )
-            .description(description.to_owned())
-            .leading_icon(move |foreground, size| {
-                Icon::new(icon, size, foreground).into_any_element()
-            })
-            .trailing(CommandPaletteAccessory::Shortcut(shortcut))
-            .disabled(!self.can_confirm())
-            .debug_selector(CURRENT_DIRECTORY_SELECTOR),
+        let item = CommandPaletteItem::new(
+            RemoteDirectoryPickerItemId::Current {
+                operation_generation: self.operation_generation,
+            },
+            self.confirmation_label(),
         )
+        .description(description.to_owned())
+        .leading_icon(move |foreground, size| {
+            Icon::new(icon, size, foreground).into_any_element()
+        })
+        .trailing(CommandPaletteAccessory::Shortcut(shortcut))
+        .disabled(!self.can_confirm())
+        .debug_selector(CURRENT_DIRECTORY_SELECTOR);
+        Some(if self.listing_truncated && self.rows.is_empty() {
+            item.section(TRUNCATED_LISTING_NOTICE)
+        } else {
+            item
+        })
     }
 
     fn child_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
@@ -1246,7 +1251,7 @@ fn child_directory_item(
         })
         .debug_selector(selector);
     if show_truncation_notice {
-        palette_item.section("First 1024 directories shown; type an exact path for others")
+        palette_item.section(TRUNCATED_LISTING_NOTICE)
     } else {
         palette_item
     }
@@ -1877,7 +1882,10 @@ mod tests {
             .collect::<Vec<_>>();
         let provider = scripted_provider(
             [Ok(rows)],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+            ],
             [],
             [],
         );
@@ -1890,6 +1898,17 @@ mod tests {
         assert!(picker.read_with(cx, |picker, _| picker.listing_truncated));
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
         assert!(cx.debug_bounds(CURRENT_DIRECTORY_SELECTOR).is_some());
+
+        set_remote_input(&picker, "~/directory-1028", cx);
+        assert!(picker.read_with(cx, |picker, _| picker.row_names().is_empty()));
+        assert_eq!(
+            picker.read_with(cx, |picker, _| {
+                picker
+                    .current_directory_item("cmd-enter".into())
+                    .and_then(|item| item.section_text().map(str::to_owned))
+            }),
+            Some("First 1024 directories shown; type an exact path for others".to_owned())
+        );
     }
 
     #[gpui::test]
