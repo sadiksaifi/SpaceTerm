@@ -16,6 +16,11 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 #[test]
 fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     let _isolation = crate::platform::macos_pty::lock_real_pty_test();
+    if crate::platform::macos_pty::isolate_real_pty_test(
+        "terminal::session::macos_adapter_tests::real_shell_output_round_trips_through_the_pty_and_emulator",
+    ) {
+        return;
+    }
     let size = test_geometry();
     let (session, events, _accessibility) = TerminalSession::start(
         macos_native_pty_adapter_factory(),
@@ -79,6 +84,11 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
 #[test]
 fn real_shell_exit_command_emits_an_exited_event() {
     let _isolation = crate::platform::macos_pty::lock_real_pty_test();
+    if crate::platform::macos_pty::isolate_real_pty_test(
+        "terminal::session::macos_adapter_tests::real_shell_exit_command_emits_an_exited_event",
+    ) {
+        return;
+    }
     let size = test_geometry();
     let (session, events, _accessibility) = TerminalSession::start(
         macos_native_pty_adapter_factory(),

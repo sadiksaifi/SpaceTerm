@@ -362,7 +362,10 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
         } else {
             "133;A;redraw=1"
         };
-        assert!(script.contains(redraw), "{relative} must state its prompt redraw policy");
+        assert!(
+            script.contains(redraw),
+            "{relative} must state its prompt redraw policy"
+        );
     }
 }
 
