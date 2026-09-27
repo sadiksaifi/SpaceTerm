@@ -1359,6 +1359,10 @@ impl CommandPaletteMetrics {
         }
     }
 
+    fn header_action_size(&self) -> Pixels {
+        (self.input_height - self.panel_padding * 2.0).max(self.input_icon_size)
+    }
+
     /// Returns the shared left edge of the editor, headings, status text, and row content.
     fn content_leading_inset(&self) -> Pixels {
         self.panel_padding + self.horizontal_padding
@@ -3278,17 +3282,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .flex()
             .flex_row()
             .items_center()
-            // Centering the glyph in its slot then gives it equal space on both sides.
             .gap(metrics.panel_padding)
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
             .when_some(self.input_leading_icon.as_ref(), |editor, icon| {
-                let icon_slot_size = crate::ControlHost::Floating
-                    .button_theme(cx)
-                    .icon_button_size(ButtonSize::Compact);
                 editor.child(
                     div()
-                        .size(icon_slot_size)
+                        .size(metrics.header_action_size())
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -3309,7 +3309,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                 .iter()
                                 .enumerate()
                                 .map(|(index, action)| {
-                                    render_header_action(palette.clone(), index, action)
+                                    render_header_action(palette.clone(), index, action, theme)
                                 }),
                         ),
                 )
@@ -3469,6 +3469,7 @@ fn render_header_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     index: usize,
     action: &CommandPaletteAction,
+    theme: CommandPaletteTheme,
 ) -> AnyElement {
     let id = action.id.clone();
     let icon = action.icon.clone();
@@ -3479,6 +3480,8 @@ fn render_header_action<I: Clone + Eq + 'static>(
     )
     .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Compact)
+    .target_size(theme.metrics.header_action_size())
+    .corner_radius(theme.shell.nested_radius())
     .disabled(action.disabled)
     .tab_stop(true)
     .on_activate(move |_, _, cx| {

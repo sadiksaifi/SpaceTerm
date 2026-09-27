@@ -1336,7 +1336,27 @@ fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) 
     let button = cx
         .debug_bounds("header-toggle-ignored")
         .expect("the search-line control was not rendered");
-    cx.simulate_click(button.center(), Modifiers::default());
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    assert_eq!(button.size.width, button.size.height);
+    assert!(button.size.height > px(24.0) && button.size.height < editor.size.height);
+    assert_eq!(
+        button.top() - editor.top(),
+        editor.bottom() - button.bottom()
+    );
+    assert_eq!(button.top() - editor.top(), editor.right() - button.right());
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let focus = cx
+        .debug_bounds("header-toggle-ignored-keyboard-focus")
+        .expect("the search-line control did not show keyboard focus");
+    assert!(focus.left() > editor.left() && focus.right() < editor.right());
+    assert!(focus.top() > editor.top() && focus.bottom() < editor.bottom());
+
+    cx.simulate_click(
+        point(button.center().x, button.top() + px(2.0)),
+        Modifiers::default(),
+    );
     cx.run_until_parked();
 
     assert!(
