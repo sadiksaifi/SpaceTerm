@@ -37,6 +37,25 @@ pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
         .expect("a previous real PTY test panicked while it owned OS process resources")
 }
 
+#[cfg(all(test, feature = "macos-native-tests"))]
+pub(crate) fn isolate_real_pty_test(test_name: &str) -> bool {
+    const CHILD_TEST: &str = "SPACETERM_ISOLATED_REAL_PTY_TEST";
+    if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+        return false;
+    }
+
+    // portable-pty forks before exec. The parallel native test process also runs Foundation
+    // code, which can leave a forked child with corrupt os_once state. Run the PTY case in a
+    // fresh test process before that process starts unrelated test threads.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--test-threads=1", "--nocapture"])
+        .env(CHILD_TEST, test_name)
+        .status()
+        .expect("failed to start isolated real PTY test");
+    assert!(status.success(), "isolated real PTY test failed: {status}");
+    true
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShutdownDisposition {
     NotRequested,
@@ -958,8 +977,11 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 mod tests {
     use std::collections::HashMap;
     use std::env;
+    use std::ffi::CString;
     use std::fmt;
     use std::io::{self, BufRead, BufReader};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::Instant;
@@ -1046,6 +1068,7 @@ mod tests {
     }
 
     const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
+    const CONTROLLED_CHILD_ACK: &str = "SPACETERM_ACK\n";
 
     #[test]
     #[ignore = "runs only as a child of the controlled PTY integration tests"]
@@ -1095,7 +1118,10 @@ mod tests {
             cwd.display(),
             env::var("SPACETERM_PTY_MARKER").unwrap(),
         );
-        thread::sleep(Duration::from_millis(100));
+        // Keep the child alive until the parent has observed its process session.
+        let mut acknowledgment = String::new();
+        io::stdin().read_line(&mut acknowledgment).unwrap();
+        assert_eq!(acknowledgment, CONTROLLED_CHILD_ACK);
     }
 
     fn controlled_child_command(working_directory: &Path, marker: &str) -> CommandBuilder {
@@ -1113,6 +1139,8 @@ mod tests {
     }
 
     fn read_controlled_report(pty: &mut SpawnedPty) -> HashMap<String, String> {
+        pty.write_all(CONTROLLED_CHILD_ACK.as_bytes()).unwrap();
+        pty.flush().unwrap();
         let mut output = String::new();
         pty.take_reader()
             .unwrap()
@@ -1142,6 +1170,11 @@ mod tests {
     #[test]
     fn controlled_child_should_observe_initialized_terminal_state_before_interaction() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::controlled_child_should_observe_initialized_terminal_state_before_interaction",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let size = PtySize {
             rows: 31,
@@ -1189,6 +1222,11 @@ mod tests {
     #[test]
     fn concurrent_terminal_sessions_should_own_distinct_process_groups() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::concurrent_terminal_sessions_should_own_distinct_process_groups",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let size = PtySize {
             rows: 24,
@@ -1220,6 +1258,11 @@ mod tests {
     #[test]
     fn stubborn_process_group_should_receive_bounded_forced_shutdown() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::stubborn_process_group_should_receive_bounded_forced_shutdown",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
@@ -1272,6 +1315,11 @@ mod tests {
     #[test]
     fn interactive_foreground_process_group_should_be_forced_down_with_its_shell() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::interactive_foreground_process_group_should_be_forced_down_with_its_shell",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/zsh");
         command.args(["-f", "-i"]);
@@ -1321,6 +1369,11 @@ mod tests {
     #[test]
     fn interactive_background_process_group_should_be_forced_down_with_its_shell() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::interactive_background_process_group_should_be_forced_down_with_its_shell",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let readiness = env::temp_dir().join(format!(
             "spaceterm-background-pty-ready-{}",
@@ -1388,6 +1441,11 @@ mod tests {
     #[test]
     fn hup_handler_process_handoff_should_be_forced_down_with_its_shell() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::hup_handler_process_handoff_should_be_forced_down_with_its_shell",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let readiness = env::temp_dir().join(format!(
             "spaceterm-handoff-pty-ready-{}",
@@ -1399,6 +1457,19 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&readiness);
         let _ = std::fs::remove_file(&replacement_report);
+        let report_name = CString::new(replacement_report.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: report_name is a live NUL-terminated path to this test's private FIFO.
+        assert_eq!(unsafe { libc::mkfifo(report_name.as_ptr(), 0o600) }, 0);
+        let mut report_reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&replacement_report)
+            .unwrap();
+        // Keep the FIFO writable so poll waits for the handler's report instead of seeing EOF.
+        let report_writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement_report)
+            .unwrap();
         let mut command = CommandBuilder::new("/bin/zsh");
         command.args(["-f", "-i"]);
         command.cwd(&working_directory);
@@ -1407,7 +1478,7 @@ mod tests {
         command.env("SPACETERM_HANDOFF_CHILD", &replacement_report);
         command.env(
             "SPACETERM_HANDOFF_TRAP",
-            "trap '' HUP; sleep 30 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exit 0",
+            "trap '' HUP; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exec /usr/bin/true",
         );
         let (mut pty, terminator) = spawn_command_in_pty(
             PtySize {
@@ -1422,30 +1493,95 @@ mod tests {
         let mut reader = BufReader::new(pty.take_reader().unwrap());
         read_output_marker(&mut reader, b"SPACETERM_READY");
         pty.write_all(
-            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; : > \"$SPACETERM_HANDOFF_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
+            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; sleep 30 & : > \"$SPACETERM_HANDOFF_READY\"; wait' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
         )
         .unwrap();
         pty.flush().unwrap();
 
         let (leader, _) = read_process_report(&mut reader, "SPACETERM_HANDOFF");
         std::fs::remove_file(&readiness).unwrap();
+        // Observe the group leader before HUP so its exit cannot precede registration.
+        // SAFETY: kqueue has no input pointers and returns an owned descriptor on success.
+        let queue = unsafe { libc::kqueue() };
+        assert!(queue >= 0);
+        // SAFETY: the successful kqueue descriptor has exactly one owner.
+        let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+        let mut exit_event = libc::kevent {
+            ident: leader as usize,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: queue and the initialized change remain live for this registration call.
+        assert_eq!(
+            unsafe {
+                libc::kevent(
+                    queue.as_raw_fd(),
+                    &exit_event,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // Establish the handoff before asking the PTY owner to shut down its session.
+        // SAFETY: leader identifies the live background shell observed just above.
+        assert_eq!(unsafe { libc::kill(leader, libc::SIGHUP) }, 0);
+        let mut event = libc::pollfd {
+            fd: report_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // The handler's FIFO write completes the handoff before shutdown scans the session.
+        // SAFETY: event points to one initialized pollfd and report_reader remains open.
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 2_000) }, 1);
+        assert_ne!(event.revents & libc::POLLIN, 0);
+        let mut report = String::new();
+        BufReader::new(&mut report_reader)
+            .read_line(&mut report)
+            .unwrap();
+        let replacement = report.trim().parse::<i32>().unwrap();
+        drop(report_writer);
+        drop(report_reader);
+        std::fs::remove_file(&replacement_report).unwrap();
+        let timeout = libc::timespec {
+            tv_sec: 2,
+            tv_nsec: 0,
+        };
+        // SAFETY: queue is open and exit_event is writable for one returned event.
+        assert_eq!(
+            unsafe {
+                libc::kevent(
+                    queue.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &mut exit_event,
+                    1,
+                    &timeout,
+                )
+            },
+            1,
+            "background group leader did not exit after HUP"
+        );
+        let exited_process = exit_event.ident;
+        let exit_flags = exit_event.fflags;
+        assert_eq!(exited_process, leader as usize);
+        assert_ne!(exit_flags & libc::NOTE_EXIT, 0);
+        terminator.terminate().unwrap();
         let drain = thread::spawn(move || {
             let mut sink = io::sink();
             io::copy(&mut reader, &mut sink)
         });
 
-        terminator.terminate().unwrap();
         pty.cleanup_child();
         assert!(pty.termination.forced.load(Ordering::Acquire));
         drop(pty);
         drain.join().unwrap().unwrap();
 
-        let replacement = std::fs::read_to_string(&replacement_report)
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
-        std::fs::remove_file(&replacement_report).unwrap();
         assert_ne!(replacement, leader);
         assert_process_disappears(leader);
         assert_process_disappears(replacement);
@@ -1454,6 +1590,11 @@ mod tests {
     #[test]
     fn close_after_session_leader_exit_should_terminate_surviving_group() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::close_after_session_leader_exit_should_terminate_surviving_group",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
@@ -1511,6 +1652,11 @@ mod tests {
     #[test]
     fn responsive_process_group_should_finish_during_the_grace_window() {
         let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "platform::macos_pty::tests::responsive_process_group_should_finish_during_the_grace_window",
+        ) {
+            return;
+        }
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
