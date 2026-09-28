@@ -3,15 +3,11 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, SharedString, Subscription, Window, div,
+    App, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, SharedString, Subscription, Window, div,
 };
 
-use crate::{FieldState, TextInputVariant};
-
-/// Keys GPUI reports when a modifier is pressed and released on its own. A modifier alone never
-/// completes a shortcut, so recording keeps waiting for the key it modifies.
-const MODIFIER_KEYS: [&str; 5] = ["shift", "control", "alt", "platform", "function"];
+use crate::{CapturedKey, ChordCapture, FieldState, TextInputVariant};
 
 /// The field's width in multiples of its own height.
 ///
@@ -42,10 +38,9 @@ pub enum ShortcutRecorderEvent {
 
 /// One recording in progress, owned so that ending it releases the keystroke interception.
 struct Recording {
-    window: AnyWindowHandle,
     held: Modifiers,
     rejected: bool,
-    _interceptor: Subscription,
+    _capture: ChordCapture,
 }
 
 /// How the field's text is painted.
@@ -196,21 +191,11 @@ impl ShortcutRecorder {
             return;
         }
         self.focus_handle.focus(window, cx);
-        let owner = cx.weak_entity();
-        let recording_window = window.window_handle();
-        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
-            if window.window_handle() != recording_window {
-                return;
-            }
-            let _ = owner.update(cx, |recorder, cx| {
-                recorder.intercept(&event.keystroke, window, cx);
-            });
-        });
+        let capture = ChordCapture::start(self.focus_handle.clone(), window, cx, Self::captured);
         self.recording = Some(Recording {
-            window: recording_window,
             held: window.modifiers(),
             rejected: false,
-            _interceptor: interceptor,
+            _capture: capture,
         });
         cx.notify();
     }
@@ -220,47 +205,27 @@ impl ShortcutRecorder {
         self.finish(ShortcutRecorderEvent::Cancelled, cx);
     }
 
-    fn intercept(&mut self, keystroke: &Keystroke, window: &Window, cx: &mut Context<Self>) {
+    fn captured(&mut self, key: CapturedKey, _: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = match key {
+            CapturedKey::Chord(keystroke) => keystroke,
+            CapturedKey::Escape | CapturedKey::Traverse | CapturedKey::FocusLost => {
+                self.cancel_recording(cx);
+                return;
+            }
+            CapturedKey::Erase => {
+                self.finish(ShortcutRecorderEvent::Cleared, cx);
+                return;
+            }
+        };
         let Some(recording) = self.recording.as_mut() else {
             return;
         };
-        if recording.window != window.window_handle() {
-            return;
-        }
-        if !self.focus_handle.is_focused(window) {
-            // Focus moved without a blur reaching this field, for example to another window's
-            // sheet. The keystroke belongs to wherever focus went.
-            self.cancel_recording(cx);
-            return;
-        }
-        let key = keystroke.key.as_str();
-        if MODIFIER_KEYS.contains(&key) {
-            return;
-        }
-        cx.stop_propagation();
-        let modifiers = keystroke.modifiers;
-        let bare = !modifiers.modified();
-        match key {
-            "escape" if bare => self.cancel_recording(cx),
-            "backspace" | "delete" if bare => self.finish(ShortcutRecorderEvent::Cleared, cx),
-            // Tab keeps meaning traversal, so a keyboard reader can always leave the field.
-            "tab" if bare || modifiers == Modifiers::shift() => {
-                self.cancel_recording(cx);
-                cx.propagate();
-            }
-            _ => {
-                let keystroke = Keystroke {
-                    key_char: None,
-                    ..keystroke.clone()
-                };
-                match (self.validator)(&keystroke, cx) {
-                    Ok(()) => self.finish(ShortcutRecorderEvent::Recorded(keystroke), cx),
-                    Err(reason) => {
-                        recording.rejected = true;
-                        cx.emit(ShortcutRecorderEvent::Rejected(reason));
-                        cx.notify();
-                    }
-                }
+        match (self.validator)(&keystroke, cx) {
+            Ok(()) => self.finish(ShortcutRecorderEvent::Recorded(keystroke), cx),
+            Err(reason) => {
+                recording.rejected = true;
+                cx.emit(ShortcutRecorderEvent::Rejected(reason));
+                cx.notify();
             }
         }
     }

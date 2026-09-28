@@ -8,6 +8,7 @@ mod appearance;
 mod button;
 #[cfg(test)]
 mod catalog_tests;
+mod chord_capture;
 mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
@@ -49,6 +50,7 @@ pub use button::{
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
     ButtonVariants, IconButton,
 };
+pub use chord_capture::{CapturedKey, ChordCapture};
 pub use combo_box::{
     ComboBox, ComboBoxAcceptance, ComboBoxAccessory, ComboBoxActivationSource, ComboBoxCloseReason,
     ComboBoxCommand, ComboBoxCommandActivation, ComboBoxCopy, ComboBoxHandle, ComboBoxItem,
@@ -112,7 +114,9 @@ pub use resize_handle::{
     ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme, ResizeInputSource,
     ResizeInteractionId,
 };
-pub use search_field::{SearchField, SearchFieldMetrics, SearchFieldPaint, SearchFieldTheme};
+pub use search_field::{
+    SearchField, SearchFieldMetrics, SearchFieldPaint, SearchFieldTheme, SearchFieldToggle,
+};
 pub use segmented_control::{
     MAXIMUM_SEGMENTED_OPTIONS, SegmentedActivationSource, SegmentedBuildError, SegmentedChange,
     SegmentedControl, SegmentedControlTheme, SegmentedMetrics, SegmentedOption, SegmentedPaint,

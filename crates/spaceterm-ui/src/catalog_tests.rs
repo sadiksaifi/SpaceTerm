@@ -94,7 +94,13 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
         segmented_control_theme(surface, text, muted, accent),
         SearchFieldTheme::new(
             FieldFrameTheme::new(surface, muted, accent, accent, surface, muted),
-            SearchFieldPaint::new(muted, button_variant, accent),
+            SearchFieldPaint::new(
+                muted,
+                button_variant,
+                accent,
+                button_variant,
+                button_variant,
+            ),
             SearchFieldMetrics::new(px(28.0)),
         ),
         menu,

@@ -51,13 +51,10 @@ fn install_theme(cx: &mut TestAppContext) {
         TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
     ));
     let button_paint = ButtonPaint::new(surface, text, rgba(0x00000000));
+    let buttons = ButtonVariantStyle::new(button_paint, button_paint, button_paint, button_paint);
     cx.set_global(SearchFieldTheme::new(
         FieldFrameTheme::new(surface, muted, accent, accent, surface, muted),
-        SearchFieldPaint::new(
-            muted,
-            ButtonVariantStyle::new(button_paint, button_paint, button_paint, button_paint),
-            accent,
-        ),
+        SearchFieldPaint::new(muted, buttons, accent, buttons, buttons),
         SearchFieldMetrics::new(px(28.0)),
     ));
 }
