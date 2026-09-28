@@ -53,7 +53,7 @@ pub(super) enum ExtensionAction {
     Installing,
     /// Installed at an older version.
     Update,
-    /// Installed at the listed version.
+    /// At least one theme remains at the listed version; reinstalling restores removed themes.
     Installed,
 }
 
@@ -522,6 +522,7 @@ fn render_extension_row(
                 gpui_color(colors.text_secondary),
             ))
             .child("Installed")
+            .child(button("Reinstall"))
             .into_any_element(),
     };
     let row_selector = format!("settings-zed-extension-{}", extension.id);

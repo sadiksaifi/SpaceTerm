@@ -2927,10 +2927,10 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
         store_status(&window, cx).as_deref(),
         Some("Installed 2 themes from Sample Themes.")
     );
-    assert_eq!(
-        cx.debug_bounds("settings-zed-extension-action-sample-themes"),
-        None,
-        "an extension at the listed version has nothing to get"
+    assert!(
+        cx.debug_bounds("settings-zed-extension-action-sample-themes")
+            .is_some(),
+        "the listed version can be reinstalled"
     );
     assert!(
         cx.debug_bounds("settings-zed-extension-installed-sample-themes")
@@ -2988,6 +2988,64 @@ fn removing_an_extension_from_a_tile_removes_all_of_its_themes(cx: &mut TestAppC
         SettingsDocument::default().preferences.terminal.themes.dark
     );
     assert!(cx.debug_bounds(tile).is_none());
+}
+
+#[gpui::test]
+fn reinstalling_an_extension_restores_a_removed_theme_without_changing_selection(
+    cx: &mut TestAppContext,
+) {
+    let transport = sample_registry();
+    let (window, _harness, cx) = open_settings_with_registry(cx, transport.clone());
+    select_section(SettingsSectionId::Themes, cx);
+    open_theme_store(&window, cx);
+    click("settings-zed-extension-action-sample-themes", cx);
+    click("modal-action-settings-theme-store-done", cx);
+    let themes = document_of(&window, cx).terminal_themes;
+    let dark = themes
+        .iter()
+        .find(|theme| theme.name == "Sample Dark")
+        .unwrap()
+        .id
+        .clone();
+    let light = themes
+        .iter()
+        .find(|theme| theme.name == "Sample Light")
+        .unwrap()
+        .id
+        .clone();
+    window.update(cx, |settings, cx| {
+        settings.set_theme(Appearance::Dark, dark.clone(), cx);
+        settings.set_appearance_mode(AppearanceMode::Light, cx);
+    });
+    settle(cx);
+
+    right_click(
+        leaked_owned(format!("settings-theme-tile-{}", light.as_str())),
+        cx,
+    );
+    click(
+        leaked_owned(format!("settings-theme-tile-{}-remove", light.as_str())),
+        cx,
+    );
+    click("modal-action-settings-remove-theme-confirm", cx);
+    assert_eq!(installed_count(&window, cx), 1);
+    let preferences = document_of(&window, cx).preferences;
+    assert_eq!(preferences.terminal.themes.dark, dark);
+
+    open_theme_store(&window, cx);
+    click("settings-zed-extension-action-sample-themes", cx);
+
+    let restored = document_of(&window, cx);
+    assert_eq!(restored.terminal_themes, themes);
+    assert_eq!(restored.preferences, preferences);
+    assert_eq!(
+        transport.requests(),
+        [
+            REGISTRY_LISTING,
+            "https://api.zed.dev/extensions/sample-themes/1.0.0/download",
+            "https://api.zed.dev/extensions/sample-themes/1.0.0/download",
+        ]
+    );
 }
 
 #[gpui::test]
