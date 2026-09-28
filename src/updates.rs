@@ -705,6 +705,9 @@ pub(crate) fn prepare_before_quit(cx: &mut App, resume: ResumeQuit) -> bool {
         return false;
     };
     service.0.update(cx, |updates, cx| {
+        // Quit is authorized. Neither updater cleanup nor a timeout may resume startup.
+        updates.resume_launch = None;
+        updates._launch_timeout = None;
         if !updates.model.cycle_active || updates.model.install_authorized {
             return false;
         }

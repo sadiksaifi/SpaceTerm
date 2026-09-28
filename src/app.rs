@@ -1314,6 +1314,71 @@ mod runtime_tests {
     }
 
     #[gpui::test]
+    fn quitting_during_startup_check_does_not_open_a_workspace(cx: &mut gpui::TestAppContext) {
+        quit_during_startup_update(cx, false);
+    }
+
+    #[gpui::test]
+    fn quitting_during_startup_download_retires_the_launch_timeout(cx: &mut gpui::TestAppContext) {
+        quit_during_startup_update(cx, true);
+    }
+
+    fn quit_during_startup_update(
+        cx: &mut gpui::TestAppContext,
+        delayed_download_cancellation: bool,
+    ) {
+        use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
+        adapters.updates = updater.clone();
+        adapters.application_quit = quit.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            let service = cx.global::<UpdateService>().0.clone();
+            let resumed_host = host.clone();
+            service.update(cx, |updates, cx| {
+                updates.begin_launch(
+                    Rc::new(move |cx| {
+                        open_initial_workspace(cx, &resumed_host).unwrap();
+                    }),
+                    cx,
+                );
+            });
+        });
+        if delayed_download_cancellation {
+            updater.emit(UpdateEvent::ReleaseMetadata {
+                published_at: crate::updates::now() - 2 * crate::updates::policy::DAY,
+                prepared: false,
+            });
+            updater.emit(UpdateEvent::Available("0.1.1".into()));
+        }
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert_eq!(updater.cancellations.get(), 1);
+        assert_eq!(quit.confirmations(), 0);
+        if delayed_download_cancellation {
+            assert_eq!(updater.downloads.get(), 1);
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(31));
+            cx.run_until_parked();
+            assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+            // A launch view that fails to open must not revive startup during quit either.
+            cx.update(ApplicationUpdates::release_launch);
+        }
+        updater.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 1);
+    }
+
+    #[gpui::test]
     fn startup_installs_menu_with_shortcuts_before_reading_settings(cx: &mut gpui::TestAppContext) {
         use crate::platform::application_menu::ApplicationMenuError;
         use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
