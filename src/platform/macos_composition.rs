@@ -166,6 +166,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
+            updates: Rc::new(super::macos_updates::MacosUpdates::new()),
             selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),

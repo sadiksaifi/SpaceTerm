@@ -143,6 +143,7 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
+    crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
@@ -317,6 +318,15 @@ impl ApplicationQuitSnapshot {
 
 impl ApplicationQuitCoordinator {
     fn request(self: &Rc<Self>, cx: &mut App) -> ApplicationQuitDecision {
+        let coordinator = Rc::clone(self);
+        if crate::updates::cancel_before_quit(
+            cx,
+            Rc::new(move |cx| {
+                coordinator.request(cx);
+            }),
+        ) {
+            return ApplicationQuitDecision::Cancel;
+        }
         if *self.state.borrow() != ApplicationQuitCoordinatorState::Idle {
             return ApplicationQuitDecision::Cancel;
         }
@@ -751,6 +761,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 /// Application-scoped capabilities shared by every Operating-System Window.
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
+    pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
@@ -895,6 +906,7 @@ fn start_application(
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     cx.set_global(host.window_frame);
+    crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
@@ -1001,6 +1013,7 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
             adapters: ApplicationCapabilities {
+                updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 selected_files: None,
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),

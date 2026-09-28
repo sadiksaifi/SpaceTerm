@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jdx/mise-action@v4
+      - name: Validate the release tag
+        id: release
+        run: mise run release:validate
+      - name: Install Xcode Metal tools
+        run: mise run deps:metal:macos
+      - name: Validate
+        run: mise run validate:macos
+      - name: Reclaim validation artifacts before packaging
+        run: mise run artifacts:clean
+      - name: Build and verify Apple Silicon package
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: mise run release:macos:package "$RELEASE_TAG"
+      - name: Sign and verify update assets
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: mise run release:macos:assets "$RELEASE_TAG"
+      - name: Publish complete GitHub release
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: mise run release:publish "$RELEASE_TAG"

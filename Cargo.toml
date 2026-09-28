@@ -1,6 +1,6 @@
 [package]
 name = "spaceterm"
-version = "0.0.0"
+publish = false
 edition = "2024"
 
 [package.metadata.packager]
@@ -19,7 +19,7 @@ resources = [
 ]
 
 [package.metadata.packager.macos]
-minimum-system-version = "11.0"
+minimum-system-version = "26.0"
 signing-identity = "-"
 info-plist-path = "target/package-macos/Info.plist"
 entitlements = "packaging/macos/Entitlements.plist"

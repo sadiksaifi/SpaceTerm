@@ -41,4 +41,3 @@ __pycache__/
 # others
 *.swp
 vendor
-.cargo/config.toml

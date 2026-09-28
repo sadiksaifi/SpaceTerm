@@ -8,8 +8,8 @@ use libghostty_vt::terminal::{
 pub(crate) const TERM_FALLBACK: &str = "xterm-256color";
 pub(crate) const TERM_NAME: &str = "xterm-spaceterm";
 pub(crate) const COMPATIBILITY_PROGRAM_NAME: &str = "ghostty";
-pub(crate) const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const XTVERSION: &str = concat!("SpaceTerm ", env!("CARGO_PKG_VERSION"));
+pub(crate) const PROGRAM_VERSION: &str = env!("SPACETERM_VERSION");
+pub(crate) const XTVERSION: &str = concat!("SpaceTerm ", env!("SPACETERM_VERSION"));
 pub(crate) const COLORTERM: &str = "truecolor";
 
 const MAX_XTGETTCAP_REQUEST: usize = 2_048;

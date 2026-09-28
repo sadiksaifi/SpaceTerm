@@ -8,9 +8,6 @@ readonly APP_NAME="SpaceTerm"
 readonly BINARY_NAME="spaceterm"
 readonly PACKAGER_VERSION="0.11.8"
 readonly MINIMUM_XCODE_MAJOR="26"
-readonly ARM_TARGET="aarch64-apple-darwin"
-readonly INTEL_TARGET="x86_64-apple-darwin"
-readonly UNIVERSAL_TARGET="universal-apple-darwin"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
@@ -31,19 +28,17 @@ readonly STAGED_ICON="$PACKAGE_STAGE_DIR/$APP_NAME.icns"
 readonly STAGED_ASSET_CATALOG="$PACKAGE_STAGE_DIR/Assets.car"
 readonly STAGED_TERMINFO="$PACKAGE_STAGE_DIR/terminfo"
 
-UNIVERSAL=0
-BUILD_NUMBER="1"
+RELEASE_TAG=""
 TEMP_ROOT=""
 
 usage() {
     cat <<EOF
-Usage: $(basename -- "$0") [--universal] [--build-number NUMBER]
+Usage: $(basename -- "$0") [--release TAG]
 
 Build and package SpaceTerm for macOS with cargo-packager.
 
-  --universal  Build a universal arm64 + x86_64 application.
-  --build-number NUMBER
-               Set CFBundleVersion (default: 1).
+  --release TAG
+               Package an annotated arm64 release tag with in-app updates.
   -h, --help   Show this help.
 EOF
 }
@@ -87,16 +82,6 @@ require_xcode() {
         || die "Xcode assetutil is required to verify $APP_NAME.icon"
 }
 
-require_universal_targets() {
-    local target
-    local installed_targets
-    installed_targets="$(rustup target list --installed)"
-    for target in "$ARM_TARGET" "$INTEL_TARGET"; do
-        grep -Fxq "$target" <<<"$installed_targets" \
-            || die "missing Rust target: $target; install both with: rustup target add $ARM_TARGET $INTEL_TARGET"
-    done
-}
-
 build_native_binary() {
     local output="$1"
     local binary="$BUILD_TARGET_DIR/release/$BINARY_NAME"
@@ -111,31 +96,12 @@ build_native_binary() {
     fi
 }
 
-build_universal_binary() {
-    local output="$1"
-    local arm_binary="$BUILD_TARGET_DIR/$ARM_TARGET/release/$BINARY_NAME"
-    local intel_binary="$BUILD_TARGET_DIR/$INTEL_TARGET/release/$BINARY_NAME"
-
-    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release --locked \
-        --manifest-path "$REPO_ROOT/Cargo.toml" --target "$ARM_TARGET"
-    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release --locked \
-        --manifest-path "$REPO_ROOT/Cargo.toml" --target "$INTEL_TARGET"
-    [[ -x "$arm_binary" ]] || die "arm64 release binary was not produced: $arm_binary"
-    [[ -x "$intel_binary" ]] || die "x86_64 release binary was not produced: $intel_binary"
-
-    mkdir -p -- "$(dirname -- "$output")"
-    lipo -create "$arm_binary" "$intel_binary" -output "$output"
-    chmod 0755 "$output"
-    lipo -verify_arch arm64 x86_64 "$output" \
-        || die "failed to create a universal arm64 + x86_64 executable"
-}
-
 compile_icon() {
     echo "Compiling layered $APP_NAME.icon"
     xcrun actool "$ICON_SOURCE" \
         --compile "$PACKAGE_STAGE_DIR" \
         --platform macosx \
-        --minimum-deployment-target 11.0 \
+        --minimum-deployment-target 26.0 \
         --app-icon "$APP_NAME" \
         --output-partial-info-plist "$ICON_PARTIAL_PLIST" \
         --enable-on-demand-resources NO \
@@ -158,19 +124,16 @@ prepare_info_plist() {
         || die "actool emitted unexpected icon metadata: file=$icon_file name=$icon_name"
     plutil -replace CFBundleIconFile -string "$icon_file" "$STAGED_INFO_PLIST"
     plutil -replace CFBundleIconName -string "$icon_name" "$STAGED_INFO_PLIST"
-    plutil -replace CFBundleShortVersionString -string "$version" "$STAGED_INFO_PLIST"
-    plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$STAGED_INFO_PLIST"
+    plutil -insert CFBundleShortVersionString -string "$version" "$STAGED_INFO_PLIST"
+    plutil -insert CFBundleVersion -string "$version" "$STAGED_INFO_PLIST"
     plutil -lint "$STAGED_INFO_PLIST" >/dev/null
 }
 
 while (( $# > 0 )); do
     case "$1" in
-        --universal)
-            UNIVERSAL=1
-            ;;
-        --build-number)
-            (( $# >= 2 )) || die "--build-number requires a value"
-            BUILD_NUMBER="$2"
+        --release)
+            (( $# >= 2 )) || die "--release requires an annotated release tag"
+            RELEASE_TAG="$2"
             shift
             ;;
         -h|--help)
@@ -204,22 +167,23 @@ require_xcode
 [[ -f "$TERMINFO_SOURCE" ]] || die "missing terminfo source: $TERMINFO_SOURCE"
 [[ -f "$THIRD_PARTY_NOTICES_SOURCE" ]] \
     || die "missing third-party notices: $THIRD_PARTY_NOTICES_SOURCE"
-if (( UNIVERSAL )); then
-    require_command rustup
-    require_universal_targets
-fi
+[[ "$(uname -m)" == "arm64" ]] || die "SpaceTerm supports Apple Silicon Macs only"
+[[ "$(rustc -vV | awk '/^host:/ { print $2 }')" == "aarch64-apple-darwin" ]] \
+    || die "an Apple Silicon Rust toolchain is required"
 
-PACKAGE_ID="$(cargo pkgid --manifest-path "$REPO_ROOT/Cargo.toml" --package "$BINARY_NAME")"
-readonly PACKAGE_ID
-PACKAGE_VERSION="${PACKAGE_ID##*@}"
-readonly PACKAGE_VERSION
-VERSION="${PACKAGE_VERSION%%[-+]*}"
+unset SPACETERM_RELEASE_TAG SPACETERM_SPARKLE_DIR
+export MACOSX_DEPLOYMENT_TARGET=26.0
+if [[ -n "$RELEASE_TAG" ]]; then
+    VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
+    export SPACETERM_RELEASE_TAG="$RELEASE_TAG"
+    SPACETERM_SPARKLE_DIR="$(python3 "$SCRIPT_DIR/prepare-sparkle-macos.py")"
+    export SPACETERM_SPARKLE_DIR
+else
+    VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --field bundle_version)"
+fi
 readonly VERSION
-[[ -n "$VERSION" && "$VERSION" =~ ^[0-9]+([.][0-9]+){2}$ ]] \
-    || die "Cargo package version must start with a three-component numeric version, got: $PACKAGE_VERSION"
-[[ "$BUILD_NUMBER" =~ ^[0-9]+([.][0-9]+){0,2}$ ]] \
-    || die "build number must contain one to three numeric components, got: $BUILD_NUMBER"
-readonly BUILD_NUMBER
+PACKAGE_VERSION="$VERSION"
+readonly PACKAGE_VERSION
 
 mkdir -p -- "$DIST_DIR"
 rm -rf -- "$PACKAGE_STAGE_DIR"
@@ -231,21 +195,15 @@ prepare_info_plist "$VERSION"
 echo "Compiling xterm-spaceterm terminfo"
 tic -x -o "$STAGED_TERMINFO" "$TERMINFO_SOURCE"
 
-if (( UNIVERSAL )); then
-    echo "Building universal release executable (arm64 + x86_64)"
-    build_universal_binary "$BUILD_TARGET_DIR/$UNIVERSAL_TARGET/release/$APP_NAME"
-    DMG_ARCH="universal"
-else
-    HOST_TARGET="$(rustc -vV | awk '/^host:/ { print $2 }')"
-    case "$HOST_TARGET" in
-        aarch64-apple-darwin) DMG_ARCH="aarch64" ;;
-        x86_64-apple-darwin) DMG_ARCH="x64" ;;
-        *) die "unsupported native macOS Rust host target: $HOST_TARGET" ;;
-    esac
-    echo "Building native release executable"
-    build_native_binary "$BUILD_TARGET_DIR/release/$APP_NAME"
+echo "Building Apple Silicon release executable"
+build_native_binary "$BUILD_TARGET_DIR/release/$APP_NAME"
+readonly DMG_ARCH="aarch64"
+readonly BINARIES_DIR="$BUILD_TARGET_DIR/release"
+METADATA_ARGS=(--version "$VERSION" --binaries "$BINARIES_DIR")
+if [[ -n "${SPACETERM_SPARKLE_DIR:-}" ]]; then
+    METADATA_ARGS+=(--sparkle "$SPACETERM_SPARKLE_DIR")
 fi
-readonly DMG_ARCH
+python3 "$SCRIPT_DIR/package-metadata-macos.py" "${METADATA_ARGS[@]}"
 
 TEMP_ROOT="$(mktemp -d "$DIST_DIR/.package.XXXXXX")"
 readonly TEMP_ROOT
@@ -254,11 +212,7 @@ readonly PACKAGER_OUTPUT_DIR="$TEMP_ROOT/output"
 mkdir -p -- "$PACKAGER_OUTPUT_DIR"
 
 echo "Packaging $APP_NAME.app and $APP_NAME.dmg with cargo-packager $PACKAGER_VERSION"
-if (( UNIVERSAL )); then
-    CI="${CI:-true}" cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR" --target "$UNIVERSAL_TARGET"
-else
-    CI="${CI:-true}" cargo packager --release --out-dir "$PACKAGER_OUTPUT_DIR"
-fi
+CI="${CI:-true}" cargo packager --config "$(cat "$PACKAGE_STAGE_DIR/packager.json")" --out-dir "$PACKAGER_OUTPUT_DIR"
 
 readonly STAGED_APP="$PACKAGER_OUTPUT_DIR/$APP_NAME.app"
 readonly PACKAGER_DMG="$PACKAGER_OUTPUT_DIR/${APP_NAME}_${PACKAGE_VERSION}_${DMG_ARCH}.dmg"
@@ -268,8 +222,8 @@ readonly STAGED_DMG="$TEMP_ROOT/$APP_NAME.dmg"
 mv "$PACKAGER_DMG" "$STAGED_DMG"
 
 VERIFY_ARGS=(--app "$STAGED_APP" --dmg "$STAGED_DMG")
-if (( UNIVERSAL )); then
-    VERIFY_ARGS+=(--universal)
+if [[ -n "$RELEASE_TAG" ]]; then
+    VERIFY_ARGS+=(--release "$RELEASE_TAG")
 fi
 "$SCRIPT_DIR/verify-macos-package.sh" "${VERIFY_ARGS[@]}"
 

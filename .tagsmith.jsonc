@@ -1,0 +1,16 @@
+{
+  "$schema": "https://tagsmith.site/schema/v1.json",
+  "configVersion": 1,
+  "git": { "remote": "origin", "baseBranch": "main" },
+  "defaults": {
+    "tagPattern": "v{version}",
+    "tagMessage": "Release SpaceTerm {version}",
+    "initialVersion": "0.0.0"
+  },
+  "targets": {
+    "spaceterm": {
+      "path": ".",
+      "channels": [{ "name": "stable", "strategy": "stable" }]
+    }
+  }
+}

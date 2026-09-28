@@ -10,6 +10,7 @@ mod terminal;
 mod theme;
 mod theme_registry;
 mod ui;
+mod updates;
 
 mod desktop_profile;
 

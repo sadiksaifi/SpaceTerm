@@ -10,6 +10,9 @@ use crate::app::{
     ZoomActiveWindow,
 };
 use crate::application_identity::ApplicationIdentity;
+use crate::ui::updates::{
+    CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
+};
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
     ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
@@ -252,6 +255,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "Help",
         submenu: None,
+        item: RELEASE_NOTES_TITLE,
+        symbol: "doc.text",
+    },
+    MenuItemIcon {
+        menu: "Help",
+        submenu: None,
         item: "Export Terminal Diagnostics…",
         symbol: "doc.text.magnifyingglass",
     },
@@ -286,6 +295,7 @@ fn application_menu(application_name: &str) -> Menu {
         name: application_name.to_owned().into(),
         items: vec![
             MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
+            MenuItem::action(CHECK_FOR_UPDATES_TITLE, CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Settings…", crate::ui::settings_window::OpenSettings),
             MenuItem::separator(),
@@ -394,15 +404,17 @@ fn help_menu() -> Menu {
         name: "Help".into(),
         items: vec![
             MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
+            MenuItem::action(RELEASE_NOTES_TITLE, OpenReleaseNotes),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
         ],
     }
 }
 
-fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 6] {
+fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 7] {
     [
         (format!("About {application_name}"), "info.circle"),
+        (CHECK_FOR_UPDATES_TITLE.to_owned(), "arrow.down.circle"),
         ("Settings…".to_owned(), "gearshape"),
         (format!("Hide {application_name}"), "eye.slash"),
         ("Hide Others".to_owned(), "eye.slash.fill"),
@@ -457,7 +469,7 @@ mod native {
         application_name: &str,
     ) -> Result<(), ApplicationMenuError> {
         let name = NSString::from_str(application_name);
-        let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+        let version = NSString::from_str(env!("SPACETERM_VERSION"));
         let description = NSString::from_str(ABOUT_DESCRIPTION);
         let credits = NSMutableAttributedString::initWithString(
             NSMutableAttributedString::alloc(),
@@ -680,6 +692,7 @@ mod tests {
             labels(application_menu("SpaceTerm").owned()),
             [
                 "About SpaceTerm",
+                "Check for Updates…",
                 "|",
                 "Settings…",
                 "|",
@@ -700,6 +713,7 @@ mod tests {
             labels(application_menu("SpaceTerm Dev").owned()),
             [
                 "About SpaceTerm Dev",
+                "Check for Updates…",
                 "|",
                 "Settings…",
                 "|",
@@ -742,9 +756,14 @@ mod tests {
                 ["Minimize", "Zoom", "|", "Bring All to Front"]
                     .map(str::to_owned)
                     .to_vec(),
-                ["SpaceTerm Help", "|", "Export Terminal Diagnostics…"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                [
+                    "SpaceTerm Help",
+                    "Release Notes",
+                    "|",
+                    "Export Terminal Diagnostics…"
+                ]
+                .map(str::to_owned)
+                .to_vec(),
             )
         );
     }

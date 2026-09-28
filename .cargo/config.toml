@@ -1,0 +1,3 @@
+[env]
+# Apply the application minimum to every macOS source build and native dependency.
+MACOSX_DEPLOYMENT_TARGET = { value = "26.0", force = true }

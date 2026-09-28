@@ -76,6 +76,9 @@ STAGED_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
 readonly STAGED_BUNDLE
 mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS"
 install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
+BUNDLE_VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --field bundle_version)"
+plutil -insert CFBundleShortVersionString -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
+plutil -insert CFBundleVersion -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
 install -m 0755 "$EXECUTABLE" "$STAGED_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 codesign --force --sign - --timestamp=none "$STAGED_BUNDLE" >/dev/null
 

@@ -391,6 +391,7 @@ pub(crate) struct TabManager {
     sidebar_visible: bool,
     sidebar_width: Pixels,
     top_chrome_width: Pixels,
+    trailing_accessory: Option<gpui::AnyView>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
     hovered_tab: Option<TabId>,
@@ -475,6 +476,7 @@ impl TabManager {
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+            trailing_accessory: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             hovered_tab: None,
@@ -863,6 +865,24 @@ impl TabManager {
             self.sidebar_visible = visible;
             self.sidebar_width = sidebar_width;
             self.top_chrome_width = top_chrome_width;
+            cx.notify();
+        }
+    }
+
+    /// Places the Operating-System Window's own control at the trailing end of the Tab bar.
+    ///
+    /// The Workspace manager owns one per window and hands it to whichever Tab manager is active.
+    pub(crate) fn set_trailing_accessory(
+        &mut self,
+        accessory: Option<gpui::AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .trailing_accessory
+            .as_ref()
+            .map(gpui::AnyView::entity_id);
+        if current != accessory.as_ref().map(gpui::AnyView::entity_id) {
+            self.trailing_accessory = accessory;
             cx.notify();
         }
     }
@@ -1549,7 +1569,21 @@ impl TabManager {
                             });
                         }),
                     ),
-            );
+            )
+            .when_some(self.trailing_accessory.clone(), |content, accessory| {
+                // The Tabs give up room to the accessory rather than scrolling beneath it, and the
+                // space between them stays draggable. The accessory owns its own edge spacing, so
+                // an empty accessory reserves nothing.
+                content.child(div().flex_1().min_w_0()).child(
+                    div()
+                        .debug_selector(|| "tab-bar-trailing-accessory".to_owned())
+                        .flex_none()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(accessory),
+                )
+            });
 
         let drag_region = WindowDragRegion::new(
             "tab-bar-drag-region",

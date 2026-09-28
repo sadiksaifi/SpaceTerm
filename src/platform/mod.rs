@@ -12,6 +12,8 @@ mod macos_appearance;
 mod macos_quick_look_window;
 #[cfg(target_os = "macos")]
 mod macos_selected_file;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;

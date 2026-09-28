@@ -2,6 +2,7 @@
 idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
+node = "24.21.0"
 zig = "0.16.0"
 shellcheck = "0.11.0"
 python = "3.13.15"
@@ -153,6 +154,7 @@ description = "Test shared repository scripts"
 run = [
   "python3 scripts/test-gpui-local.py",
   "python3 scripts/test-gpui-bump.py",
+  "python3 scripts/test-release-version.py",
 ]
 
 [tasks."test:portable"]
@@ -192,7 +194,7 @@ run = '''
 set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
 '''
 
 [tasks."lint:diff"]
@@ -315,7 +317,7 @@ run = '''
 set -eu
 bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
 shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/prepare-sparkle-macos.py scripts/setup-update-key-macos.py scripts/package-metadata-macos.py scripts/release-artifacts-macos.py scripts/configure-update-secret-macos.py scripts/test-updater-macos.py
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
@@ -329,6 +331,7 @@ run = [
   { task = "fmt:check:macos" },
   { task = "test:macos" },
   { task = "lint:macos:scripts" },
+  { task = "test:macos:updater" },
 ]
 
 [tasks."bench:macos:resources"]
@@ -342,10 +345,7 @@ run = 'python3 scripts/measure-macos-terminal-resources.py "${usage_pid?}" --dur
 
 [tasks."package:macos"]
 description = "Build and verify the macOS app and disk image"
-usage = '''
-arg "[build_number]" help="Application build number" default="1"
-'''
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --build-number "${usage_build_number}"'
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh'
 
 [tasks."package:macos:install"]
 description = "Build, verify, and install the macOS app"
@@ -354,13 +354,6 @@ run = [
   "rm -rf -- /Applications/SpaceTerm.app",
   "/usr/bin/ditto dist/SpaceTerm.app /Applications/SpaceTerm.app",
 ]
-
-[tasks."package:macos:universal"]
-description = "Build universal macOS Apple Silicon and Intel artifacts"
-usage = '''
-arg "[build_number]" help="Application build number" default="1"
-'''
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --universal --build-number "${usage_build_number}"'
 
 [tasks."package:macos:verify"]
 description = "Verify existing macOS artifacts"
@@ -386,3 +379,66 @@ run = [
 [tasks."deps:metal:macos"]
 description = "Install Xcode's Metal compiler component for native GPUI builds"
 run = "xcodebuild -downloadComponent MetalToolchain"
+
+[tasks."test:release"]
+description = "Verify Git release provenance and generated update metadata"
+run = "python3 scripts/test-release-version.py"
+
+[tasks."release:targets"]
+description = "Validate Tagsmith release configuration"
+run = "npx --yes tagsmith@latest targets --json"
+
+[tasks."release:preview"]
+description = "Preview an annotated release tag without creating it"
+usage = '''
+arg "<version>" help="Stable SemVer to release"
+'''
+run = 'npx --yes tagsmith@latest tag --target spaceterm --channel stable --version "${usage_version}" --dry-run --json'
+
+[tasks."deps:macos:sparkle"]
+description = "Download and verify the pinned macOS updater"
+run = "python3 scripts/prepare-sparkle-macos.py"
+
+[tasks."release:macos:key"]
+description = "Prepare the update signing key in macOS Keychain"
+run = "python3 scripts/setup-update-key-macos.py"
+
+[tasks."check:macos:updater"]
+description = "Check the native updater and its Rust integration"
+run = '''
+export SPACETERM_SPARKLE_DIR="$(python3 scripts/prepare-sparkle-macos.py)"
+./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --all-targets --all-features --locked
+'''
+
+[tasks."release:macos:package"]
+description = "Package the annotated release tag for Apple Silicon"
+usage = '''
+arg "<tag>" help="Annotated stable release tag"
+'''
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --release "${usage_tag}"'
+
+[tasks."release:validate"]
+description = "Validate the GitHub Actions annotated release tag"
+run = 'npx --yes tagsmith@latest validate --tag "${GITHUB_REF_NAME:?}" --github-output'
+
+[tasks."release:macos:assets"]
+description = "Generate and verify signed GitHub update assets"
+usage = '''
+arg "<tag>" help="Annotated stable release tag"
+'''
+run = 'python3 scripts/release-artifacts-macos.py "${usage_tag}"'
+
+[tasks."release:publish"]
+description = "Upload assets to a draft, then publish the GitHub release"
+usage = '''
+arg "<tag>" help="Validated stable release tag"
+'''
+run = 'python3 scripts/publish-release.py "${usage_tag}"'
+
+[tasks."test:macos:updater"]
+description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
+run = "python3 scripts/test-updater-macos.py"
+
+[tasks."release:macos:configure-secret"]
+description = "Configure the GitHub Actions signing secret from macOS Keychain"
+run = "python3 scripts/configure-update-secret-macos.py"

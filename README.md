@@ -79,6 +79,33 @@ Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolc
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
 platform segment such as `:macos`.
 
+## Releases and updates
+
+Release DMGs are hosted in [GitHub Releases](https://github.com/sadiksaifi/SpaceTerm/releases)
+for Apple Silicon Macs running macOS 26.0 or later. This minimum also applies to development
+builds. Intel Macs are unsupported. Drag SpaceTerm into Applications before opening it.
+These builds use ad hoc signing. If macOS blocks the first launch, follow Apple's
+[Open Anyway instructions](https://support.apple.com/en-us/102445) in Privacy & Security.
+
+Installed releases check for updates after launch and daily while running. Update commands are
+available in the SpaceTerm menu. Updates are verified with the application's embedded public key;
+installation and restart require confirmation. Development builds do not update themselves.
+
+Releases are managed by [Tagsmith](https://tagsmith.site/).
+Use `npx tagsmith@latest` to create and validate release tags. The annotated Git tag supplies every
+release version after removing the `v` prefix; there is no Cargo version bump or separate build number.
+The first release tag is `v0.1.0`.
+
+Before the first release, run `mise run release:macos:key` to retain the signing key in macOS
+Keychain, then `mise run release:macos:configure-secret` to provision the repository's Actions
+secret. Keep a secure backup of that Keychain key: losing it requires users to install a new copy
+manually. Only the public key belongs in the repository.
+
+Run `mise run release:preview 0.1.0` on the intended clean commit to review the tag before creating
+it. Pushing an annotated release tag runs validation, creates and signs the arm64 package, and
+publishes the DMG, signed `appcast.xml`, and `SHA256SUMS` together. A published release is never
+overwritten; corrections require a new tag.
+
 Run `mise run validate:macos` for the full macOS validation suite, including SpaceTerm's patched
 terminal library. Both `validate:portable` and `validate` include GPUI scene-ordering tests.
 `validate` also requires the host renderer checks: Metal pixel tests and Blade compilation on
