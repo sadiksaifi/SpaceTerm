@@ -319,3 +319,6 @@ impl SettingsWindow {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests;

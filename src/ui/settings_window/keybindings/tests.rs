@@ -10,9 +10,9 @@ use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ui::appearance_runtime;
 
-use super::keybindings::ShortcutDescription;
-use super::test_support::MemoryStorage;
-use super::{SettingsSectionId, SettingsWindow};
+use super::super::test_support::MemoryStorage;
+use super::super::{SettingsSectionId, SettingsWindow};
+use super::ShortcutDescription;
 
 fn open_keybindings(
     document: SettingsDocument,

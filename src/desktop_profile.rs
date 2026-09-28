@@ -320,7 +320,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 mod tests {
     use super::*;
     use crate::ui::{NewWorkspace, SwitchWorkspace};
-    use gpui::{Action, KeyBinding};
+    use gpui::KeyBinding;
 
     #[gpui::test]
     fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
@@ -369,6 +369,7 @@ mod tests {
             .collect::<Vec<_>>();
         #[cfg(feature = "appearance-exerciser")]
         let expected = {
+            use gpui::Action as _;
             let mut expected = expected;
             expected.extend([
                 format!(

@@ -23,9 +23,6 @@ pub(crate) mod test_support;
 mod control_tests;
 
 #[cfg(test)]
-mod keybindings_tests;
-
-#[cfg(test)]
 mod microphone_tests;
 
 #[cfg(test)]
