@@ -83,6 +83,44 @@ Fuzzy search over Settings Row labels and keywords that reveals a matching Setti
 The application-scoped Light, Dark, or Auto choice selecting the built-in Application Chrome and
 the Terminal Theme slot of that appearance.
 
+**Malformed Settings**:
+A `settings.json` that SpaceTerm cannot read as a valid Settings Document, because it does not
+parse, fails validation, or exceeds the size limit. A storage failure is not Malformed Settings.
+
+**Settings Recovery**:
+Replacing Malformed Settings with default Settings while keeping the unreadable file unchanged as
+`settings.json.bak` beside it.
+
+## Keybindings
+
+**Command**:
+A SpaceTerm operation whose Shortcut a person can change, such as New Tab or Split Right. Standard
+application commands, such as Copy and Quit, are not Commands.
+
+**Shortcut**:
+One key chord: a key with any combination of the Control, Option, Shift, and Command modifiers.
+_Avoid_: Hotkey, key equivalent
+
+**Keybinding**:
+The Shortcut one Command resolves to, or Unassigned.
+
+**Unassigned**:
+The Keybinding of a Command that has no Shortcut.
+
+**Keymap**:
+Every Command's Keybinding: the host's default Shortcuts with the overrides retained in Settings
+applied. A Shortcut belongs to at most one Command.
+
+**Reserved Shortcut**:
+A Shortcut no Command can be assigned. It is Terminal Reserved or System Reserved.
+
+**Terminal Reserved**:
+A Shortcut that types into the terminal or that programs running in the terminal read, such as
+Control-C or Option-B.
+
+**System Reserved**:
+A Shortcut the Operating System or a standard application command owns, such as Command-Q.
+
 ## Updates
 
 **Update Deadline**:
