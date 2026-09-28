@@ -7,6 +7,7 @@ use serde::{
 
 use super::preferences::ResetTarget;
 use super::{Appearance, AppearancePreferences, TerminalTheme, ThemeCatalog, ThemeSlots};
+use crate::keybindings::KeybindingPreferences;
 
 const SETTINGS_SCHEMA_VERSION: u32 = 3;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
@@ -19,6 +20,8 @@ pub(crate) struct SettingsDocument {
     pub(crate) revision: u64,
     #[serde(default)]
     pub(crate) updates: crate::updates::policy::UpdatePreferences,
+    #[serde(default)]
+    pub(crate) keybindings: KeybindingPreferences,
     pub(crate) preferences: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
@@ -30,6 +33,7 @@ impl Default for SettingsDocument {
             schema_version: SETTINGS_SCHEMA_VERSION,
             revision: 0,
             updates: Default::default(),
+            keybindings: Default::default(),
             preferences: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
@@ -44,6 +48,9 @@ impl SettingsDocument {
         self.preferences
             .validate()
             .map_err(|_| SettingsDocumentError::InvalidPreferences)?;
+        self.keybindings
+            .validate()
+            .map_err(|_| SettingsDocumentError::InvalidKeybindings)?;
         let catalog = ThemeCatalog::from_terminal_themes(&self.terminal_themes)
             .map_err(|_| SettingsDocumentError::InvalidCatalog)?;
         validate_selection(&catalog, &self.preferences.terminal.themes)?;
@@ -70,6 +77,7 @@ impl SettingsDocument {
         let defaults = Self::default();
         self.preferences = defaults.preferences;
         self.updates = defaults.updates;
+        self.keybindings = defaults.keybindings;
         self.terminal_themes = defaults.terminal_themes;
     }
 }
@@ -229,6 +237,8 @@ pub(crate) enum SettingsDocumentError {
     UnsupportedVersion,
     #[error("appearance preferences are invalid")]
     InvalidPreferences,
+    #[error("keybinding preferences are invalid")]
+    InvalidKeybindings,
     #[error("appearance catalog is invalid")]
     InvalidCatalog,
     #[error("settings document cannot be serialized")]
