@@ -569,9 +569,6 @@
         },
         "toggle_sidebar_focus": {
           "$ref": "#/$defs/shortcutOverride"
-        },
-        "open_settings": {
-          "$ref": "#/$defs/shortcutOverride"
         }
       }
     },

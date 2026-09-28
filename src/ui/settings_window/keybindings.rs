@@ -293,6 +293,7 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
         SystemReservation::LogOut => "Log Out",
         SystemReservation::Screenshot => "screenshots",
         SystemReservation::Help => "Help",
+        SystemReservation::Settings => "Settings",
     }
 }
 

@@ -9,6 +9,7 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
         ("cmd-z", Undo),
         ("shift-cmd-z", Redo),
         ("cmd-a", SelectAll),
+        ("cmd-,", Settings),
         ("cmd-q", Quit),
         ("cmd-h", Hide),
         ("alt-cmd-h", HideOthers),
@@ -48,6 +49,22 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
 mod tests {
     use super::*;
     use crate::keybindings::{Command, KeybindingPreferences, Reservation};
+
+    #[test]
+    fn settings_keeps_its_standard_shortcut_and_no_command_can_take_it() {
+        let profile = crate::desktop_profile::default_keymap::profile(shortcuts()).unwrap();
+        let settings = Shortcut::parse("cmd-,").unwrap();
+
+        assert_eq!(
+            profile.check(&settings),
+            Err(Reservation::System(SystemReservation::Settings))
+        );
+        let mut preferences = KeybindingPreferences::default();
+        assert_eq!(
+            profile.assign(&mut preferences, Command::NewWorkspace, Some(settings)),
+            Err(Reservation::System(SystemReservation::Settings))
+        );
+    }
 
     #[test]
     fn system_reservations_allow_the_complete_default_profile() {

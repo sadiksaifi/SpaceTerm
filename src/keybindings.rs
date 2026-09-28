@@ -28,7 +28,6 @@ pub enum CommandGroup {
     Pane,
     Terminal,
     View,
-    Settings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +51,7 @@ macro_rules! commands {
         pub enum Command { $($command),+ }
 
         impl Command {
-            pub const ALL: [Self; 44] = [$(Self::$command),+];
+            pub const ALL: [Self; 43] = [$(Self::$command),+];
             pub const fn id(self) -> &'static str {
                 match self { $(Self::$command => $id),+ }
             }
@@ -119,7 +118,6 @@ commands! {
     ResetTerminalFontSize => ("reset_terminal_font_size", "Reset Font Size", View, Workspace, crate::ui::ResetTerminalFontSize),
     ToggleSidebar => ("toggle_sidebar", "Toggle Sidebar", View, Workspace, crate::ui::ToggleSidebar),
     ToggleSidebarFocus => ("toggle_sidebar_focus", "Toggle Sidebar Focus", View, Workspace, crate::ui::ToggleSidebarFocus),
-    OpenSettings => ("open_settings", "Settings", Settings, Application, crate::ui::settings_window::OpenSettings),
 }
 
 impl Command {

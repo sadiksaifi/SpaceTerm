@@ -136,7 +136,6 @@ cmd--	Some(Identifier("TerminalPane"))	terminal::DecreaseTerminalFontSize
 cmd-0	Some(Identifier("TerminalPane"))	terminal::ResetTerminalFontSize
 cmd-b	Some(Identifier("TerminalPane"))	terminal::ToggleSidebar
 cmd-shift-e	Some(Identifier("TerminalPane"))	terminal::ToggleSidebarFocus
-cmd-,	None	spaceterm::OpenSettings
 shift-enter	Some(Identifier("TerminalFind"))	terminal::FindPrevious
 escape	Some(Identifier("TerminalFind"))	terminal::CloseTerminalFind
 tab	Some(Identifier("TerminalFind"))	terminal::FocusNextTerminalFindControl
@@ -148,6 +147,7 @@ cmd-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
 escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch
 cmd-c	Some(Identifier("TerminalPane"))	spaceterm_text_input::Copy
 cmd-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
+cmd-,	None	spaceterm::OpenSettings
 cmd-q	None	spaceterm::QuitApplication
 cmd-h	None	spaceterm::HideApplication
 alt-cmd-h	None	spaceterm::HideOtherApplications

@@ -79,7 +79,7 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
             previous_group = command.group();
         }
     }
-    assert_eq!(Command::ALL.len(), 44);
+    assert_eq!(Command::ALL.len(), 43);
     assert_eq!(Command::NewWorkspace.id(), "new_workspace");
     assert_eq!(Command::CloseTab.id(), "close_tab");
     assert_eq!(Command::from_id("NewWorkspace"), None);
@@ -108,7 +108,6 @@ fn command_scopes_and_actions_preserve_the_existing_binding_contract() {
         Command::CreateTab,
         Command::ClosePane,
         Command::CloseTab,
-        Command::OpenSettings,
     ];
     for command in Command::ALL {
         let application = application_commands.contains(&command);

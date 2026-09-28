@@ -458,7 +458,6 @@ const fn shortcut_group(group: CommandGroup) -> &'static str {
         CommandGroup::Pane => "Panes",
         CommandGroup::Terminal => "Terminal",
         CommandGroup::View => "View",
-        CommandGroup::Settings => "General",
     }
 }
 
@@ -526,7 +525,6 @@ shortcut_rows! {
     ResetTerminalFontSize => "reset-terminal-font-size",
     ToggleSidebar => "toggle-sidebar",
     ToggleSidebarFocus => "toggle-sidebar-focus",
-    OpenSettings => "open-settings",
 }
 
 #[cfg(test)]

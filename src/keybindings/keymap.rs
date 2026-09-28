@@ -46,6 +46,7 @@ pub enum SystemReservation {
     LogOut,
     Screenshot,
     Help,
+    Settings,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
