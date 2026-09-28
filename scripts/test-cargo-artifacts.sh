@@ -5,7 +5,9 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 guard=$script_dir/cargo-artifacts.sh
 repo_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-cargo-artifacts.XXXXXX")
-trap 'rm -rf -- "$temp_root"' EXIT HUP INT TERM
+case_name=measurement-failure
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "cargo artifact guard test failed: %s (status %s)\n" "$case_name" "$status" >&2; fi; rm -rf -- "$temp_root"' EXIT
+trap 'exit 1' HUP INT TERM
 
 prepare_owned_target() {
     target=$1
@@ -125,12 +127,14 @@ if failures:
     raise SystemExit("; ".join(failures))
 PY
 
+case_name=pre-command-cleanup
 target=$temp_root/pre/target
 make_oversized_target "$target"
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
     "test ! -e \"\$CARGO_TARGET_DIR/artifact\" && test \"\$CARGO_INCREMENTAL\" = 0 && test -f \"\$CARGO_TARGET_DIR/.spaceterm-cargo-target-owner\""
 
+case_name=post-command-cleanup
 target=$temp_root/post/target
 prepare_owned_target "$target"
 set +e
@@ -143,6 +147,7 @@ test "$status" -eq 75
 test ! -e "$target/artifact"
 test -f "$target/.spaceterm-cargo-target-owner"
 
+case_name=command-failure
 target=$temp_root/failure/target
 prepare_owned_target "$target"
 set +e
@@ -152,6 +157,7 @@ status=$?
 set -e
 test "$status" -eq 37
 
+case_name=dash-command-failure
 target=$temp_root/dash/target
 prepare_owned_target "$target"
 set +e
@@ -161,6 +167,7 @@ status=$?
 set -e
 test "$status" -eq 23
 
+case_name=startup-signal
 target=$temp_root/startup-signal/target
 started=$temp_root/startup-signal-started
 prepare_owned_target "$target"
@@ -187,6 +194,7 @@ if kill -0 "$guarded_pid" 2>/dev/null; then
     exit 1
 fi
 
+case_name=child-signal
 target=$temp_root/child-signal/target
 prepare_owned_target "$target"
 set +e
@@ -210,6 +218,7 @@ status=$?
 set -e
 test "$status" -eq 41
 
+case_name=live-child-cleanup
 target=$temp_root/live/target
 continuation=$temp_root/live-continued
 prepare_owned_target "$target"
@@ -224,6 +233,7 @@ test "$status" -eq 75
 test ! -e "$continuation"
 test ! -e "$target/artifact"
 
+case_name=leader-exit-cleanup
 target=$temp_root/leader-exit/target
 continuation=$temp_root/leader-exit-continued
 prepare_owned_target "$target"
@@ -238,6 +248,7 @@ test "$status" -eq 75
 test ! -e "$continuation"
 test ! -e "$target/artifact"
 
+case_name=termination-before-clean
 target=$temp_root/termination-before-clean/target
 prepare_owned_target "$target"
 cat > "$temp_root/write-after-term.py" <<'PY'
@@ -270,6 +281,7 @@ test "$status" -eq 75
 test ! -e "$target/after-term"
 test ! -e "$target/artifact"
 
+case_name=cleanup-failure
 target=$temp_root/cleanup-failure/target
 prepare_owned_target "$target"
 mkdir -p "$temp_root/bin"
@@ -293,12 +305,14 @@ set -e
 test "$status" -eq 75
 test -e "$target/artifact"
 
+case_name=nested-guard
 target=$temp_root/nested/target
 make_oversized_target "$target"
 CARGO_TARGET_DIR="$target" SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     SPACETERM_CARGO_ARTIFACT_GUARD_ACTIVE=1 \
     "$guard" run -- sh -c "test -e \"\$CARGO_TARGET_DIR/artifact\""
 
+case_name=unsafe-target
 unsafe_target=$temp_root/unsafe
 mkdir -p "$unsafe_target"
 dd if=/dev/zero of="$unsafe_target/artifact" bs=1048576 count=2 >/dev/null 2>&1
@@ -310,6 +324,7 @@ set -e
 test "$status" -eq 2
 test -e "$unsafe_target/artifact"
 
+case_name=foreign-target
 foreign_target=$temp_root/foreign/target
 mkdir -p "$foreign_target"
 printf '%s\n' /another/repository > "$foreign_target/.spaceterm-cargo-target-owner"
@@ -322,22 +337,42 @@ set -e
 test "$status" -eq 2
 test -e "$foreign_target/unrelated-artifact"
 
+case_name=configured-target
 configured_target=$temp_root/configured/target
 configured_home=$temp_root/configured/cargo-home
-cargo_bin_dir=$(rustc --print sysroot)/bin
-mkdir -p "$configured_home" "$configured_target"
+configured_bin=$temp_root/configured/bin
+mkdir -p "$configured_home" "$configured_target" "$configured_bin"
 configured_target=$(CDPATH='' cd -- "$configured_target" && pwd -P)
 cat > "$configured_home/config.toml" <<EOF
 [build]
 target-dir = "$configured_target"
 EOF
+# Cargo's dependency cache and network are unrelated to target resolution. The
+# stub reports the configured path through the metadata interface the guard uses.
+cat > "$configured_bin/cargo" <<'EOF'
+#!/bin/sh
+test "$1" = metadata || exit 1
+test -z "${CARGO_TARGET_DIR:-}" || exit 1
+python3 - "$CARGO_HOME/config.toml" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+config = Path(sys.argv[1]).read_text(encoding="utf-8")
+line = next(line for line in config.splitlines() if line.startswith("target-dir = "))
+target = json.loads(line.partition(" = ")[2])
+print(json.dumps({"target_directory": target}))
+PY
+EOF
+chmod +x "$configured_bin/cargo"
 # shellcheck disable=SC2016
-PATH="$cargo_bin_dir:$PATH" CARGO_HOME="$configured_home" \
+PATH="$configured_bin:$PATH" CARGO_HOME="$configured_home" \
     SPACETERM_CARGO_TARGET_BUDGET_MIB=1 \
     "$guard" run -- sh -c \
     'test "$CARGO_TARGET_DIR" = "$1" && test -f "$1/.spaceterm-cargo-target-owner"' \
     sh "$configured_target"
 
+case_name=configured-triple-executable
 fake_bin=$temp_root/configured-triple-bin
 fake_executable=$temp_root/configured-triple-target/aarch-vendor-os/debug/spaceterm
 artifact_path=$temp_root/configured-triple-artifact-path
@@ -355,6 +390,7 @@ PATH="$fake_bin:$PATH" FAKE_EXECUTABLE="$fake_executable" \
     --output "$artifact_path" --bin spaceterm -- --locked
 test "$(cat "$artifact_path")" = "$fake_executable"
 
+case_name=development-command
 if grep -Eq 'cargo run (--features appearance-exerciser )?--locked|target/debug/spaceterm' \
     "$script_dir/../.mise.toml" "$script_dir/run-development-app-macos.sh"; then
     echo "interactive development tasks must build before launching" >&2
