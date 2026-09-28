@@ -11,11 +11,11 @@ use crate::appearance::{Appearance, ResetTarget};
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SettingsSectionId {
-    /// Appearance mode and window presentation.
-    Appearance,
+    /// How SpaceTerm's windows present themselves: density, transparency, and blur.
+    Interface,
     /// Terminal typography and text rendering.
-    Terminal,
-    /// Terminal Themes: the selection, the installed library, and where themes come from.
+    Font,
+    /// The light, dark, or automatic appearance, and the Terminal Theme each appearance uses.
     Themes,
     /// System permissions that tools running in SpaceTerm rely on.
     Privacy,
@@ -23,27 +23,12 @@ pub(super) enum SettingsSectionId {
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 4] = [
-        Self::Appearance,
-        Self::Terminal,
-        Self::Themes,
-        Self::Privacy,
-    ];
+    pub(super) const ALL: [Self; 4] = [Self::Interface, Self::Font, Self::Themes, Self::Privacy];
 
     pub(super) const fn title(self) -> &'static str {
         match self {
-            Self::Appearance => "Appearance",
-            Self::Terminal => "Terminal",
-            Self::Themes => "Themes",
-            Self::Privacy => "Privacy",
-        }
-    }
-
-    /// The shorter form the navigation list presents.
-    pub(super) const fn navigation_title(self) -> &'static str {
-        match self {
-            Self::Appearance => "Appearance",
-            Self::Terminal => "Terminal",
+            Self::Interface => "Interface",
+            Self::Font => "Font",
             Self::Themes => "Themes",
             Self::Privacy => "Privacy",
         }
@@ -51,12 +36,10 @@ impl SettingsSectionId {
 
     pub(super) const fn description(self) -> &'static str {
         match self {
-            Self::Appearance => {
-                "Choose light, dark, or automatic appearance, window transparency, and interface density."
-            }
-            Self::Terminal => "Type and text rendering in terminal output.",
+            Self::Interface => "Density, transparency, and blur for SpaceTerm's windows.",
+            Self::Font => "The typeface and text rendering in terminal panes.",
             Self::Themes => {
-                "Colors for terminal panes, including any theme published for Zed. SpaceTerm's own interface keeps its built-in appearance."
+                "Light, dark, or automatic appearance, and the colors terminal panes use in each. Themes published for Zed work too."
             }
             Self::Privacy => {
                 "System permissions that voice and other tools running in SpaceTerm rely on."
@@ -66,8 +49,8 @@ impl SettingsSectionId {
 
     pub(super) const fn selector(self) -> &'static str {
         match self {
-            Self::Appearance => "settings-section-appearance",
-            Self::Terminal => "settings-section-terminal",
+            Self::Interface => "settings-section-interface",
+            Self::Font => "settings-section-font",
             Self::Themes => "settings-section-themes",
             Self::Privacy => "settings-section-privacy",
         }
@@ -82,9 +65,8 @@ pub(super) enum SettingsRowId {
     Transparency,
     Blur,
     Density,
+    /// The Terminal Theme in use, or both slots under Auto.
     TerminalTheme,
-    TerminalLightTheme,
-    TerminalDarkTheme,
     TerminalFontFamily,
     TerminalBaseSize,
     TerminalLineHeight,
@@ -92,12 +74,8 @@ pub(super) enum SettingsRowId {
     TerminalBoldWeight,
     TerminalItalic,
     TerminalBoldAsBright,
-    /// The installed Terminal Theme library.
+    /// The installed Terminal Themes for the chosen appearance, and the way to get more.
     InstalledThemes,
-    /// Theme extensions published to the Zed extension registry.
-    ZedExtensions,
-    /// Installing a Zed theme family document from a local file.
-    ThemeImport,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
 }
@@ -120,8 +98,6 @@ impl SettingsRowId {
             Self::Blur => ResetTarget::Blur,
             Self::Density => ResetTarget::Density,
             Self::TerminalTheme => ResetTarget::TerminalTheme(appearance),
-            Self::TerminalLightTheme => ResetTarget::TerminalTheme(Appearance::Light),
-            Self::TerminalDarkTheme => ResetTarget::TerminalTheme(Appearance::Dark),
             Self::TerminalFontFamily => ResetTarget::TerminalFontFamily,
             Self::TerminalBaseSize => ResetTarget::TerminalBaseSize,
             Self::TerminalRegularWeight => ResetTarget::TerminalRegularWeight,
@@ -129,10 +105,7 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::InstalledThemes
-            | Self::ZedExtensions
-            | Self::ThemeImport
-            | Self::MicrophoneAccess => {
+            Self::InstalledThemes | Self::MicrophoneAccess => {
                 return None;
             }
         })
@@ -206,9 +179,91 @@ pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
 
 pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
+        id: SettingsRowId::Density,
+        section: SettingsSectionId::Interface,
+        group: "Window",
+        label: "Density",
+        keywords: &["compact", "comfortable", "spacing", "padding"],
+        selector: "settings-row-density",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::Transparency,
+        section: SettingsSectionId::Interface,
+        group: "Window",
+        label: "Transparency",
+        keywords: &["opacity", "transparent", "opaque", "window", "terminal"],
+        selector: "settings-row-transparency",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::Blur,
+        section: SettingsSectionId::Interface,
+        group: "Window",
+        label: "Blur",
+        keywords: &["blurred", "background", "window", "glass"],
+        selector: "settings-row-blur",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalFontFamily,
+        section: SettingsSectionId::Font,
+        group: "Typeface",
+        label: "Family",
+        keywords: &["typeface", "family", "monospace", "font"],
+        selector: "settings-row-terminal-font-family",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalBaseSize,
+        section: SettingsSectionId::Font,
+        group: "Typeface",
+        label: "Size",
+        keywords: &["points", "size", "bigger", "smaller", "zoom", "font"],
+        selector: "settings-row-terminal-base-size",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalLineHeight,
+        section: SettingsSectionId::Font,
+        group: "Typeface",
+        label: "Line height",
+        keywords: &["leading", "spacing", "line"],
+        selector: "settings-row-terminal-line-height",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalRegularWeight,
+        section: SettingsSectionId::Font,
+        group: "Weight",
+        label: "Regular",
+        keywords: &["weight", "font"],
+        selector: "settings-row-terminal-regular-weight",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalBoldWeight,
+        section: SettingsSectionId::Font,
+        group: "Weight",
+        label: "Bold",
+        keywords: &["weight", "font", "bold"],
+        selector: "settings-row-terminal-bold-weight",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalItalic,
+        section: SettingsSectionId::Font,
+        group: "Rendering",
+        label: "Italic text",
+        keywords: &["oblique", "slant", "italic"],
+        selector: "settings-row-terminal-italic",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalBoldAsBright,
+        section: SettingsSectionId::Font,
+        group: "Rendering",
+        label: "Show bold text in bright colors",
+        keywords: &["ansi", "bright", "bold", "colour"],
+        selector: "settings-row-terminal-bold-as-bright",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::AppearanceMode,
-        section: SettingsSectionId::Appearance,
-        group: "Mode",
+        section: SettingsSectionId::Themes,
+        // The appearance and the theme it shows lead the page together and need no title: they
+        // are what the page is about.
+        group: "",
         label: "Appearance",
         keywords: &[
             "light",
@@ -224,165 +279,47 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-appearance-mode",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::Density,
-        section: SettingsSectionId::Appearance,
-        group: "Window",
-        label: "Density",
-        keywords: &["compact", "comfortable", "spacing", "padding"],
-        selector: "settings-row-density",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::Transparency,
-        section: SettingsSectionId::Appearance,
-        group: "Window",
-        label: "Transparency",
-        keywords: &["opacity", "transparent", "opaque", "window", "terminal"],
-        selector: "settings-row-transparency",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::Blur,
-        section: SettingsSectionId::Appearance,
-        group: "Window",
-        label: "Blur",
-        keywords: &["blurred", "background", "window", "glass"],
-        selector: "settings-row-blur",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalFontFamily,
-        section: SettingsSectionId::Terminal,
-        group: "Font",
-        label: "Family",
-        keywords: &["typeface", "family", "monospace", "font"],
-        selector: "settings-row-terminal-font-family",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalBaseSize,
-        section: SettingsSectionId::Terminal,
-        group: "Font",
-        label: "Size",
-        keywords: &["points", "size", "bigger", "smaller", "zoom", "font"],
-        selector: "settings-row-terminal-base-size",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalLineHeight,
-        section: SettingsSectionId::Terminal,
-        group: "Font",
-        label: "Line height",
-        keywords: &["leading", "spacing", "line"],
-        selector: "settings-row-terminal-line-height",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalRegularWeight,
-        section: SettingsSectionId::Terminal,
-        group: "Weight",
-        label: "Regular",
-        keywords: &["weight", "font"],
-        selector: "settings-row-terminal-regular-weight",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalBoldWeight,
-        section: SettingsSectionId::Terminal,
-        group: "Weight",
-        label: "Bold",
-        keywords: &["weight", "font", "bold"],
-        selector: "settings-row-terminal-bold-weight",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalItalic,
-        section: SettingsSectionId::Terminal,
-        group: "Rendering",
-        label: "Italic text",
-        keywords: &["oblique", "slant", "italic"],
-        selector: "settings-row-terminal-italic",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalBoldAsBright,
-        section: SettingsSectionId::Terminal,
-        group: "Rendering",
-        label: "Show bold text in bright colors",
-        keywords: &["ansi", "bright", "bold", "colour"],
-        selector: "settings-row-terminal-bold-as-bright",
-    },
-    SettingsRowDescriptor {
         id: SettingsRowId::TerminalTheme,
         section: SettingsSectionId::Themes,
-        group: "Current theme",
-        label: "Theme",
-        keywords: &["color", "colour", "palette", "terminal theme", "ansi"],
-        selector: "settings-row-terminal-theme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalLightTheme,
-        section: SettingsSectionId::Themes,
-        group: "Current theme",
-        label: "Light",
+        group: "",
+        label: "Current theme",
         keywords: &[
             "color",
             "colour",
             "palette",
-            "theme",
             "terminal theme",
             "ansi",
-        ],
-        selector: "settings-row-terminal-light-theme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::TerminalDarkTheme,
-        section: SettingsSectionId::Themes,
-        group: "Current theme",
-        label: "Dark",
-        keywords: &[
-            "color",
-            "colour",
-            "palette",
-            "theme",
-            "terminal theme",
-            "ansi",
-        ],
-        selector: "settings-row-terminal-dark-theme",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::InstalledThemes,
-        section: SettingsSectionId::Themes,
-        group: "Installed",
-        label: "Installed themes",
-        keywords: &[
-            "builtin",
-            "custom",
-            "use",
-            "remove",
-            "delete",
-            "list",
+            "preview",
+            "light",
+            "dark",
             "unavailable",
             "fallback",
             "missing",
         ],
-        selector: "settings-row-installed-themes",
+        selector: "settings-row-terminal-theme",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ZedExtensions,
+        id: SettingsRowId::InstalledThemes,
         section: SettingsSectionId::Themes,
-        group: "Zed extensions",
-        label: "Zed extensions",
+        group: "Themes",
+        label: "Installed themes",
         keywords: &[
-            "registry",
+            "choose",
+            "gallery",
+            "remove",
+            "delete",
+            "get more",
             "download",
             "install",
             "update",
-            "browse",
-            "gallery",
-            "online",
-            "more themes",
+            "zed",
+            "extension",
+            "registry",
+            "import",
+            "file",
+            "json",
         ],
-        selector: "settings-row-zed-extensions",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ThemeImport,
-        section: SettingsSectionId::Themes,
-        group: "Import",
-        label: "Zed theme file",
-        keywords: &["import", "file", "json", "family", "local"],
-        selector: "settings-row-theme-import",
+        selector: "settings-row-installed-themes",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::MicrophoneAccess,
@@ -413,14 +350,12 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 18] = [
+    const EVERY_ROW: [SettingsRowId; 14] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
         SettingsRowId::Density,
         SettingsRowId::TerminalTheme,
-        SettingsRowId::TerminalLightTheme,
-        SettingsRowId::TerminalDarkTheme,
         SettingsRowId::TerminalFontFamily,
         SettingsRowId::TerminalBaseSize,
         SettingsRowId::TerminalLineHeight,
@@ -429,8 +364,6 @@ mod tests {
         SettingsRowId::TerminalItalic,
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
-        SettingsRowId::ZedExtensions,
-        SettingsRowId::ThemeImport,
         SettingsRowId::MicrophoneAccess,
     ];
 
@@ -497,17 +430,16 @@ mod tests {
         assert_eq!(modes, 1);
     }
 
-    /// A theme row changes a theme, so its reset leaves the shared appearance mode alone.
+    /// The theme row changes the displayed appearance's theme, so its reset leaves the shared
+    /// appearance mode and the other slot alone.
     #[test]
-    fn a_theme_row_resets_only_its_own_theme() {
-        assert_eq!(
-            SettingsRowId::TerminalDarkTheme.reset_target(Appearance::Light),
-            Some(ResetTarget::TerminalTheme(Appearance::Dark)),
-        );
-        assert_eq!(
-            SettingsRowId::TerminalLightTheme.reset_target(Appearance::Dark),
-            Some(ResetTarget::TerminalTheme(Appearance::Light)),
-        );
+    fn the_theme_row_resets_only_the_displayed_theme() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            assert_eq!(
+                SettingsRowId::TerminalTheme.reset_target(appearance),
+                Some(ResetTarget::TerminalTheme(appearance)),
+            );
+        }
     }
 
     #[test]
@@ -534,24 +466,16 @@ mod tests {
             matching_rows("theme").into_iter().collect::<HashSet<_>>(),
             HashSet::from([
                 SettingsRowId::TerminalTheme,
-                SettingsRowId::TerminalLightTheme,
-                SettingsRowId::TerminalDarkTheme,
                 SettingsRowId::InstalledThemes,
-                SettingsRowId::ZedExtensions,
-                SettingsRowId::ThemeImport,
             ])
         );
     }
 
     #[test]
-    fn terminal_theme_search_reaches_the_selection_rows() {
+    fn terminal_theme_search_reaches_the_current_theme() {
         assert_eq!(
-            matching_rows("terminal theme").into_iter().collect::<HashSet<_>>(),
-            HashSet::from([
-                SettingsRowId::TerminalTheme,
-                SettingsRowId::TerminalLightTheme,
-                SettingsRowId::TerminalDarkTheme,
-            ])
+            matching_rows("terminal theme"),
+            vec![SettingsRowId::TerminalTheme]
         );
     }
 
@@ -571,16 +495,16 @@ mod tests {
     #[test]
     fn a_keyword_query_reaches_a_row_whose_label_omits_the_word() {
         assert!(matching_rows("leading").contains(&SettingsRowId::TerminalLineHeight));
-        assert!(matching_rows("registry").contains(&SettingsRowId::ZedExtensions));
-        assert!(matching_rows("import").contains(&SettingsRowId::ThemeImport));
+        assert!(matching_rows("registry").contains(&SettingsRowId::InstalledThemes));
+        assert!(matching_rows("import").contains(&SettingsRowId::InstalledThemes));
         assert!(matching_rows("automatic").contains(&SettingsRowId::AppearanceMode));
     }
 
-    /// The diagnostics readout is part of the theme library rather than a row of its own, so the
-    /// words a person searches for when a theme is missing still reach that page.
+    /// The diagnostics notice is not a row of its own, so the words a person searches for when a
+    /// theme is missing reach the theme selection it describes.
     #[test]
-    fn a_missing_theme_query_reaches_the_library() {
-        assert!(matching_rows("fallback").contains(&SettingsRowId::InstalledThemes));
+    fn a_missing_theme_query_reaches_the_theme_selection() {
+        assert!(matching_rows("fallback").contains(&SettingsRowId::TerminalTheme));
     }
 
     /// A person whose voice tool cannot hear them searches for what they were doing, not for the
@@ -645,10 +569,7 @@ mod tests {
         for row in ROWS {
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::InstalledThemes
-                    | SettingsRowId::ZedExtensions
-                    | SettingsRowId::ThemeImport
-                    | SettingsRowId::MicrophoneAccess
+                SettingsRowId::InstalledThemes | SettingsRowId::MicrophoneAccess
             );
             assert_eq!(
                 row.id.reset_target(Appearance::Light).is_some(),

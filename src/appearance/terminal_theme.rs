@@ -524,7 +524,7 @@ pub(crate) struct ThemePackage {
     pub(crate) version: String,
 }
 
-/// One catalog entry as a settings list presents it.
+/// One catalog entry as the theme gallery presents it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ThemeSummary {
     pub(crate) id: ThemeId,
@@ -532,12 +532,12 @@ pub(crate) struct ThemeSummary {
     pub(crate) appearance: Appearance,
     /// Built-in themes cannot be removed, and their identifiers are reserved.
     pub(crate) builtin: bool,
-    /// The family the theme was published in, when it was installed from Zed.
+    /// The Zed theme family the theme was published in, when it came from Zed.
     pub(crate) family: Option<String>,
     /// The registry extension that installed this theme, when one did.
     pub(crate) package: Option<ThemePackage>,
-    /// Representative resolved colors, ordered for a left-to-right preview strip.
-    pub(crate) swatches: Vec<Color>,
+    /// The theme's complete palette, without the person's per-role overrides, for its preview.
+    pub(crate) colors: TerminalColors,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -590,8 +590,7 @@ impl ThemeCatalog {
         self.revision
     }
 
-    /// Lists installed themes with resolved preview swatches, built-in themes first and the rest
-    /// by name.
+    /// Lists installed themes, built-in themes first and the rest by name.
     pub(crate) fn summaries(&self) -> Vec<ThemeSummary> {
         let mut summaries = self
             .themes
@@ -599,26 +598,20 @@ impl ThemeCatalog {
             .map(|theme| {
                 let mut colors = builtin::terminal_base(theme.appearance);
                 colors.apply(&theme.colors);
+                let origin = theme.metadata.origin.as_ref();
                 ThemeSummary {
                     id: theme.id.clone(),
                     name: theme.name.clone(),
                     appearance: theme.appearance,
                     builtin: theme.id.is_reserved(),
-                    family: theme
-                        .metadata
-                        .origin
-                        .as_ref()
-                        .map(|origin| origin.family.clone()),
-                    package: theme.metadata.origin.as_ref().and_then(|origin| {
+                    family: origin.map(|origin| origin.family.clone()),
+                    package: origin.and_then(|origin| {
                         Some(ThemePackage {
                             id: origin.package_id.clone()?,
                             version: origin.package_version.clone()?,
                         })
                     }),
-                    swatches: std::iter::once(colors.background)
-                        .chain(std::iter::once(colors.foreground))
-                        .chain(colors.normal.into_iter().skip(1).take(6))
-                        .collect(),
+                    colors,
                 }
             })
             .collect::<Vec<_>>();

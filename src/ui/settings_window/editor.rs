@@ -119,12 +119,12 @@ impl SettingsEditor {
         Ok(receipt)
     }
 
-    pub(super) fn remove_theme(
+    pub(super) fn remove_themes(
         &mut self,
-        id: &ThemeId,
+        ids: &[ThemeId],
         cx: &mut Context<SettingsWindow>,
     ) -> Result<(), SettingsError> {
-        self.draft.remove_theme(id)?;
+        self.draft.remove_themes(ids)?;
         self.schedule(cx);
         Ok(())
     }

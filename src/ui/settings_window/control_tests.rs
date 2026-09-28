@@ -229,7 +229,7 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
     assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
 
     cx.simulate_keystrokes("down");
@@ -237,7 +237,7 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
     assert!(cx.debug_bounds("settings-terminal-font-family").is_some());
 
@@ -246,9 +246,9 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
-    assert!(cx.debug_bounds("settings-appearance-mode").is_some());
+    assert!(cx.debug_bounds("settings-density").is_some());
 }
 
 /// The list stops at both ends rather than wrapping, so holding an arrow lands somewhere stable.
@@ -262,7 +262,7 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
 
     cx.simulate_keystrokes("end down");
@@ -276,7 +276,7 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
 }
 
@@ -285,15 +285,15 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
 fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
     redraw(cx);
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
     assert!(
-        cx.debug_bounds("settings-navigation-chip-settings-section-terminal")
+        cx.debug_bounds("settings-navigation-chip-settings-section-font")
             .is_some(),
         "the selected section should keep its own material"
     );
@@ -308,7 +308,7 @@ fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppC
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
 
     // Keyboard navigation starts only when Tab enters the list.
@@ -349,7 +349,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx.run_until_parked();
 
     let position = cx
-        .debug_bounds("settings-navigation-settings-section-terminal")
+        .debug_bounds("settings-navigation-settings-section-font")
         .unwrap()
         .center();
     cx.simulate_mouse_move(position, None, Modifiers::none());
@@ -372,7 +372,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     redraw(cx);
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
     assert!(!settings.read_with(cx, |settings, _| settings.navigation_focus_visible));
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
@@ -389,7 +389,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
             .is_some()
     );
 
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
     redraw(cx);
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
@@ -397,7 +397,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
     cx.simulate_keystrokes("tab tab down");
     cx.run_until_parked();
@@ -440,7 +440,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal,
+        SettingsSectionId::Font,
         "search should land on the first section that can answer it"
     );
 
@@ -455,7 +455,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Terminal,
+        SettingsSectionId::Font,
         "the list should step over the sections the query emptied"
     );
 }
@@ -467,7 +467,7 @@ fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestA
     document.preferences.terminal.typography.regular_weight = 450;
     let (settings, cx) = open_settings(&document, cx);
 
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
     click("settings-row-terminal-regular-weight-control", cx);
     assert!(
         cx.debug_bounds("settings-row-terminal-regular-weight-control-450")
@@ -475,7 +475,7 @@ fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestA
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
     click("settings-row-terminal-regular-weight-control", cx);
     assert!(
         cx.debug_bounds("settings-row-terminal-regular-weight-control-450")
@@ -497,7 +497,7 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
         family: "Unavailable Settings Test Monospace".to_owned(),
     };
     let (settings, cx) = open_settings(&document, cx);
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
 
     click("settings-terminal-font-family", cx);
     assert!(
@@ -513,20 +513,21 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
     );
 }
 
+/// A theme that is no longer installed stays the choice: the page names it, and nothing in the
+/// gallery claims to be selected in its place.
 #[gpui::test]
 fn unavailable_theme_ids_remain_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
+    document.preferences.mode = crate::appearance::AppearanceMode::Dark;
     document.preferences.terminal.themes.dark = ThemeId::new("user.missing-terminal").unwrap();
     let (settings, cx) = open_settings(&document, cx);
 
     click("settings-navigation-settings-section-themes", cx);
-    click("settings-row-terminal-theme-control", cx);
+    assert!(cx.debug_bounds("settings-current-theme-name").is_some());
     assert!(
-        cx.debug_bounds("settings-row-terminal-theme-control-user.missing-terminal")
-            .is_some()
+        cx.debug_bounds("settings-theme-tile-user.missing-terminal")
+            .is_none()
     );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
 
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.editor.document().clone()),

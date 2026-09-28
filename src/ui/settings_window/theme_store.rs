@@ -1,77 +1,101 @@
-//! The Themes section's Zed extension browser: search the registry, then install or update.
+//! Get More Themes: a sheet that finds Zed extensions and installs their themes, or imports a Zed
+//! theme file.
 //!
-//! SpaceTerm contacts the registry only after the person asks to browse it, and only once per
-//! window: the listing is small, searched locally, and discarded with the window. Installing
-//! downloads one extension, translates its themes, and installs them without selecting any.
+//! SpaceTerm contacts the registry only when the sheet opens, and only once per window: the
+//! listing is small, searched locally, and discarded with the window. Installing downloads one
+//! extension, translates its themes, and adds them to the gallery without applying any.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Entity, SharedString, Window, div};
-use spaceterm_ui::{FuzzyTarget, SearchField, TextInput, TextInputEvent, fuzzy_filter};
+use gpui::{AnyElement, App, Entity, FocusHandle, SharedString, WeakEntity, Window, div, px};
+use spaceterm_ui::{
+    Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FrameSpinner, FuzzyTarget, Icon,
+    IconName, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressSize,
+    SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
+    TextInputVariant, fuzzy_filter,
+};
 
-use crate::appearance::{ThemePackage, ZedExtension};
-use crate::settings::ThemeImport;
+use crate::appearance::{CatalogError, ImportError, ThemePackage, ZedExtension};
+use crate::settings::{SettingsError, ThemeImport};
 use crate::theme_registry::{RegistryError, RegistryExtension, ZedThemeRegistry};
-use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::{ChromeAppearance, gpui_color, shared_chrome};
+use crate::ui::chrome_geometry::HAIRLINE;
+use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
 use super::controls::action_button;
-use crate::ui::appearance::gpui_color;
-use super::themes::{import_failure_message, new_list_search};
+use super::import::{ImportError as ThemeReadError, read_theme_document};
 
-/// Results beyond this many ask for a narrower search instead of growing the page.
+/// Results beyond this many ask for a narrower search instead of growing the list.
 const MAX_RESULTS: usize = 40;
 
-pub(super) const SEARCH_SELECTOR: &str = "settings-zed-extensions-search";
-pub(super) const BROWSE_SELECTOR: &str = "settings-zed-extensions-browse";
+pub(super) const SEARCH_SELECTOR: &str = "settings-theme-store-search";
+pub(super) const IMPORT_SELECTOR: &str = "settings-theme-store-import";
+pub(super) const DONE_SELECTOR: &str = "settings-theme-store-done";
 
-/// What the window knows about the registry listing.
+/// What the sheet knows about the registry listing.
 #[derive(Clone, Debug)]
 pub(super) enum Listing {
-    /// The person has not asked to browse, so SpaceTerm has not contacted the registry.
+    /// The sheet has not opened, so SpaceTerm has not contacted the registry.
     NotRequested,
     Loading,
     Loaded(Arc<[RegistryExtension]>),
     Failed(RegistryError),
 }
 
-/// What one extension's action offers, derived from what is installed and in flight.
+/// What one extension's row offers, derived from what is installed and in flight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ExtensionAction {
     Install,
     Installing,
+    /// Installed at an older version.
     Update,
+    /// Installed at the listed version.
     Installed,
 }
 
-/// Owns the injected registry, the listing, installs in flight, and the last outcome.
-pub(super) struct ZedExtensionsBrowser {
+/// The sheet's body: owns the injected registry, the listing, and installs in flight. Installed
+/// themes belong to the Settings Window that owns this store.
+pub(super) struct ThemeStore {
+    owner: WeakEntity<SettingsWindow>,
     registry: Option<ZedThemeRegistry>,
     listing: Listing,
     installing: BTreeSet<String>,
+    /// What the last install or import did, until the sheet next opens.
     status: Option<SharedString>,
     search: Entity<TextInput>,
     query: SharedString,
 }
 
-impl ZedExtensionsBrowser {
+impl ThemeStore {
     pub(super) fn new(
+        owner: WeakEntity<SettingsWindow>,
         registry: Option<ZedThemeRegistry>,
         window: &mut Window,
-        cx: &mut Context<SettingsWindow>,
+        cx: &mut Context<Self>,
     ) -> Self {
-        let search = new_list_search(SEARCH_SELECTOR, "Search Zed themes", window, cx);
-        cx.subscribe(&search, |settings, search, event: &TextInputEvent, cx| {
+        let search = cx.new(|cx| {
+            TextInput::new(SEARCH_SELECTOR, "Search Zed themes", String::new(), window, cx)
+                .placeholder("Search Zed themes")
+                .variant(TextInputVariant::Bare)
+                .return_behavior(TextInputReturnBehavior::Propagate)
+                .escape_behavior(TextInputEscapeBehavior::Propagate)
+                .input_length_limit(Some(128))
+                .emit_programmatic_changes(true)
+                .debug_selector(SEARCH_SELECTOR)
+        });
+        cx.subscribe(&search, |store, search, event: &TextInputEvent, cx| {
             if matches!(event, TextInputEvent::ValueChanged(_)) {
-                settings.zed_extensions.query = SharedString::from(search.read(cx).value().to_owned());
+                store.query = SharedString::from(search.read(cx).value().to_owned());
                 cx.notify();
             }
         })
         .detach();
         Self {
+            owner,
             registry,
             listing: Listing::NotRequested,
             installing: BTreeSet::new(),
@@ -87,13 +111,17 @@ impl ZedExtensionsBrowser {
     }
 
     #[cfg(test)]
-    pub(super) fn status(&self) -> Option<&SharedString> {
-        self.status.as_ref()
+    pub(super) fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    fn search_focus(&self, cx: &App) -> FocusHandle {
+        self.search.read(cx).focus_handle()
     }
 
     /// The extensions matching the query, best match first, or the most downloaded first when
-    /// there is no query.
-    pub(super) fn matches(&self) -> (Vec<RegistryExtension>, usize) {
+    /// there is no query, with the number that matched.
+    fn matches(&self) -> (Vec<RegistryExtension>, usize) {
         let Listing::Loaded(extensions) = &self.listing else {
             return (Vec::new(), 0);
         };
@@ -110,29 +138,24 @@ impl ZedExtensionsBrowser {
             .collect();
         (shown, total)
     }
-}
 
-impl SettingsWindow {
-    /// Fetches the registry listing once, at the person's request.
-    pub(super) fn browse_zed_extensions(&mut self, cx: &mut Context<Self>) {
-        let Some(registry) = self.zed_extensions.registry.clone() else {
+    /// Fetches the registry listing unless it is loaded or loading.
+    fn browse(&mut self, cx: &mut Context<Self>) {
+        let Some(registry) = self.registry.clone() else {
             return;
         };
-        if matches!(
-            self.zed_extensions.listing,
-            Listing::Loading | Listing::Loaded(_)
-        ) {
+        if matches!(self.listing, Listing::Loading | Listing::Loaded(_)) {
             return;
         }
-        self.zed_extensions.listing = Listing::Loading;
+        self.listing = Listing::Loading;
         cx.notify();
-        cx.spawn(async move |owner, cx| {
+        cx.spawn(async move |store, cx| {
             let listing = cx
                 .background_executor()
                 .spawn(async move { registry.list() })
                 .await;
-            let _ = owner.update(cx, |settings, cx| {
-                settings.zed_extensions.listing = match listing {
+            let _ = store.update(cx, |store, cx| {
+                store.listing = match listing {
                     Ok(extensions) => Listing::Loaded(extensions.into()),
                     Err(error) => Listing::Failed(error),
                 };
@@ -142,21 +165,16 @@ impl SettingsWindow {
         .detach();
     }
 
-    pub(super) fn install_zed_extension(
-        &mut self,
-        extension: RegistryExtension,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(registry) = self.zed_extensions.registry.clone() else {
+    fn install(&mut self, extension: RegistryExtension, cx: &mut Context<Self>) {
+        let Some(registry) = self.registry.clone() else {
             return;
         };
-        if !self.editor.editable() || !self.zed_extensions.installing.insert(extension.id.clone())
-        {
+        if !self.editable(cx) || !self.installing.insert(extension.id.clone()) {
             return;
         }
-        self.zed_extensions.status = None;
+        self.status = None;
         cx.notify();
-        cx.spawn(async move |owner, cx| {
+        cx.spawn(async move |store, cx| {
             let download = cx
                 .background_executor()
                 .spawn({
@@ -164,37 +182,108 @@ impl SettingsWindow {
                     async move { registry.download(&extension) }
                 })
                 .await;
-            let _ = owner.update(cx, |settings, cx| {
-                settings.finish_zed_install(&extension, download, cx);
+            let _ = store.update(cx, |store, cx| {
+                store.finish_install(&extension, download, cx);
             });
         })
         .detach();
     }
 
-    pub(super) fn finish_zed_install(
+    pub(super) fn finish_install(
         &mut self,
         extension: &RegistryExtension,
         download: Result<ZedExtension, RegistryError>,
         cx: &mut Context<Self>,
     ) {
-        self.zed_extensions.installing.remove(&extension.id);
+        self.installing.remove(&extension.id);
         let message = match download {
             Err(error) => SharedString::from(registry_failure_message(error)),
-            Ok(package) => match self.editor.import(ThemeImport::ZedExtension(&package), cx) {
-                Ok(receipt) => SharedString::from(match receipt.installed.len() {
-                    1 => format!("Installed 1 theme from {}.", extension.name),
-                    count => format!("Installed {count} themes from {}.", extension.name),
-                }),
-                Err(error) => SharedString::from(import_failure_message(error)),
-            },
+            Ok(package) => {
+                let installed = self.owner.update(cx, |settings, cx| {
+                    settings
+                        .editor
+                        .import(ThemeImport::ZedExtension(&package), cx)
+                });
+                match installed {
+                    Ok(Ok(receipt)) => SharedString::from(match receipt.installed.len() {
+                        1 => format!("Installed 1 theme from {}.", extension.name),
+                        count => format!("Installed {count} themes from {}.", extension.name),
+                    }),
+                    Ok(Err(error)) => SharedString::from(import_failure_message(error)),
+                    Err(_) => SharedString::from("Those themes could not be installed."),
+                }
+            }
         };
-        self.zed_extensions.status = Some(message);
+        self.status = Some(message);
         cx.notify();
     }
 
+    /// Asks for a Zed theme file and installs every theme in it.
+    fn begin_import(&mut self, cx: &mut Context<Self>) {
+        let Some(opener) = cx
+            .try_global::<crate::app::SelectedFileAccess>()
+            .map(|access| Arc::clone(&access.0))
+        else {
+            self.status = Some("File import is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        self.status = None;
+        cx.notify();
+        cx.spawn(async move |store, cx| {
+            let Ok(Ok(Some(paths))) = selection.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let read = cx
+                .background_executor()
+                .spawn(async move { read_theme_document(&path, opener.as_ref()) })
+                .await;
+            let _ = store.update(cx, |store, cx| store.finish_import(read, cx));
+        })
+        .detach();
+    }
+
+    pub(super) fn finish_import(
+        &mut self,
+        read: Result<Vec<u8>, ThemeReadError>,
+        cx: &mut Context<Self>,
+    ) {
+        let message = match read {
+            Ok(bytes) => self
+                .owner
+                .update(cx, |settings, cx| {
+                    import_family(&bytes, |source| settings.editor.import(source, cx))
+                })
+                .unwrap_or_else(|_| SharedString::from("Those themes could not be installed.")),
+            Err(error) => SharedString::from(error.message()),
+        };
+        self.status = Some(message);
+        cx.notify();
+    }
+
+    fn editable(&self, cx: &App) -> bool {
+        self.owner
+            .upgrade()
+            .is_some_and(|settings| settings.read(cx).editor.editable())
+    }
+
     /// The installed version of every extension that contributed an installed theme.
-    pub(super) fn installed_extensions(&self) -> BTreeMap<String, String> {
-        self.editor
+    fn installed_extensions(&self, cx: &App) -> BTreeMap<String, String> {
+        let Some(settings) = self.owner.upgrade() else {
+            return BTreeMap::new();
+        };
+        settings
+            .read(cx)
+            .editor
             .theme_summaries()
             .unwrap_or_default()
             .into_iter()
@@ -203,12 +292,8 @@ impl SettingsWindow {
             .collect()
     }
 
-    pub(super) fn render_zed_extensions(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+    fn render_listing(&self, appearance: &ChromeAppearance, cx: &mut Context<Self>) -> AnyElement {
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let secondary = |text: SharedString| {
             div()
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
@@ -216,186 +301,278 @@ impl SettingsWindow {
                 .whitespace_normal()
                 .child(text)
         };
-        let mut content = div()
-            .debug_selector(|| "settings-zed-extensions".to_owned())
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(appearance.spacing(8.0));
-        if self.zed_extensions.registry.is_none() {
-            return content
-                .child(secondary("The Zed extension registry is unavailable.".into()))
-                .into_any_element();
-        }
-        match self.zed_extensions.listing.clone() {
-            Listing::NotRequested => {
-                let owner = cx.weak_entity();
-                content = content
-                    .child(secondary(
-                        "Browse the themes published to the Zed extension registry. SpaceTerm contacts the registry only when you browse it."
-                            .into(),
-                    ))
-                    .child(
-                        div().child(action_button(
-                            BROWSE_SELECTOR,
-                            "Browse Zed Themes",
-                            true,
-                            move |_, cx| {
-                                let _ = owner.update(cx, |settings, cx| {
-                                    settings.browse_zed_extensions(cx);
-                                });
-                            },
-                        )),
-                    );
-            }
-            Listing::Loading => {
-                content = content.child(secondary("Loading the Zed extension registry…".into()));
-            }
+        // A state with no rows sits centered where the rows would be, so the sheet keeps its size.
+        let placeholder = || {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(appearance.spacing(10.0))
+                .min_h(appearance.spacing(160.0))
+                .text_center()
+        };
+        match self.listing.clone() {
+            _ if self.registry.is_none() => placeholder()
+                .child(secondary(
+                    "The Zed extension registry is unavailable. You can still import a theme file."
+                        .into(),
+                ))
+                .into_any_element(),
+            Listing::NotRequested | Listing::Loading => placeholder()
+                .child(
+                    FrameSpinner::new("settings-theme-store-loading", "Loading themes")
+                        .size(ProgressSize::Compact),
+                )
+                .child(secondary("Loading themes…".into()))
+                .into_any_element(),
             Listing::Failed(error) => {
-                let owner = cx.weak_entity();
-                content = content
+                let store = cx.weak_entity();
+                placeholder()
                     .child(secondary(registry_failure_message(error).into()))
-                    .child(div().child(action_button(
-                        "settings-zed-extensions-retry",
+                    .child(action_button(
+                        "settings-theme-store-retry",
                         "Try Again",
                         true,
                         move |_, cx| {
-                            let _ = owner.update(cx, |settings, cx| {
-                                settings.browse_zed_extensions(cx);
-                            });
+                            let _ = store.update(cx, |store, cx| store.browse(cx));
                         },
-                    )));
+                    ))
+                    .into_any_element()
             }
             Listing::Loaded(_) => {
-                let installed = self.installed_extensions();
-                let (shown, total) = self.zed_extensions.matches();
-                content = content.child(
-                    SearchField::new(
-                        "settings-zed-extensions-search-frame",
-                        self.zed_extensions.search.clone(),
-                    )
-                    .debug_selectors(
-                        "settings-zed-extensions-search-frame",
-                        "settings-zed-extensions-search-clear",
-                    ),
-                );
+                let installed = self.installed_extensions(cx);
+                let editable = self.editable(cx);
+                let (shown, total) = self.matches();
                 if shown.is_empty() {
-                    content = content.child(secondary(
-                        format!("No Zed themes match “{}”.", self.zed_extensions.query).into(),
-                    ));
+                    return placeholder()
+                        .child(secondary(
+                            format!("No Zed themes match “{}”.", self.query).into(),
+                        ))
+                        .into_any_element();
                 }
-                let rows = shown
-                    .iter()
-                    .map(|extension| {
-                        let action =
-                            extension_action(&self.zed_extensions.installing, extension, &installed);
-                        self.render_extension_row(extension, action, appearance, cx)
-                    })
-                    .collect::<Vec<_>>();
-                content = content.child(div().flex().flex_col().w_full().children(rows));
-                if total > shown.len() {
-                    content = content.child(secondary(
-                        format!(
-                            "Showing {} of {total} extensions. Refine your search to see others.",
-                            shown.len()
-                        )
-                        .into(),
-                    ));
-                }
-            }
-        }
-        content
-            .children(
-                self.zed_extensions
-                    .status
-                    .clone()
-                    .map(|status| {
-                        secondary(status)
-                            .debug_selector(|| "settings-zed-extensions-status".to_owned())
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn render_extension_row(
-        &self,
-        extension: &RegistryExtension,
-        action: ExtensionAction,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let mut byline = Vec::new();
-        if !extension.authors.is_empty() {
-            byline.push(format!("by {}", extension.authors.join(", ")));
-        }
-        byline.push(download_count(extension.downloads));
-        let label = match action {
-            ExtensionAction::Install => "Install",
-            ExtensionAction::Installing => "Installing…",
-            ExtensionAction::Update => "Update",
-            ExtensionAction::Installed => "Installed",
-        };
-        let enabled = matches!(action, ExtensionAction::Install | ExtensionAction::Update)
-            && self.editor.editable();
-        let owner = cx.weak_entity();
-        let target = extension.clone();
-        let selector = format!("settings-zed-extension-{}", extension.id);
-        let action_selector = format!("settings-zed-extension-action-{}", extension.id);
-        div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .gap(appearance.spacing(10.0))
-            .py(appearance.spacing(6.0))
-            .child(
+                let divider = gpui_color(colors.border);
+                let count = shown.len();
+                let rows = shown.iter().enumerate().map(|(index, extension)| {
+                    let action = extension_action(&self.installing, extension, &installed);
+                    render_extension_row(extension, action, editable, appearance, cx)
+                        .when(index + 1 < count, |row| {
+                            row.border_b(px(HAIRLINE)).border_color(divider)
+                        })
+                });
                 div()
                     .flex()
                     .flex_col()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        div()
-                            .truncate()
-                            .chrome_text(appearance.typography.style(TextRole::Body))
-                            .text_color(gpui_color(colors.text))
-                            .child(SharedString::from(extension.name.clone())),
-                    )
-                    .children(extension.description.clone().map(|description| {
-                        div()
-                            .truncate()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(colors.text_secondary))
-                            .child(SharedString::from(description))
-                    }))
-                    .child(
-                        div()
-                            .truncate()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(colors.text_muted))
-                            .child(SharedString::from(byline.join(" · "))),
-                    ),
-            )
-            .child(
-                spaceterm_ui::Button::new(SharedString::from(action_selector.clone()), label)
-                    .variant(spaceterm_ui::ButtonVariant::Outline)
-                    .size(spaceterm_ui::ButtonSize::Small)
-                    .disabled(!enabled)
-                    .tab_stop(true)
-                    .debug_selector(action_selector)
-                    .on_activate(move |_, _, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.install_zed_extension(target.clone(), cx);
-                        });
-                    }),
-            )
-            .into_any_element()
+                    .w_full()
+                    .children(rows)
+                    .when(total > count, |list| {
+                        list.child(div().pt(appearance.spacing(10.0)).child(secondary(
+                            format!(
+                                "Showing {count} of {total} extensions. Search to find others."
+                            )
+                            .into(),
+                        )))
+                    })
+                    .into_any_element()
+            }
+        }
     }
 }
 
-/// What one extension's action offers, given the installs in flight and installed versions.
+impl Render for ThemeStore {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = shared_chrome(cx);
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
+        let store = cx.weak_entity();
+        div()
+            .debug_selector(|| "settings-theme-store".to_owned())
+            .chrome_text(appearance.typography.style(TextRole::Body))
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(appearance.spacing(12.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(appearance.spacing(10.0))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            SearchField::new(
+                                "settings-theme-store-search-frame",
+                                self.search.clone(),
+                            )
+                            .debug_selectors(
+                                "settings-theme-store-search-frame",
+                                "settings-theme-store-search-clear",
+                            ),
+                        ),
+                    )
+                    .child(div().flex_none().child(action_button(
+                        IMPORT_SELECTOR,
+                        "Import from File…",
+                        self.editable(cx),
+                        move |_, cx| {
+                            let _ = store.update(cx, |store, cx| store.begin_import(cx));
+                        },
+                    ))),
+            )
+            .child(self.render_listing(&appearance, cx))
+            .children(self.status.clone().map(|status| {
+                div()
+                    .debug_selector(|| "settings-theme-store-status".to_owned())
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(colors.text_secondary))
+                    .whitespace_normal()
+                    .child(status)
+            }))
+    }
+}
+
+impl SettingsWindow {
+    /// Opens Get More Themes. Opening it is the only thing that contacts the registry.
+    pub(super) fn open_theme_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.theme_store.clone();
+        let focus = store.update(cx, |store, cx| {
+            store.status = None;
+            store.browse(cx);
+            store.search_focus(cx)
+        });
+        let dialog = Dialog::new(
+            ModalId::new("settings-theme-store"),
+            "Get more themes",
+            "Get More Themes",
+            vec![
+                ModalAction::new((), "Done", ModalActionRole::Cancel, DONE_SELECTOR)
+                    .with_emphasis(ModalActionEmphasis::Prominent),
+            ],
+            DialogInitialFocus::Body(focus),
+        )
+        .description(
+            "Themes from the Zed extension registry. Installed themes appear in your gallery, \
+             ready to choose.",
+        )
+        .size(DialogSize::Wide)
+        .body(store);
+        let presented = dialog.present(
+            window,
+            cx,
+            |_, _, _| DialogCloseDecision::Allow,
+            |_, _| {},
+        );
+        if presented.is_err() {
+            eprintln!("failed to present the SpaceTerm Get More Themes sheet");
+        }
+    }
+}
+
+/// One extension, the way a store lists an app: what it is, who made it, and one action.
+fn render_extension_row(
+    extension: &RegistryExtension,
+    action: ExtensionAction,
+    editable: bool,
+    appearance: &ChromeAppearance,
+    cx: &mut Context<ThemeStore>,
+) -> gpui::Div {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
+    let mut byline = Vec::new();
+    if !extension.authors.is_empty() {
+        byline.push(extension.authors.join(", "));
+    }
+    byline.push(download_count(extension.downloads));
+    let selector = format!("settings-zed-extension-action-{}", extension.id);
+    let button = |label: &'static str| {
+        let store = cx.weak_entity();
+        let target = extension.clone();
+        spaceterm_ui::Button::new(SharedString::from(selector.clone()), label)
+            .variant(spaceterm_ui::ButtonVariant::Outline)
+            .size(spaceterm_ui::ButtonSize::Small)
+            .disabled(!editable)
+            .tab_stop(true)
+            .debug_selector(selector.clone())
+            .on_activate(move |_, _, cx| {
+                let _ = store.update(cx, |store, cx| store.install(target.clone(), cx));
+            })
+            .into_any_element()
+    };
+    let trailing = match action {
+        ExtensionAction::Install => button("Get"),
+        ExtensionAction::Update => button("Update"),
+        ExtensionAction::Installing => FrameSpinner::new(
+            SharedString::from(format!("{selector}-progress")),
+            "Installing",
+        )
+        .size(ProgressSize::Compact)
+        .into_any_element(),
+        ExtensionAction::Installed => div()
+            .debug_selector({
+                let selector = format!("settings-zed-extension-installed-{}", extension.id);
+                move || selector
+            })
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(appearance.spacing(4.0))
+            .text_color(gpui_color(colors.text_secondary))
+            .chrome_text(appearance.typography.style(TextRole::Secondary))
+            .child(Icon::new(
+                IconName::Check,
+                appearance.icons.metrics(IconRole::Caption).glyph_size,
+                gpui_color(colors.text_secondary),
+            ))
+            .child("Installed")
+            .into_any_element(),
+    };
+    let row_selector = format!("settings-zed-extension-{}", extension.id);
+    div()
+        .debug_selector(move || row_selector)
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .gap(appearance.spacing(12.0))
+        .py(appearance.spacing(10.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .flex_1()
+                .gap(appearance.spacing(1.0))
+                .child(
+                    div()
+                        .truncate()
+                        .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
+                        .text_color(gpui_color(colors.text))
+                        .child(SharedString::from(extension.name.clone())),
+                )
+                .children(extension.description.clone().map(|description| {
+                    div()
+                        .truncate()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.text_secondary))
+                        .child(SharedString::from(description))
+                }))
+                .child(
+                    div()
+                        .truncate()
+                        .chrome_text(appearance.typography.style(TextRole::Caption))
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(SharedString::from(byline.join(" · "))),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .min_w(appearance.spacing(72.0))
+                .flex()
+                .justify_end()
+                .child(trailing),
+        )
+}
+
+/// What one extension's row offers, given the installs in flight and installed versions.
 fn extension_action(
     installing: &BTreeSet<String>,
     extension: &RegistryExtension,
@@ -411,7 +588,7 @@ fn extension_action(
     }
 }
 
-/// A download count in the short form a gallery uses.
+/// A download count in the short form a store uses.
 fn download_count(downloads: u64) -> String {
     let (value, unit) = match downloads {
         0..1_000 => return format!("{downloads} downloads"),
@@ -440,9 +617,64 @@ fn registry_failure_message(error: RegistryError) -> &'static str {
     }
 }
 
+fn import_family<'a>(
+    bytes: &'a [u8],
+    install: impl FnOnce(ThemeImport<'a>) -> Result<crate::settings::ImportReceipt, SettingsError>,
+) -> SharedString {
+    match install(ThemeImport::ZedFamily(bytes)) {
+        Ok(receipt) => installed_message(receipt.installed.len()),
+        Err(error) => import_failure_message(error).into(),
+    }
+}
+
+fn import_failure_message(error: SettingsError) -> &'static str {
+    match error {
+        SettingsError::Catalog(CatalogError::TooManyThemes) => {
+            "There is no room for those themes. Remove some installed themes and try again."
+        }
+        SettingsError::Busy => "Settings are busy. Try again when saving finishes.",
+        SettingsError::Stale | SettingsError::Catalog(CatalogError::RevisionConflict) => {
+            "Settings changed before the install finished. Try again."
+        }
+        SettingsError::Import(ImportError::TooLarge) => "That theme file is too large.",
+        SettingsError::Import(ImportError::InvalidThemeCount) => {
+            "That source contains no themes SpaceTerm can use, or too many."
+        }
+        SettingsError::Import(_) => "That is not a Zed theme file SpaceTerm can read.",
+        _ => "Those themes could not be installed.",
+    }
+}
+
+fn installed_message(installed: usize) -> SharedString {
+    if installed == 1 {
+        SharedString::from("Installed 1 theme.")
+    } else {
+        SharedString::from(format!("Installed {installed} themes."))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
+    use crate::settings::UserSettings;
+    use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
+
+    struct EmptyStorage;
+
+    impl SettingsStorage for EmptyStorage {
+        fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
+            Ok(None)
+        }
+
+        fn write(
+            &self,
+            _: &[u8],
+            _: Option<&SecureEntryIdentity>,
+        ) -> Result<StorageCommit, StorageError> {
+            panic!("importing a preview must not write settings");
+        }
+    }
 
     fn listed(version: &str) -> RegistryExtension {
         RegistryExtension {
@@ -485,5 +717,70 @@ mod tests {
         assert_eq!(download_count(1_240), "1.2K downloads");
         assert_eq!(download_count(48_000), "48K downloads");
         assert_eq!(download_count(1_147_221), "1.1M downloads");
+    }
+
+    #[test]
+    fn reimporting_a_zed_family_replaces_its_themes() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
+        let install = || {
+            import_family(bytes, |source| {
+                settings.import_preview(&token, settings.snapshot().catalog_revision, source)
+            })
+        };
+
+        assert_eq!(install(), installed_message(1));
+        assert_eq!(install(), installed_message(1));
+        assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_zed_family_installs_nothing_and_a_corrected_retry_is_clean() {
+        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let token = settings.begin_preview(0).unwrap();
+        let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Broken","appearance":"sepia","style":{}}]}"##;
+        let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Second","appearance":"light","style":{}}]}"##;
+        let install = |bytes| {
+            import_family(bytes, |source| {
+                settings.import_preview(&token, settings.snapshot().catalog_revision, source)
+            })
+        };
+
+        assert_eq!(
+            install(invalid).as_ref(),
+            "That is not a Zed theme file SpaceTerm can read."
+        );
+        assert!(settings.snapshot().candidate.terminal_themes.is_empty());
+
+        assert_eq!(install(corrected), installed_message(2));
+        assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 2);
+    }
+
+    #[test]
+    fn install_failures_have_content_free_messages() {
+        for (error, expected) in [
+            (
+                SettingsError::Busy,
+                "Settings are busy. Try again when saving finishes.",
+            ),
+            (
+                SettingsError::Catalog(CatalogError::TooManyThemes),
+                "There is no room for those themes. Remove some installed themes and try again.",
+            ),
+            (
+                SettingsError::Import(ImportError::InvalidThemeCount),
+                "That source contains no themes SpaceTerm can use, or too many.",
+            ),
+        ] {
+            let mut attempts = 0;
+            let message = import_family(b"{}", |source| {
+                assert!(matches!(source, ThemeImport::ZedFamily(_)));
+                attempts += 1;
+                Err(error)
+            });
+            assert_eq!(attempts, 1);
+            assert_eq!(message.as_ref(), expected);
+        }
     }
 }

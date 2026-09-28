@@ -46,9 +46,6 @@ pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonV
     )
 }
 
-/// The width every theme's color strip takes, so the names beside them share one column.
-const SWATCH_WIDTH: f32 = 88.0;
-
 /// The horizontal breathing room every row keeps inside the card that holds it.
 ///
 /// Rows carry it rather than the card, so a fill a row paints, such as the one Settings Search
@@ -142,12 +139,14 @@ pub(super) enum SettingsRowLayout {
     Beside,
     /// A label above content that needs the whole row, such as a list.
     Above,
-    /// Content spanning the row with no label of its own, for a group whose title already names
-    /// it. Repeating that title on the only row inside the box says the same thing twice.
+    /// Content spanning the row with no label of its own, for content that presents itself, such
+    /// as a preview or a gallery.
     Full,
 }
 
 /// One titled run of related rows.
+///
+/// An empty title draws no heading, for a group whose content already says what it is.
 ///
 /// The group uses the document surface and its text pair. Its title and surrounding space carry
 /// grouping. The fixed card edge and inset separators keep related rows legible without adding a
@@ -206,18 +205,20 @@ impl SettingsGroup {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(6.0))
-            .child(
+            .when(!self.title.is_empty(), |group| {
                 // The title keeps the rows' inset so it starts on their left edge, and the inset
                 // sits on a wrapper so the title's own box is the type it sets, not the padding
                 // around it.
-                div().px(row_inset + px(HAIRLINE)).child(
-                    div()
-                        .debug_selector(move || title_selector.clone())
-                        .chrome_text(appearance.typography.style(TextRole::Section))
-                        .text_color(gpui_color(appearance.colors.text))
-                        .child(self.title),
-                ),
-            )
+                group.child(
+                    div().px(row_inset + px(HAIRLINE)).child(
+                        div()
+                            .debug_selector(move || title_selector.clone())
+                            .chrome_text(appearance.typography.style(TextRole::Section))
+                            .text_color(gpui_color(appearance.colors.text))
+                            .child(self.title),
+                    ),
+                )
+            })
             .child(
                 spaceterm_ui::ControlHost::Card.mount(
                     div()
@@ -728,47 +729,6 @@ impl gpui::RenderOnce for StepperElement {
                 ),
             )
     }
-}
-
-/// A left-to-right strip of representative theme colors.
-///
-/// Every strip is the same size whatever a theme offers, so the names beside them line up in one
-/// column. A theme with fewer colors shows wider bands rather than a shorter strip.
-pub(super) fn swatch_strip(
-    selector: String,
-    swatches: &[Color],
-    appearance: &ChromeAppearance,
-) -> impl IntoElement {
-    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-    let background = appearance.materials.paint(
-        crate::appearance::SurfaceRole::Surface,
-        colors.elevated_surface_background,
-        colors.element_background,
-    );
-    let border = appearance
-        .materials
-        .edge(colors.element_background, colors.border);
-    div()
-        .debug_selector(move || selector.clone())
-        .flex()
-        .flex_row()
-        .flex_none()
-        .items_center()
-        .w(appearance.spacing(SWATCH_WIDTH))
-        .h(appearance.spacing(14.0))
-        .rounded(RadiusRole::ControlSmall.pixels())
-        .overflow_hidden()
-        // A strip is bounded by a hairline rather than left to its own colors: a theme is free to
-        // open on a near-background color, and the built-in dark theme does, which would otherwise
-        // leave the strip looking short of the column every other strip fills.
-        .border(px(HAIRLINE))
-        .border_color(gpui_color(border))
-        .bg(gpui_color(background))
-        .children(
-            swatches
-                .iter()
-                .map(|color| div().flex_1().h_full().bg(gpui_color(*color))),
-        )
 }
 
 /// A short status a row carries, such as a theme being the one in use.

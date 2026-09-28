@@ -159,6 +159,7 @@ lucide_sources! {
     Terminal => "terminal",
     Trash2 => "trash-2",
     TriangleAlert => "triangle-alert",
+    Type => "type",
     X => "x",
 }
 

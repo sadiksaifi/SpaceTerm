@@ -150,7 +150,7 @@ fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     assert!(!draft.settle(true, result));
     assert_eq!(draft.status(), SaveStatus::Saved);
 
-    draft.remove_theme(id).unwrap();
+    draft.remove_themes(std::slice::from_ref(id)).unwrap();
     assert_eq!(draft.status(), SaveStatus::Saving);
     assert!(draft.has_unwritten_changes());
     let result = draft.prepare_commit().unwrap().run();
@@ -352,7 +352,7 @@ fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
                 .import(ThemeImport::ZedFamily(br#"{"themes":[]}"#))
                 .map(|_| ()),
             _ => draft
-                .remove_theme(&crate::appearance::ThemeId::new("custom.absent").unwrap()),
+                .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()]),
         };
         assert!(result.is_err());
         assert_eq!(draft.status(), SaveStatus::Saved);
@@ -378,7 +378,7 @@ fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
     );
     assert!(
         draft
-            .remove_theme(&crate::appearance::ThemeId::new("custom.absent").unwrap())
+            .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()])
             .is_err()
     );
 

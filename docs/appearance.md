@@ -74,8 +74,9 @@ theme, the extension ID and version when there is one, and a fingerprint of the 
 
 ## Zed extension registry
 
-The Themes section browses theme extensions in the Zed extension registry at `api.zed.dev`.
-SpaceTerm contacts the registry only when the person browses it or installs an extension. Requests
+The Themes section's Get More Themes sheet lists theme extensions in the Zed extension registry at
+`api.zed.dev`. SpaceTerm contacts the registry only when the sheet opens, at most once per Settings
+Window unless the listing failed, and when the person installs an extension. Requests
 send the user agent `SpaceTerm` and no other identifying data. They use HTTPS only, follow at most
 four redirects, each HTTPS, and verify certificates against the Operating System's trust store. The listing is limited to
 8 MiB and 10,000 extensions. An extension archive is limited to 16 MiB compressed, 32 MiB
@@ -110,8 +111,8 @@ preference and also removes every installed theme, so no selection outlives the 
 
 ## Settings Window
 
-The Settings Window is the interface for everything above, across four sections: Appearance,
-Terminal, Themes, and Privacy. It opens from the application menu and its key equivalent,
+The Settings Window is the interface for everything above, across four sections: Interface, Font,
+Themes, and Privacy. It opens from the application menu and its key equivalent,
 presents one navigation list beside a detail pane showing one section at a time, groups each
 section's rows under a title, and searches Settings Row labels, group titles, and keywords.
 
@@ -124,10 +125,17 @@ card could only ever be drawn as an outline, and a hairline between every pair o
 for a reading the gap already gives. Rows within a group therefore sit closer together than one
 group sits to the next, which the suite asserts.
 
-Appearance presents the mode, Density, Transparency, and Blur. Terminal presents type and
-rendering. Themes presents the Terminal Theme for the current mode, or both slots under Auto, then
-the installed themes with search, the Zed extension registry, and local Zed family import. Changes
-preview live and commit shortly after the last change, so there is no save action.
+Interface presents Density, Transparency, and Blur. Font presents terminal type and rendering.
+Themes presents the Appearance Mode together with the Terminal Theme each appearance uses, so the
+choice between light and dark sits in one place. Under the mode, a preview shows the theme in use
+in the terminal font, with its name, origin, and sixteen ANSI colors. Under Auto it shows the Light
+and Dark slots side by side instead, and selecting one points the gallery below at it. The gallery
+shows the installed themes of that appearance as miniature previews; clicking one applies it, and
+its context menu offers Use Theme and, for an installed theme, Remove Theme and Remove All from its
+extension. Removal asks first and returns a slot that used a removed theme to its built-in theme.
+Get More Themes opens a sheet that searches the Zed extension registry, installs or updates an
+extension without selecting any of its themes, and imports a local Zed family file. Changes preview
+live and commit shortly after the last change, so there is no save action.
 See [ADR 0005](adr/0005-present-settings-in-a-separate-operating-system-window.md).
 
 Per-role Terminal color overrides are not editable from the Settings Window. They remain supported

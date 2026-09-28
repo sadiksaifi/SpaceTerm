@@ -95,6 +95,17 @@ fn open_settings_with_capabilities(
     )
 }
 
+fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
+    let position = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"))
+        .center();
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+}
+
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
@@ -108,8 +119,8 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 /// Selects one navigation entry, because each section is its own view.
 fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
     let selector: &'static str = match section {
-        SettingsSectionId::Appearance => "settings-navigation-settings-section-appearance",
-        SettingsSectionId::Terminal => "settings-navigation-settings-section-terminal",
+        SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
+        SettingsSectionId::Font => "settings-navigation-settings-section-font",
         SettingsSectionId::Themes => "settings-navigation-settings-section-themes",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
     };
@@ -180,7 +191,7 @@ fn an_edit_previews_at_once_and_writes_after_it_settles(cx: &mut TestAppContext)
 #[gpui::test]
 fn several_rapid_changes_produce_one_write_carrying_the_last_value(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     click("settings-terminal-base-size-increase", cx);
     click("settings-terminal-base-size-increase", cx);
@@ -354,6 +365,7 @@ fn appearance_mode_switches_both_surfaces_without_changing_any_theme_slot(
     cx: &mut TestAppContext,
 ) {
     let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
     let before = document_of(&window, cx).preferences;
     for (selector, mode) in [
         ("settings-appearance-mode-light", AppearanceMode::Light),
@@ -368,25 +380,36 @@ fn appearance_mode_switches_both_surfaces_without_changing_any_theme_slot(
     }
 }
 
+/// The page always shows the theme in use and the gallery. Only Auto shows a card per slot.
 #[gpui::test]
-fn fixed_mode_offers_one_theme_row_and_auto_offers_two(cx: &mut TestAppContext) {
+fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    for (selector, automatic) in [
-        ("settings-appearance-mode-light", false),
-        ("settings-appearance-mode-auto", true),
-        ("settings-appearance-mode-dark", false),
+    select_section(SettingsSectionId::Themes, cx);
+    for (mode, automatic) in [
+        (AppearanceMode::Light, false),
+        (AppearanceMode::Auto, true),
+        (AppearanceMode::Dark, false),
     ] {
-        click(selector, cx);
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
+        cx.run_until_parked();
         let rows = window.read_with(cx, |settings, _| {
             settings.rows_for(SettingsSectionId::Themes)
         });
-        assert_eq!(rows.contains(&SettingsRowId::TerminalTheme), !automatic);
-        for row in [
-            SettingsRowId::TerminalLightTheme,
-            SettingsRowId::TerminalDarkTheme,
-        ] {
-            assert_eq!(rows.contains(&row), automatic);
+        assert_eq!(
+            rows,
+            vec![
+                SettingsRowId::AppearanceMode,
+                SettingsRowId::TerminalTheme,
+                SettingsRowId::InstalledThemes
+            ]
+        );
+        for slot in ["settings-theme-slot-light", "settings-theme-slot-dark"] {
+            assert_eq!(cx.debug_bounds(slot).is_some(), automatic, "{mode:?} {slot}");
         }
+        assert_eq!(
+            cx.debug_bounds("settings-current-theme-name").is_some(),
+            !automatic
+        );
     }
 }
 
@@ -420,6 +443,7 @@ fn changing_one_theme_slot_preserves_the_mode_and_other_slot(cx: &mut TestAppCon
 #[gpui::test]
 fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
     click("settings-appearance-mode-light", cx);
     let mut expected = document_of(&window, cx).preferences;
     expected.mode = AppearanceMode::default();
@@ -427,31 +451,17 @@ fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext
     assert_eq!(document_of(&window, cx).preferences, expected);
 }
 
-/// Exercise the actual pickers and reset buttons, including fixed rows whose slot comes from mode.
+/// A tile applies its theme to the slot the gallery shows: the fixed mode's slot, or the slot
+/// selected under Auto. The other slot and the mode stay as they were.
 #[gpui::test]
-fn theme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContext) {
+fn a_gallery_tile_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    for (mode, slot, row) in [
-        (
-            AppearanceMode::Light,
-            Appearance::Light,
-            SettingsRowId::TerminalTheme,
-        ),
-        (
-            AppearanceMode::Dark,
-            Appearance::Dark,
-            SettingsRowId::TerminalTheme,
-        ),
-        (
-            AppearanceMode::Auto,
-            Appearance::Light,
-            SettingsRowId::TerminalLightTheme,
-        ),
-        (
-            AppearanceMode::Auto,
-            Appearance::Dark,
-            SettingsRowId::TerminalDarkTheme,
-        ),
+    select_section(SettingsSectionId::Themes, cx);
+    for (mode, slot) in [
+        (AppearanceMode::Light, Appearance::Light),
+        (AppearanceMode::Dark, Appearance::Dark),
+        (AppearanceMode::Auto, Appearance::Light),
+        (AppearanceMode::Auto, Appearance::Dark),
     ] {
         cx.update(|_, cx| {
             window.update(cx, |settings, cx| {
@@ -463,34 +473,106 @@ fn theme_pickers_and_resets_edit_only_the_displayed_slot(cx: &mut TestAppContext
                 );
             })
         });
-        set_query(&window, row.descriptor().label, cx);
+        cx.run_until_parked();
+        if mode == AppearanceMode::Auto {
+            click(
+                leaked_owned(format!("settings-theme-slot-{slot:?}").to_ascii_lowercase()),
+                cx,
+            );
+        }
+        assert_eq!(
+            window.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+            slot
+        );
         let before = document_of(&window, cx).preferences;
-        let selector = super::control_selector(row);
-        click(leaked_owned(selector.clone()), cx);
         let chosen = builtin_fallback_theme(slot);
-        click(leaked_owned(format!("{selector}-{}", chosen.as_str())), cx);
+        click(
+            leaked_owned(format!("settings-theme-tile-{}", chosen.as_str())),
+            cx,
+        );
         let mut expected = before;
         expected.terminal.themes.set(slot, chosen);
         assert_eq!(document_of(&window, cx).preferences, expected);
+    }
+}
 
-        // Use a different unavailable choice so reset exists for both builtin-default and alternate slots.
-        cx.update(|_, cx| {
-            window.update(cx, |settings, cx| {
-                settings.set_theme(
-                    slot,
-                    crate::appearance::ThemeId::new("user.reset-me").unwrap(),
-                    cx,
-                )
-            })
-        });
-        cx.run_until_parked();
-        click(
-            leaked_owned(format!("{}-reset", row.descriptor().selector)),
+/// Removing the theme in use from a tile's context menu asks first, then returns its slot to the
+/// built-in theme instead of leaving panes on a fallback.
+#[gpui::test]
+fn removing_the_theme_in_use_returns_its_slot_to_the_built_in_theme(cx: &mut TestAppContext) {
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    let imported = document
+        .terminal_themes
+        .iter()
+        .find(|theme| theme.appearance == Appearance::Light)
+        .expect("fixture light theme")
+        .id
+        .clone();
+    document.preferences.mode = AppearanceMode::Light;
+    document.preferences.terminal.themes.light = imported.clone();
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Themes, cx);
+    let tile = leaked_owned(format!("settings-theme-tile-{}", imported.as_str()));
+
+    right_click(tile, cx);
+    click(
+        leaked_owned(format!("settings-theme-tile-{}-remove", imported.as_str())),
+        cx,
+    );
+    assert_eq!(
+        document_of(&window, cx).preferences.terminal.themes.light,
+        imported,
+        "removal waits for confirmation"
+    );
+    click("modal-action-settings-remove-theme-confirm", cx);
+
+    let after = document_of(&window, cx);
+    assert!(after.terminal_themes.iter().all(|theme| theme.id != imported));
+    assert_eq!(
+        after.preferences.terminal.themes.light,
+        SettingsDocument::default().preferences.terminal.themes.light
+    );
+    assert!(cx.debug_bounds(tile).is_none());
+}
+
+/// Built-in themes offer only to be used, since there is nothing to remove.
+#[gpui::test]
+fn a_built_in_tile_offers_no_removal(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    // Choosing another theme leaves the built-in one something to use.
+    window.update(cx, |settings, cx| {
+        settings.set_appearance_mode(AppearanceMode::Dark, cx);
+        settings.set_theme(
+            Appearance::Dark,
+            crate::appearance::ThemeId::new("user.unavailable").unwrap(),
             cx,
         );
-        expected.reset(row.reset_target(slot).unwrap());
-        assert_eq!(document_of(&window, cx).preferences, expected);
-    }
+    });
+    select_section(SettingsSectionId::Themes, cx);
+    let builtin = builtin_fallback_theme(Appearance::Dark);
+    right_click(
+        leaked_owned(format!("settings-theme-tile-{}", builtin.as_str())),
+        cx,
+    );
+
+    assert!(
+        cx.debug_bounds(leaked_owned(format!(
+            "settings-theme-tile-{}-use",
+            builtin.as_str()
+        )))
+        .is_some()
+    );
+    assert!(
+        cx.debug_bounds(leaked_owned(format!(
+            "settings-theme-tile-{}-remove",
+            builtin.as_str()
+        )))
+        .is_none()
+    );
 }
 
 // Reset --------------------------------------------------------------------------------------
@@ -527,7 +609,7 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
 #[gpui::test]
 fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
         cx.debug_bounds(selector)
@@ -606,7 +688,7 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
 
     document.preferences.window.density = ChromeDensity::Comfortable;
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     // A tall window keeps the row on screen at every width, so only the width decides wrapping.
     let resize = |width: f32, cx: &mut VisualTestContext| {
@@ -794,12 +876,12 @@ fn search_narrows_the_detail_pane_to_matching_rows(cx: &mut TestAppContext) {
 
     set_query(&window, "line height", cx);
 
-    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Font));
     assert_eq!(rows, vec![SettingsRowId::TerminalLineHeight]);
     assert!(
         window
             .read_with(cx, |window, _| window
-                .rows_for(SettingsSectionId::Appearance))
+                .rows_for(SettingsSectionId::Interface))
             .is_empty()
     );
     assert!(
@@ -827,6 +909,7 @@ fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppCont
     use gpui::{DivInspectorState, IntoElement as _, ParentElement as _, div};
 
     let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
     let observed = Rc::new(RefCell::new(Vec::<DivInspectorState>::new()));
     let styles = Rc::clone(&observed);
     cx.update(|window, cx| {
@@ -885,58 +968,33 @@ fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn search_reveals_the_first_match_available_in_auto_mode(cx: &mut TestAppContext) {
+fn a_theme_search_reveals_the_theme_in_use_in_every_mode(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    cx.update(|_, cx| {
-        window.update(cx, |settings, cx| {
-            settings.set_appearance_mode(AppearanceMode::Auto, cx)
-        });
-    });
-
     set_query(&window, "theme", cx);
+    for mode in [
+        AppearanceMode::Light,
+        AppearanceMode::Auto,
+        AppearanceMode::Dark,
+    ] {
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
 
-    assert_eq!(
-        window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::TerminalLightTheme)
-    );
+        assert_eq!(
+            window.read_with(cx, |window, _| window.revealed),
+            Some(SettingsRowId::TerminalTheme)
+        );
+    }
 }
 
 #[gpui::test]
-fn changing_appearance_mode_resynchronizes_the_revealed_search_result(cx: &mut TestAppContext) {
+fn a_theme_search_navigates_only_to_sections_it_matches(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    set_query(&window, "theme", cx);
-    assert_eq!(
-        window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::TerminalTheme)
-    );
-
-    cx.update(|_, cx| {
-        window.update(cx, |settings, cx| {
-            settings.set_appearance_mode(AppearanceMode::Auto, cx)
-        });
-    });
-
-    assert_eq!(
-        window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::TerminalLightTheme)
-    );
-}
-
-#[gpui::test]
-fn search_navigation_excludes_sections_with_only_unavailable_matches(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    cx.update(|_, cx| {
-        window.update(cx, |settings, cx| {
-            settings.set_appearance_mode(AppearanceMode::Auto, cx)
-        });
-    });
 
     set_query(&window, "theme", cx);
 
     assert!(!window.read_with(cx, |window, _| {
         window
             .navigable_sections()
-            .contains(&SettingsSectionId::Appearance)
+            .contains(&SettingsSectionId::Interface)
     }));
 }
 
@@ -962,7 +1020,7 @@ fn clearing_search_restores_every_row(cx: &mut TestAppContext) {
     assert!(
         !window
             .read_with(cx, |window, _| window
-                .rows_for(SettingsSectionId::Appearance))
+                .rows_for(SettingsSectionId::Interface))
             .is_empty()
     );
 }
@@ -971,11 +1029,11 @@ fn clearing_search_restores_every_row(cx: &mut TestAppContext) {
 fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    click("settings-navigation-settings-section-terminal", cx);
+    click("settings-navigation-settings-section-font", cx);
 
     assert_eq!(
         window.read_with(cx, |window, _| window.active_section),
-        SettingsSectionId::Terminal
+        SettingsSectionId::Font
     );
 }
 
@@ -1007,10 +1065,10 @@ fn the_detail_pane_presents_only_the_selected_section(cx: &mut TestAppContext) {
 
     assert_eq!(
         window.read_with(cx, |window, _| window.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
-    assert!(cx.debug_bounds("settings-section-appearance").is_some());
-    assert!(cx.debug_bounds("settings-section-terminal").is_none());
+    assert!(cx.debug_bounds("settings-section-interface").is_some());
+    assert!(cx.debug_bounds("settings-section-font").is_none());
     assert!(cx.debug_bounds("settings-section-themes").is_none());
     assert!(cx.debug_bounds("settings-row-terminal-italic").is_none());
 }
@@ -1247,7 +1305,7 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
     document.preferences.terminal.typography.base_size = 8.0;
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     // The decrement is disabled at the bottom of the range, so it cannot request a rejected value.
     click("settings-terminal-base-size-decrease", cx);
@@ -1266,7 +1324,7 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
 fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
     click("settings-terminal-line-height-increase", cx);
 
     let height = document_of(&window, cx)
@@ -1504,15 +1562,14 @@ fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) 
 
 /// Nothing is wrong by default, and a warning that says so is noise rather than information.
 #[gpui::test]
-fn the_theme_library_warns_only_when_something_could_not_be_resolved(cx: &mut TestAppContext) {
+fn the_themes_page_warns_only_when_something_could_not_be_resolved(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
 
     assert_eq!(cx.debug_bounds("settings-diagnostics-notice"), None);
     assert!(
-        cx.debug_bounds("settings-installed-themes")
-            .is_some(),
-        "the library lists what is installed"
+        cx.debug_bounds("settings-current-theme").is_some(),
+        "the page leads with the theme in use"
     );
 }
 
@@ -1530,6 +1587,10 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
+            // A section's untitled lead group presents itself, as the theme in use does.
+            if row.descriptor().group.is_empty() {
+                continue;
+            }
             let group = super::group_selector(section, row.descriptor().group);
             let frame = cx
                 .debug_bounds(leaked_owned(group.clone()))
@@ -1558,15 +1619,15 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
 #[gpui::test]
 fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     let pane = cx
-        .debug_bounds("settings-section-terminal")
+        .debug_bounds("settings-section-font")
         .expect("the section should render");
-    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Font));
     let mut cards: Vec<(String, gpui::Bounds<gpui::Pixels>)> = Vec::new();
     for row in &rows {
-        let group = super::group_selector(SettingsSectionId::Terminal, row.descriptor().group);
+        let group = super::group_selector(SettingsSectionId::Font, row.descriptor().group);
         let card = cx
             .debug_bounds(leaked_owned(format!("{group}-card")))
             .unwrap_or_else(|| panic!("{group} should rest on a card"));
@@ -1623,7 +1684,7 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
 fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     let card = cx
-        .debug_bounds("settings-section-appearance-group-window-card")
+        .debug_bounds("settings-section-interface-group-window-card")
         .expect("the Window group must render its card");
     let top = cx
         .debug_bounds("settings-row-transparency")
@@ -1632,7 +1693,7 @@ fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut T
         .debug_bounds("settings-row-blur")
         .expect("the Blur row must render");
     let separator = cx
-        .debug_bounds("settings-section-appearance-group-window-card-separator-2")
+        .debug_bounds("settings-section-interface-group-window-card-separator-2")
         .expect("adjacent Window rows must render a separator");
 
     assert_eq!(bottom.top(), top.bottom());
@@ -1787,10 +1848,10 @@ fn assert_client_chrome_geometry(document: SettingsDocument, cx: &mut TestAppCon
         .debug_bounds("settings-detail-heading")
         .expect("detail heading");
     let title = cx
-        .debug_bounds("settings-section-appearance-title")
+        .debug_bounds("settings-section-interface-title")
         .expect("section title");
     let description = cx
-        .debug_bounds("settings-section-appearance-description")
+        .debug_bounds("settings-section-interface-description")
         .expect("section description");
     let detail = cx.debug_bounds("settings-detail").expect("detail pane");
     let expected_height = cx.update(|_, cx| crate::ui::appearance::chrome(cx).top_height());
@@ -1922,6 +1983,9 @@ fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
+            if row.descriptor().group.is_empty() {
+                continue;
+            }
             let group = super::group_selector(section, row.descriptor().group);
             let title = cx
                 .debug_bounds(leaked_owned(format!("{group}-title")))
@@ -2019,6 +2083,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 #[gpui::test]
 fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
 
     let label = cx
         .debug_bounds("settings-row-appearance-mode-label")
@@ -2029,9 +2094,9 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
     let row = cx
         .debug_bounds("settings-row-appearance-mode")
         .expect("the appearance row should render");
-    let density = cx
-        .debug_bounds("settings-row-density")
-        .expect("the density row should render");
+    let next = cx
+        .debug_bounds("settings-row-terminal-theme")
+        .expect("the theme in use should render under the appearance row");
 
     // The caption is the only thing in this row under the label, so the label column's own extent
     // is what the assertions below measure.
@@ -2040,8 +2105,8 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
         "guidance should sit under the label, got {label:?} against {control:?}"
     );
     assert!(
-        row.bottom() <= density.top() + px(0.5),
-        "guidance should stay inside its own row, got {row:?} against {density:?}"
+        row.bottom() <= next.top() + px(0.5),
+        "guidance should stay inside its own row, got {row:?} against {next:?}"
     );
     assert!(
         control.left() >= label.left(),
@@ -2059,9 +2124,9 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
     cx: &mut TestAppContext,
 ) {
     let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
-    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Terminal));
+    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Font));
     let bounds = rows
         .iter()
         .map(|row| {
@@ -2103,7 +2168,7 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
 #[gpui::test]
 fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     let selector = cx
         .debug_bounds("settings-row-terminal-regular-weight-control")
@@ -2131,10 +2196,10 @@ fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppC
 fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    set_query(&window, "theme", cx);
+    set_query(&window, "typeface", cx);
     let trigger = cx
-        .debug_bounds("settings-row-terminal-theme-control")
-        .expect("the terminal theme selector should render");
+        .debug_bounds("settings-terminal-font-family")
+        .expect("the terminal font selector should render");
     let value = cx
         .debug_bounds("combo-box-trigger-label")
         .expect("the selector should show its value");
@@ -2148,44 +2213,10 @@ fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
     );
 }
 
-/// Every theme's colors take one column width, so the names beside them line up.
-#[gpui::test]
-fn every_theme_strip_shares_one_width(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Themes, cx);
-
-    let ids = window.read_with(cx, |window, _| {
-        window
-            .editor
-            .theme_summaries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|summary| summary.id.as_str().to_owned())
-            .collect::<Vec<_>>()
-    });
-    assert!(ids.len() > 1, "the library should list several themes");
-
-    let edges = ids
-        .iter()
-        .map(|id| {
-            cx.debug_bounds(leaked_owned(format!("settings-theme-swatches-{id}")))
-                .unwrap_or_else(|| panic!("{id} should show its colors"))
-                .right()
-        })
-        .collect::<Vec<_>>();
-
-    // A theme offering fewer colors shows wider bands rather than a shorter strip, so every name
-    // beside them starts at the same place.
-    assert!(
-        edges.windows(2).all(|pair| pair[0] == pair[1]),
-        "every strip should end at one edge, got {edges:?} for {ids:?}"
-    );
-}
-
 #[gpui::test]
 fn a_row_label_is_centered_against_the_control_it_names(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     // The terminal weight row pairs a short label with the tallest control in the form.
     let label = cx
@@ -2221,7 +2252,7 @@ fn a_control_hugs_its_content_rather_than_filling_the_row(cx: &mut TestAppContex
 #[gpui::test]
 fn a_switch_row_presents_the_switch_without_repeating_the_label(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     let switch = cx
         .debug_bounds("settings-terminal-italic")
@@ -2237,72 +2268,6 @@ fn a_switch_row_presents_the_switch_without_repeating_the_label(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn every_installed_theme_row_keeps_one_line(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Themes, cx);
-    let ids = window.read_with(cx, |window, _| {
-        window
-            .editor
-            .theme_summaries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|summary| summary.id.as_str().to_owned())
-            .collect::<Vec<_>>()
-    });
-    assert!(ids.len() > 1, "the built-in themes should be installed");
-
-    let heights = ids
-        .iter()
-        .map(|id| {
-            let selector: &'static str =
-                Box::leak(format!("settings-theme-row-{id}").into_boxed_str());
-            cx.debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} should render"))
-                .size
-                .height
-        })
-        .collect::<Vec<_>>();
-
-    // A name that wrapped would grow its row, so equal heights are what keeps the list a list.
-    assert!(
-        heights.windows(2).all(|pair| pair[0] == pair[1]),
-        "theme rows should share one height, got {heights:?}"
-    );
-}
-
-#[gpui::test]
-fn every_installed_theme_reserves_the_in_use_status_slot(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Themes, cx);
-    let ids = window.read_with(cx, |window, _| {
-        window
-            .editor
-            .theme_summaries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|summary| summary.id.as_str().to_owned())
-            .collect::<Vec<_>>()
-    });
-
-    let widths = ids
-        .iter()
-        .map(|id| {
-            let selector: &'static str =
-                Box::leak(format!("settings-theme-status-slot-{id}").into_boxed_str());
-            cx.debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} should reserve the theme status column"))
-                .size
-                .width
-        })
-        .collect::<Vec<_>>();
-
-    assert!(
-        widths.windows(2).all(|pair| pair[0] == pair[1]),
-        "selected and unselected themes should reserve the same status width, got {widths:?}"
-    );
-}
-
-#[gpui::test]
 fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
 
@@ -2310,15 +2275,11 @@ fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext)
     let mut heights = Vec::new();
     for (section, selectors) in [
         (
-            SettingsSectionId::Appearance,
+            SettingsSectionId::Interface,
             ["settings-density"].as_slice(),
         ),
         (
-            SettingsSectionId::Themes,
-            ["settings-row-terminal-theme-control"].as_slice(),
-        ),
-        (
-            SettingsSectionId::Terminal,
+            SettingsSectionId::Font,
             [
                 "settings-terminal-font-family",
                 "settings-terminal-base-size",
@@ -2347,7 +2308,7 @@ fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext)
 #[gpui::test]
 fn an_open_selector_matches_its_filter_and_row_heights(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     click("settings-row-terminal-regular-weight-control", cx);
 
@@ -2368,7 +2329,7 @@ fn an_open_selector_matches_its_filter_and_row_heights(cx: &mut TestAppContext) 
 #[gpui::test]
 fn an_open_selector_shows_its_filter_glyph_and_marks_the_current_value(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Terminal, cx);
+    select_section(SettingsSectionId::Font, cx);
 
     click("settings-row-terminal-regular-weight-control", cx);
 
@@ -2389,6 +2350,7 @@ fn pressing_a_segment_keeps_the_control_height(cx: &mut TestAppContext) {
     // GPUI replaces an element's text style when an interaction refinement carries one, so a
     // refinement that forgot the segment's line height would reflow the row under the pointer.
     let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
     let light = cx
         .debug_bounds("settings-appearance-mode-light")
         .expect("the light card should render")
@@ -2413,6 +2375,7 @@ fn pressing_a_segment_keeps_the_control_height(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
 
     let card = cx
         .debug_bounds("settings-appearance-mode-light")
@@ -2689,6 +2652,7 @@ fn resetting_theme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestA
 #[gpui::test]
 fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             for slot in [Appearance::Light, Appearance::Dark] {
@@ -2743,8 +2707,8 @@ fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut Test
         px(super::WINDOW_HEIGHT),
     ));
     cx.run_until_parked();
-    select_section(SettingsSectionId::Terminal, cx);
-    select_section(SettingsSectionId::Appearance, cx);
+    select_section(SettingsSectionId::Font, cx);
+    select_section(SettingsSectionId::Themes, cx);
 
     let row = cx
         .debug_bounds("settings-row-appearance-mode")
@@ -2833,31 +2797,51 @@ fn registry_archive() -> Vec<u8> {
     )])
 }
 
-/// Browsing contacts the registry once and only on request; installing an extension adds its
-/// themes without selecting any, and the row then reports the installed version.
-#[gpui::test]
-fn zed_extensions_are_browsed_on_request_and_install_without_selection(cx: &mut TestAppContext) {
-    let transport = Arc::new(
+fn store_listing(
+    window: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> super::theme_store::Listing {
+    window.read_with(cx, |window, cx| window.theme_store.read(cx).listing().clone())
+}
+
+fn store_status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
+    window.read_with(cx, |window, cx| {
+        window.theme_store.read(cx).status().map(str::to_owned)
+    })
+}
+
+fn open_theme_store(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
+    cx.update(|gpui_window, cx| {
+        window.update(cx, |settings, cx| settings.open_theme_store(gpui_window, cx));
+    });
+    cx.run_until_parked();
+}
+
+fn sample_registry() -> Arc<MemoryTransport> {
+    Arc::new(
         MemoryTransport::default()
             .route(REGISTRY_LISTING, Ok(registry_listing("1.0.0")))
             .route(
                 "https://api.zed.dev/extensions/sample-themes/1.0.0/download",
                 Ok(registry_archive()),
             ),
-    );
+    )
+}
+
+/// Opening Get More Themes is what contacts the registry, once; getting an extension adds its
+/// themes without selecting any, and its row then reads Installed.
+#[gpui::test]
+fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut TestAppContext) {
+    let transport = sample_registry();
     let (window, _harness, cx) = open_settings_with_registry(cx, transport.clone());
     select_section(SettingsSectionId::Themes, cx);
     assert!(transport.requests().is_empty());
 
-    click("settings-zed-extensions-browse", cx);
-    assert!(window.read_with(cx, |window, _| matches!(
-        window.zed_extensions.listing(),
-        super::zed_extensions::Listing::Loaded(extensions) if extensions.len() == 2
-    )));
-    assert!(
-        cx.debug_bounds("settings-zed-extension-action-sample-themes")
-            .is_some()
-    );
+    open_theme_store(&window, cx);
+    assert!(matches!(
+        store_listing(&window, cx),
+        super::theme_store::Listing::Loaded(extensions) if extensions.len() == 2
+    ));
     let preferences = document_of(&window, cx).preferences;
 
     click("settings-zed-extension-action-sample-themes", cx);
@@ -2872,23 +2856,70 @@ fn zed_extensions_are_browsed_on_request_and_install_without_selection(cx: &mut 
     assert_eq!(names, ["Sample Dark", "Sample Light"]);
     assert_eq!(document.preferences, preferences);
     assert_eq!(
-        window.read_with(cx, |window, _| window.zed_extensions.status().cloned()),
-        Some("Installed 2 themes from Sample Themes.".into())
+        store_status(&window, cx).as_deref(),
+        Some("Installed 2 themes from Sample Themes.")
     );
+    assert_eq!(
+        cx.debug_bounds("settings-zed-extension-action-sample-themes"),
+        None,
+        "an extension at the listed version has nothing to get"
+    );
+    assert!(
+        cx.debug_bounds("settings-zed-extension-installed-sample-themes")
+            .is_some()
+    );
+
+    click("modal-action-settings-theme-store-done", cx);
+    open_theme_store(&window, cx);
     assert_eq!(
         transport.requests(),
         [
             REGISTRY_LISTING,
             "https://api.zed.dev/extensions/sample-themes/1.0.0/download"
-        ]
+        ],
+        "reopening the sheet reuses the listing"
     );
+}
+
+/// A tile's context menu removes every theme its extension installed. A slot that used one of
+/// them returns to its built-in theme.
+#[gpui::test]
+fn removing_an_extension_from_a_tile_removes_all_of_its_themes(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
+    select_section(SettingsSectionId::Themes, cx);
+    open_theme_store(&window, cx);
+    click("settings-zed-extension-action-sample-themes", cx);
+    click("modal-action-settings-theme-store-done", cx);
+    let selected = document_of(&window, cx)
+        .terminal_themes
+        .iter()
+        .find(|theme| theme.name == "Sample Dark")
+        .map(|theme| theme.id.clone())
+        .expect("the dark theme is installed");
+    window.update(cx, |settings, cx| {
+        settings.set_appearance_mode(AppearanceMode::Dark, cx);
+        settings.set_theme(Appearance::Dark, selected.clone(), cx);
+    });
+    settle(cx);
+
+    let tile = leaked_owned(format!("settings-theme-tile-{}", selected.as_str()));
+    right_click(tile, cx);
+    click(
+        leaked_owned(format!(
+            "settings-theme-tile-{}-remove-extension",
+            selected.as_str()
+        )),
+        cx,
+    );
+    click("modal-action-settings-remove-theme-confirm", cx);
+
+    let document = document_of(&window, cx);
+    assert!(document.terminal_themes.is_empty());
     assert_eq!(
-        window.read_with(cx, |window, _| window
-            .installed_extensions()
-            .get("sample-themes")
-            .cloned()),
-        Some(String::from("1.0.0"))
+        document.preferences.terminal.themes.dark,
+        SettingsDocument::default().preferences.terminal.themes.dark
     );
+    assert!(cx.debug_bounds(tile).is_none());
 }
 
 #[gpui::test]
@@ -2897,12 +2928,12 @@ fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings_with_registry(cx, transport.clone());
     select_section(SettingsSectionId::Themes, cx);
 
-    click("settings-zed-extensions-browse", cx);
-    assert!(window.read_with(cx, |window, _| matches!(
-        window.zed_extensions.listing(),
-        super::zed_extensions::Listing::Failed(crate::theme_registry::RegistryError::Refused)
-    )));
+    open_theme_store(&window, cx);
+    assert!(matches!(
+        store_listing(&window, cx),
+        super::theme_store::Listing::Failed(crate::theme_registry::RegistryError::Refused)
+    ));
 
-    click("settings-zed-extensions-retry", cx);
+    click("settings-theme-store-retry", cx);
     assert_eq!(transport.requests().len(), 2);
 }

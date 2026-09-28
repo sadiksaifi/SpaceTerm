@@ -261,6 +261,7 @@ fn summaries_list_builtins_first_then_installed_themes_by_name() {
     assert!(summaries[..2].iter().all(|summary| summary.builtin));
     assert_eq!(names[2..], ["alpha", "Beta", "Zulu"]);
     assert_eq!(summaries[2].family.as_deref(), Some("Sample"));
+    assert_eq!(summaries[3].family, None);
     assert_eq!(
         summaries[2].package,
         Some(ThemePackage {
@@ -268,6 +269,5 @@ fn summaries_list_builtins_first_then_installed_themes_by_name() {
             version: String::from("1.0.0"),
         })
     );
-    assert_eq!(summaries[3].family, None);
     assert_eq!(summaries[3].package, None);
 }

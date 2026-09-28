@@ -354,7 +354,7 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
     let catalog_revision = settings.snapshot().catalog_revision;
     let preferences_before_deletion = settings.snapshot().candidate.preferences.clone();
     let removed_revision = settings
-        .remove_theme_preview(&token, catalog_revision, &selected)
+        .remove_themes_preview(&token, catalog_revision, std::slice::from_ref(&selected))
         .unwrap();
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
@@ -383,10 +383,10 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
     let before = settings.snapshot();
 
     assert_eq!(
-        settings.remove_theme_preview(
+        settings.remove_themes_preview(
             &token,
             before.catalog_revision,
-            &ThemeId::builtin("builtin.spaceterm.dark"),
+            &[ThemeId::builtin("builtin.spaceterm.dark")],
         ),
         Err(SettingsError::Catalog(CatalogError::ReservedId))
     );
@@ -395,10 +395,10 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         before.catalog_revision
     );
     assert_eq!(
-        settings.remove_theme_preview(
+        settings.remove_themes_preview(
             &token,
             before.catalog_revision,
-            &ThemeId::new("custom.unknown").unwrap(),
+            &[ThemeId::new("custom.unknown").unwrap()],
         ),
         Err(SettingsError::Catalog(CatalogError::UnknownTheme))
     );
@@ -410,6 +410,44 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         settings.snapshot().candidate.terminal_themes,
         before.candidate.terminal_themes
     );
+    assert_eq!(storage.0.lock().unwrap().writes, 0);
+}
+
+#[test]
+fn removing_several_themes_is_all_or_nothing() {
+    let (settings, storage) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    let imported = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedFamily(ZED_FAMILY),
+        )
+        .unwrap();
+    let id = imported.installed[0].clone();
+    let before = settings.snapshot();
+
+    assert_eq!(
+        settings.remove_themes_preview(
+            &token,
+            before.catalog_revision,
+            &[id.clone(), ThemeId::new("custom.unknown").unwrap()],
+        ),
+        Err(SettingsError::Catalog(CatalogError::UnknownTheme))
+    );
+    assert_eq!(
+        settings.remove_themes_preview(&token, before.catalog_revision, &[]),
+        Err(SettingsError::Catalog(CatalogError::UnknownTheme))
+    );
+    assert_eq!(
+        settings.snapshot().candidate.terminal_themes,
+        before.candidate.terminal_themes
+    );
+
+    settings
+        .remove_themes_preview(&token, before.catalog_revision, &[id])
+        .unwrap();
+    assert!(settings.snapshot().candidate.terminal_themes.is_empty());
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
 
@@ -428,17 +466,17 @@ fn deletion_rejects_stale_and_busy_operations_without_removing_the_theme() {
     let id = imported.installed[0].clone();
 
     assert_eq!(
-        settings.remove_theme_preview(&token, stale_catalog_revision, &id),
+        settings.remove_themes_preview(&token, stale_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Stale)
     );
     let current_catalog_revision = settings.snapshot().catalog_revision;
     let job = settings.commit_preview(&token).unwrap();
     assert_eq!(
-        settings.remove_theme_preview(&token, current_catalog_revision, &id),
+        settings.remove_themes_preview(&token, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     );
     assert!(matches!(
-        settings.remove_theme_committed(0, current_catalog_revision, &id),
+        settings.remove_themes_committed(0, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     ));
     assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
@@ -461,10 +499,10 @@ fn direct_deletion_commits_only_the_named_custom_theme() {
     let installed = settings.snapshot();
 
     let deletion = settings
-        .remove_theme_committed(
+        .remove_themes_committed(
             installed.committed.revision,
             installed.catalog_revision,
-            &id,
+            std::slice::from_ref(&id),
         )
         .unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);

@@ -230,8 +230,8 @@ pub(crate) use zed::{
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
 pub(crate) use builtin::chrome_base as builtin_chrome_base;
-#[cfg(test)]
 pub(crate) use builtin::fallback_id as builtin_fallback_theme;
+pub(crate) use builtin::terminal_base as builtin_terminal_base;
 pub(crate) use builtin::LIGHT_BOUNDARY_INK;
 pub(crate) use resolution::AppearanceDiagnostic;
 

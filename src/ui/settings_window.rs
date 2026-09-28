@@ -10,8 +10,9 @@ mod controls;
 mod editor;
 mod import;
 mod microphone;
+mod theme_gallery;
+mod theme_store;
 mod themes;
-mod zed_extensions;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -69,8 +70,8 @@ use controls::{
 };
 use editor::{SaveStatus, SettingsEditor};
 use microphone::MicrophoneAccessRow;
-use themes::InstalledThemesSearch;
-use zed_extensions::ZedExtensionsBrowser;
+use theme_gallery::ThemeGallery;
+use theme_store::ThemeStore;
 
 actions!(
     spaceterm,
@@ -307,7 +308,6 @@ pub(crate) struct SettingsWindow {
     active_section: SettingsSectionId,
     /// The row Settings Search revealed, highlighted so the eye lands on it.
     revealed: Option<SettingsRowId>,
-    interchange_status: Option<SharedString>,
     focus_handle: FocusHandle,
     /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
     navigation_focus: FocusHandle,
@@ -315,8 +315,9 @@ pub(crate) struct SettingsWindow {
     navigation_focus_visible: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     microphone_access: MicrophoneAccessRow,
-    installed_search: InstalledThemesSearch,
-    zed_extensions: ZedExtensionsBrowser,
+    theme_gallery: ThemeGallery,
+    /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
+    theme_store: Entity<ThemeStore>,
 }
 
 impl SettingsWindow {
@@ -443,8 +444,9 @@ impl SettingsWindow {
             async {}
         })
         .detach();
-        let installed_search = InstalledThemesSearch::new(window, cx);
-        let zed_extensions = ZedExtensionsBrowser::new(theme_registry, window, cx);
+        let theme_gallery = ThemeGallery::new(window, cx);
+        let owner = cx.weak_entity();
+        let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         Self {
             window_appearance,
             window_traffic_lights,
@@ -454,16 +456,15 @@ impl SettingsWindow {
             query: SharedString::default(),
             scroll: ScrollHandle::new(),
             scrollbar,
-            active_section: SettingsSectionId::Appearance,
+            active_section: SettingsSectionId::Interface,
             revealed: None,
-            interchange_status: None,
             focus_handle,
             navigation_focus,
             navigation_focus_visible: true,
             operating_system_window_drag_platform,
             microphone_access: MicrophoneAccessRow::new(microphone_access),
-            installed_search,
-            zed_extensions,
+            theme_gallery,
+            theme_store,
         }
     }
 
@@ -547,21 +548,14 @@ impl SettingsWindow {
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        self.applicable_matching_rows()
+        catalog::matching_rows(&self.query)
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
-    fn applicable_matching_rows(&self) -> Vec<SettingsRowId> {
-        catalog::matching_rows(&self.query)
-            .into_iter()
-            .filter(|row| self.row_applies(*row))
-            .collect()
-    }
-
     fn synchronize_search_results(&mut self) {
-        let matching = self.applicable_matching_rows();
+        let matching = catalog::matching_rows(&self.query);
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -576,16 +570,6 @@ impl SettingsWindow {
         {
             self.active_section = row.descriptor().section;
             self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-        }
-    }
-
-    /// Auto exposes both Terminal slots.
-    fn row_applies(&self, row: SettingsRowId) -> bool {
-        let auto = self.editor.document().preferences.mode == AppearanceMode::Auto;
-        match row {
-            SettingsRowId::TerminalTheme => !auto,
-            SettingsRowId::TerminalLightTheme | SettingsRowId::TerminalDarkTheme => auto,
-            _ => true,
         }
     }
 
@@ -935,7 +919,7 @@ impl SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = self.applicable_matching_rows();
+        let matching = catalog::matching_rows(&self.query);
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -993,7 +977,7 @@ impl SettingsWindow {
                 div()
                     .id(SharedString::from(format!(
                         "settings-navigation-{}",
-                        section.navigation_title()
+                        section.title()
                     )))
                     .debug_selector(move || format!("settings-navigation-{}", section.selector()))
                     .relative()
@@ -1059,15 +1043,15 @@ impl SettingsWindow {
                             })
                             .child(Icon::inherited(
                                 match section {
-                                    SettingsSectionId::Appearance => IconName::SunMoon,
-                                    SettingsSectionId::Terminal => IconName::Terminal,
+                                    SettingsSectionId::Interface => IconName::AppWindow,
+                                    SettingsSectionId::Font => IconName::Type,
                                     SettingsSectionId::Themes => IconName::Palette,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
                             )),
                     )
-                    .child(div().min_w_0().flex_1().child(section.navigation_title()))
+                    .child(div().min_w_0().flex_1().child(section.title()))
             })
             .collect::<Vec<_>>();
         let sidebar = div()
@@ -1251,7 +1235,14 @@ impl SettingsWindow {
         let rendered = groups
             .into_iter()
             .map(|(title, members)| {
-                SettingsGroup::new(group_selector(section, title), title, members)
+                // The gallery's title names the appearance it is showing, which changes with the
+                // mode and, under Auto, with the slot chosen above it. Its selector stays fixed.
+                let heading = if title == SettingsRowId::InstalledThemes.descriptor().group {
+                    self.installed_themes_title(cx)
+                } else {
+                    title
+                };
+                SettingsGroup::new(group_selector(section, title), heading, members)
                     .render(settings)
                     .into_any_element()
             })
@@ -1362,13 +1353,7 @@ impl SettingsWindow {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
-            SettingsRowId::TerminalTheme => self.render_theme_picker(row, None, appearance, cx),
-            SettingsRowId::TerminalLightTheme => {
-                self.render_theme_picker(row, Some(Appearance::Light), appearance, cx)
-            }
-            SettingsRowId::TerminalDarkTheme => {
-                self.render_theme_picker(row, Some(Appearance::Dark), appearance, cx)
-            }
+            SettingsRowId::TerminalTheme => self.render_current_theme(appearance, cx),
             SettingsRowId::Density => self.render_density(appearance, cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
@@ -1379,8 +1364,6 @@ impl SettingsWindow {
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
-            SettingsRowId::ZedExtensions => self.render_zed_extensions(appearance, cx),
-            SettingsRowId::ThemeImport => self.render_theme_import(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
         }
     }
@@ -1457,60 +1440,6 @@ impl SettingsWindow {
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
         self.edit(move |draft| draft.preferences.mode = mode, cx);
         self.synchronize_search_results();
-    }
-
-    fn render_theme_picker(
-        &mut self,
-        row: SettingsRowId,
-        slot: Option<Appearance>,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let preferences = &self.editor.document().preferences;
-        let themes = &preferences.terminal.themes;
-        let restrict = slot.unwrap_or_else(|| self.fixed_appearance());
-        let current = themes.get(restrict).clone();
-        let summaries = self
-            .editor
-            .theme_summaries()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|summary| summary.appearance == restrict)
-            .collect::<Vec<_>>();
-        // The control carries its own selector so it never collides with its row's.
-        let selector = control_selector(row);
-        let mut items = summaries
-            .iter()
-            .map(|summary| {
-                ComboBoxItem::new(summary.id.clone(), SharedString::from(summary.name.clone()))
-                    .debug_selector(format!("{selector}-{}", summary.id.as_str()))
-            })
-            .collect::<Vec<_>>();
-        retain_selected_item(
-            &mut items,
-            ComboBoxItem::new(
-                current.clone(),
-                SharedString::from(format!("{current} (Unavailable)")),
-            )
-            .debug_selector(format!("{selector}-{}", current.as_str())),
-        );
-        let owner = cx.weak_entity();
-        settings_selector(
-            selector,
-            format!("{} terminal theme", row.descriptor().label),
-            Some(current),
-            "Choose a terminal theme",
-            items,
-            appearance,
-        )
-        .disabled(!self.editor.editable())
-        .on_accept(move |acceptance, _, cx| {
-            let id = acceptance.item_id().clone();
-            let _ = owner.update(cx, |settings, cx| {
-                settings.set_theme(restrict, id, cx);
-            });
-        })
-        .into_any_element()
     }
 
     fn set_theme(&mut self, slot: Appearance, id: ThemeId, cx: &mut Context<Self>) {
@@ -2266,12 +2195,10 @@ fn control_selector(row: SettingsRowId) -> String {
 
 /// Where a row's label sits.
 ///
-/// The installed library and the Zed extension browser present lists rather than one control,
-/// and each is the only row in its box, so the group's own title names them and the content spans
-/// the row.
+/// The theme preview and gallery present themselves, so they span the row without a label.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::InstalledThemes | SettingsRowId::ZedExtensions => SettingsRowLayout::Full,
+        SettingsRowId::TerminalTheme | SettingsRowId::InstalledThemes => SettingsRowLayout::Full,
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -2321,9 +2248,6 @@ impl SettingsWindow {
                 })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
-            SettingsRowId::ThemeImport => {
-                Some("Install every theme in a Zed theme family JSON file.")
-            }
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }

@@ -113,10 +113,10 @@ impl SettingsDraft {
         })
     }
 
-    pub(super) fn remove_theme(&mut self, id: &ThemeId) -> Result<(), SettingsError> {
+    pub(super) fn remove_themes(&mut self, ids: &[ThemeId]) -> Result<(), SettingsError> {
         self.edit_catalog(|settings, token, revision| {
             settings
-                .remove_theme_preview(token, revision, id)
+                .remove_themes_preview(token, revision, ids)
                 .map(|_| ())
         })
     }

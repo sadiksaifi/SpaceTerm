@@ -407,11 +407,12 @@ impl UserSettings {
         ))
     }
 
-    pub(crate) fn remove_theme_preview(
+    /// Removes installed themes together, so one extension leaves the catalog in one step.
+    pub(crate) fn remove_themes_preview(
         &self,
         token: &PreviewToken,
         catalog_revision: u64,
-        id: &ThemeId,
+        ids: &[ThemeId],
     ) -> Result<u64, SettingsError> {
         let mut state = self.0.lock();
         self.require_token(&state, token)?;
@@ -419,7 +420,7 @@ impl UserSettings {
         let Transaction::Preview { candidate, .. } = &state.transaction else {
             return Err(SettingsError::Stale);
         };
-        let candidate = remove_theme(candidate, id)?;
+        let candidate = remove_themes(candidate, ids)?;
         state.transaction = Transaction::Preview {
             id: token.id,
             candidate: Arc::new(candidate),
@@ -434,16 +435,16 @@ impl UserSettings {
         dead_code,
         reason = "direct imported theme deletion is available without a preview UI"
     )]
-    pub(crate) fn remove_theme_committed(
+    pub(crate) fn remove_themes_committed(
         &self,
         revision: u64,
         catalog_revision: u64,
-        id: &ThemeId,
+        ids: &[ThemeId],
     ) -> Result<CommitJob, SettingsError> {
         let mut state = self.0.lock();
         state.require_idle(revision)?;
         state.require_catalog_revision(catalog_revision)?;
-        let candidate = remove_theme(&state.committed, id)?;
+        let candidate = remove_themes(&state.committed, ids)?;
         self.prepare_direct_commit(&mut state, candidate)
     }
 
@@ -703,23 +704,19 @@ fn install_themes(
     Ok((validate_candidate(candidate, document.revision)?, installed))
 }
 
-#[allow(
-    dead_code,
-    reason = "shared validation for the optional preview and direct deletion operations"
-)]
-fn remove_theme(
+fn remove_themes(
     document: &SettingsDocument,
-    id: &ThemeId,
+    ids: &[ThemeId],
 ) -> Result<SettingsDocument, SettingsError> {
-    if id.is_reserved() {
+    if ids.iter().any(ThemeId::is_reserved) {
         return Err(CatalogError::ReservedId.into());
     }
-    let mut candidate = document.clone();
-    let before = candidate.terminal_themes.len();
-    candidate.terminal_themes.retain(|theme| &theme.id != id);
-    if candidate.terminal_themes.len() == before {
+    let installed = |id: &ThemeId| document.terminal_themes.iter().any(|theme| &theme.id == id);
+    if ids.is_empty() || !ids.iter().all(installed) {
         return Err(CatalogError::UnknownTheme.into());
     }
+    let mut candidate = document.clone();
+    candidate.terminal_themes.retain(|theme| !ids.contains(&theme.id));
     validate_candidate(candidate, document.revision)
 }
 
