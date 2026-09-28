@@ -39,16 +39,12 @@ pub(crate) fn offer_at_launch(workspace: WindowHandle<WorkspaceManager>, cx: &mu
     cx.defer(move |cx| {
         let _ = workspace.update(cx, |_, window, cx| {
             let result = launch_alert().present(window, cx, move |outcome, cx| {
-                match outcome {
-                    AlertOutcome::Activated {
-                        action_id: RecoveryAction::Reset,
-                        ..
-                    } => reset(workspace, cx),
-                    AlertOutcome::Activated {
-                        action_id: RecoveryAction::OpenSettings,
-                        ..
-                    } => super::settings_window::open_or_activate(cx),
-                    _ => {}
+                if let AlertOutcome::Activated {
+                    action_id: RecoveryAction::Reset,
+                    ..
+                } = outcome
+                {
+                    reset(workspace, cx);
                 }
             });
             if result.is_err() {
@@ -101,12 +97,6 @@ fn launch_alert() -> Alert<RecoveryAction> {
                 "settings-recovery-reset",
             )
             .with_emphasis(ModalActionEmphasis::Prominent),
-            ModalAction::new(
-                RecoveryAction::OpenSettings,
-                "Open Settings",
-                ModalActionRole::Auxiliary,
-                "settings-recovery-open-settings",
-            ),
             ModalAction::new(
                 RecoveryAction::NotNow,
                 "Not Now",

@@ -1931,11 +1931,14 @@ impl SettingsWindow {
                                 .child(explanation),
                         ),
                 )
+                // The glyph and text start at the top, beside the title. The actions answer the
+                // whole notice, so they center on its height.
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .flex_none()
+                        .self_center()
                         .gap(appearance.spacing(6.0))
                         .when(status.recoverable(), |actions| {
                             let owner = owner.clone();

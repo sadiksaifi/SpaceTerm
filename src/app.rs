@@ -1350,7 +1350,9 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn settings_recovery_can_defer_to_the_settings_window(cx: &mut gpui::TestAppContext) {
+    fn settings_recovery_can_be_declined_without_changing_the_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
@@ -1358,16 +1360,17 @@ mod runtime_tests {
         let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
         cx.run_until_parked();
 
-        click("modal-action-settings-recovery-open-settings", cx);
+        click("modal-action-settings-recovery-not-now", cx);
 
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         assert_eq!(storage.backup(), None);
-        assert!(cx.update(|_, cx| {
-            cx.windows().into_iter().any(|window| {
-                window
-                    .downcast::<crate::ui::settings_window::SettingsWindow>()
-                    .is_some()
-            })
-        }));
+        let status = cx.update(|_, cx| {
+            cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings
+                .snapshot()
+                .status
+        });
+        assert!(status.is_some_and(crate::settings::SettingsError::is_malformed));
     }
 
     #[gpui::test]
