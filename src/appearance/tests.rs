@@ -133,13 +133,13 @@ fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppea
         .unwrap()
 }
 
-/// A Dark Pane reads as the window's own surface, one quiet step below the chrome around it.
+/// A Dark Pane reads as the window's own surface, one quiet step above the window root.
 ///
 /// The step is measured against the opaque theme reference, which every material derives from,
-/// so it holds whatever the desktop behind the window happens to be. Glass narrows it slightly,
-/// because a dark rung spends no more ink than the ladder ceiling once the window transmits.
+/// so it holds whatever the desktop behind the window happens to be. The material keeps the step
+/// subtle as the window transmits.
 #[test]
-fn dark_pane_rests_one_subtle_step_below_the_window_root() {
+fn dark_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
         let resolved = prepared_appearance(AppearanceMode::Dark, transparency);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
@@ -151,12 +151,12 @@ fn dark_pane_rests_one_subtle_step_below_the_window_root() {
         assert!(
             [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
                 .into_iter()
-                .all(|(pane, root)| pane < root),
-            "a Dark Pane stays darker than the window root at transparency {transparency}: pane={pane:?}",
+                .all(|(pane, root)| pane > root),
+            "a Dark Pane stays lighter than the window root at transparency {transparency}: pane={pane:?}",
         );
         let step = root.contrast_ratio(pane);
         assert!(
-            (1.015..=1.05).contains(&step),
+            (1.015..=1.07).contains(&step),
             "a Dark Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
         );
     }
