@@ -249,12 +249,23 @@ impl SettingsGroup {
 /// that this setting was changed, the control stays on the one shared right edge whether or not a
 /// reset is present, and keyboard focus reaches the reset just before the control it restores. The
 /// reset's slot is held empty on a row without one, so the label wraps at the same width either way.
+/// What a row's caption tells the reader, which selects its color.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum CaptionTone {
+    /// Guidance, in the secondary text color.
+    #[default]
+    Guidance,
+    /// Something changed that the reader should notice, in the Chrome warning color.
+    Warning,
+    /// The row refused something or cannot act, in the Chrome error color.
+    Error,
+}
+
 pub(super) struct SettingsRow {
     selector: &'static str,
     label: &'static str,
     description: Option<SharedString>,
-    /// The description warns about the row rather than guiding it.
-    warning: bool,
+    tone: CaptionTone,
     control: AnyElement,
     reset: Option<AnyElement>,
     highlighted: bool,
@@ -272,7 +283,7 @@ impl SettingsRow {
             selector,
             label,
             description: None,
-            warning: false,
+            tone: CaptionTone::Guidance,
             control: control.into_any_element(),
             reset: None,
             highlighted: false,
@@ -287,11 +298,10 @@ impl SettingsRow {
         self
     }
 
-    /// Warns about the row, such as why it refused an edit, in place of guidance and in the
-    /// Chrome warning color.
-    pub(super) fn warning(mut self, message: impl Into<SharedString>) -> Self {
+    /// Adds one line below the control in the color its tone selects.
+    pub(super) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
         self.description = Some(message.into());
-        self.warning = true;
+        self.tone = tone;
         self
     }
 
@@ -356,10 +366,10 @@ impl SettingsRow {
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         let description_selector = format!("{selector}-description");
-        let caption_color = if self.warning {
-            colors.warning
-        } else {
-            secondary
+        let caption_color = match self.tone {
+            CaptionTone::Guidance => secondary,
+            CaptionTone::Warning => colors.warning,
+            CaptionTone::Error => colors.error,
         };
         // One rule for the whole form: the label starts at the content's left edge, the control
         // ends at its right edge, and nothing is centered.

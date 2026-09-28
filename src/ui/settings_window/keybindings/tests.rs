@@ -12,6 +12,7 @@ use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::controls::CaptionTone;
 use super::ShortcutDescription;
 
 fn open_keybindings(
@@ -206,14 +207,14 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Removed from Close Tab.".into(),
-            warning: true,
+            tone: CaptionTone::Warning,
         })
     );
     assert_eq!(
         description(&window, Command::CloseTab, cx),
         Some(ShortcutDescription {
             text: "Its shortcut is now assigned to New Workspace.".into(),
-            warning: true,
+            tone: CaptionTone::Warning,
         })
     );
 }
@@ -229,7 +230,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Ctrl+C is reserved for programs running in the terminal.".into(),
-            warning: true,
+            tone: CaptionTone::Error,
         })
     );
 
@@ -238,9 +239,17 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "K types into the terminal. Add Primary to use it as a shortcut.".into(),
-            warning: true,
+            text: "K is sent to the terminal. Add Primary to use it as a shortcut.".into(),
+            tone: CaptionTone::Error,
         })
+    );
+
+    // A function key types nothing, and the same wording holds for it.
+    cx.simulate_keystrokes("f5");
+    cx.run_until_parked();
+    assert_eq!(
+        description(&window, Command::NewWorkspace, cx).map(|description| description.text),
+        Some("F5 is sent to the terminal. Add Primary to use it as a shortcut.".into())
     );
 
     // Escape ends the recording, and the refusal goes with it.
@@ -261,7 +270,7 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Primary+Q is reserved by Operating System for Quit.".into(),
-            warning: true,
+            tone: CaptionTone::Error,
         })
     );
 }
@@ -323,7 +332,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Its default shortcut is assigned to Close Workspace.".into(),
-            warning: true,
+            tone: CaptionTone::Warning,
         })
     );
     click("settings-row-shortcut-new-workspace-reset", cx);

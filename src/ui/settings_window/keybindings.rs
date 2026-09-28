@@ -15,7 +15,7 @@ use spaceterm_ui::{
     ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
 };
 
-use super::controls::row_horizontal_inset;
+use super::controls::{CaptionTone, row_horizontal_inset};
 use super::{SettingsRowId, SettingsWindow, control_selector};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::desktop_profile::DesktopPresentation;
@@ -77,9 +77,9 @@ pub(super) enum ShortcutNotice {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ShortcutDescription {
     pub(super) text: SharedString,
-    /// The line warns, for a refused recording, a Shortcut taken from another Command, or an
-    /// inactive Shortcut, rather than informs.
-    pub(super) warning: bool,
+    /// Error for a Reserved Shortcut, refused or inactive; Warning for a Shortcut that moved
+    /// between Commands.
+    pub(super) tone: CaptionTone,
 }
 
 impl ShortcutRows {
@@ -260,7 +260,7 @@ fn reservation_message(
     match reservation {
         Reservation::Terminal(TerminalConvention::TextInput) => {
             let primary = presentation.format_modifiers(Modifiers::command());
-            format!("{chord} types into the terminal. Add {primary} to use it as a shortcut.")
+            format!("{chord} is sent to the terminal. Add {primary} to use it as a shortcut.")
         }
         Reservation::Terminal(
             TerminalConvention::ControlCharacter
@@ -372,11 +372,21 @@ impl SettingsWindow {
         cx: &App,
     ) -> Option<AnyElement> {
         let message = self.no_shortcuts_found(cx)?;
+        // A Reserved Shortcut reads in the same error color the recorder refuses it in.
+        let reserved = matches!(
+            self.shortcuts.query(cx),
+            ShortcutQuery::Chord(SearchedChord { shortcut: Err(_), .. })
+        );
+        let color = if reserved {
+            appearance.colors.error
+        } else {
+            appearance.colors.text_muted
+        };
         Some(
             div()
                 .debug_selector(|| "settings-keybindings-no-results".to_owned())
                 .px(row_horizontal_inset(appearance))
-                .text_color(gpui_color(appearance.colors.text_muted))
+                .text_color(gpui_color(color))
                 .child(message)
                 .into_any_element(),
         )
@@ -485,23 +495,23 @@ impl SettingsWindow {
         cx: &App,
     ) -> Option<ShortcutDescription> {
         let presentation = DesktopPresentation::get(cx);
-        let (text, warning) = match self.shortcuts.notice.as_ref() {
+        let (text, tone) = match self.shortcuts.notice.as_ref() {
             Some((owner, ShortcutNotice::Refused(reason))) if *owner == command => {
-                (reason.clone(), true)
+                (reason.clone(), CaptionTone::Error)
             }
             // A reassignment is marked on both rows, so the Command that lost its Shortcut is as
             // easy to find as the one that took it.
             Some((owner, ShortcutNotice::Reassigned { from })) if *owner == command => {
-                (format!("Removed from {}.", from.label()).into(), true)
+                (format!("Removed from {}.", from.label()).into(), CaptionTone::Warning)
             }
             Some((owner, ShortcutNotice::Reassigned { from })) if *from == command => (
                 format!("Its shortcut is now assigned to {}.", owner.label()).into(),
-                true,
+                CaptionTone::Warning,
             ),
             _ => match self.resolved_keymap(cx).state(command) {
                 KeybindingState::Displaced { by } => (
                     format!("Its default shortcut is assigned to {}.", by.label()).into(),
-                    true,
+                    CaptionTone::Warning,
                 ),
                 KeybindingState::Blocked(reason) => {
                     let chord = self
@@ -518,7 +528,7 @@ impl SettingsWindow {
                             system_reservation_label(reason),
                         )
                         .into(),
-                        true,
+                        CaptionTone::Error,
                     )
                 }
                 KeybindingState::Default
@@ -526,7 +536,7 @@ impl SettingsWindow {
                 | KeybindingState::Unassigned => return None,
             },
         };
-        Some(ShortcutDescription { text, warning })
+        Some(ShortcutDescription { text, tone })
     }
 
     /// Whether the Command's Keybinding differs from its default, including a default another

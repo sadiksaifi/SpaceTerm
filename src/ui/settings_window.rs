@@ -1412,11 +1412,7 @@ impl SettingsWindow {
             rendered = rendered.description(self.update_status(cx).summary);
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
-                rendered = if description.warning {
-                    rendered.warning(description.text)
-                } else {
-                    rendered.description(description.text)
-                };
+                rendered = rendered.caption(description.text, description.tone);
             }
         } else if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
