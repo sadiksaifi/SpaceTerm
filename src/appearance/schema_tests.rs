@@ -142,6 +142,41 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
     );
 }
 
+#[test]
+fn published_schema_lists_keybinding_commands_in_settings_order() {
+    let schema = published_schema();
+    let expected: Vec<_> = crate::keybindings::Command::ALL
+        .iter()
+        .map(|command| command.id())
+        .collect();
+    assert_eq!(
+        property_keys(&schema["$defs"]["keybindings"]),
+        expected.iter().copied().collect()
+    );
+
+    let source = include_str!("../../docs/schema/appearance-settings.schema.json");
+    let positions: Vec<_> = expected
+        .iter()
+        .map(|id| {
+            source
+                .find(&format!("\"{id}\":"))
+                .expect("schema must list every command id")
+        })
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let validator = validator();
+    let mut settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
+    settings["keybindings"] =
+        serde_json::json!({"close_tab": null, "new_workspace": "shift-cmd-t"});
+    assert!(validator.is_valid(&settings));
+    settings["keybindings"]["unknown_command"] = serde_json::json!(null);
+    assert!(!validator.is_valid(&settings));
+    settings["keybindings"].as_object_mut().unwrap().remove("unknown_command");
+    settings["keybindings"]["close_tab"] = serde_json::json!(true);
+    assert!(!validator.is_valid(&settings));
+}
+
 fn object_keys(value: &serde_json::Value) -> std::collections::BTreeSet<&str> {
     value
         .as_object()

@@ -834,7 +834,7 @@ impl AppearanceExerciser {
                                 "appearance-toggle-chrome-tooltip",
                                 "Toggle Appearance Preview Without Activating This Window",
                             )
-                            .keyboard_equivalent(preview_shortcut),
+                            .keyboard_equivalent(preview_shortcut.unwrap_or_default()),
                         ),
                 )
                 .child(action(

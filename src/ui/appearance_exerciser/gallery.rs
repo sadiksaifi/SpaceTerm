@@ -905,13 +905,13 @@ mod tests {
     fn gallery_shortcut_cycles_fixture_while_palette_retains_focus_and_query(
         cx: &mut TestAppContext,
     ) {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+        let settings = crate::settings::UserSettings::load(Arc::new(
             super::super::tests::ReadOnlyExerciserStorage,
         ));
         let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
         platform.set_system_appearance(Some(Appearance::Dark));
         cx.update(|cx| {
-            appearance_runtime::install(settings, changed, Rc::new(platform), cx).unwrap();
+            appearance_runtime::install(settings, Rc::new(platform), cx).unwrap();
             crate::ui::init(cx).unwrap();
             open(cx).unwrap();
         });
@@ -955,13 +955,13 @@ mod tests {
     fn gallery_cycles_all_production_fixtures_repeatedly_without_losing_editor_state(
         cx: &mut TestAppContext,
     ) {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+        let settings = crate::settings::UserSettings::load(Arc::new(
             super::super::tests::ReadOnlyExerciserStorage,
         ));
         let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
         platform.set_system_appearance(Some(Appearance::Dark));
         cx.update(|cx| {
-            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            appearance_runtime::install(settings.clone(), Rc::new(platform), cx).unwrap();
             crate::ui::init(cx).unwrap();
         });
         let (gallery, cx) = cx.add_window_view(Gallery::new);
@@ -986,14 +986,14 @@ mod tests {
 
     #[gpui::test]
     fn authored_fixture_floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+        let settings = crate::settings::UserSettings::load(Arc::new(
             super::super::tests::ReadOnlyExerciserStorage,
         ));
         let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
         platform.set_system_appearance(Some(Appearance::Dark));
         platform.set_native_window_transparency_supported(true);
         cx.update(|cx| {
-            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            appearance_runtime::install(settings.clone(), Rc::new(platform), cx).unwrap();
             crate::ui::init(cx).unwrap();
         });
         let (gallery, cx) = cx.add_window_view(Gallery::new);
@@ -1073,13 +1073,13 @@ mod tests {
     fn gallery_activity_preview_selects_inactive_control_states_without_editing_preferences(
         cx: &mut TestAppContext,
     ) {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::new(
+        let settings = crate::settings::UserSettings::load(Arc::new(
             super::super::tests::ReadOnlyExerciserStorage,
         ));
         let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
         platform.set_system_appearance(Some(Appearance::Dark));
         cx.update(|cx| {
-            appearance_runtime::install(settings.clone(), changed, Rc::new(platform), cx).unwrap();
+            appearance_runtime::install(settings.clone(), Rc::new(platform), cx).unwrap();
             crate::ui::init(cx).unwrap();
         });
         let (_, cx) = cx.add_window_view(Gallery::new);

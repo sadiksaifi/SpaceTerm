@@ -18,6 +18,7 @@ use gpui::{Context, Task};
 use crate::appearance::{ResetTarget, ThemeId, ThemeSummary, SettingsDocument};
 #[cfg(test)]
 use crate::settings::CommitJob;
+use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
 use crate::settings::{CommitOutcome, ImportReceipt, ThemeImport, SettingsError, UserSettings};
 
@@ -209,6 +210,17 @@ impl SettingsEditor {
         cx.notify();
     }
 
+    /// Replaces Malformed Settings with defaults, keeping the unreadable file as a backup.
+    pub(super) fn recover_by_reset(
+        &mut self,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Result<(), RecoveryError> {
+        self.pending = None;
+        let result = self.draft.recover_by_reset();
+        cx.notify();
+        result
+    }
+
     pub(super) fn synchronize(&mut self) {
         if self.pending.is_none() && self.in_flight.is_none() {
             self.draft.synchronize();
@@ -340,6 +352,11 @@ impl SaveStatus {
         }
     }
 
+    /// Whether Settings Recovery can replace the retained document.
+    pub(super) fn recoverable(self) -> bool {
+        matches!(self, Self::Unavailable(error) if error.is_malformed())
+    }
+
     /// The explanation a banner adds above the content, when one is warranted.
     pub(super) fn explanation(self) -> Option<&'static str> {
         match self {
@@ -347,11 +364,11 @@ impl SaveStatus {
             Self::Failed(_) => {
                 Some("The change is still applied. Retry to write it to your settings file.")
             }
+            status if status.recoverable() => Some(
+                "SpaceTerm is showing defaults and has changed nothing. Reset Settings keeps the unreadable file as a backup and starts from defaults.",
+            ),
             Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => Some(
                 "Reload to pick up the change. Editing is paused so SpaceTerm does not replace it.",
-            ),
-            Self::Unavailable(SettingsError::Invalid) => Some(
-                "SpaceTerm is showing defaults and has changed nothing. Fix or remove the file, then reload.",
             ),
             Self::Unavailable(_) => {
                 Some("Editing is paused until SpaceTerm can read and write your settings.")

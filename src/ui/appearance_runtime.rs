@@ -90,10 +90,10 @@ impl Global for AppearanceRuntime {}
 
 pub(crate) fn install(
     settings: UserSettings,
-    changed: async_channel::Receiver<()>,
     platform: Rc<dyn AppearancePlatform>,
     cx: &mut App,
 ) -> Result<(), SettingsError> {
+    let changed = settings.subscribe();
     let (fonts, pending_font_names) =
         capture_initial_fonts(cx, &settings.snapshot().candidate.preferences);
     let observation = platform.observe();

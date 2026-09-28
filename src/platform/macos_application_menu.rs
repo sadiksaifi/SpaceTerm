@@ -1,4 +1,4 @@
-use gpui::{App, Menu, MenuItem, SystemMenuType};
+use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use super::application_menu::{
@@ -269,8 +269,10 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
 impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
         let application_name = self.identity.display_name();
-        cx.set_menus(menus(application_name));
-        native::decorate(application_name)
+        let menus = menus(application_name);
+        let native_keys = native_key_equivalents(&menus, &cx.key_bindings().borrow());
+        cx.set_menus(menus);
+        native::decorate(application_name, &native_keys)
     }
 
     fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
@@ -423,6 +425,62 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
     ]
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct NativeKeyEquivalent {
+    path: Vec<SharedString>,
+    modifiers: Modifiers,
+    key: &'static str,
+}
+
+fn missing_native_key_equivalent(key: &str) -> Option<&'static str> {
+    match key {
+        "enter" => Some("\r"),
+        "tab" => Some("\t"),
+        _ => None,
+    }
+}
+
+fn native_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<NativeKeyEquivalent> {
+    fn collect(
+        menu: &Menu,
+        path: &mut Vec<SharedString>,
+        keymap: &Keymap,
+        keys: &mut Vec<NativeKeyEquivalent>,
+    ) {
+        path.push(menu.name.clone());
+        for item in &menu.items {
+            match item {
+                MenuItem::Submenu(submenu) => collect(submenu, path, keymap, keys),
+                MenuItem::Action { name, action, .. } => {
+                    if crate::keybindings::Command::ALL
+                        .into_iter()
+                        .any(|command| command.action().partial_eq(action.as_ref()))
+                        && let Some(shortcut) =
+                            crate::desktop_profile::installed_shortcut(keymap, action.as_ref())
+                        && let Some(key) = missing_native_key_equivalent(shortcut.key())
+                    {
+                        let mut item_path = path.clone();
+                        item_path.push(name.clone());
+                        keys.push(NativeKeyEquivalent {
+                            path: item_path,
+                            modifiers: shortcut.modifiers(),
+                            key,
+                        });
+                    }
+                }
+                MenuItem::Separator | MenuItem::SystemMenu(_) => {}
+            }
+        }
+        path.pop();
+    }
+    let mut keys = Vec::new();
+    let mut path = Vec::new();
+    for menu in menus {
+        collect(menu, &mut path, keymap, &mut keys);
+    }
+    keys
+}
+
 #[cfg(not(test))]
 mod native {
     use objc2::runtime::AnyObject;
@@ -436,15 +494,22 @@ mod native {
 
     use super::{
         ApplicationMenuCommand, ApplicationMenuError, MENU_ITEM_ICONS, MenuItemIcon,
-        TOGGLE_PANE_ZOOM_TITLE,
+        NativeKeyEquivalent,
     };
 
     const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
-    pub(super) fn decorate(application_name: &str) -> Result<(), ApplicationMenuError> {
+    pub(super) fn decorate(
+        application_name: &str,
+        native_keys: &[NativeKeyEquivalent],
+    ) -> Result<(), ApplicationMenuError> {
         let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
-        decorate_main_menu(&NSApplication::sharedApplication(mtm), application_name)
+        decorate_main_menu(
+            &NSApplication::sharedApplication(mtm),
+            application_name,
+            native_keys,
+        )
     }
 
     pub(super) fn perform(
@@ -502,6 +567,7 @@ mod native {
     fn decorate_main_menu(
         application: &NSApplication,
         application_name: &str,
+        native_keys: &[NativeKeyEquivalent],
     ) -> Result<(), ApplicationMenuError> {
         let main_menu = application
             .mainMenu()
@@ -522,22 +588,41 @@ mod native {
                 .ok_or(ApplicationMenuError::Unavailable)?;
             set_symbol_image(&item, decoration.symbol)?;
         }
-        let zoom_decoration = MenuItemIcon {
-            menu: "View",
-            submenu: None,
-            item: TOGGLE_PANE_ZOOM_TITLE,
-            symbol: "",
-        };
-        let zoom_item = find_menu_item(&main_menu, &zoom_decoration, application_name)
-            .ok_or(ApplicationMenuError::Unavailable)?;
-        let key_equivalent = NSString::from_str("\r");
-        let modifiers = NSEventModifierFlags::Command | NSEventModifierFlags::Shift;
-        zoom_item.setKeyEquivalent(&key_equivalent);
-        zoom_item.setKeyEquivalentModifierMask(modifiers);
-        if zoom_item.keyEquivalent() != key_equivalent
-            || zoom_item.keyEquivalentModifierMask() != modifiers
-        {
-            return Err(ApplicationMenuError::Unavailable);
+        // Complete the named keys omitted by GPUI's native translation.
+        for equivalent in native_keys {
+            let (title, menu_path) = equivalent
+                .path
+                .split_last()
+                .ok_or(ApplicationMenuError::Unavailable)?;
+            let mut menu = main_menu.clone();
+            for title in menu_path {
+                menu = menu
+                    .itemWithTitle(&NSString::from_str(title))
+                    .and_then(|item| item.submenu())
+                    .ok_or(ApplicationMenuError::Unavailable)?;
+            }
+            let item = menu
+                .itemWithTitle(&NSString::from_str(title))
+                .ok_or(ApplicationMenuError::Unavailable)?;
+            let key_equivalent = NSString::from_str(equivalent.key);
+            let mut modifiers = NSEventModifierFlags::empty();
+            for (enabled, flag) in [
+                (equivalent.modifiers.control, NSEventModifierFlags::Control),
+                (equivalent.modifiers.alt, NSEventModifierFlags::Option),
+                (equivalent.modifiers.shift, NSEventModifierFlags::Shift),
+                (equivalent.modifiers.platform, NSEventModifierFlags::Command),
+            ] {
+                if enabled {
+                    modifiers |= flag;
+                }
+            }
+            item.setKeyEquivalent(&key_equivalent);
+            item.setKeyEquivalentModifierMask(modifiers);
+            if item.keyEquivalent() != key_equivalent
+                || item.keyEquivalentModifierMask() != modifiers
+            {
+                return Err(ApplicationMenuError::Unavailable);
+            }
         }
         Ok(())
     }
@@ -597,7 +682,10 @@ mod native {
 mod native {
     use super::{ApplicationMenuCommand, ApplicationMenuError};
 
-    pub(super) fn decorate(_: &str) -> Result<(), ApplicationMenuError> {
+    pub(super) fn decorate(
+        _: &str,
+        _: &[super::NativeKeyEquivalent],
+    ) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
 
@@ -651,6 +739,58 @@ mod tests {
             }
         }
         paths
+    }
+
+    #[test]
+    fn native_equivalents_follow_overrides_for_top_level_and_nested_commands() {
+        let profile = crate::desktop_profile::default_keymap::profile(
+            super::super::macos_reserved_shortcuts::shortcuts(),
+        )
+        .unwrap();
+        for (preferences, expected) in [
+            (
+                "{}",
+                vec![(vec!["View", TOGGLE_PANE_ZOOM_TITLE], "shift-cmd-enter")],
+            ),
+            (
+                r#"{"toggle_pane_zoom":"alt-cmd-enter"}"#,
+                vec![(vec!["View", TOGGLE_PANE_ZOOM_TITLE], "alt-cmd-enter")],
+            ),
+            (
+                r#"{"toggle_pane_zoom":"cmd-y","focus_pane_left":"ctrl-shift-cmd-enter"}"#,
+                vec![(vec!["View", "Focus Pane", "Left"], "ctrl-shift-cmd-enter")],
+            ),
+            (r#"{"toggle_pane_zoom":null}"#, vec![]),
+            (
+                r#"{"toggle_pane_zoom":"ctrl-tab"}"#,
+                vec![(vec!["View", TOGGLE_PANE_ZOOM_TITLE], "ctrl-tab")],
+            ),
+            (
+                r#"{"toggle_pane_zoom":null,"focus_pane_left":"ctrl-shift-tab"}"#,
+                vec![(vec!["View", "Focus Pane", "Left"], "ctrl-shift-tab")],
+            ),
+        ] {
+            let preferences = serde_json::from_str(preferences).unwrap();
+            let keymap = Keymap::new(profile.resolve(&preferences).key_bindings());
+            let expected = expected
+                .into_iter()
+                .map(|(path, shortcut)| NativeKeyEquivalent {
+                    path: path.into_iter().map(SharedString::from).collect(),
+                    key: if shortcut.ends_with("tab") {
+                        "\t"
+                    } else {
+                        "\r"
+                    },
+                    modifiers: crate::keybindings::Shortcut::parse(shortcut)
+                        .unwrap()
+                        .modifiers(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                native_key_equivalents(&menus("SpaceTerm"), &keymap),
+                expected
+            );
+        }
     }
 
     #[test]

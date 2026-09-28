@@ -437,7 +437,9 @@ impl From<SecureFilesystemError> for AppPathsError {
     fn from(error: SecureFilesystemError) -> Self {
         match error {
             SecureFilesystemError::Unsafe => Self::UnsafePath,
-            SecureFilesystemError::Missing
+            SecureFilesystemError::Conflict
+            | SecureFilesystemError::TooLarge
+            | SecureFilesystemError::Missing
             | SecureFilesystemError::AlreadyExists
             | SecureFilesystemError::Unavailable => Self::FilesystemUnavailable,
         }

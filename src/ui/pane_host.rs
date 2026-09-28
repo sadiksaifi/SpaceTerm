@@ -2120,7 +2120,7 @@ fn render_pane_caption_content(
             .debug_selector(id.clone())
             .tooltip(
                 Tooltip::new(gpui::SharedString::from(format!("{id}-tooltip")), name)
-                    .keyboard_equivalent(shortcut),
+                    .keyboard_equivalent(shortcut.unwrap_or_default()),
             )
             .on_activate(move |_, window, cx| {
                 if !caption_action_available {

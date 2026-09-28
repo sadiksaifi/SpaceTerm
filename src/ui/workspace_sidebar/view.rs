@@ -588,7 +588,7 @@ impl WorkspaceSidebar {
                         .debug_selector("open-settings-button")
                         .tooltip(
                             Tooltip::new("open-settings-tooltip", "Settings")
-                                .keyboard_equivalent(settings_shortcut)
+                                .keyboard_equivalent(settings_shortcut.unwrap_or_default())
                                 .debug_selector("open-settings-tooltip"),
                         )
                         // The same application action the menu item and the keyboard equivalent
@@ -660,27 +660,37 @@ impl WorkspaceSidebar {
 /// labels, leading icons, and trailing shortcuts, presented as a button-triggered menu.
 /// Labels and icons come from the shared creation descriptors so the two surfaces cannot drift.
 fn new_workspace_menu_entries(
-    local_shortcut: impl Into<SharedString>,
-    remote_shortcut: impl Into<SharedString>,
+    local_shortcut: Option<SharedString>,
+    remote_shortcut: Option<SharedString>,
     remote_disabled: bool,
 ) -> Vec<MenuEntry<NewWorkspaceMenuCommand>> {
     use crate::ui::workspace_creation::{
         LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
     };
     vec![
-        MenuEntry::action(LOCAL_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Local)
-            .shortcut(local_shortcut)
-            .icon(|foreground, size| {
-                Icon::custom(LOCAL_WORKSPACE_ICON, size, foreground).into_any_element()
-            })
-            .debug_selector("new-workspace-menu-create-local"),
-        MenuEntry::action(REMOTE_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Remote)
-            .shortcut(remote_shortcut)
-            .icon(|foreground, size| {
-                Icon::custom(REMOTE_WORKSPACE_ICON, size, foreground).into_any_element()
-            })
-            .disabled(remote_disabled)
-            .debug_selector("new-workspace-menu-create-remote"),
+        {
+            let entry = MenuEntry::action(LOCAL_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Local);
+            match local_shortcut {
+                Some(shortcut) => entry.shortcut(shortcut),
+                None => entry,
+            }
+        }
+        .icon(|foreground, size| {
+            Icon::custom(LOCAL_WORKSPACE_ICON, size, foreground).into_any_element()
+        })
+        .debug_selector("new-workspace-menu-create-local"),
+        {
+            let entry = MenuEntry::action(REMOTE_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Remote);
+            match remote_shortcut {
+                Some(shortcut) => entry.shortcut(shortcut),
+                None => entry,
+            }
+        }
+        .icon(|foreground, size| {
+            Icon::custom(REMOTE_WORKSPACE_ICON, size, foreground).into_any_element()
+        })
+        .disabled(remote_disabled)
+        .debug_selector("new-workspace-menu-create-remote"),
     ]
 }
 
@@ -692,11 +702,16 @@ fn workspace_menu_entries(
 ) -> Vec<MenuEntry<RowMenuCommand>> {
     let shortcut = presentation.shortcut(&crate::ui::CreateTab);
     let mut entries = vec![
-        MenuEntry::action(
-            "New Tab",
-            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
-        )
-        .shortcut(shortcut)
+        {
+            let entry = MenuEntry::action(
+                "New Tab",
+                RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
+            );
+            match shortcut {
+                Some(shortcut) => entry.shortcut(shortcut),
+                None => entry,
+            }
+        }
         .icon(|foreground, size| {
             Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
         })

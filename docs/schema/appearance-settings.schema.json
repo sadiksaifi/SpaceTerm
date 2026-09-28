@@ -30,6 +30,9 @@
     },
     "updates": {
       "$ref": "#/$defs/updates"
+    },
+    "keybindings": {
+      "$ref": "#/$defs/keybindings"
     }
   },
   "$defs": {
@@ -417,6 +420,155 @@
         },
         "origin": {
           "$ref": "#/$defs/themeOrigin"
+        }
+      }
+    },
+    "shortcut": {
+      "type": "string",
+      "description": "One key chord in SpaceTerm shortcut spelling."
+    },
+    "shortcutOverride": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/shortcut"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "keybindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "switch_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "new_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "new_remote_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace1": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace2": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace3": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace4": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace5": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace6": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace7": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace8": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace9": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "create_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab1": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab2": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab3": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab4": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab5": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab6": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab7": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab8": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab9": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "split_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "split_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_left": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_up": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_previous_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_next_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_pane_zoom": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "open_terminal_find": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "find_next": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "find_previous": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "clear_terminal_screen_and_scrollback": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "increase_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "decrease_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "reset_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_sidebar": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_sidebar_focus": {
+          "$ref": "#/$defs/shortcutOverride"
         }
       }
     },

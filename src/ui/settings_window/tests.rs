@@ -71,11 +71,11 @@ fn open_settings_with_capabilities(
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     registry: Option<ZedThemeRegistry>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
-    let (settings, changed) = crate::settings::UserSettings::load(storage.clone());
+    let settings = crate::settings::UserSettings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings.clone(), changed, Rc::new(platform.clone()), cx)
+        appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
@@ -122,6 +122,7 @@ fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
         SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
         SettingsSectionId::Font => "settings-navigation-settings-section-font",
         SettingsSectionId::Themes => "settings-navigation-settings-section-themes",
+        SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
     };
@@ -316,6 +317,51 @@ fn an_unreadable_document_refuses_edits_until_it_is_reloaded(cx: &mut TestAppCon
 
     assert_eq!(status(&window, cx), SaveStatus::Saved);
     assert!(window.read_with(cx, |window, _| window.editor.editable()));
+}
+
+#[gpui::test]
+fn malformed_settings_reset_keeps_a_backup_and_resumes_editing(cx: &mut TestAppContext) {
+    let storage = Arc::new(MemoryStorage::default());
+    storage.corrupt();
+    let (window, harness, cx) = open_settings_with(cx, storage);
+    assert!(cx.debug_bounds("settings-banner-reset-settings").is_some());
+
+    click("settings-banner-reset-settings", cx);
+    click("modal-action-settings-recovery-confirm-cancel", cx);
+    cx.run_until_parked();
+    assert_eq!(harness.storage.backup(), None);
+    assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+
+    click("settings-banner-reset-settings", cx);
+    click("modal-action-settings-recovery-confirm-reset", cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.storage.backup().as_deref(),
+        Some(super::test_support::CORRUPT_DOCUMENT)
+    );
+    assert!(
+        harness.storage.document().is_some(),
+        "the reset writes a readable default document"
+    );
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert!(cx.debug_bounds("settings-banner").is_none());
+    click("settings-density-comfortable", cx);
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+}
+
+#[gpui::test]
+fn only_malformed_settings_offer_a_reset(cx: &mut TestAppContext) {
+    let storage = Arc::new(MemoryStorage::default());
+    storage.fail_reads(Some(StorageError::Unsafe));
+    let (window, _harness, cx) = open_settings_with(cx, storage);
+
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+    assert!(cx.debug_bounds("settings-banner-reload").is_some());
+    assert!(cx.debug_bounds("settings-banner-reset-settings").is_none());
 }
 
 #[gpui::test]
@@ -642,14 +688,14 @@ fn a_built_in_tile_offers_no_removal(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 
     click("settings-density-comfortable", cx);
 
-    assert!(window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 
     click("settings-row-density-reset", cx);
@@ -658,8 +704,8 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
         document_of(&window, cx).preferences.window.density,
         ChromeDensity::Compact
     );
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 }
 
@@ -723,8 +769,8 @@ fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut
 
     // A test frame keeps every selector it has ever drawn, so the reset's absence is read from the
     // row's state rather than from its bounds.
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::TerminalItalic)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::TerminalItalic, cx)
     }));
     assert_eq!(bounds("settings-terminal-italic", cx), control);
 }
@@ -803,8 +849,8 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
 
     resize(1400.0, cx);
     click(CONTROL, cx);
-    assert!(window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::TerminalBoldAsBright)
+    assert!(window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::TerminalBoldAsBright, cx)
     }));
     let with_reset = measure(cx);
 
@@ -2741,7 +2787,7 @@ fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut Te
     cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
     cx.run_until_parked();
     assert_eq!(document_of(&window, cx).preferences, expected);
-    let (restarted, _) = crate::settings::UserSettings::load(harness.storage);
+    let restarted = crate::settings::UserSettings::load(harness.storage);
     assert_eq!(restarted.snapshot().candidate.preferences, expected);
 }
 

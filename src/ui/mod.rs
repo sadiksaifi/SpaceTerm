@@ -32,6 +32,7 @@ mod scrollbar_theme;
 mod search_field_theme;
 mod segmented_control_theme;
 mod selection_chip;
+pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
@@ -187,7 +188,14 @@ fn init_with_text_direction(
             .with_outer_edge_width(1.0),
     );
     initialize_controls(cx)?;
-    crate::desktop_profile::testing_profile(direction).install(cx);
+    let keymap = crate::desktop_profile::testing_profile(direction).install(cx);
+    crate::keybindings::runtime::install(keymap, cx);
+    gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
+        cx,
+        |presentation, cx| {
+            presentation.refresh(cx);
+        },
+    );
     Ok(())
 }
 

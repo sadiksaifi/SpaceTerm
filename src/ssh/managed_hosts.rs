@@ -240,7 +240,15 @@ impl<'a> ManagedHostsStore<'a> {
         self.paths
             .filesystem()
             .read_private_file(&directory, target.file_name(), MANAGED_CONFIG_BYTES)
-            .map_err(map_filesystem_error)
+            .map_err(map_filesystem_error)?
+            .map(|snapshot| {
+                if snapshot.bytes.len() > MANAGED_CONFIG_BYTES {
+                    Err(map_filesystem_error(SecureFilesystemError::TooLarge))
+                } else {
+                    Ok(snapshot)
+                }
+            })
+            .transpose()
     }
 
     fn commit(
@@ -641,6 +649,25 @@ mod tests {
                 }))
         }
 
+        fn rename_private_file(
+            &self,
+            directory: &SecureDirectory,
+            from: &OsStr,
+            to: &OsStr,
+            _: &SecureEntryIdentity,
+        ) -> Result<(), SecureFilesystemError> {
+            let path = Self::directory_path(directory)?.clone();
+            let mut state = self.state.lock().unwrap();
+            let value = state
+                .files
+                .remove(&(path.clone(), from.to_string_lossy().into_owned()))
+                .ok_or(SecureFilesystemError::Missing)?;
+            state
+                .files
+                .insert((path, to.to_string_lossy().into_owned()), value);
+            Ok(())
+        }
+
         fn prepare_private_file(
             &self,
             directory: &SecureDirectory,
@@ -782,9 +809,7 @@ mod tests {
         let paths = paths(filesystem.clone());
         let store = ManagedHostsStore::new(&paths);
 
-        store
-            .insert(host("work", "work.example"), &[])
-            .unwrap();
+        store.insert(host("work", "work.example"), &[]).unwrap();
 
         let state = filesystem.state.lock().unwrap();
         assert_eq!(
@@ -812,9 +837,7 @@ mod tests {
         let paths = paths(filesystem.clone());
         let store = ManagedHostsStore::new(&paths);
 
-        store
-            .insert(host("work", "work.example"), &[])
-            .unwrap();
+        store.insert(host("work", "work.example"), &[]).unwrap();
 
         let state = filesystem.state.lock().unwrap();
         assert_eq!(state.preparation_nonces.len(), 3);

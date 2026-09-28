@@ -47,6 +47,8 @@ pub(super) fn prepared(
             gpui_color(colors.input_placeholder),
             clear_mark_fills(colors),
             gpui_color(clear_glyph(reference)),
+            toggle_off(colors),
+            toggle_on(colors),
         ),
         SearchFieldMetrics::new(px(FIELD_HEIGHT))
             .spacing(px(8.0), px(7.0), px(FIELD_RADIUS))
@@ -78,6 +80,34 @@ fn clear_mark_fills(colors: &ChromeColors) -> ButtonVariantStyle {
         fill(colors.input_placeholder.mix(colors.input_text, 0.5)),
         fill(colors.input_text),
         fill(colors.input_disabled_text),
+    )
+}
+
+/// A trailing toggle while off: a glyph at the search glyph's neutral weight on no surface of its
+/// own, which gains the ghost fill only while pointed at or pressed.
+fn toggle_off(colors: &ChromeColors) -> ButtonVariantStyle {
+    let paint = |background: Color, glyph: Color| {
+        ButtonPaint::new(gpui_color(background), gpui_color(glyph), rgba(0))
+    };
+    ButtonVariantStyle::new(
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_placeholder), rgba(0)),
+        paint(colors.ghost_element_hover, colors.ghost_element_hover_foreground),
+        paint(colors.ghost_element_active, colors.ghost_element_active_foreground),
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_disabled_text), rgba(0)),
+    )
+}
+
+/// A trailing toggle while on: the selected ghost fill behind an accent glyph, so the active
+/// search mode reads from the field without looking at the placeholder.
+fn toggle_on(colors: &ChromeColors) -> ButtonVariantStyle {
+    let paint = |background: Color| {
+        ButtonPaint::new(gpui_color(background), gpui_color(colors.text_accent), rgba(0))
+    };
+    ButtonVariantStyle::new(
+        paint(colors.ghost_element_selected),
+        paint(colors.ghost_element_hover),
+        paint(colors.ghost_element_active),
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_disabled_text), rgba(0)),
     )
 }
 

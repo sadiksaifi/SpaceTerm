@@ -23,6 +23,8 @@ impl<T: Any + Eq + Send + Sync> EntryIdentityValue for T {
 pub(crate) enum SecureFilesystemError {
     Missing,
     AlreadyExists,
+    Conflict,
+    TooLarge,
     Unsafe,
     Unavailable,
 }
@@ -161,13 +163,23 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         child: &SecureDirectory,
     ) -> Result<(), SecureFilesystemError>;
 
-    /// Reads a committed snapshot without observing another operation's provisional publication.
+    /// Reads a committed snapshot, retaining at most maximum_bytes + 1 bytes.
+    /// The extra byte identifies oversized files while preserving their opaque identity.
     fn read_private_file(
         &self,
         directory: &SecureDirectory,
         name: &OsStr,
         maximum_bytes: usize,
     ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError>;
+
+    /// Renames only the expected private file, preserving both source and backup on conflict.
+    fn rename_private_file(
+        &self,
+        directory: &SecureDirectory,
+        from: &OsStr,
+        to: &OsStr,
+        expected: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError>;
 
     fn prepare_private_file(
         &self,

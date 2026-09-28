@@ -1558,9 +1558,12 @@ impl TabManager {
                         .debug_selector("create-tab-button")
                         .tooltip(
                             Tooltip::new("create-tab-tooltip", "Create Tab")
-                                .keyboard_equivalent(create_tab_shortcut(
-                                    crate::desktop_profile::DesktopPresentation::get(cx),
-                                ))
+                                .keyboard_equivalent(
+                                    create_tab_shortcut(
+                                        crate::desktop_profile::DesktopPresentation::get(cx),
+                                    )
+                                    .unwrap_or_default(),
+                                )
                                 .debug_selector("create-tab-tooltip"),
                         )
                         .on_activate(move |_, window, cx| {
@@ -1874,12 +1877,13 @@ fn render_tab_identity(
         .into_any_element()
 }
 
-
 fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance) -> Color {
     appearance.title_bar_controls.colors.focus_ring
 }
 
-fn create_tab_shortcut(presentation: &crate::desktop_profile::DesktopPresentation) -> &'static str {
+fn create_tab_shortcut(
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> Option<gpui::SharedString> {
     presentation.shortcut(&crate::ui::CreateTab)
 }
 
@@ -1902,7 +1906,7 @@ mod tests {
     fn create_tab_tooltip_should_use_the_host_neutral_profile_shortcut() {
         assert_eq!(
             create_tab_shortcut(&crate::desktop_profile::testing_presentation()),
-            "Primary+T"
+            Some("Primary+T".into())
         );
     }
 

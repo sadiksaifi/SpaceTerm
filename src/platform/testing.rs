@@ -129,15 +129,38 @@ impl SecureFilesystem for RecordingFilesystem {
             .values
             .get(&Self::path(directory)?.join(name))
             .map(|(bytes, identity)| {
-                if bytes.len() > maximum_bytes {
-                    return Err(SecureFilesystemError::Unsafe);
-                }
                 Ok(PrivateFileSnapshot {
-                    bytes: bytes.clone(),
+                    bytes: bytes[..bytes.len().min(maximum_bytes.saturating_add(1))].to_vec(),
                     identity: SecureEntryIdentity::from_opaque(*identity),
                 })
             })
             .transpose()
+    }
+    fn rename_private_file(
+        &self,
+        directory: &SecureDirectory,
+        from: &OsStr,
+        to: &OsStr,
+        expected: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError> {
+        self.verify_directory(directory)?;
+        let path = Self::path(directory)?;
+        let mut files = self.files.lock().unwrap();
+        if files
+            .values
+            .get(&path.join(from))
+            .map(|(_, identity)| SecureEntryIdentity::from_opaque(*identity))
+            .as_ref()
+            != Some(expected)
+        {
+            return Err(SecureFilesystemError::Conflict);
+        }
+        let source = files
+            .values
+            .remove(&path.join(from))
+            .ok_or(SecureFilesystemError::Missing)?;
+        files.values.insert(path.join(to), source);
+        Ok(())
     }
     fn prepare_private_file(
         &self,

@@ -8,7 +8,7 @@ use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px};
+use gpui::{AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, div, px};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -155,7 +155,10 @@ pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
     rows: Vec<AnyElement>,
+    on_rows_prepainted: Option<RowsPrepainted>,
 }
+
+type RowsPrepainted = Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App)>;
 
 impl SettingsGroup {
     pub(super) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
@@ -163,7 +166,17 @@ impl SettingsGroup {
             selector,
             title,
             rows,
+            on_rows_prepainted: None,
         }
+    }
+
+    /// Reports where each row was laid out on every frame, in row order and window coordinates.
+    pub(super) fn on_rows_prepainted(
+        mut self,
+        listener: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_rows_prepainted = Some(Box::new(listener));
+        self
     }
 
     pub(super) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
@@ -235,10 +248,25 @@ impl SettingsGroup {
                         .overflow_hidden()
                         // A card is a surface resting on the page's base, lighter or brighter than it.
                         .bg(gpui_color(card_background))
+                        .when_some(self.on_rows_prepainted, |card, listener| {
+                            card.on_children_prepainted(listener)
+                        })
                         .children(rows),
                 ),
             )
     }
+}
+
+/// What a row's caption tells the reader, which selects its color.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum CaptionTone {
+    /// Guidance, in the secondary text color.
+    #[default]
+    Guidance,
+    /// Something changed that the reader should notice, in the Chrome warning color.
+    Warning,
+    /// The row refused something or cannot act, in the Chrome error color.
+    Error,
 }
 
 /// One labeled row: a label, its control, and an optional reset affordance.
@@ -253,6 +281,7 @@ pub(super) struct SettingsRow {
     selector: &'static str,
     label: &'static str,
     description: Option<SharedString>,
+    tone: CaptionTone,
     control: AnyElement,
     reset: Option<AnyElement>,
     highlighted: bool,
@@ -270,6 +299,7 @@ impl SettingsRow {
             selector,
             label,
             description: None,
+            tone: CaptionTone::Guidance,
             control: control.into_any_element(),
             reset: None,
             highlighted: false,
@@ -281,6 +311,13 @@ impl SettingsRow {
     /// Adds one line of guidance below the control.
     pub(super) fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Adds one line below the control in the color its tone selects.
+    pub(super) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
+        self.description = Some(message.into());
+        self.tone = tone;
         self
     }
 
@@ -345,6 +382,11 @@ impl SettingsRow {
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         let description_selector = format!("{selector}-description");
+        let caption_color = match self.tone {
+            CaptionTone::Guidance => secondary,
+            CaptionTone::Warning => colors.warning,
+            CaptionTone::Error => colors.error,
+        };
         // One rule for the whole form: the label starts at the content's left edge, the control
         // ends at its right edge, and nothing is centered.
         let caption = |description: SharedString| {
@@ -354,7 +396,7 @@ impl SettingsRow {
                     move || description_selector.clone()
                 })
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(secondary))
+                .text_color(gpui_color(caption_color))
                 .whitespace_normal()
                 .child(description)
         };

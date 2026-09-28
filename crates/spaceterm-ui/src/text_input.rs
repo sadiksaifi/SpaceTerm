@@ -229,6 +229,15 @@ impl TextInputPaint {
         self.selection_foreground = foreground;
         self
     }
+
+    /// The value and placeholder paints for the enabled or disabled state, in that order.
+    pub(crate) fn value_paints(self, disabled: bool) -> (Rgba, Rgba) {
+        if disabled {
+            (self.disabled_text, self.disabled_placeholder)
+        } else {
+            (self.text, self.placeholder)
+        }
+    }
 }
 
 /// Complete paint catalog for the bounded variants.
@@ -323,6 +332,12 @@ impl TextInputTheme {
             metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
+    }
+
+    /// The paint of one variant, for a composite that presents text inside the shared frame
+    /// without an editor of its own.
+    pub(crate) fn paint(&self, variant: TextInputVariant) -> TextInputPaint {
+        self.variants.paint(variant)
     }
 }
 

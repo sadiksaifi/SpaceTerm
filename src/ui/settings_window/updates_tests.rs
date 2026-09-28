@@ -15,13 +15,13 @@ use super::updates::{CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
 
 fn open_updates(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let (settings, changed) = crate::settings::UserSettings::load(MemoryStorage::with_document(
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
         &SettingsDocument::default(),
     ));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings, changed, Rc::new(platform), cx)
+        appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });

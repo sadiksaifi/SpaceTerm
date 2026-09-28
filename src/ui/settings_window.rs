@@ -9,6 +9,7 @@ mod catalog;
 mod controls;
 mod editor;
 mod import;
+mod keybindings;
 mod microphone;
 mod theme_gallery;
 mod theme_store;
@@ -32,7 +33,7 @@ mod updates_tests;
 mod tests;
 
 use crate::ui::appearance::gpui_color;
-use std::rc::Rc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::prelude::*;
 use gpui::{
@@ -51,7 +52,7 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::theme_registry::ZedThemeRegistry;
@@ -67,12 +68,13 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
-use catalog::{ROWS, SettingsRowId, SettingsSectionId};
+use catalog::{SettingsRowId, SettingsSectionId};
 use controls::{
     SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
     reset_button, row_horizontal_inset, section_heading,
 };
 use editor::{SaveStatus, SettingsEditor};
+use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -312,6 +314,9 @@ pub(crate) struct SettingsWindow {
     active_section: SettingsSectionId,
     /// The row Settings Search revealed, highlighted so the eye lands on it.
     revealed: Option<SettingsRowId>,
+    /// Where each row of the presented section was laid out in the latest frame, so keyboard focus
+    /// reaching a row outside the viewport can scroll it into view.
+    row_bounds: Rc<RefCell<HashMap<SettingsRowId, Bounds<Pixels>>>>,
     focus_handle: FocusHandle,
     /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
     navigation_focus: FocusHandle,
@@ -322,6 +327,16 @@ pub(crate) struct SettingsWindow {
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
+    /// One shortcut recorder per Command, kept so a recording survives re-rendering.
+    shortcuts: ShortcutRows,
+}
+
+/// How one row returns to its default.
+#[derive(Clone, Debug)]
+enum RowReset {
+    Appearance(ResetTarget),
+    Update,
+    Shortcut(crate::keybindings::Command),
 }
 
 impl SettingsWindow {
@@ -356,6 +371,21 @@ impl SettingsWindow {
             .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
             .settings
             .clone();
+        // Settings Recovery can run from the launch prompt while this window is open, and a reset
+        // to defaults may leave the installed appearance unchanged, so follow the owner directly.
+        let changes = settings.subscribe();
+        cx.spawn(async move |settings, cx| {
+            while changes.recv().await.is_ok() {
+                let followed = settings.update(cx, |settings, cx| {
+                    settings.editor.synchronize();
+                    cx.notify();
+                });
+                if followed.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let editor = SettingsEditor::new(settings);
         // The window takes focus so its own shortcuts and Tab traversal resolve from the moment it
         // opens, rather than only after something inside it is clicked.
@@ -434,9 +464,13 @@ impl SettingsWindow {
         .detach();
         // Authorization can change in the system's settings while this window is in the background,
         // most often right after the Denied recovery sent the person there.
+        // Leaving the window also ends searching by Shortcut, which keeps focus but must not keep
+        // taking the chords pressed on return.
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
+            } else {
+                settings.shortcuts.end_search_capture(cx);
             }
             cx.notify();
         })
@@ -456,6 +490,7 @@ impl SettingsWindow {
         let theme_gallery = ThemeGallery::new(window, cx);
         let owner = cx.weak_entity();
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
+        let shortcuts = ShortcutRows::new(window, cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -467,6 +502,7 @@ impl SettingsWindow {
             scrollbar,
             active_section: SettingsSectionId::Interface,
             revealed: None,
+            row_bounds: Rc::default(),
             focus_handle,
             navigation_focus,
             navigation_focus_visible: true,
@@ -474,6 +510,7 @@ impl SettingsWindow {
             microphone_access: MicrophoneAccessRow::new(microphone_access),
             theme_gallery,
             theme_store,
+            shortcuts,
         }
     }
 
@@ -549,9 +586,35 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// Scrolls the detail pane the least distance that shows the whole row, for keyboard focus that
+    /// reached a row outside the viewport. A row taller than the viewport shows its top.
+    fn scroll_row_into_view(&mut self, row: SettingsRowId, cx: &mut Context<Self>) {
+        let Some(bounds) = self.row_bounds.borrow().get(&row).copied() else {
+            return;
+        };
+        let viewport = self.scroll.bounds();
+        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height
+        {
+            viewport.top() - bounds.top()
+        } else if bounds.bottom() > viewport.bottom() {
+            viewport.bottom() - bounds.bottom()
+        } else {
+            return;
+        };
+        let offset = self.scroll.offset();
+        let lowest = -self.scroll.max_offset().y;
+        self.scroll.set_offset(gpui::point(
+            offset.x,
+            (offset.y + shift).clamp(lowest, px(0.0)),
+        ));
+        cx.notify();
+    }
+
     /// Presents one section. Each section is its own view, so the detail pane starts at its top.
     fn reveal_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
         self.active_section = section;
+        self.shortcuts.dismiss_notice();
+        self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
@@ -595,20 +658,29 @@ impl SettingsWindow {
     }
 
     /// Whether this row differs from its default, which is when a reset is worth offering.
-    fn differs_from_default(&self, row: SettingsRowId) -> bool {
-        if let Some(differs) = self.update_preference_differs(row) {
-            return differs;
+    #[cfg(test)]
+    fn differs_from_default(&self, row: SettingsRowId, cx: &App) -> bool {
+        self.pending_reset(row, cx).is_some()
+    }
+
+    /// How this row returns to its default, when it differs from it.
+    fn pending_reset(&self, row: SettingsRowId, cx: &App) -> Option<RowReset> {
+        if let SettingsRowId::Shortcut(command) = row {
+            return self
+                .shortcut_differs(command, cx)
+                .then_some(RowReset::Shortcut(command));
         }
-        let Some(target) = row.reset_target(self.fixed_appearance()) else {
-            return false;
-        };
+        if let Some(differs) = self.update_preference_differs(row) {
+            return differs.then_some(RowReset::Update);
+        }
+        let target = row.reset_target(self.fixed_appearance())?;
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
         // the document would copy the whole installed theme catalog to answer a question about
         // one field.
         let current = &self.editor.document().preferences;
         let mut reset = current.clone();
-        reset.reset(target);
-        reset != *current
+        reset.reset(target.clone());
+        (reset != *current).then_some(RowReset::Appearance(target))
     }
 
     fn row_reset(
@@ -617,13 +689,10 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.differs_from_default(row) || !self.editor.editable() {
+        if !self.editor.editable() {
             return None;
         }
-        let target = row.reset_target(self.fixed_appearance());
-        if target.is_none() && self.update_preference_differs(row).is_none() {
-            return None;
-        }
+        let reset = self.pending_reset(row, cx)?;
         let owner = cx.weak_entity();
         Some(
             reset_button(
@@ -635,10 +704,11 @@ impl SettingsWindow {
                     .glyph_size,
                 true,
                 move |_, cx| {
-                    let target = target.clone();
-                    let _ = owner.update(cx, |settings, cx| match target {
-                        Some(target) => settings.editor.reset(target, cx),
-                        None => settings.reset_update_preference(row, cx),
+                    let reset = reset.clone();
+                    let _ = owner.update(cx, |settings, cx| match reset {
+                        RowReset::Appearance(target) => settings.editor.reset(target, cx),
+                        RowReset::Update => settings.reset_update_preference(row, cx),
+                        RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
                     });
                 },
             )
@@ -941,8 +1011,7 @@ impl SettingsWindow {
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
-                ROWS.iter()
-                    .any(|row| row.section == *section && matching.contains(&row.id))
+                catalog::rows().any(|row| row.section == *section && matching.contains(&row.id))
             })
             .collect()
     }
@@ -1064,6 +1133,7 @@ impl SettingsWindow {
                                     SettingsSectionId::Interface => IconName::AppWindow,
                                     SettingsSectionId::Font => IconName::Type,
                                     SettingsSectionId::Themes => IconName::Palette,
+                                    SettingsSectionId::Keybindings => IconName::Keyboard,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                     SettingsSectionId::Updates => IconName::Download,
                                 },
@@ -1234,26 +1304,42 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let appearance = &settings.chrome;
-        let rows = self.rows_for(section);
+        let mut rows = self.rows_for(section);
         if rows.is_empty() {
             return div()
                 .debug_selector(move || format!("{}-empty", section.selector()))
                 .into_any_element();
         }
+        // The Keybindings search narrows the rows Settings Search left, so it stays in place
+        // above them even when it finds nothing.
+        let (shortcut_search, no_shortcuts) = if section == SettingsSectionId::Keybindings {
+            self.retain_found_shortcuts(&mut rows, cx);
+            let empty = rows
+                .is_empty()
+                .then(|| self.render_no_shortcuts_found(appearance, cx))
+                .flatten();
+            (Some(self.render_shortcut_search(cx)), empty)
+        } else {
+            (None, None)
+        };
         // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
         // card. A filtered view groups whatever survived the filter the same way.
-        let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
+        let mut groups: Vec<(&'static str, Vec<SettingsRowId>, Vec<AnyElement>)> = Vec::new();
         for row in rows {
             let title = row.descriptor().group;
             let rendered = self.render_row(row, appearance, window, cx);
             match groups.last_mut() {
-                Some((current, members)) if *current == title => members.push(rendered),
-                _ => groups.push((title, vec![rendered])),
+                Some((current, ids, members)) if *current == title => {
+                    ids.push(row);
+                    members.push(rendered);
+                }
+                _ => groups.push((title, vec![row], vec![rendered])),
             }
         }
+        self.row_bounds.borrow_mut().clear();
         let rendered = groups
             .into_iter()
-            .map(|(title, members)| {
+            .map(|(title, ids, members)| {
                 // The gallery's title names the appearance it is showing, which changes with the
                 // mode and, under Auto, with the slot chosen above it. Its selector stays fixed.
                 let heading = if title == SettingsRowId::InstalledThemes.descriptor().group {
@@ -1261,7 +1347,11 @@ impl SettingsWindow {
                 } else {
                     title
                 };
+                let row_bounds = Rc::clone(&self.row_bounds);
                 SettingsGroup::new(group_selector(section, title), heading, members)
+                    .on_rows_prepainted(move |bounds, _, _| {
+                        row_bounds.borrow_mut().extend(ids.iter().copied().zip(bounds));
+                    })
                     .render(settings)
                     .into_any_element()
             })
@@ -1276,6 +1366,8 @@ impl SettingsWindow {
             .w_full()
             .gap(appearance.spacing(26.0))
             .children(notice)
+            .children(shortcut_search)
+            .children(no_shortcuts)
             .children(rendered)
             .into_any_element()
     }
@@ -1358,6 +1450,10 @@ impl SettingsWindow {
             .highlighted(highlighted);
         if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
+        } else if let SettingsRowId::Shortcut(command) = row {
+            if let Some(description) = self.shortcut_description(command, cx) {
+                rendered = rendered.caption(description.text, description.tone);
+            }
         } else if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
@@ -1391,6 +1487,7 @@ impl SettingsWindow {
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
+            SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
         }
     }
 
@@ -1874,15 +1971,38 @@ impl SettingsWindow {
                                 .child(explanation),
                         ),
                 )
-                .child(action_button(action_selector, label, true, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        if critical {
-                            settings.editor.reload(cx);
-                        } else {
-                            settings.editor.retry(cx);
-                        }
-                    });
-                }))
+                // The glyph and text start at the top, beside the title. The actions answer the
+                // whole notice, so they center on its height.
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_none()
+                        .self_center()
+                        .gap(appearance.spacing(6.0))
+                        .when(status.recoverable(), |actions| {
+                            let owner = owner.clone();
+                            actions.child(action_button(
+                                "settings-banner-reset-settings",
+                                "Reset Settings…",
+                                true,
+                                move |window, cx| {
+                                    let _ = owner.update(cx, |settings, cx| {
+                                        settings.confirm_settings_recovery(window, cx);
+                                    });
+                                },
+                            ))
+                        })
+                        .child(action_button(action_selector, label, true, move |_, cx| {
+                            let _ = owner.update(cx, |settings, cx| {
+                                if critical {
+                                    settings.editor.reload(cx);
+                                } else {
+                                    settings.editor.retry(cx);
+                                }
+                            });
+                        })),
+                )
                 .into_any_element(),
         )
     }
@@ -2019,13 +2139,43 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    /// Confirms Settings Recovery. The reset replaces the file SpaceTerm could not read, so the
+    /// alert names the backup that keeps it.
+    fn confirm_settings_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let owner = cx.weak_entity();
+        let result = super::settings_recovery::confirmation_alert().present(
+            window,
+            cx,
+            move |outcome, cx| {
+                if !matches!(
+                    outcome,
+                    spaceterm_ui::AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) {
+                    return;
+                }
+                let _ = owner.update(cx, |settings, cx| {
+                    // A failure keeps the banner, whose status now names what stopped the reset.
+                    if settings.editor.recover_by_reset(cx).is_err() {
+                        eprintln!("SpaceTerm Settings could not be reset");
+                    }
+                });
+            },
+        );
+        if result.is_err() {
+            eprintln!("failed to present the SpaceTerm settings recovery confirmation");
+        }
+    }
+
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
             "Reset all settings",
             "Reset All Settings",
-            "Every setting returns to its default, and the terminal themes you installed are removed.",
+            "Every setting and keyboard shortcut returns to its default, and the terminal themes you installed are removed.",
             vec![
                 ModalAction::new(
                     true,
@@ -2061,6 +2211,7 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
+                settings.shortcuts.dismiss_notice();
                 settings.editor.reset_all(cx);
                 cx.notify();
             });

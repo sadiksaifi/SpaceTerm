@@ -4,8 +4,8 @@ use crate::app::{
 };
 use crate::application_identity::ApplicationIdentity;
 use crate::desktop_profile::{
-    ActionShortcut, ControlKeybindingProfiles, DesktopPresentation, DesktopProfile,
-    DesktopProfileError, DesktopWording,
+    ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
+    DesktopWording, ShortcutFormatter,
 };
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::TitlebarOptions;
@@ -61,13 +61,6 @@ fn capture_startup_dependencies(
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
 ) -> Result<DesktopProfile, DesktopProfileError> {
-    use crate::ui::OpenTerminalFind;
-    use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
-        TogglePaneZoom,
-    };
-    use spaceterm_ui::{EditCopy, EditPaste};
-
     DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         ControlKeybindingProfiles::new(
@@ -77,42 +70,18 @@ fn desktop_profile(
             spaceterm_ui::ComboBoxKeybindingProfile::MacOs,
             spaceterm_ui::TextInputKeybindingProfile::MacOs,
         ),
-        crate::desktop_profile::keybindings::bindings(),
+        crate::desktop_profile::default_keymap::profile(
+            super::macos_reserved_shortcuts::shortcuts(),
+        )
+        .map_err(|_| DesktopProfileError::InvalidCombination)?,
         DesktopPresentation::new(
             DesktopWording {
                 file_preview: "Quick Look",
+                operating_system_name: "macOS",
             },
-            "⌘↩",
-            vec![
-                ActionShortcut::new(crate::ui::ActivateWorkspace1, "⌃1"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace2, "⌃2"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace3, "⌃3"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace4, "⌃4"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace5, "⌃5"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace6, "⌃6"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace7, "⌃7"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace8, "⌃8"),
-                ActionShortcut::new(crate::ui::ActivateWorkspace9, "⌃9"),
-                ActionShortcut::new(SwitchWorkspace, "⇧⌘K"),
-                ActionShortcut::new(crate::ui::ToggleSidebar, "⌘B"),
-                ActionShortcut::new(NewWorkspace, "⌘N"),
-                ActionShortcut::new(crate::ui::NewRemoteWorkspace, "⇧⌘N"),
-                ActionShortcut::new(crate::ui::settings_window::OpenSettings, "⌘,"),
-                ActionShortcut::new(CreateTab, "⌘T"),
-                ActionShortcut::new(EditCopy, "⌘C"),
-                ActionShortcut::new(EditPaste, "⌘V"),
-                ActionShortcut::new(OpenTerminalFind, "⌘F"),
-                ActionShortcut::new(SplitRight, "⌘D"),
-                ActionShortcut::new(SplitDown, "⇧⌘D"),
-                ActionShortcut::new(TogglePaneZoom, "⇧⌘↩"),
-                ActionShortcut::new(ClosePane, "⌘W"),
-                ActionShortcut::new(CloseTab, "⇧⌘W"),
-                #[cfg(feature = "appearance-exerciser")]
-                ActionShortcut::new(
-                    crate::ui::appearance_exerciser::ToggleAppearancePreview,
-                    "⌥⌘C",
-                ),
-            ],
+            super::macos_shortcut_glyphs::MacosShortcutFormatter
+                .format_chord(gpui::Modifiers::command(), "enter"),
+            Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),
         locale,
     )
@@ -377,25 +346,49 @@ mod tests {
             )))
             .unwrap()
             .install(cx);
+            gpui::BorrowAppContext::update_global::<DesktopPresentation, _>(
+                cx,
+                |presentation, cx| presentation.refresh(cx),
+            );
             let presentation = DesktopPresentation::get(cx);
-            assert_eq!(presentation.shortcut(&SwitchWorkspace), "⇧⌘K");
-            assert_eq!(presentation.shortcut(&crate::ui::ToggleSidebar), "⌘B");
-            assert_eq!(presentation.shortcut(&NewWorkspace), "⌘N");
-            assert_eq!(presentation.shortcut(&crate::ui::NewRemoteWorkspace), "⇧⌘N");
-            assert_eq!(presentation.shortcut(&CreateTab), "⌘T");
-            assert_eq!(presentation.shortcut(&spaceterm_ui::EditCopy), "⌘C");
-            assert_eq!(presentation.shortcut(&SplitRight), "⌘D");
-            assert_eq!(presentation.shortcut(&SplitDown), "⇧⌘D");
-            assert_eq!(presentation.shortcut(&TogglePaneZoom), "⇧⌘↩");
-            assert_eq!(presentation.shortcut(&ClosePane), "⌘W");
-            assert_eq!(presentation.shortcut(&CloseTab), "⇧⌘W");
+            assert_eq!(
+                presentation.shortcut(&SwitchWorkspace).as_deref(),
+                Some("⇧⌘K")
+            );
+            assert_eq!(
+                presentation.shortcut(&crate::ui::ToggleSidebar).as_deref(),
+                Some("⌘B")
+            );
+            assert_eq!(presentation.shortcut(&NewWorkspace).as_deref(), Some("⌘N"));
+            assert_eq!(
+                presentation
+                    .shortcut(&crate::ui::NewRemoteWorkspace)
+                    .as_deref(),
+                Some("⇧⌘N")
+            );
+            assert_eq!(presentation.shortcut(&CreateTab).as_deref(), Some("⌘T"));
+            assert_eq!(
+                presentation.shortcut(&spaceterm_ui::EditCopy).as_deref(),
+                Some("⌘C")
+            );
+            assert_eq!(presentation.shortcut(&SplitRight).as_deref(), Some("⌘D"));
+            assert_eq!(presentation.shortcut(&SplitDown).as_deref(), Some("⇧⌘D"));
+            assert_eq!(
+                presentation.shortcut(&TogglePaneZoom).as_deref(),
+                Some("⇧⌘↩")
+            );
+            assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌘W"));
+            assert_eq!(presentation.shortcut(&CloseTab).as_deref(), Some("⇧⌘W"));
             #[cfg(feature = "appearance-exerciser")]
             assert_eq!(
-                presentation.shortcut(&crate::ui::appearance_exerciser::ToggleAppearancePreview),
-                "⌥⌘C"
+                presentation
+                    .shortcut(&crate::ui::appearance_exerciser::ToggleAppearancePreview)
+                    .as_deref(),
+                Some("⌥⌘C")
             );
             assert_eq!(presentation.command_palette_confirm_shortcut(), "⌘↩");
             assert_eq!(presentation.wording().file_preview, "Quick Look");
+            assert_eq!(presentation.wording().operating_system_name, "macOS");
         });
     }
 }

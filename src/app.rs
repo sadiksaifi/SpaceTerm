@@ -154,6 +154,7 @@ pub(crate) fn init(
     if let Err(error) = application_menu.install(cx) {
         eprintln!("failed to install the application menu: {error}");
     }
+    crate::keybindings::runtime::attach_application_menu(application_menu, cx);
     Ok(())
 }
 
@@ -689,6 +690,7 @@ mod tests {
             crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
         );
         let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
+        cx.update(crate::ui::init).unwrap();
         cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
 
         cx.update(|cx| {
@@ -939,7 +941,14 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
-    host.profile.install(cx);
+    let keymap = host.profile.install(cx);
+    crate::keybindings::runtime::install(keymap, cx);
+    gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
+        cx,
+        |presentation, cx| {
+            presentation.refresh(cx);
+        },
+    );
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
@@ -959,11 +968,12 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     )
     .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
-        crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
+        crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
+        crate::keybindings::runtime::follow(&settings, cx);
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     Ok(())
@@ -983,6 +993,7 @@ fn open_initial_workspace(
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
+    crate::ui::settings_recovery::offer_at_launch(workspace, cx);
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
         .map_err(|_| RuntimeError::Initialization)?;
@@ -1249,6 +1260,9 @@ mod runtime_tests {
     struct EmptySettingsStorage;
 
     impl crate::settings::storage::SettingsStorage for EmptySettingsStorage {
+        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+            Err(crate::settings::storage::StorageError::Unavailable)
+        }
         fn read(
             &self,
         ) -> Result<
@@ -1280,6 +1294,97 @@ mod runtime_tests {
                     ),
                 ),
         )
+    }
+
+    fn host_with_storage(
+        storage: Arc<crate::ui::settings_window::test_support::MemoryStorage>,
+    ) -> HostComposition {
+        HostComposition::new(parts(Rc::default(), Rc::default()))
+            .unwrap()
+            .with_appearance(
+                storage,
+                Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            )
+    }
+
+    fn click(selector: &'static str, cx: &mut gpui::VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be painted"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn launch_offers_settings_recovery_once_for_malformed_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.corrupt();
+        let host = host_with_storage(storage.clone());
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+
+        click("modal-action-settings-recovery-reset", cx);
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert_eq!(
+            storage.backup().as_deref(),
+            Some(crate::ui::settings_window::test_support::CORRUPT_DOCUMENT)
+        );
+        assert!(storage.document().is_some());
+        let status = cx.update(|_, cx| {
+            cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings
+                .snapshot()
+                .status
+        });
+        assert_eq!(status, None);
+        // Only launch asks. A reopened Workspace window does not repeat the prompt.
+        let reopened = cx.update(|_, cx| open(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(reopened.into(), cx);
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn settings_recovery_can_be_declined_without_changing_the_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.corrupt();
+        let host = host_with_storage(storage.clone());
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+
+        click("modal-action-settings-recovery-not-now", cx);
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert_eq!(storage.backup(), None);
+        let status = cx.update(|_, cx| {
+            cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings
+                .snapshot()
+                .status
+        });
+        assert!(status.is_some_and(crate::settings::SettingsError::is_malformed));
+    }
+
+    #[gpui::test]
+    fn launch_does_not_offer_recovery_for_settings_it_cannot_safely_replace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.fail_reads(Some(crate::settings::storage::StorageError::Unsafe));
+        let host = host_with_storage(storage);
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     }
 
     #[gpui::test]
@@ -1408,6 +1513,9 @@ mod runtime_tests {
         }
 
         impl SettingsStorage for StartupProbe {
+            fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+                Err(crate::settings::storage::StorageError::Unavailable)
+            }
             fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
                 assert!(
                     self.0.load(Ordering::SeqCst),

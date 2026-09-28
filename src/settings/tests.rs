@@ -13,12 +13,26 @@ struct MemoryStorage(Mutex<MemoryState>);
 struct MemoryState {
     snapshot: Option<(Vec<u8>, u64)>,
     writes: usize,
+    backup: Option<Vec<u8>>,
+    successor_after_quarantine: bool,
     failure: Option<StorageError>,
     unsynced: bool,
     successor_after_commit: bool,
 }
 
 impl SettingsStorage for MemoryStorage {
+    fn quarantine(&self) -> Result<(), StorageError> {
+        let mut state = self.0.lock().unwrap();
+        if let Some(error) = state.failure {
+            return Err(error);
+        }
+        state.backup = Some(state.snapshot.take().ok_or(StorageError::Unavailable)?.0);
+        if state.successor_after_quarantine {
+            state.snapshot = Some((b"competing writer".to_vec(), 30));
+        }
+        Ok(())
+    }
+
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
         let state = self.0.lock().unwrap();
         if let Some(error) = state.failure {
@@ -68,7 +82,7 @@ impl SettingsStorage for MemoryStorage {
 
 fn setup() -> (UserSettings, Arc<MemoryStorage>) {
     let storage = Arc::new(MemoryStorage::default());
-    let (settings, _) = UserSettings::load(storage.clone());
+    let settings = UserSettings::load(storage.clone());
     (settings, storage)
 }
 
@@ -151,7 +165,7 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
         Err(SettingsError::Busy)
     );
     job.run().unwrap();
-    let (restarted, _) = UserSettings::load(storage);
+    let restarted = UserSettings::load(storage);
     assert_eq!(
         restarted.export_document().unwrap(),
         settings.export_document().unwrap()
@@ -630,7 +644,7 @@ fn commit_captures_one_candidate_and_rejects_conflicting_edits() {
     let outcome = job.run().unwrap();
     assert_eq!(outcome.revision, original.revision + 1);
     assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
-    let (restarted, _) = UserSettings::load(storage);
+    let restarted = UserSettings::load(storage);
     assert_eq!(
         export_settings(&settings.snapshot().committed).unwrap(),
         export_settings(&restarted.snapshot().committed).unwrap()
@@ -773,7 +787,7 @@ fn uncertain_durability_is_committed_and_identity_is_reconciled() {
 fn invalid_startup_document_is_retained_and_cannot_be_overwritten() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 1));
-    let (settings, _) = UserSettings::load(storage.clone());
+    let settings = UserSettings::load(storage.clone());
     assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
     let current = settings.snapshot().committed;
     assert!(
@@ -796,4 +810,179 @@ fn preview_tokens_cannot_cross_settings_owners_or_revisions() {
     assert_eq!(second.cancel_preview(&token), Err(SettingsError::Stale));
     first.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(first.cancel_preview(&token), Err(SettingsError::Stale));
+}
+
+#[test]
+fn subscribers_receive_coalesced_changes_and_closed_subscribers_are_pruned() {
+    let (settings, _) = setup();
+    let first = settings.subscribe();
+    let second = settings.subscribe();
+    let closed = settings.subscribe();
+    drop(closed);
+    let token = settings.begin_preview(0).unwrap();
+    settings.cancel_preview(&token).unwrap();
+    assert_eq!(first.try_recv(), Ok(()));
+    assert_eq!(second.try_recv(), Ok(()));
+    assert!(first.try_recv().is_err());
+    assert!(second.try_recv().is_err());
+    assert_eq!(settings.0.subscribers.lock().unwrap().len(), 2);
+    let late = settings.subscribe();
+    settings.begin_preview(0).unwrap();
+    assert_eq!(first.try_recv(), Ok(()));
+    assert_eq!(second.try_recv(), Ok(()));
+    assert_eq!(late.try_recv(), Ok(()));
+}
+
+#[test]
+fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
+    let (settings, storage) = setup();
+    let mut document = (*settings.snapshot().committed).clone();
+    document.preferences.mode = AppearanceMode::Light;
+    settings
+        .update_committed(0, document)
+        .unwrap()
+        .run()
+        .unwrap();
+    let before = settings.snapshot();
+    let broken = b"{ broken settings\0\xff";
+    {
+        let mut state = storage.0.lock().unwrap();
+        state.snapshot = Some((broken.to_vec(), 20));
+        state.backup = Some(b"old backup".to_vec());
+    }
+    assert_eq!(settings.reload(), Err(SettingsError::Invalid));
+    assert!(settings
+        .update_committed(before.committed.revision, (*before.committed).clone())
+        .is_err());
+    assert!(settings.snapshot().recoverable_candidate.is_some());
+    let first = settings.subscribe();
+    let second = settings.subscribe();
+    let receipt = settings.recover_by_reset().unwrap();
+    let recovered = settings.snapshot();
+    assert_eq!(recovered.status, None);
+    assert_eq!(recovered.phase, PreviewPhase::Idle);
+    assert_eq!(
+        recovered.committed.preferences,
+        SettingsDocument::default().preferences
+    );
+    assert!(recovered.recoverable_candidate.is_none());
+    assert!(recovered.committed.revision > before.committed.revision);
+    assert!(recovered.catalog_revision > before.catalog_revision);
+    assert_eq!(receipt.durability, Durability::Synchronized);
+    assert_eq!(first.try_recv(), Ok(()));
+    assert_eq!(second.try_recv(), Ok(()));
+    {
+        let state = storage.0.lock().unwrap();
+        assert_eq!(state.backup.as_deref(), Some(broken.as_slice()));
+        assert_eq!(
+            state.snapshot.as_ref().unwrap().0,
+            export_settings(&SettingsDocument::default())
+                .unwrap()
+                .as_bytes()
+        );
+    }
+    assert!(matches!(
+        settings.begin_preview(before.committed.revision),
+        Err(SettingsError::Stale)
+    ));
+    settings
+        .update_committed(recovered.committed.revision, (*recovered.committed).clone())
+        .unwrap()
+        .run()
+        .unwrap();
+}
+
+#[test]
+fn recovery_refuses_healthy_unsafe_and_busy_settings_without_quarantining() {
+    use super::recovery::RecoveryError;
+    let (settings, storage) = setup();
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::NotMalformed)
+    );
+    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    settings.reload().unwrap_err();
+    assert!(!settings.snapshot().status.unwrap().is_malformed());
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::NotMalformed)
+    );
+    {
+        let mut state = storage.0.lock().unwrap();
+        state.failure = None;
+        state.snapshot = Some((b"broken".to_vec(), 1));
+    }
+    settings.reload().unwrap_err();
+    let token = settings.begin_preview(0).unwrap();
+    assert_eq!(settings.recover_by_reset(), Err(RecoveryError::Busy));
+    assert!(storage.0.lock().unwrap().backup.is_none());
+    drop(token);
+    settings.recover_by_reset().unwrap();
+}
+
+#[test]
+fn recovery_preserves_backup_and_competing_file_on_conflict() {
+    use super::recovery::RecoveryError;
+    let storage = Arc::new(MemoryStorage::default());
+    {
+        let mut state = storage.0.lock().unwrap();
+        state.snapshot = Some((b"broken".to_vec(), 1));
+        state.successor_after_quarantine = true;
+    }
+    let settings = UserSettings::load(storage.clone());
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::Storage(StorageError::Conflict))
+    );
+    let state = storage.0.lock().unwrap();
+    assert_eq!(state.backup.as_deref(), Some(b"broken".as_slice()));
+    assert_eq!(state.snapshot.as_ref().unwrap().0, b"competing writer");
+    assert_eq!(state.writes, 0);
+    drop(state);
+    assert_eq!(
+        settings.snapshot().status,
+        Some(SettingsError::Storage(StorageError::Conflict))
+    );
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::NotMalformed)
+    );
+}
+
+#[test]
+fn recovery_refuses_committing_and_storage_ready_settings() {
+    use super::recovery::RecoveryError;
+    let (settings, storage) = setup();
+    let candidate = (*settings.snapshot().committed).clone();
+    let job = settings.update_committed(0, candidate).unwrap();
+    assert_eq!(settings.recover_by_reset(), Err(RecoveryError::Busy));
+    storage.0.lock().unwrap().failure = Some(StorageError::TooLarge);
+    assert_eq!(
+        job.run(),
+        Err(SettingsError::Storage(StorageError::TooLarge))
+    );
+    assert!(settings.snapshot().status.unwrap().is_malformed());
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::NotMalformed)
+    );
+    assert!(storage.0.lock().unwrap().backup.is_none());
+}
+
+#[test]
+fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
+    use super::recovery::RecoveryError;
+    let storage = Arc::new(MemoryStorage::default());
+    storage.0.lock().unwrap().snapshot = Some((b"broken".to_vec(), 1));
+    let settings = UserSettings::load(storage.clone());
+    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::Storage(StorageError::Unsafe))
+    );
+    let state = storage.0.lock().unwrap();
+    assert_eq!(state.writes, 0);
+    assert!(state.backup.is_none());
+    assert_eq!(state.snapshot.as_ref().unwrap().0, b"broken");
+    assert!(!settings.snapshot().status.unwrap().is_malformed());
 }

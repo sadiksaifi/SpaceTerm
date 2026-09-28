@@ -185,12 +185,11 @@ fn open_settings<'a>(
     document: &SettingsDocument,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
-    let (settings, changed) =
-        crate::settings::UserSettings::load(MemoryStorage::with_document(document));
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(document));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings, changed, Rc::new(platform), cx)
+        appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });

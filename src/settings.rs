@@ -8,6 +8,7 @@
     )
 )]
 
+pub(crate) mod recovery;
 pub(crate) mod storage;
 #[cfg(test)]
 mod storage_tests;
@@ -43,6 +44,12 @@ pub(crate) enum SettingsError {
     Catalog(#[from] CatalogError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+impl SettingsError {
+    pub(crate) fn is_malformed(self) -> bool {
+        matches!(self, Self::Invalid | Self::Storage(StorageError::TooLarge))
+    }
 }
 
 impl From<SettingsDocumentError> for SettingsError {
@@ -90,7 +97,7 @@ pub(crate) struct UserSettings(Arc<SettingsInner>);
 struct SettingsInner {
     state: Mutex<State>,
     storage: Arc<dyn SettingsStorage>,
-    changed: async_channel::Sender<()>,
+    subscribers: Mutex<Vec<async_channel::Sender<()>>>,
 }
 
 struct State {
@@ -192,14 +199,21 @@ impl SettingsInner {
     }
 
     fn notify(&self) {
-        let _ = self.changed.try_send(());
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|subscriber| {
+                !matches!(
+                    subscriber.try_send(()),
+                    Err(async_channel::TrySendError::Closed(()))
+                )
+            });
     }
 }
 
 impl UserSettings {
     /// Loads without creating a missing file or replacing an invalid one.
-    pub(crate) fn load(storage: Arc<dyn SettingsStorage>) -> (Self, async_channel::Receiver<()>) {
-        let (changed, receiver) = async_channel::bounded(1);
+    pub(crate) fn load(storage: Arc<dyn SettingsStorage>) -> Self {
         let mut state = State {
             committed: Arc::new(SettingsDocument::default()),
             recoverable_candidate: None,
@@ -218,14 +232,21 @@ impl UserSettings {
             }
             Err(error) => state.status = Some(error),
         }
-        (
-            Self(Arc::new(SettingsInner {
-                state: Mutex::new(state),
-                storage,
-                changed,
-            })),
-            receiver,
-        )
+        Self(Arc::new(SettingsInner {
+            state: Mutex::new(state),
+            storage,
+            subscribers: Mutex::new(Vec::new()),
+        }))
+    }
+
+    pub(crate) fn subscribe(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        self.0
+            .subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(sender);
+        receiver
     }
 
     pub(crate) fn snapshot(&self) -> SettingsSnapshot {

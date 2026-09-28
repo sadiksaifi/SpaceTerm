@@ -11,9 +11,9 @@ pub(crate) enum TerminalContextMenuCommand {
     FilePreview,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalContextPresentation {
-    copy_shortcut: &'static str,
+    copy_shortcut: Option<gpui::SharedString>,
     file_preview_label: &'static str,
 }
 
@@ -35,20 +35,36 @@ pub(crate) fn terminal_context_menu_entries(
     let find_shortcut = presentation.shortcut(&crate::ui::OpenTerminalFind);
     let presentation = terminal_context_presentation(presentation);
     vec![
-        menu_entry(TerminalContextMenuCommand::Copy, "Copy", actions.copy)
-            .shortcut(presentation.copy_shortcut),
-        menu_entry(TerminalContextMenuCommand::Paste, "Paste", true).shortcut(paste_shortcut),
-        menu_entry(TerminalContextMenuCommand::Find, "Find", true).shortcut(find_shortcut),
+        menu_entry(
+            TerminalContextMenuCommand::Copy,
+            "Copy",
+            actions.copy,
+            presentation.copy_shortcut,
+        ),
+        menu_entry(
+            TerminalContextMenuCommand::Paste,
+            "Paste",
+            true,
+            paste_shortcut,
+        ),
+        menu_entry(
+            TerminalContextMenuCommand::Find,
+            "Find",
+            true,
+            find_shortcut,
+        ),
         MenuEntry::separator(),
         menu_entry(
             TerminalContextMenuCommand::OpenLink,
             "Open Link",
             actions.open_link,
+            None,
         ),
         menu_entry(
             TerminalContextMenuCommand::FilePreview,
             presentation.file_preview_label,
             actions.file_preview,
+            None,
         ),
     ]
 }
@@ -57,14 +73,19 @@ fn menu_entry(
     command: TerminalContextMenuCommand,
     label: &'static str,
     enabled: bool,
+    shortcut: Option<gpui::SharedString>,
 ) -> MenuEntry<TerminalContextMenuCommand> {
-    MenuEntry::action(label, command)
+    let entry = MenuEntry::action(label, command)
         .disabled(!enabled)
         .debug_selector(format!(
             "terminal-context-menu-row-{}-{}",
             command.debug_name(),
             if enabled { "enabled" } else { "disabled" },
-        ))
+        ));
+    match shortcut {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    }
 }
 
 impl TerminalContextMenuCommand {
@@ -88,7 +109,7 @@ mod tests {
         assert_eq!(
             terminal_context_presentation(&crate::desktop_profile::testing_presentation()),
             TerminalContextPresentation {
-                copy_shortcut: "Primary+C",
+                copy_shortcut: Some("Primary+C".into()),
                 file_preview_label: "Preview File",
             }
         );

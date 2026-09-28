@@ -1270,6 +1270,11 @@ fn group_and_all_resets_have_exact_scope_and_retain_color_themes() {
 #[test]
 fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
     let mut document = reset_fixture();
+    document.keybindings = serde_json::from_value(serde_json::json!({
+        "close_tab": null,
+        "new_workspace": "shift-cmd-t"
+    }))
+    .unwrap();
     document.revision = 17;
     let schema_version = document.schema_version;
     assert!(
@@ -1288,6 +1293,7 @@ fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
         document.terminal_themes.is_empty(),
         "the imported catalog should empty"
     );
+    assert_eq!(document.keybindings, Default::default());
     assert_eq!(
         document.revision, 17,
         "the write order should carry forward"
@@ -1501,4 +1507,66 @@ fn update_preferences_round_trip_and_reset_with_the_settings_document() {
     assert_eq!(restored.updates, document.updates);
     restored.reset_all();
     assert_eq!(restored.updates, UpdatePreferences::default());
+}
+
+#[test]
+fn keybinding_overrides_round_trip_as_a_sparse_map() {
+    let document = SettingsDocument {
+        keybindings: serde_json::from_value(serde_json::json!({
+            "close_tab": null,
+            "new_workspace": "shift-cmd-t"
+        }))
+        .unwrap(),
+        ..Default::default()
+    };
+
+    let encoded = export_settings(&document).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        value["keybindings"],
+        serde_json::json!({"close_tab": null, "new_workspace": "shift-cmd-t"})
+    );
+    assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
+    assert!(encoded.find("\"updates\"").unwrap() < encoded.find("\"keybindings\"").unwrap());
+    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"preferences\"").unwrap());
+
+    let mut without_overrides = value;
+    without_overrides.as_object_mut().unwrap().remove("keybindings");
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&without_overrides).unwrap())
+            .unwrap()
+            .keybindings,
+        Default::default()
+    );
+}
+
+#[test]
+fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
+    let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
+    value["keybindings"] = serde_json::json!({
+        "close_tab": "shift-cmd-t",
+        "new_workspace": "shift-cmd-t"
+    });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert_eq!(
+        parse_settings(&bytes),
+        Err(SettingsDocumentError::InvalidKeybindings)
+    );
+    let invalid: SettingsDocument = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        export_settings(&invalid),
+        Err(SettingsDocumentError::InvalidKeybindings)
+    );
+
+    value["keybindings"] = serde_json::json!({"unknown_command": "shift-cmd-t"});
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&value).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    );
+
+    value["keybindings"] = serde_json::json!({"close_tab": "ctrl-c"});
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&value).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    );
 }

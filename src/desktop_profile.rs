@@ -1,7 +1,10 @@
 //! Validated desktop policy supplied by host composition, with no host detection.
-pub(crate) mod keybindings;
+pub(crate) mod default_keymap;
 
-use gpui::{Action, App, KeyBinding};
+use std::rc::Rc;
+
+use crate::keybindings::{KeybindingPreferences, KeymapProfile, Shortcut};
+use gpui::{Action, App, KeyContext, Keymap, Modifiers, SharedString};
 use spaceterm_ui::{
     ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, MenuKeybindingProfile,
     ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile,
@@ -10,40 +13,49 @@ use spaceterm_ui::{
 #[derive(Clone, Copy)]
 pub(crate) struct DesktopWording {
     pub(crate) file_preview: &'static str,
+    pub(crate) operating_system_name: &'static str,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ActionShortcut {
-    action: &'static str,
-    display: &'static str,
-}
-
-impl ActionShortcut {
-    pub(crate) fn new<A: Action>(action: A, display: &'static str) -> Self {
-        Self {
-            action: action.name(),
-            display,
-        }
-    }
+pub(crate) trait ShortcutFormatter {
+    /// Presents one key with its modifiers. The key is GPUI's lowercase key name, such as `k`,
+    /// `enter`, or `f5`.
+    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString;
+    fn format_modifiers(&self, modifiers: Modifiers) -> SharedString;
 }
 
 #[derive(Clone)]
 pub(crate) struct DesktopPresentation {
     wording: DesktopWording,
-    command_palette_confirm_shortcut: &'static str,
-    shortcuts: Vec<ActionShortcut>,
+    command_palette_confirm_shortcut: SharedString,
+    formatter: Rc<dyn ShortcutFormatter>,
+    shortcuts: Vec<PresentedShortcut>,
+}
+
+struct PresentedShortcut {
+    action: Box<dyn Action>,
+    display: SharedString,
+}
+
+impl Clone for PresentedShortcut {
+    fn clone(&self) -> Self {
+        Self {
+            action: self.action.boxed_clone(),
+            display: self.display.clone(),
+        }
+    }
 }
 
 impl DesktopPresentation {
     pub(crate) fn new(
         wording: DesktopWording,
-        command_palette_confirm_shortcut: &'static str,
-        shortcuts: Vec<ActionShortcut>,
+        command_palette_confirm_shortcut: SharedString,
+        formatter: Rc<dyn ShortcutFormatter>,
     ) -> Self {
         Self {
             wording,
             command_palette_confirm_shortcut,
-            shortcuts,
+            formatter,
+            shortcuts: Vec::new(),
         }
     }
 
@@ -55,17 +67,80 @@ impl DesktopPresentation {
         self.wording
     }
 
-    pub(crate) const fn command_palette_confirm_shortcut(&self) -> &'static str {
-        self.command_palette_confirm_shortcut
+    pub(crate) fn command_palette_confirm_shortcut(&self) -> &str {
+        &self.command_palette_confirm_shortcut
     }
 
-    pub(crate) fn shortcut<A: Action>(&self, action: &A) -> &'static str {
+    pub(crate) fn shortcut(&self, action: &dyn Action) -> Option<SharedString> {
         self.shortcuts
             .iter()
-            .find(|presentation| presentation.action == action.name())
-            .expect("desktop profile validation must cover every displayed action")
-            .display
+            .find(|entry| entry.action.partial_eq(action))
+            .map(|entry| entry.display.clone())
     }
+
+    pub(crate) fn format(&self, shortcut: &Shortcut) -> SharedString {
+        self.formatter
+            .format_chord(shortcut.modifiers(), shortcut.key())
+    }
+
+    /// Presents a chord that need not be a valid [`Shortcut`], such as one a recorder refused.
+    pub(crate) fn format_keystroke(&self, keystroke: &gpui::Keystroke) -> SharedString {
+        self.formatter
+            .format_chord(keystroke.modifiers, &keystroke.key.to_ascii_lowercase())
+    }
+
+    pub(crate) fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
+        self.formatter.format_modifiers(modifiers)
+    }
+
+    pub(crate) fn refresh(&mut self, cx: &App) {
+        self.refresh_keymap(&cx.key_bindings().borrow());
+    }
+
+    fn refresh_keymap(&mut self, keymap: &Keymap) {
+        self.shortcuts.clear();
+        for binding in keymap.bindings() {
+            let action = binding.action();
+            if self
+                .shortcuts
+                .iter()
+                .any(|entry| entry.action.partial_eq(action))
+            {
+                continue;
+            }
+            if let Some(shortcut) = installed_shortcut(keymap, action) {
+                self.shortcuts.push(PresentedShortcut {
+                    action: action.boxed_clone(),
+                    display: self.format(&shortcut),
+                });
+            }
+        }
+    }
+}
+
+/// Match GPUI's native menu selection: first default-context match, or first binding.
+pub(crate) fn installed_shortcut(keymap: &Keymap, action: &dyn Action) -> Option<Shortcut> {
+    let mut context = KeyContext::new_with_defaults();
+    for name in ["Workspace", "Pane", "Editor"] {
+        context.add(name);
+    }
+    let contexts = [context];
+    let mut bindings = keymap.bindings_for_action(action);
+    let first = bindings.next()?;
+    let matches = |binding: &gpui::KeyBinding| {
+        binding
+            .predicate()
+            .is_none_or(|predicate| predicate.eval(&contexts))
+    };
+    let binding = if matches(first) {
+        first
+    } else {
+        bindings.find(|binding| matches(binding)).unwrap_or(first)
+    };
+    let [keystroke] = binding.keystrokes() else {
+        return None;
+    };
+    Shortcut::parse(&keystroke.unparse()).ok()
 }
 impl gpui::Global for DesktopPresentation {}
 
@@ -73,7 +148,7 @@ pub(crate) struct DesktopProfile {
     presentation: DesktopPresentation,
     modal_policy: ModalDesktopPolicy,
     control_keys: ControlKeybindingProfiles,
-    bindings: Vec<KeyBinding>,
+    keymap: KeymapProfile,
     locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
 }
 
@@ -110,58 +185,27 @@ pub(crate) enum DesktopProfileError {
     MissingCapability,
     #[error("desktop policy and capabilities disagree")]
     InvalidCombination,
-    #[error("a global shortcut has more than one owner")]
-    DuplicateGlobalKey,
 }
 impl DesktopProfile {
     pub(crate) fn new(
         modal_policy: ModalDesktopPolicy,
         control_keys: ControlKeybindingProfiles,
-        bindings: Vec<KeyBinding>,
+        keymap: KeymapProfile,
         presentation: DesktopPresentation,
         locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
     ) -> Result<Self, DesktopProfileError> {
-        for (index, binding) in bindings.iter().enumerate() {
-            if binding.predicate().is_none()
-                && bindings[..index].iter().any(|previous| {
-                    previous.predicate().is_none() && previous.keystrokes() == binding.keystrokes()
-                })
-            {
-                return Err(DesktopProfileError::DuplicateGlobalKey);
-            }
-        }
         if presentation.command_palette_confirm_shortcut.is_empty() {
-            return Err(DesktopProfileError::MissingCapability);
-        }
-        for (index, shortcut) in presentation.shortcuts.iter().enumerate() {
-            if shortcut.display.is_empty()
-                || !bindings
-                    .iter()
-                    .any(|binding| binding.action().name() == shortcut.action)
-                || presentation.shortcuts[..index]
-                    .iter()
-                    .any(|previous| previous.action == shortcut.action)
-            {
-                return Err(DesktopProfileError::InvalidCombination);
-            }
-        }
-        if required_presented_actions().iter().any(|required| {
-            !presentation
-                .shortcuts
-                .iter()
-                .any(|shortcut| shortcut.action == *required)
-        }) {
             return Err(DesktopProfileError::MissingCapability);
         }
         Ok(Self {
             presentation,
             modal_policy,
             control_keys,
-            bindings,
+            keymap,
             locale,
         })
     }
-    pub(crate) fn install(&self, cx: &mut App) {
+    pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
         cx.set_global(self.presentation.clone());
         spaceterm_ui::install_modal_policy(
             cx,
@@ -175,90 +219,83 @@ impl DesktopProfile {
         spaceterm_ui::install_portable_modal_keybindings(cx);
         spaceterm_ui::install_modal_keybindings(cx, self.control_keys.modal);
         spaceterm_ui::install_text_input_keybindings(cx, self.control_keys.text_input);
-        cx.bind_keys(self.bindings.clone());
+        cx.bind_keys(
+            self.keymap
+                .resolve(&KeybindingPreferences::default())
+                .key_bindings(),
+        );
+        cx.bind_keys(self.keymap.control_bindings().iter().cloned());
+        cx.bind_keys(self.keymap.fixed_bindings().iter().cloned());
+        self.keymap.clone()
     }
 }
 
-fn required_presented_actions() -> [&'static str; 23] {
-    use crate::ui::OpenTerminalFind;
-    use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
-        TogglePaneZoom,
-    };
-    use spaceterm_ui::{EditCopy, EditPaste};
+#[cfg(test)]
+struct TestingShortcutFormatter;
 
-    [
-        crate::ui::ActivateWorkspace1.name(),
-        crate::ui::ActivateWorkspace2.name(),
-        crate::ui::ActivateWorkspace3.name(),
-        crate::ui::ActivateWorkspace4.name(),
-        crate::ui::ActivateWorkspace5.name(),
-        crate::ui::ActivateWorkspace6.name(),
-        crate::ui::ActivateWorkspace7.name(),
-        crate::ui::ActivateWorkspace8.name(),
-        crate::ui::ActivateWorkspace9.name(),
-        SwitchWorkspace.name(),
-        crate::ui::ToggleSidebar.name(),
-        NewWorkspace.name(),
-        crate::ui::NewRemoteWorkspace.name(),
-        crate::ui::settings_window::OpenSettings.name(),
-        CreateTab.name(),
-        EditCopy.name(),
-        EditPaste.name(),
-        OpenTerminalFind.name(),
-        SplitRight.name(),
-        SplitDown.name(),
-        TogglePaneZoom.name(),
-        ClosePane.name(),
-        CloseTab.name(),
-    ]
+#[cfg(test)]
+impl ShortcutFormatter for TestingShortcutFormatter {
+    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
+        let key = match key {
+            "enter" => "Enter".to_owned(),
+            "space" => "Space".to_owned(),
+            "tab" => "Tab".to_owned(),
+            _ => key.to_uppercase(),
+        };
+        let modifiers = self.format_modifiers(modifiers);
+        if modifiers.is_empty() {
+            key.into()
+        } else {
+            format!("{modifiers}+{key}").into()
+        }
+    }
+
+    fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
+        [
+            (modifiers.platform, "Primary"),
+            (modifiers.control, "Ctrl"),
+            (modifiers.alt, "Alt"),
+            (modifiers.shift, "Shift"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, label)| enabled.then_some(label))
+        .collect::<Vec<_>>()
+        .join("+")
+        .into()
+    }
+}
+
+/// A System Reserved table for tests, standing in for a host's.
+#[cfg(test)]
+fn testing_reserved_shortcuts() -> Vec<crate::keybindings::SystemReserved> {
+    vec![crate::keybindings::SystemReserved {
+        shortcut: Shortcut::parse("cmd-q").expect("static reserved shortcut"),
+        reason: crate::keybindings::SystemReservation::Quit,
+    }]
 }
 
 #[cfg(test)]
 pub(crate) fn testing_presentation() -> DesktopPresentation {
-    use crate::ui::OpenTerminalFind;
-    use crate::ui::{
-        ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
-        TogglePaneZoom,
-    };
-    use spaceterm_ui::{EditCopy, EditPaste};
-
-    DesktopPresentation::new(
+    let mut presentation = DesktopPresentation::new(
         DesktopWording {
             file_preview: "Preview File",
+            operating_system_name: "Operating System",
         },
-        "Primary+Enter",
-        vec![
-            ActionShortcut::new(crate::ui::ActivateWorkspace1, "Ctrl+1"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace2, "Ctrl+2"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace3, "Ctrl+3"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace4, "Ctrl+4"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace5, "Ctrl+5"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace6, "Ctrl+6"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace7, "Ctrl+7"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace8, "Ctrl+8"),
-            ActionShortcut::new(crate::ui::ActivateWorkspace9, "Ctrl+9"),
-            ActionShortcut::new(SwitchWorkspace, "Primary+Shift+K"),
-            ActionShortcut::new(crate::ui::ToggleSidebar, "Primary+B"),
-            ActionShortcut::new(NewWorkspace, "Primary+N"),
-            ActionShortcut::new(crate::ui::NewRemoteWorkspace, "Primary+Shift+N"),
-            ActionShortcut::new(crate::ui::settings_window::OpenSettings, "Primary+,"),
-            ActionShortcut::new(CreateTab, "Primary+T"),
-            ActionShortcut::new(EditCopy, "Primary+C"),
-            ActionShortcut::new(EditPaste, "Primary+V"),
-            ActionShortcut::new(OpenTerminalFind, "Primary+F"),
-            ActionShortcut::new(SplitRight, "Primary+D"),
-            ActionShortcut::new(SplitDown, "Primary+Shift+D"),
-            ActionShortcut::new(TogglePaneZoom, "Primary+Shift+Enter"),
-            ActionShortcut::new(ClosePane, "Primary+W"),
-            ActionShortcut::new(CloseTab, "Primary+Shift+W"),
-            #[cfg(feature = "appearance-exerciser")]
-            ActionShortcut::new(
-                crate::ui::appearance_exerciser::ToggleAppearancePreview,
-                "Primary+Alt+C",
-            ),
-        ],
-    )
+        "Primary+Enter".into(),
+        Rc::new(TestingShortcutFormatter),
+    );
+    let profile = default_keymap::profile(testing_reserved_shortcuts()).unwrap();
+    let keymap = Keymap::new(
+        profile
+            .resolve(&KeybindingPreferences::default())
+            .key_bindings()
+            .into_iter()
+            .chain(profile.control_bindings().iter().cloned())
+            .chain(profile.fixed_bindings().iter().cloned())
+            .collect(),
+    );
+    presentation.refresh_keymap(&keymap);
+    presentation
 }
 
 #[cfg(test)]
@@ -272,7 +309,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
             ComboBoxKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
         ),
-        keybindings::bindings(),
+        default_keymap::profile(testing_reserved_shortcuts()).unwrap(),
         testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
     )
@@ -283,22 +320,32 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 mod tests {
     use super::*;
     use crate::ui::{NewWorkspace, SwitchWorkspace};
-    use gpui::Action;
+    use gpui::KeyBinding;
 
     #[gpui::test]
     fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
         let actual = cx.update(|cx| {
             crate::ui::init(cx).unwrap();
+            let menu = std::rc::Rc::new(crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default());
             crate::app::init(
                 cx,
-                std::rc::Rc::new(
-                    crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
-                ),
+                menu.clone(),
                 std::rc::Rc::new(
                     crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
                 ),
             )
             .unwrap();
+            assert_eq!(menu.installs(), 1);
+            let bindings = cx.key_bindings();
+            let keymap = bindings.borrow();
+            let tagged = keymap.bindings().enumerate().filter_map(|(index, binding)| {
+                (binding.meta() == Some(crate::keybindings::CUSTOMIZABLE_BINDINGS)).then_some(index)
+            }).collect::<Vec<_>>();
+            assert_eq!(tagged.len(), 46);
+            assert!(tagged.windows(2).all(|pair| pair[1] == pair[0] + 1));
+            assert_eq!(DesktopPresentation::get(cx).shortcut(&crate::ui::IncreaseTerminalFontSize).as_deref(), Some("Primary+="));
+            // Settings keeps its fixed Shortcut outside the customizable segment.
+            assert_eq!(DesktopPresentation::get(cx).shortcut(&crate::ui::settings_window::OpenSettings).as_deref(), Some("Primary+,"));
             cx.key_bindings()
                 .borrow()
                 .bindings()
@@ -324,6 +371,7 @@ mod tests {
             .collect::<Vec<_>>();
         #[cfg(feature = "appearance-exerciser")]
         let expected = {
+            use gpui::Action as _;
             let mut expected = expected;
             expected.extend([
                 format!(
@@ -340,52 +388,50 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[test]
-    fn duplicate_global_shortcuts_are_rejected_after_modifier_normalization() {
-        let result = DesktopProfile::new(
-            ModalDesktopPolicy::mac_os(),
-            ControlKeybindingProfiles::new(
-                ModalKeybindingProfile::MacOs,
-                MenuKeybindingProfile::MacOs,
-                CommandPaletteKeybindingProfile::MacOs,
-                ComboBoxKeybindingProfile::MacOs,
-                TextInputKeybindingProfile::MacOs,
-            ),
-            vec![
-                KeyBinding::new("cmd-shift-k", SwitchWorkspace, None),
-                KeyBinding::new("shift-cmd-k", NewWorkspace, None),
-            ],
-            testing_presentation(),
-            std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
-                spaceterm_ui::TextDirection::LeftToRight,
-            )),
-        );
-        assert_eq!(result.err(), Some(DesktopProfileError::DuplicateGlobalKey));
-    }
-
-    #[test]
-    fn missing_required_action_presentation_is_rejected() {
-        let mut presentation = testing_presentation();
-        presentation
-            .shortcuts
-            .retain(|shortcut| shortcut.action != NewWorkspace.name());
-
-        let result = DesktopProfile::new(
-            ModalDesktopPolicy::mac_os(),
-            ControlKeybindingProfiles::new(
-                ModalKeybindingProfile::MacOs,
-                MenuKeybindingProfile::MacOs,
-                CommandPaletteKeybindingProfile::MacOs,
-                ComboBoxKeybindingProfile::MacOs,
-                TextInputKeybindingProfile::MacOs,
-            ),
-            keybindings::bindings(),
-            presentation,
-            std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(
-                spaceterm_ui::TextDirection::LeftToRight,
-            )),
-        );
-
-        assert_eq!(result.err(), Some(DesktopProfileError::MissingCapability));
+    #[gpui::test]
+    fn presentation_refresh_follows_installed_bindings_and_clears_removed_hints(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut presentation = testing_presentation();
+            assert_eq!(
+                presentation
+                    .format_modifiers(gpui::Modifiers {
+                        platform: true,
+                        shift: true,
+                        ..Default::default()
+                    })
+                    .as_ref(),
+                "Primary+Shift"
+            );
+            assert_eq!(
+                presentation.wording().operating_system_name,
+                "Operating System"
+            );
+            cx.bind_keys([
+                KeyBinding::new("cmd-y", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
+                KeyBinding::new("cmd-u", NewWorkspace, None),
+                KeyBinding::new("cmd-i", NewWorkspace, None),
+            ]);
+            presentation.refresh(cx);
+            assert_eq!(
+                presentation.shortcut(&NewWorkspace).as_deref(),
+                Some("Primary+U")
+            );
+            cx.clear_key_bindings();
+            cx.bind_keys([
+                KeyBinding::new("cmd-y", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
+                KeyBinding::new("cmd-u", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
+            ]);
+            presentation.refresh(cx);
+            assert_eq!(
+                presentation.shortcut(&NewWorkspace).as_deref(),
+                Some("Primary+Y")
+            );
+            assert_eq!(presentation.shortcut(&SwitchWorkspace), None);
+            cx.clear_key_bindings();
+            presentation.refresh(cx);
+            assert_eq!(presentation.shortcut(&NewWorkspace), None);
+        });
     }
 }

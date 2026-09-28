@@ -105,7 +105,7 @@ impl FieldFrameTheme {
         self
     }
 
-    fn ring_color(self) -> gpui::Rgba {
+    pub(crate) fn ring_color(self) -> gpui::Rgba {
         self.focus_ring.unwrap_or(self.focused_border)
     }
 
