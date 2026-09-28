@@ -130,6 +130,11 @@ fn search_value(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> 
     })
 }
 
+/// The explanation a search that found nothing shows.
+fn no_results(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
+    window.read_with(cx, |settings, cx| settings.no_shortcuts_found(cx).map(String::from))
+}
+
 fn is_searching_by_shortcut(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
     window.read_with(cx, |settings, _| settings.shortcuts.is_searching_by_shortcut())
 }
@@ -420,6 +425,65 @@ fn a_chord_no_command_uses_finds_nothing(cx: &mut TestAppContext) {
 
     assert!(found(&window, cx).is_empty());
     assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
+    assert_eq!(
+        no_results(&window, cx).as_deref(),
+        Some("Ctrl+C is reserved for programs running in the terminal.")
+    );
+}
+
+#[gpui::test]
+fn searching_by_an_unused_shortcut_says_no_command_uses_it(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    cx.simulate_keystrokes("cmd-shift-y");
+    cx.run_until_parked();
+
+    assert!(found(&window, cx).is_empty());
+    assert_eq!(
+        no_results(&window, cx).as_deref(),
+        Some("No command uses Primary+Shift+Y.")
+    );
+}
+
+#[gpui::test]
+fn searching_by_a_system_reserved_shortcut_names_its_owner(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+
+    assert!(found(&window, cx).is_empty());
+    assert_eq!(
+        no_results(&window, cx).as_deref(),
+        Some("Primary+Q is reserved by Operating System for Quit.")
+    );
+}
+
+#[gpui::test]
+fn the_search_by_shortcut_toggle_is_the_tab_stop_after_the_search_field(
+    cx: &mut TestAppContext,
+) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    type_search(&window, "", cx);
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(!window.read_with(cx, |settings, cx| {
+        settings.shortcuts.search_input().read(cx).is_focused()
+    }));
+    // A button activates when the key that pressed it is released.
+    cx.simulate_keystrokes("space");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("space").expect("keystroke"),
+    });
+    cx.run_until_parked();
+
+    assert!(is_searching_by_shortcut(&window, cx));
+    assert!(window.read_with(cx, |settings, cx| {
+        settings.shortcuts.search_input().read(cx).is_focused()
+    }));
 }
 
 #[gpui::test]

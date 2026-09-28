@@ -49,12 +49,12 @@ struct ShortcutSearch {
     capture: Option<ChordCapture>,
 }
 
-/// One chord pressed into the search, and the Shortcut it is when it can be one.
+/// One chord pressed into the search, and the Shortcut it is when a Command can use it.
 #[derive(Clone, Debug)]
 struct SearchedChord {
     text: SharedString,
-    /// `None` for a chord no Command can use, such as a Terminal Reserved one, which finds nothing.
-    shortcut: Option<Shortcut>,
+    /// The Shortcut to find, or why no Command can use the chord, which then finds nothing.
+    shortcut: Result<Shortcut, SharedString>,
 }
 
 /// What the Keybindings search narrows the rows to.
@@ -218,13 +218,19 @@ impl ShortcutRows {
 
 /// Accepts a chord the Keymap can assign, and explains a refusal in the host's notation.
 fn validate(keystroke: &Keystroke, cx: &App) -> Result<(), SharedString> {
+    assignable(keystroke, cx).map(|_| ())
+}
+
+/// The Shortcut a chord is when the Keymap can assign it, or why it can't, in the host's notation.
+fn assignable(keystroke: &Keystroke, cx: &App) -> Result<Shortcut, SharedString> {
     let presentation = DesktopPresentation::get(cx);
     let chord = presentation.format_keystroke(keystroke);
     let shortcut = Shortcut::from_keystroke(keystroke)
         .map_err(|rejection| rejection_message(rejection, &chord, presentation))?;
     KeymapRuntime::profile(cx)
         .check(&shortcut)
-        .map_err(|reservation| reservation_message(reservation, &chord, presentation))
+        .map_err(|reservation| reservation_message(reservation, &chord, presentation))?;
+    Ok(shortcut)
 }
 
 fn rejection_message(
@@ -343,7 +349,7 @@ impl SettingsWindow {
                 ShortcutQuery::Chord(chord) => chord
                     .shortcut
                     .as_ref()
-                    .is_some_and(|shortcut| keymap.shortcuts(command).contains(shortcut)),
+                    .is_ok_and(|shortcut| keymap.shortcuts(command).contains(shortcut)),
                 ShortcutQuery::Text(text) => {
                     let label = command.label().to_lowercase();
                     let shortcut = keymap
@@ -365,19 +371,30 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &App,
     ) -> Option<AnyElement> {
-        let message = match self.shortcuts.query(cx) {
-            ShortcutQuery::Everything => return None,
-            ShortcutQuery::Chord(chord) => format!("No command uses {}.", chord.text),
-            ShortcutQuery::Text(text) => format!("No commands match “{text}”."),
-        };
+        let message = self.no_shortcuts_found(cx)?;
         Some(
             div()
                 .debug_selector(|| "settings-keybindings-no-results".to_owned())
                 .px(row_horizontal_inset(appearance))
                 .text_color(gpui_color(appearance.colors.text_muted))
-                .child(SharedString::from(message))
+                .child(message)
                 .into_any_element(),
         )
+    }
+
+    /// What a search that finds nothing says.
+    pub(super) fn no_shortcuts_found(&self, cx: &App) -> Option<SharedString> {
+        Some(match self.shortcuts.query(cx) {
+            ShortcutQuery::Everything => return None,
+            // A Reserved Shortcut is explained the way the recorder refuses it, which says more than
+            // that nothing uses it.
+            ShortcutQuery::Chord(SearchedChord {
+                shortcut: Err(reason),
+                ..
+            }) => reason.clone(),
+            ShortcutQuery::Chord(chord) => format!("No command uses {}.", chord.text).into(),
+            ShortcutQuery::Text(text) => format!("No commands match “{text}”.").into(),
+        })
     }
 
     /// Switches the search between taking text and recording the Shortcut to search for.
@@ -419,7 +436,7 @@ impl SettingsWindow {
                 let text = DesktopPresentation::get(cx).format_keystroke(&keystroke);
                 self.shortcuts.search.chord = Some(SearchedChord {
                     text: text.clone(),
-                    shortcut: Shortcut::from_keystroke(&keystroke).ok(),
+                    shortcut: assignable(&keystroke, cx),
                 });
                 input.update(cx, |input, cx| {
                     input.set_value(text.to_string(), cx);
