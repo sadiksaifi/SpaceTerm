@@ -1,31 +1,40 @@
-name: Release
+name: Cache macOS validation
 
+# Release tags can restore caches saved on main, but not on other tags.
 on:
+  workflow_dispatch:
   push:
-    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+    branches: [main]
+    paths:
+      - .github/workflows/cache-validation.yml
+      - .github/workflows/release.yml
+      - .mise.toml
+      - rust-toolchain.toml
+      - Cargo.lock
+      - Cargo.toml
+      - '**/Cargo.toml'
+      - third_party/ghostty
+      - third_party/libghostty-vt-sys/build.rs
+      - third_party/libghostty-vt-sys/patches/**
+      - packaging/macos/sparkle.json
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
-  cancel-in-progress: false
+  group: cache-macos-validation
+  cancel-in-progress: true
 
 jobs:
-  release:
+  validation:
     runs-on: macos-26
-    timeout-minutes: 90
-    permissions:
-      contents: write
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
       - uses: jdx/mise-action@v4
-      - name: Validate the release tag
-        id: release
-        run: mise run release:validate
       - name: Install Xcode Metal tools
         run: mise run deps:metal:macos
       - name: Identify validation cache
@@ -49,11 +58,9 @@ jobs:
           key: ${{ steps.validation-cache-key.outputs.key }}
       - name: Validate
         run: mise run validate:macos
-      # Packaging cleans target, so save the validation artifacts first.
-      - name: Save validation build cache before cleanup
+      - name: Save validation build cache
         if: steps.validation-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
-        continue-on-error: true
         with:
           path: |
             target/debug
@@ -62,19 +69,3 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
           key: ${{ steps.validation-cache.outputs.cache-primary-key }}
-      - name: Reclaim validation artifacts before packaging
-        run: mise run artifacts:clean
-      - name: Build and verify Apple Silicon package
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: mise run release:macos:package "$RELEASE_TAG"
-      - name: Sign and verify update assets
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: mise run release:macos:assets "$RELEASE_TAG"
-      - name: Publish complete GitHub release
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          GH_TOKEN: ${{ github.token }}
-        run: mise run release:publish "$RELEASE_TAG"
