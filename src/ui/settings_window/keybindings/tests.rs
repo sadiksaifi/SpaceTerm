@@ -439,3 +439,25 @@ fn leaving_the_section_stops_searching_by_shortcut(cx: &mut TestAppContext) {
 
     assert!(!is_searching_by_shortcut(&window, cx));
 }
+
+#[gpui::test]
+fn clicking_away_while_recording_cancels_without_a_change(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    let recorder = window.read_with(cx, |settings, _| {
+        settings.shortcuts.recorder(Command::NewWorkspace).clone()
+    });
+    recorder.update_in(cx, |recorder, window, cx| {
+        recorder.start_recording(window, cx);
+    });
+    cx.run_until_parked();
+
+    click("settings-keybindings-search-frame", cx);
+
+    assert!(!is_recording(&window, Command::NewWorkspace, cx));
+    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    // The keys that follow go where focus went, not to the recorder.
+    cx.simulate_input("tab");
+    cx.run_until_parked();
+    assert_eq!(search_value(&window, cx), "tab");
+    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+}
