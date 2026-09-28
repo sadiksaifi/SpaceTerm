@@ -188,7 +188,8 @@ fn init_with_text_direction(
             .with_outer_edge_width(1.0),
     );
     initialize_controls(cx)?;
-    crate::desktop_profile::testing_profile(direction).install(cx);
+    let keymap = crate::desktop_profile::testing_profile(direction).install(cx);
+    crate::keybindings::runtime::install(keymap, cx);
     gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
         cx,
         |presentation, cx| {

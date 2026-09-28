@@ -154,6 +154,7 @@ pub(crate) fn init(
     if let Err(error) = application_menu.install(cx) {
         eprintln!("failed to install the application menu: {error}");
     }
+    crate::keybindings::runtime::attach_application_menu(application_menu, cx);
     Ok(())
 }
 
@@ -689,6 +690,7 @@ mod tests {
             crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
         );
         let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
+        cx.update(crate::ui::init).unwrap();
         cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
 
         cx.update(|cx| {
@@ -939,7 +941,8 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
-    host.profile.install(cx);
+    let keymap = host.profile.install(cx);
+    crate::keybindings::runtime::install(keymap, cx);
     gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
         cx,
         |presentation, cx| {
@@ -968,8 +971,9 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
-        crate::ui::appearance_runtime::install(settings, Rc::clone(platform), cx)
+        crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
+        crate::keybindings::runtime::follow(&settings, cx);
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     Ok(())

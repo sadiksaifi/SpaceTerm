@@ -3,12 +3,13 @@
     not(test),
     expect(
         dead_code,
-        reason = "wired by the later desktop profile and keymap runtime steps"
+        reason = "used by the later Keybindings Settings Section"
     )
 )]
 
 mod keymap;
 mod preferences;
+pub(crate) mod runtime;
 mod shortcut;
 mod terminal_conventions;
 

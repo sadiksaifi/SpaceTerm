@@ -204,7 +204,7 @@ impl DesktopProfile {
             locale,
         })
     }
-    pub(crate) fn install(&self, cx: &mut App) {
+    pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
         cx.set_global(self.presentation.clone());
         spaceterm_ui::install_modal_policy(
             cx,
@@ -225,6 +225,7 @@ impl DesktopProfile {
         );
         cx.bind_keys(self.keymap.control_bindings().iter().cloned());
         cx.bind_keys(self.keymap.fixed_bindings().iter().cloned());
+        self.keymap.clone()
     }
 }
 
