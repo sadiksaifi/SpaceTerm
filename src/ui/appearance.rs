@@ -1,7 +1,7 @@
 //! Prepared chrome presentation shared by app-owned composites and reusable controls.
 
 mod built_in_dark;
-pub(crate) mod built_in_light;
+mod built_in_light;
 mod collection_selection;
 mod disabled_union;
 mod separator;
@@ -21,6 +21,11 @@ use crate::appearance::{
 };
 
 pub(super) const SUBDUED_SELECTION_CONTRAST: f64 = 1.20;
+
+/// The GPUI paint for a portable color. Every UI surface converts through this one function.
+pub(crate) fn gpui_color(color: Color) -> gpui::Rgba {
+    rgba(color.rgba_hex())
+}
 
 pub(crate) fn prepared_font(descriptor: &ResolvedFontDescriptor) -> Font {
     let mut result = font(descriptor.primary_family.clone());
@@ -334,14 +339,14 @@ fn floating_material_with_floor(
     minimum: f64,
 ) -> Option<Color> {
     let preferred = match appearance {
-        Appearance::Light => (Color::rgb(0x000000), Color::rgb(0xffffff)),
-        Appearance::Dark => (Color::rgb(0xffffff), Color::rgb(0x000000)),
+        Appearance::Light => (Color::BLACK, Color::WHITE),
+        Appearance::Dark => (Color::WHITE, Color::BLACK),
     };
     let alternate = (preferred.1, preferred.0);
     for (foreground, endpoint) in [preferred, alternate] {
         let endpoint = endpoint.with_alpha(material.a);
         let readable = |candidate: Color| {
-            [Color::rgb(0x000000), Color::rgb(0xffffff)]
+            [Color::BLACK, Color::WHITE]
                 .into_iter()
                 .all(|underlay| {
                     let background = wash.source_over(candidate.source_over(underlay));
@@ -374,9 +379,9 @@ fn floating_material_with_floor(
 
 fn opaque_floating_fallback(appearance: Appearance, target: Color) -> Color {
     let target = target.with_alpha(255);
-    floating_material(appearance, target, Color::rgba(0)).unwrap_or_else(|| match appearance {
-        Appearance::Light => Color::rgb(0xffffff),
-        Appearance::Dark => Color::rgb(0x000000),
+    floating_material(appearance, target, Color::rgba(0)).unwrap_or(match appearance {
+        Appearance::Light => Color::WHITE,
+        Appearance::Dark => Color::BLACK,
     })
 }
 
@@ -468,8 +473,8 @@ fn readable_on_material(
     minimum_contrast: f64,
 ) -> Color {
     let backgrounds = [
-        wash.source_over(material.source_over(Color::rgb(0x000000))),
-        wash.source_over(material.source_over(Color::rgb(0xffffff))),
+        wash.source_over(material.source_over(Color::BLACK)),
+        wash.source_over(material.source_over(Color::WHITE)),
     ];
     readable_on_backgrounds(proposed, backgrounds, minimum_contrast)
 }
@@ -488,8 +493,8 @@ pub(super) fn readable_on_backgrounds<const N: usize>(
     if minimum(proposed) >= minimum_contrast {
         return proposed;
     }
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let target = if minimum(dark) >= minimum(light) {
         dark
     } else {
@@ -532,8 +537,8 @@ fn preferred_readable_endpoint<const N: usize>(backgrounds: [Color; N]) -> Color
             .map(|background| color.contrast_ratio(background))
             .fold(f64::INFINITY, f64::min)
     };
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     if minimum(dark) >= minimum(light) {
         dark
     } else {
@@ -585,7 +590,7 @@ fn resolve_floating_field_colors_detailed(
     material: Color,
     wash: Color,
 ) -> FloatingFieldResolution {
-    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+    let host_backgrounds = [Color::BLACK, Color::WHITE]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
     if let Some(focus_floor) = floors.focus {
         let focus_ring =
@@ -1010,9 +1015,9 @@ fn resolve_floating_state_at_alpha_with_content_fallback(
         .find(|constraint| matches!(constraint.background, FloatingConstraintBackground::Fill))
         .map(|constraint| {
             if content_is_lighter_than_background(constraint.proposed, state.target_fill) {
-                Color::rgb(0xffffff)
+                Color::WHITE
             } else {
-                Color::rgb(0x000000)
+                Color::BLACK
             }
         });
     let mut content = [Color::rgba(0); 4];
@@ -1210,7 +1215,7 @@ fn resolve_floating_control_colors_detailed(
     material: Color,
     wash: Color,
 ) -> FloatingColorResolution {
-    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+    let host_backgrounds = [Color::BLACK, Color::WHITE]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
     if let Some(focus_floor) = floors.focus {
         paint.focus_ring =
@@ -1987,11 +1992,11 @@ fn resolve_floating_frame<const N: usize>(
         let target = reference_fill.source_over(reference_surface);
         let endpoint = proposed
             .first()
-            .map_or(Color::rgb(0x000000), |(content, _)| {
+            .map_or(Color::BLACK, |(content, _)| {
                 if content_is_lighter_than_background(*content, target) {
-                    Color::rgb(0xffffff)
+                    Color::WHITE
                 } else {
-                    Color::rgb(0x000000)
+                    Color::BLACK
                 }
             });
         for alpha in paint_fill.a..=255 {
@@ -2900,16 +2905,16 @@ fn feasible_non_floating_material_target(
     let rendered = |candidate| materials.paint(role, root, candidate).source_over(root);
     let feasible = |candidate| {
         let host = rendered(candidate);
-        Color::rgb(0x000000).contrast_ratio(host) >= minimum
-            || Color::rgb(0xffffff).contrast_ratio(host) >= minimum
+        Color::BLACK.contrast_ratio(host) >= minimum
+            || Color::WHITE.contrast_ratio(host) >= minimum
     };
     if feasible(target) {
         return target;
     }
 
     let host = rendered(target);
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let preferred = if dark.contrast_ratio(host) >= light.contrast_ratio(host) {
         light
     } else {
@@ -3039,7 +3044,7 @@ fn prepare_app_state<const N: usize>(
     for alpha in fill.a..=u8::MAX {
         consider(fill.with_alpha(alpha));
     }
-    for endpoint in [Color::rgb(0), Color::rgb(0xffffff)] {
+    for endpoint in [Color::BLACK, Color::WHITE] {
         for step in 1..=u8::MAX {
             consider(fill.mix(endpoint, f64::from(step) / 255.0));
         }
@@ -3090,7 +3095,7 @@ fn prepare_app_state_boundary<const N: usize>(
     }
     for step in 1..=u8::MAX {
         let amount = f64::from(step) / 255.0;
-        for endpoint in [Color::rgb(0), Color::rgb(0xffffff)] {
+        for endpoint in [Color::BLACK, Color::WHITE] {
             let candidate = proposed.mix(endpoint, amount);
             if readable(candidate) {
                 return candidate;
@@ -3465,7 +3470,7 @@ fn resolve_floating_segmented_colors_detailed(
     wash: Color,
     explicit_track: bool,
 ) -> FloatingColorResolution {
-    let host_backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)]
+    let host_backgrounds = [Color::BLACK, Color::WHITE]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
     let mut fallback_families = Vec::new();
     let semantic_track = if explicit_track {
@@ -3761,8 +3766,8 @@ pub(super) fn readable_on_background(
     if rendered.contrast_ratio(background) >= minimum_contrast {
         return rendered;
     }
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let target = if dark.contrast_ratio(background) >= light.contrast_ratio(background) {
         dark
     } else {
@@ -4019,7 +4024,7 @@ impl ChromeAppearance {
             let tone = Color::rgba(u32::from(shell.backdrop_tone()));
             let wash = Color::rgba(u32::from(shell.material()));
             let divider = Color::rgba(u32::from(shell.divider()));
-            if [Color::rgb(0), Color::rgb(0xffffff)]
+            if [Color::BLACK, Color::WHITE]
                 .into_iter()
                 .any(|underlay| {
                     let background = wash.source_over(tone.source_over(underlay));
@@ -4080,8 +4085,8 @@ impl ChromeAppearance {
                 tone = tone.with_alpha(tone.a.max(230));
             }
             let endpoints = [
-                wash.source_over(tone.source_over(Color::rgb(0))),
-                wash.source_over(tone.source_over(Color::rgb(0xffffff))),
+                wash.source_over(tone.source_over(Color::BLACK)),
+                wash.source_over(tone.source_over(Color::WHITE)),
             ];
             let edge = if self.capabilities.increase_contrast || self.capabilities.show_borders {
                 readable_on_material(self.colors.border, tone, wash, 3.0)
@@ -4097,11 +4102,11 @@ impl ChromeAppearance {
                 self.rule_band(),
             );
             FloatingSurfacePaint::new(
-                rgba(wash.rgba_hex()),
-                rgba(edge.rgba_hex()),
-                rgba(divider.rgba_hex()),
+                gpui_color(wash),
+                gpui_color(edge),
+                gpui_color(divider),
             )
-            .backdrop_tone(rgba(tone.rgba_hex()))
+            .backdrop_tone(gpui_color(tone))
         };
         FloatingSurfaceTheme::new(
             FloatingSurfacePaints::new(
@@ -4118,7 +4123,7 @@ impl ChromeAppearance {
                     .rgba_hex(),
             )
             .into(),
-            rgba(self.colors.modal_scrim.rgba_hex()),
+            gpui_color(self.colors.modal_scrim),
         )
         .corner_radii(
             super::chrome_geometry::RadiusRole::Card.pixels(),
@@ -4512,10 +4517,10 @@ mod typography_tests {
     fn material_frame_strengthens_the_fill_before_changing_authored_content_polarity() {
         use crate::appearance::Color;
 
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let opaque_seed = Color::rgb(0x0055aa);
         let translucent_fill = Color::rgba(0x0055aa80);
-        let authored_content = Color::rgb(0xffffff);
+        let authored_content = Color::WHITE;
         let (fill, [content]) = resolve_floating_frame(
             opaque_seed,
             translucent_fill,
@@ -4540,11 +4545,11 @@ mod typography_tests {
     fn nonfloating_filled_polarity_flip_is_coherent_and_diagnosed() {
         use crate::appearance::{ChromeColors, Color};
 
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let reference = ChromeColors {
             background: host,
             primary_background: Color::rgb(0xaaaaaa),
-            primary_foreground: Color::rgb(0xffffff),
+            primary_foreground: Color::WHITE,
             primary_icon: Color::rgb(0x111111),
             ..ChromeColors::default()
         };
@@ -4571,12 +4576,12 @@ mod typography_tests {
     #[test]
     fn material_control_resolution_escapes_an_infeasible_increased_contrast_fill() {
         use crate::appearance::{ChromeColors, Color};
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let reference = ChromeColors {
             background: host,
             primary_background: Color::rgb(0x767676),
-            primary_foreground: Color::rgb(0xffffff),
-            primary_icon: Color::rgb(0xffffff),
+            primary_foreground: Color::WHITE,
+            primary_icon: Color::WHITE,
             ..ChromeColors::default()
         };
         let paint = ChromeColors {
@@ -4618,7 +4623,7 @@ mod typography_tests {
     #[test]
     fn inactive_material_resolution_keeps_focus_absent_and_collapses_the_field_frame() {
         use crate::appearance::{ChromeColors, Color};
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let reference = ChromeColors {
             background: host,
             focus_ring: Color::rgba(0),
@@ -4649,7 +4654,7 @@ mod typography_tests {
     #[test]
     fn active_material_resolution_preserves_explicitly_absent_state_edges() {
         use crate::appearance::{ChromeColors, Color};
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let absent = Color::rgba(0x12345600);
         let reference = ChromeColors {
             background: host,
@@ -4682,11 +4687,11 @@ mod typography_tests {
     fn floating_constraints_distinguish_inside_content_from_host_adjacent_paint() {
         use crate::appearance::Color;
 
-        let white = Color::rgb(0xffffff);
+        let white = Color::WHITE;
         let resolved = resolve_floating_state_at_alpha(
             floating_state(
-                Color::rgb(0x000000),
-                Color::rgb(0x000000),
+                Color::BLACK,
+                Color::BLACK,
                 white,
                 [
                     floating_constraint(white, 4.5),
@@ -4714,7 +4719,7 @@ mod typography_tests {
     fn unpainted_floating_content_resolves_on_the_host_without_forcing_family_opacity() {
         use crate::appearance::Color;
 
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let proposed = Color::rgb(0x999999);
         let resolved = resolve_floating_state_at_alpha(
             floating_state(
@@ -4742,7 +4747,7 @@ mod typography_tests {
             fill,
             fill,
             [
-                floating_constraint(Color::rgb(0xffffff), 4.5),
+                floating_constraint(Color::WHITE, 4.5),
                 floating_constraint(Color::rgb(0x222222), 4.5),
                 None,
                 None,
@@ -4764,10 +4769,10 @@ mod typography_tests {
         use crate::appearance::Color;
 
         let fill = Color::rgb(0x757575);
-        let opposite = Color::rgb(0x000000);
+        let opposite = Color::BLACK;
         assert!(opposite.contrast_ratio(fill) >= 4.5);
 
-        let resolved = super::readable_toward_endpoint(opposite, Color::rgb(0xffffff), [fill], 4.5);
+        let resolved = super::readable_toward_endpoint(opposite, Color::WHITE, [fill], 4.5);
 
         assert!(relative_luminance(resolved) > relative_luminance(fill));
         assert!(resolved.contrast_ratio(fill) >= 4.5);
@@ -4852,17 +4857,17 @@ mod typography_tests {
 
         assert_eq!(
             host_relative_fill(
-                Color::rgb(0x000000),
-                Color::rgb(0x000000),
+                Color::BLACK,
+                Color::BLACK,
                 Color::rgb(0x202020),
             ),
             Some(Color::rgb(0x202020)),
         );
         assert_eq!(
             host_relative_fill(
-                Color::rgb(0xffffff),
-                Color::rgb(0x000000),
-                Color::rgb(0xffffff),
+                Color::WHITE,
+                Color::BLACK,
+                Color::WHITE,
             ),
             None,
         );
@@ -4875,8 +4880,8 @@ mod typography_tests {
         let reference = ChromeColors {
             elevated_surface_background: Color::rgb(0x202020),
             input_background: Color::rgb(0x767676),
-            input_text: Color::rgb(0xffffff),
-            input_placeholder: Color::rgb(0xffffff),
+            input_text: Color::WHITE,
+            input_placeholder: Color::WHITE,
             ..ChromeColors::default()
         };
         let paint = ChromeColors {
@@ -4892,7 +4897,7 @@ mod typography_tests {
             Color::rgba(0),
         );
 
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let background = resolved.input_background.source_over(underlay);
             assert!(
                 resolved
@@ -4912,7 +4917,7 @@ mod typography_tests {
         let reference = ChromeColors {
             elevated_surface_background: Color::rgb(0x202020),
             element_background: Color::rgb(0x767676),
-            text_secondary: Color::rgb(0xffffff),
+            text_secondary: Color::WHITE,
             ..ChromeColors::default()
         };
         let paint = ChromeColors {
@@ -4928,7 +4933,7 @@ mod typography_tests {
             Color::rgba(0),
         );
 
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let background = resolved.element_background.source_over(underlay);
             assert!(
                 resolved
@@ -4948,8 +4953,8 @@ mod typography_tests {
         let reference = ChromeColors {
             elevated_surface_background: Color::rgb(0x606060),
             toggle_off_background: Color::rgb(0x767676),
-            toggle_off_mark: Color::rgb(0xffffff),
-            text_accent: Color::rgb(0xffffff),
+            toggle_off_mark: Color::WHITE,
+            text_accent: Color::WHITE,
             ..ChromeColors::default()
         };
         let paint = ChromeColors {
@@ -4966,7 +4971,7 @@ mod typography_tests {
             Color::rgba(0),
         );
 
-        for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+        for underlay in [Color::BLACK, Color::WHITE] {
             let host = material.source_over(underlay);
             let track = resolved.toggle_off_background.source_over(host);
             for background in [host, track] {
@@ -4997,11 +5002,11 @@ mod typography_tests {
             &reference,
             reference.clone(),
             Color::rgba(0),
-            Color::rgb(0xffffff),
+            Color::WHITE,
         );
 
         assert_ne!(resolved.warning_border, resolved.warning);
-        assert!(resolved.warning_border.contrast_ratio(Color::rgb(0xffffff)) >= 3.0,);
+        assert!(resolved.warning_border.contrast_ratio(Color::WHITE) >= 3.0,);
     }
 }
 

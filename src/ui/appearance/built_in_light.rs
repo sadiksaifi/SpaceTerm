@@ -19,18 +19,6 @@ pub(super) const SURFACE_BAND: SeparatorBand = SeparatorBand {
     ceiling: 1.30,
 };
 
-/// Ordinary controls need a stronger edge when their fill matches a card or popup host.
-pub(crate) const CONTROL_EDGE: Color = Color::rgba(0x0000002b);
-
-/// Hovered and pressed controls use the strong boundary rung.
-pub(crate) const INTERACTION_EDGE: Color = Color::rgba(0x00000040);
-
-/// Disabled controls retain their role fill and use the quietest boundary rung.
-pub(crate) const DISABLED_EDGE: Color = Color::rgba(0x0000000a);
-
-/// The rim of a selected segmented option and of a switch thumb, both of which carry a shadow too.
-pub(crate) const SELECTED_EDGE: Color = Color::rgba(0x0000001a);
-
 /// Whether the window uses Light appearance.
 pub(super) fn applies(resolved: &ResolvedChromeAppearance) -> bool {
     resolved.appearance == Appearance::Light

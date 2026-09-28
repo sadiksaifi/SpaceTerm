@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use super::*;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;

@@ -1,4 +1,5 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{
     ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle, ButtonVariants,
 };
@@ -309,9 +310,6 @@ fn paint(background: Color, foreground: Color, icon: Color, border: Color) -> Bu
     .icon_foreground(gpui_color(icon))
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

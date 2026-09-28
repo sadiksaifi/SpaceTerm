@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -42,7 +43,6 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
     tab_id: TabId,
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
-use crate::appearance::Color;
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
@@ -54,7 +54,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    Render, Window, div, px, relative, rgba,
+    Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
@@ -2457,9 +2457,6 @@ fn split_ratio_for_offset(
         .then_some(requested_offset / content_extent)
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
@@ -2476,6 +2473,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::appearance::Color;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -2498,7 +2496,7 @@ mod tests {
             ..crate::appearance::AppearancePreferences::default()
         };
         preferences.window.transparency = transparency;
-        let resolved = crate::appearance::SchemeCatalog::default()
+        let resolved = crate::appearance::ThemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
                 &preferences,
@@ -2517,7 +2515,7 @@ mod tests {
                 prepared_appearance(crate::appearance::Appearance::Light, transparency);
             let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
             for terminal in [
-                Color::rgb(0x000000),
+                Color::BLACK,
                 Color::rgb(0xfafafa),
                 Color::rgb(0x38658a),
             ] {
@@ -2537,7 +2535,7 @@ mod tests {
         for transparency in [0.0, 0.35, 1.0] {
             let appearance = prepared_appearance(crate::appearance::Appearance::Dark, transparency);
             for terminal in [
-                Color::rgb(0x000000),
+                Color::BLACK,
                 Color::rgb(0xfafafa),
                 Color::rgb(0x38658a),
             ] {

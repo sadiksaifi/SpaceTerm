@@ -1,4 +1,4 @@
-//! Portable appearance policy, color-scheme interchange, and pure resolution.
+//! Portable appearance policy, Zed terminal theme translation, and pure resolution.
 //!
 //! This Module deliberately contains no GPUI, terminal-engine, filesystem, or
 //! native platform types. Callers supply catalogs and availability facts, then
@@ -188,15 +188,16 @@ mod catalog_tests;
 mod compiler;
 mod composition;
 mod document;
-#[cfg(test)]
-mod interchange_tests;
 mod preferences;
 mod resolution;
 #[cfg(test)]
 mod schema_tests;
-mod scheme;
+mod terminal_theme;
 #[cfg(test)]
 mod tests;
+mod zed;
+#[cfg(test)]
+mod zed_tests;
 
 pub(crate) use crate::theme::Color;
 pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
@@ -205,12 +206,10 @@ pub(crate) use composition::{
     WindowBackgroundAppearance,
 };
 pub(crate) use document::{
-    ImportCandidate, ImportError, SettingsDocument, SettingsDocumentError, export_resolved_schemes,
-    export_schemes, export_settings, import_zed, list_zed_candidates, parse_color_document,
-    parse_settings,
+    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 pub(crate) use preferences::{
-    AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, SchemeSlots,
+    AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, ThemeSlots,
     TerminalFontFamily,
 };
 pub(crate) use resolution::{
@@ -219,19 +218,24 @@ pub(crate) use resolution::{
     ResolvedChromeTypography, ResolvedFontDescriptor, ResolvedTerminalAppearance,
     ResolvedTerminalTypography, SystemAppearance,
 };
-pub(crate) use scheme::{
-    Appearance, CatalogError, ChromeColors, ColorScheme, SchemeCatalog, SchemeId, SchemeSummary,
-    TerminalColors,
+pub(crate) use terminal_theme::{
+    Appearance, CatalogError, ChromeColors, TerminalColors, TerminalTheme, ThemeCatalog, ThemeId,
+    ThemePackage, ThemeSummary,
+};
+pub(crate) use zed::{
+    ImportError, MAX_EXTENSION_FAMILIES, MAX_FAMILY_BYTES, ZedExtension, translate_zed_extension,
+    translate_zed_family,
 };
 
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
 pub(crate) use builtin::chrome_base as builtin_chrome_base;
-#[cfg(test)]
-pub(crate) use builtin::fallback_id as builtin_fallback_scheme;
+pub(crate) use builtin::fallback_id as builtin_fallback_theme;
+pub(crate) use builtin::terminal_base as builtin_terminal_base;
+pub(crate) use builtin::LIGHT_BOUNDARY_INK;
 pub(crate) use resolution::AppearanceDiagnostic;
 
 #[cfg(test)]
 pub(crate) use resolution::ResolutionError;
 #[cfg(test)]
-pub(crate) use scheme::{OptionalColorOverride, SchemeMetadata, TerminalColorOverrides};
+pub(crate) use terminal_theme::{OptionalColorOverride, ThemeMetadata, TerminalColorOverrides};

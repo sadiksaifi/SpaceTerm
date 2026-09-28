@@ -202,6 +202,7 @@ fn compose(
                     super::macos_microphone_access::MacosMicrophoneAccess::new(),
                 ))
             },
+            theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },
         services: Rc::new(super::macos_services::NativeServicesRegistration),

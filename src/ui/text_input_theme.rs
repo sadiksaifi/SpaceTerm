@@ -1,11 +1,12 @@
+use crate::ui::appearance::gpui_color;
 use std::time::Duration;
 
-use gpui::{Rgba, px, rgba};
+use gpui::px;
 use spaceterm_ui::{
     FieldFrameTheme, TextInputMetrics, TextInputPaint, TextInputTheme, TextInputVariants,
 };
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 
 pub(super) fn theme(colors: &ChromeColors) -> TextInputTheme {
@@ -44,8 +45,4 @@ pub(super) fn themed(standard: &ChromeColors, bare: &ChromeColors) -> TextInputT
         .focus_ring(gpui_color(standard.focus_ring))
         .corner_radius(RadiusRole::Control.pixels()),
     )
-}
-
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
 }

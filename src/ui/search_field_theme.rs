@@ -1,4 +1,5 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::{px, rgba};
 use spaceterm_ui::{
     ButtonPaint, ButtonVariantStyle, FieldFrameTheme, SearchFieldMetrics, SearchFieldPaint,
     SearchFieldTheme,
@@ -96,9 +97,6 @@ fn clear_glyph(reference: &ChromeColors) -> Color {
     super::control_theme_catalog::readable_on(reference.input_background, disc, 4.5)
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

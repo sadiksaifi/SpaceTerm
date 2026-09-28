@@ -1,20 +1,17 @@
-//! Reading one user-chosen interchange document.
+//! Reading one user-chosen Zed theme file.
 //!
-//! Importing a color package or a theme is the only Settings operation that reads a file the user
-//! picked rather than a file SpaceTerm owns. The read has a fixed byte bound and
+//! Importing a theme file is the only Settings operation that reads a file the user picked rather
+//! than a file SpaceTerm owns. The read has a fixed byte bound and
 //! reports only a typed classification, so a failure carries no path and no native error text.
 
 use std::{fs::File, io::Read, path::Path};
 
 use crate::platform::selected_file::SelectedFileOpener;
 
-/// The greatest interchange document SpaceTerm will read.
-///
-/// The same bound the retained Settings document uses. A color package larger than this is not a
-/// color package.
-const MAXIMUM_IMPORT_BYTES: u64 = 4 * 1024 * 1024;
+/// The greatest theme file SpaceTerm will read, the same bound translation applies.
+const MAXIMUM_IMPORT_BYTES: u64 = crate::appearance::MAX_FAMILY_BYTES as u64;
 
-/// Why an interchange document could not be read.
+/// Why a theme file could not be read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ImportError {
     /// The chosen path is not a readable regular file.
@@ -27,15 +24,15 @@ impl ImportError {
     pub(super) const fn message(self) -> &'static str {
         match self {
             Self::Unreadable => "That file could not be read.",
-            Self::TooLarge => "That file is too large to be a color package.",
+            Self::TooLarge => "That file is too large to be a theme file.",
         }
     }
 }
 
-/// Reads one interchange document, refusing anything that is not a bounded regular file.
+/// Reads one theme file, refusing anything that is not a bounded regular file.
 ///
 /// Type and size checks use the opened file, and the read stays bounded if that file grows.
-pub(super) fn read_interchange_document(
+pub(super) fn read_theme_document(
     path: &Path,
     opener: &dyn SelectedFileOpener,
 ) -> Result<Vec<u8>, ImportError> {
@@ -91,7 +88,7 @@ mod tests {
         let path = scratch("bounded.json");
         std::fs::write(&path, b"{\"schema_version\":1}").expect("fixture");
 
-        let bytes = read_interchange_document(&path, &FixtureFileOpener)
+        let bytes = read_theme_document(&path, &FixtureFileOpener)
             .expect("a bounded file should be read");
 
         assert_eq!(bytes, b"{\"schema_version\":1}");
@@ -140,7 +137,7 @@ mod tests {
         std::fs::write(&path, &oversized).expect("fixture");
 
         assert_eq!(
-            read_interchange_document(&path, &FixtureFileOpener),
+            read_theme_document(&path, &FixtureFileOpener),
             Err(ImportError::TooLarge)
         );
     }
@@ -151,7 +148,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
-            read_interchange_document(&path, &FixtureFileOpener),
+            read_theme_document(&path, &FixtureFileOpener),
             Err(ImportError::Unreadable)
         );
     }
@@ -162,7 +159,7 @@ mod tests {
         std::fs::create_dir_all(&path).expect("fixture");
 
         assert_eq!(
-            read_interchange_document(&path, &FixtureFileOpener),
+            read_theme_document(&path, &FixtureFileOpener),
             Err(ImportError::Unreadable)
         );
     }

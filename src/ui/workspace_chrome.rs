@@ -1,5 +1,6 @@
 //! Titlebar composition and sizing shared by its controls, Tab spacer, and resize edge.
 
+use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Pixels, Rgba, Window, div, px};
 use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon, IconName};
@@ -354,16 +355,13 @@ impl WorkspaceChromeIdentity {
     }
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    gpui::rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, SchemeCatalog, SystemAppearance, builtin_chrome_base,
+        CompositionCapabilities, ThemeCatalog, SystemAppearance, builtin_chrome_base,
     };
 
     #[test]
@@ -415,7 +413,7 @@ mod tests {
             ..AppearancePreferences::default()
         };
         preferences.window.transparency = 1.0;
-        let resolved = SchemeCatalog::default()
+        let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,

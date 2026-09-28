@@ -1,6 +1,7 @@
 use super::*;
 use crate::appearance::{
     AppearanceGeneration, AppearanceMode, AvailableFonts, SystemAppearance, TerminalColorOverrides,
+    ZedExtension,
 };
 use crate::platform::secure_filesystem::PrivateFileSnapshot;
 use storage::StorageCommit;
@@ -71,73 +72,71 @@ fn setup() -> (UserSettings, Arc<MemoryStorage>) {
     (settings, storage)
 }
 
-const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"id":"custom.sample","name":"Sample","appearance":"light","colors":{"foreground":"#112233"}}]}"##;
+const ZED_FAMILY: &[u8] = br##"{"name":"Sample Family","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
+
+fn zed_extension(version: &str, names: &[&str]) -> ZedExtension {
+    let themes = names
+        .iter()
+        .map(|name| serde_json::json!({ "name": name, "appearance": "dark", "style": {} }))
+        .collect::<Vec<_>>();
+    ZedExtension {
+        id: String::from("sample-themes"),
+        version: version.to_owned(),
+        families: vec![serde_json::to_vec(&serde_json::json!({ "name": "Sample", "themes": themes })).unwrap()],
+    }
+}
+
+fn installed_names(settings: &UserSettings) -> Vec<String> {
+    let mut names = settings
+        .snapshot()
+        .candidate
+        .terminal_themes
+        .iter()
+        .map(|theme| theme.name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
 
 #[test]
-fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection() {
+fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selection() {
     let (settings, storage) = setup();
     let initial = settings.snapshot();
     let token = settings.begin_preview(initial.committed.revision).unwrap();
     let before_import = settings.snapshot().catalog_revision;
     let receipt = settings
-        .import_preview(
-            &token,
-            before_import,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new(),
-        )
+        .import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY))
         .unwrap();
     let imported = settings.snapshot();
-    assert_eq!(
-        receipt.installed,
-        vec![SchemeId::new("custom.sample").unwrap()]
-    );
+    assert_eq!(receipt.installed.len(), 1);
     assert_eq!(receipt.catalog_revision, imported.catalog_revision);
     assert_eq!(
         imported.candidate.preferences,
         initial.committed.preferences
     );
-    assert_eq!(imported.candidate.color_schemes.len(), 1);
+    assert_eq!(imported.candidate.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
-    assert_eq!(settings.list_schemes().unwrap().len(), 3);
+    assert_eq!(settings.list_themes().unwrap().len(), 3);
     assert_eq!(
-        settings.import_preview(
-            &token,
-            before_import,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new()
-        ),
+        settings.import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY)),
         Err(SettingsError::Stale)
     );
-    let id = SchemeId::new("custom.sample").unwrap();
     let exported = settings.export_document().unwrap();
     let copy = crate::appearance::parse_settings(exported.as_bytes()).unwrap();
     assert_eq!(&copy, imported.candidate.as_ref());
-    assert_eq!(
-        settings.import_preview(
-            &token,
-            imported.catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new()
-        ),
-        Err(SettingsError::Catalog(CatalogError::DuplicateId))
-    );
-    assert_eq!(
-        settings.snapshot().catalog_revision,
-        imported.catalog_revision
-    );
-    settings
+    let reinstalled = settings
         .import_preview(
             &token,
             imported.catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::from([id]),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
+    assert_eq!(reinstalled.installed, receipt.installed);
+    assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     settings
         .reset_preview(&token, ResetTarget::AllAppearance)
         .unwrap();
-    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     let job = settings.commit_preview(&token).unwrap();
     assert_eq!(
         settings.reset_preview(&token, ResetTarget::TerminalTypography),
@@ -147,8 +146,7 @@ fn settings_owner_imports_replaces_resets_and_exports_without_implicit_selection
         settings.import_preview(
             &token,
             settings.snapshot().catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new()
+            ThemeImport::ZedFamily(ZED_FAMILY),
         ),
         Err(SettingsError::Busy)
     );
@@ -168,16 +166,12 @@ fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
         .import_committed(
             initial.committed.revision,
             initial.catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
-    assert_eq!(
-        receipt.installed,
-        vec![SchemeId::new("custom.sample").unwrap()]
-    );
+    assert_eq!(receipt.installed.len(), 1);
     assert_eq!(receipt.catalog_revision, initial.catalog_revision + 1);
-    assert!(settings.snapshot().candidate.color_schemes.is_empty());
+    assert!(settings.snapshot().candidate.terminal_themes.is_empty());
     job.run().unwrap();
     assert_eq!(
         settings.snapshot().catalog_revision,
@@ -189,29 +183,31 @@ fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
         .unwrap()
         .run()
         .unwrap();
-    assert_eq!(settings.snapshot().committed.color_schemes.len(), 1);
+    assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 
 #[test]
-fn zed_candidates_require_explicit_selection_and_install_through_settings() {
-    let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
-    let candidates = UserSettings::list_import_candidates(bytes).unwrap();
-    assert_eq!(candidates.len(), 1);
+fn a_zed_family_installs_without_changing_any_selection() {
     let (settings, _) = setup();
     let token = settings.begin_preview(0).unwrap();
+    let invalid = settings.import_preview(
+        &token,
+        settings.snapshot().catalog_revision,
+        ThemeImport::ZedFamily(br#"{"themes":"none"}"#),
+    );
+    assert_eq!(
+        invalid,
+        Err(SettingsError::Import(ImportError::InvalidZedDocument))
+    );
     settings
         .import_preview(
             &token,
             settings.snapshot().catalog_revision,
-            SchemeImport::Zed {
-                bytes,
-                candidate_index: candidates[0].index,
-            },
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
-    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     assert_eq!(
         settings.snapshot().candidate.preferences,
         SettingsDocument::default().preferences
@@ -219,8 +215,8 @@ fn zed_candidates_require_explicit_selection_and_install_through_settings() {
 }
 
 #[test]
-fn maximum_zed_family_installs_as_one_bounded_batch() {
-    let themes = (0..32)
+fn a_large_zed_family_installs_as_one_batch() {
+    let themes = (0..200)
         .map(|index| {
             serde_json::json!({
                 "name": format!("Theme {index}"),
@@ -237,13 +233,100 @@ fn maximum_zed_family_installs_as_one_bounded_batch() {
         .import_preview(
             &token,
             settings.snapshot().catalog_revision,
-            SchemeImport::ZedFamily { bytes: &bytes },
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(&bytes),
         )
         .unwrap();
 
-    assert_eq!(receipt.installed.len(), 32);
-    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 32);
+    assert_eq!(receipt.installed.len(), 200);
+    assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 200);
+}
+
+#[test]
+fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
+    let (settings, _) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    let first = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedExtension(&zed_extension("1.0.0", &["Kept", "Dropped"])),
+        )
+        .unwrap();
+    settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedFamily(ZED_FAMILY),
+        )
+        .unwrap();
+    let kept = first
+        .installed
+        .iter()
+        .find(|id| {
+            settings
+                .snapshot()
+                .candidate
+                .terminal_themes
+                .iter()
+                .any(|theme| &theme.id == *id && theme.name == "Kept")
+        })
+        .unwrap()
+        .clone();
+    let mut candidate = (*settings.snapshot().candidate).clone();
+    candidate.preferences.terminal.themes.dark = kept.clone();
+    settings.update_preview(&token, candidate).unwrap();
+
+    let second = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedExtension(&zed_extension("2.0.0", &["Kept", "Added"])),
+        )
+        .unwrap();
+
+    assert!(second.installed.contains(&kept));
+    assert_eq!(installed_names(&settings), ["Added", "Kept", "Sample"]);
+    let snapshot = settings.snapshot();
+    assert_eq!(snapshot.candidate.preferences.terminal.themes.dark, kept);
+    let versions = snapshot
+        .candidate
+        .terminal_themes
+        .iter()
+        .filter_map(|theme| theme.metadata.origin.as_ref()?.package_version.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(versions, ["2.0.0", "2.0.0"]);
+}
+
+#[test]
+fn a_failed_extension_update_keeps_the_installed_version() {
+    let (settings, _) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedExtension(&zed_extension("1.0.0", &["Kept"])),
+        )
+        .unwrap();
+    let before = settings.snapshot();
+    let broken = ZedExtension {
+        families: vec![b"{".to_vec()],
+        ..zed_extension("2.0.0", &[])
+    };
+
+    assert_eq!(
+        settings.import_preview(
+            &token,
+            before.catalog_revision,
+            ThemeImport::ZedExtension(&broken),
+        ),
+        Err(SettingsError::Import(ImportError::InvalidThemeCount))
+    );
+    assert_eq!(settings.snapshot().catalog_revision, before.catalog_revision);
+    assert_eq!(
+        settings.snapshot().candidate.terminal_themes,
+        before.candidate.terminal_themes
+    );
 }
 
 #[test]
@@ -254,14 +337,13 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
         .import_preview(
             &token,
             settings.snapshot().catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
     candidate.preferences.mode = AppearanceMode::Light;
-    candidate.preferences.terminal.schemes.light = selected.clone();
+    candidate.preferences.terminal.themes.light = selected.clone();
     candidate
         .preferences
         .terminal
@@ -272,13 +354,13 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
     let catalog_revision = settings.snapshot().catalog_revision;
     let preferences_before_deletion = settings.snapshot().candidate.preferences.clone();
     let removed_revision = settings
-        .remove_scheme_preview(&token, catalog_revision, &selected)
+        .remove_themes_preview(&token, catalog_revision, std::slice::from_ref(&selected))
         .unwrap();
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
-    assert!(snapshot.candidate.color_schemes.is_empty());
+    assert!(snapshot.candidate.terminal_themes.is_empty());
     assert_eq!(snapshot.candidate.preferences, preferences_before_deletion);
-    let resolved = SchemeCatalog::default()
+    let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &snapshot.candidate.preferences,
@@ -286,10 +368,10 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
             &AvailableFonts::default(),
         )
         .unwrap();
-    assert_eq!(resolved.terminal.requested_scheme, selected);
+    assert_eq!(resolved.terminal.requested_theme, selected);
     assert_eq!(
-        resolved.terminal.effective_scheme,
-        SchemeId::builtin("builtin.spaceterm.light")
+        resolved.terminal.effective_theme,
+        ThemeId::builtin("builtin.spaceterm.light")
     );
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
@@ -301,10 +383,10 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
     let before = settings.snapshot();
 
     assert_eq!(
-        settings.remove_scheme_preview(
+        settings.remove_themes_preview(
             &token,
             before.catalog_revision,
-            &SchemeId::builtin("builtin.spaceterm.dark"),
+            &[ThemeId::builtin("builtin.spaceterm.dark")],
         ),
         Err(SettingsError::Catalog(CatalogError::ReservedId))
     );
@@ -313,26 +395,64 @@ fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
         before.catalog_revision
     );
     assert_eq!(
-        settings.remove_scheme_preview(
+        settings.remove_themes_preview(
             &token,
             before.catalog_revision,
-            &SchemeId::new("custom.unknown").unwrap(),
+            &[ThemeId::new("custom.unknown").unwrap()],
         ),
-        Err(SettingsError::Catalog(CatalogError::UnknownReplacement))
+        Err(SettingsError::Catalog(CatalogError::UnknownTheme))
     );
     assert_eq!(
         settings.snapshot().catalog_revision,
         before.catalog_revision
     );
     assert_eq!(
-        settings.snapshot().candidate.color_schemes,
-        before.candidate.color_schemes
+        settings.snapshot().candidate.terminal_themes,
+        before.candidate.terminal_themes
     );
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
 
 #[test]
-fn deletion_rejects_stale_and_busy_operations_without_removing_the_scheme() {
+fn removing_several_themes_is_all_or_nothing() {
+    let (settings, storage) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    let imported = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedFamily(ZED_FAMILY),
+        )
+        .unwrap();
+    let id = imported.installed[0].clone();
+    let before = settings.snapshot();
+
+    assert_eq!(
+        settings.remove_themes_preview(
+            &token,
+            before.catalog_revision,
+            &[id.clone(), ThemeId::new("custom.unknown").unwrap()],
+        ),
+        Err(SettingsError::Catalog(CatalogError::UnknownTheme))
+    );
+    assert_eq!(
+        settings.remove_themes_preview(&token, before.catalog_revision, &[]),
+        Err(SettingsError::Catalog(CatalogError::UnknownTheme))
+    );
+    assert_eq!(
+        settings.snapshot().candidate.terminal_themes,
+        before.candidate.terminal_themes
+    );
+
+    settings
+        .remove_themes_preview(&token, before.catalog_revision, &[id])
+        .unwrap();
+    assert!(settings.snapshot().candidate.terminal_themes.is_empty());
+    assert_eq!(storage.0.lock().unwrap().writes, 0);
+}
+
+#[test]
+fn deletion_rejects_stale_and_busy_operations_without_removing_the_theme() {
     let (settings, _) = setup();
     let token = settings.begin_preview(0).unwrap();
     let stale_catalog_revision = settings.snapshot().catalog_revision;
@@ -340,40 +460,38 @@ fn deletion_rejects_stale_and_busy_operations_without_removing_the_scheme() {
         .import_preview(
             &token,
             stale_catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
     let id = imported.installed[0].clone();
 
     assert_eq!(
-        settings.remove_scheme_preview(&token, stale_catalog_revision, &id),
+        settings.remove_themes_preview(&token, stale_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Stale)
     );
     let current_catalog_revision = settings.snapshot().catalog_revision;
     let job = settings.commit_preview(&token).unwrap();
     assert_eq!(
-        settings.remove_scheme_preview(&token, current_catalog_revision, &id),
+        settings.remove_themes_preview(&token, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     );
     assert!(matches!(
-        settings.remove_scheme_committed(0, current_catalog_revision, &id),
+        settings.remove_themes_committed(0, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     ));
-    assert_eq!(settings.snapshot().candidate.color_schemes.len(), 1);
+    assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     drop(job);
 }
 
 #[test]
-fn direct_deletion_commits_only_the_named_custom_scheme() {
+fn direct_deletion_commits_only_the_named_custom_theme() {
     let (settings, storage) = setup();
     let initial = settings.snapshot();
     let (receipt, job) = settings
         .import_committed(
             initial.committed.revision,
             initial.catalog_revision,
-            SchemeImport::SpaceTerm(IMPORTED_SCHEME),
-            &BTreeSet::new(),
+            ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
     let id = receipt.installed[0].clone();
@@ -381,16 +499,16 @@ fn direct_deletion_commits_only_the_named_custom_scheme() {
     let installed = settings.snapshot();
 
     let deletion = settings
-        .remove_scheme_committed(
+        .remove_themes_committed(
             installed.committed.revision,
             installed.catalog_revision,
-            &id,
+            std::slice::from_ref(&id),
         )
         .unwrap();
-    assert_eq!(settings.snapshot().committed.color_schemes.len(), 1);
+    assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     deletion.run().unwrap();
-    assert!(settings.snapshot().committed.color_schemes.is_empty());
-    assert_eq!(settings.list_schemes().unwrap().len(), 2);
+    assert!(settings.snapshot().committed.terminal_themes.is_empty());
+    assert_eq!(settings.list_themes().unwrap().len(), 2);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 

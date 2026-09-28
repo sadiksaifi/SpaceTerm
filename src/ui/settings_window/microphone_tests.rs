@@ -94,6 +94,7 @@ fn open_settings(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             access,
+            None,
             window,
             cx,
         )
@@ -192,7 +193,7 @@ fn settings_search_reveals_microphone_access_from_another_section(cx: &mut TestA
     let (window, cx) = open_settings(Some(access), cx);
     assert_eq!(
         window.read_with(cx, |window, _| window.active_section),
-        SettingsSectionId::Appearance
+        SettingsSectionId::Interface
     );
 
     cx.update(|_, cx| {

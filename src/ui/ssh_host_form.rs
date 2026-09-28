@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use crate::directory_selection::SystemFileSelection;
 use std::fmt;
 use std::num::NonZeroU16;
@@ -14,7 +15,6 @@ use spaceterm_ui::{
 
 use super::appearance::ChromeAppearance;
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use crate::appearance::Color;
 use crate::ssh::managed_hosts::{
     ManagedSshHost, ManagedSshHostField, ManagedSshHostValidationError, ManagedSshHostValueError,
 };
@@ -923,9 +923,6 @@ fn managed_validation_message(
     }
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    gpui::rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

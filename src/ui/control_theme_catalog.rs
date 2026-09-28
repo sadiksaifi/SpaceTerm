@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use gpui::px;
 use spaceterm_ui::{ControlShadow, ControlShadowLayer, ControlThemeCatalog};
 
@@ -189,8 +190,9 @@ pub(super) fn catalog(
         appearance.capabilities.increase_contrast || appearance.capabilities.show_borders;
     let light = appearance.appearance == Appearance::Light;
     // Light controls need a stronger edge than their card or popup host.
-    let rest_edge = super::appearance::built_in_light::CONTROL_EDGE;
-    let selected_edge = super::appearance::built_in_light::SELECTED_EDGE;
+    let ink = crate::appearance::LIGHT_BOUNDARY_INK;
+    let rest_edge = ink.control;
+    let selected_edge = ink.rule;
     let border = (light && !preserve_accessibility_border).then_some(gpui_color(rest_edge));
     let catalog = catalog.toggle_segmented_elevation(
         if light { shadow } else { ControlShadow::none() },
@@ -206,7 +208,7 @@ pub(super) fn catalog(
     let catalog = catalog.ordinary_control_elevation(shadow, border);
     if !preserve_accessibility_border {
         let interaction_edge = if appearance.active {
-            super::appearance::built_in_light::INTERACTION_EDGE
+            ink.strong
         } else {
             rest_edge
         };
@@ -214,7 +216,7 @@ pub(super) fn catalog(
             gpui_color(rest_edge),
             gpui_color(interaction_edge),
             gpui_color(interaction_edge),
-            gpui_color(super::appearance::built_in_light::DISABLED_EDGE),
+            gpui_color(ink.disabled),
         ))
     } else {
         catalog
@@ -436,8 +438,8 @@ fn row_backgrounds(
         return [fill.source_over(surface); 2];
     }
     [
-        crate::appearance::Color::rgb(0x000000),
-        crate::appearance::Color::rgb(0xffffff),
+        crate::appearance::Color::BLACK,
+        crate::appearance::Color::WHITE,
     ]
     .map(|underlay| {
         let background = fill.source_over(surface.source_over(underlay));
@@ -494,7 +496,7 @@ fn readable_selection_fill(
             + u32::from(candidate.g.abs_diff(reference.g))
             + u32::from(candidate.b.abs_diff(reference.b))
     };
-    let mut endpoints = [Color::rgb(0), Color::rgb(0xffffff)];
+    let mut endpoints = [Color::BLACK, Color::WHITE];
     endpoints.sort_by_key(|endpoint| distance(*endpoint));
     for endpoint in endpoints {
         if let Some(candidate) = (1..u8::MAX)
@@ -524,8 +526,8 @@ fn shared_neutral(
             .map(|background| foreground.contrast_ratio(background))
             .fold(f64::INFINITY, f64::min)
     };
-    let dark = crate::appearance::Color::rgb(0x000000);
-    let light = crate::appearance::Color::rgb(0xffffff);
+    let dark = crate::appearance::Color::BLACK;
+    let light = crate::appearance::Color::WHITE;
     let (foreground, contrast) = if score(dark) >= score(light) {
         (dark, score(dark))
     } else {
@@ -742,9 +744,6 @@ pub(super) fn readable_on(
     super::appearance::readable_on_background(proposed, background, minimum_contrast)
 }
 
-fn gpui_color(color: crate::appearance::Color) -> gpui::Rgba {
-    gpui::rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
@@ -793,10 +792,10 @@ mod tests {
                     .child(
                         ComboBox::new(
                             "edge-combo",
-                            "Scheme",
+                            "Theme",
                             Some(1),
                             "Choose",
-                            vec![ComboBoxItem::new(1, "Scheme")],
+                            vec![ComboBoxItem::new(1, "Theme")],
                         )
                         .debug_selector("edge-combo")
                         .on_accept(|_, _, _| {}),
@@ -823,9 +822,9 @@ mod tests {
                     .child(
                         Picker::new(
                             "edge-picker",
-                            "Scheme",
+                            "Theme",
                             1,
-                            vec![PickerOption::new(1, "Scheme")],
+                            vec![PickerOption::new(1, "Theme")],
                         )
                         .unwrap()
                         .debug_selector("edge-picker")
@@ -863,7 +862,7 @@ mod tests {
     fn control_surfaces_do_not_paint_detached_bottom_hairlines(cx: &mut gpui::TestAppContext) {
         use crate::appearance::{
             AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-            CompositionCapabilities, SchemeCatalog, SystemAppearance,
+            CompositionCapabilities, ThemeCatalog, SystemAppearance,
         };
         use crate::ui::appearance::ChromeAppearance;
         use spaceterm_ui::{ControlHost, ProgressMotion, replace_control_theme_catalog};
@@ -873,7 +872,7 @@ mod tests {
         for appearance in [Appearance::Light, Appearance::Dark] {
             for (increase_contrast, show_borders) in [(false, false), (true, false), (false, true)]
             {
-                let resolved = SchemeCatalog::default()
+                let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &AppearancePreferences {
@@ -1134,12 +1133,12 @@ mod tests {
     fn prepared_row_state_policy_keeps_disabled_selection_identical_across_activity() {
         use crate::appearance::{
             Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences,
-            AvailableFonts, CompositionCapabilities, SchemeCatalog, SystemAppearance,
+            AvailableFonts, CompositionCapabilities, ThemeCatalog, SystemAppearance,
         };
         use crate::ui::appearance::ChromeAppearance;
         for appearance in [Appearance::Light, Appearance::Dark] {
             for increase_contrast in [false, true] {
-                let resolved = SchemeCatalog::default()
+                let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &AppearancePreferences {
@@ -1318,7 +1317,7 @@ mod tests {
                     let backgrounds = if paint.elevated_surface_background.is_opaque() {
                         [expected.fill.source_over(paint.elevated_surface_background); 2]
                     } else {
-                        [Color::rgb(0x000000), Color::rgb(0xffffff)].map(|underlay| {
+                        [Color::BLACK, Color::WHITE].map(|underlay| {
                             expected.fill.source_over(
                                 paint.elevated_surface_background.source_over(underlay),
                             )
@@ -1366,8 +1365,8 @@ mod tests {
                 let [_, foreground, ..] = (states[0].2)(&reference);
                 let readable = readable_on(foreground, reference.elevated_surface_background, 4.5);
                 assert!(
-                    readable.contrast_ratio(Color::rgb(0x000000))
-                        < readable.contrast_ratio(Color::rgb(0xffffff)),
+                    readable.contrast_ratio(Color::BLACK)
+                        < readable.contrast_ratio(Color::WHITE),
                     "Light overlay text stays dark at every transparency"
                 );
             }
@@ -1378,7 +1377,7 @@ mod tests {
     fn built_in_floating_row_states_remain_distinct_translucent_and_readable_at_maximum_glass() {
         use crate::appearance::{
             Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences,
-            AvailableFonts, CompositionCapabilities, SchemeCatalog, SystemAppearance,
+            AvailableFonts, CompositionCapabilities, ThemeCatalog, SystemAppearance,
         };
         use crate::ui::appearance::ChromeAppearance;
 
@@ -1391,7 +1390,7 @@ mod tests {
                 ..AppearancePreferences::default()
             };
             preferences.window.transparency = 1.0;
-            let resolved = SchemeCatalog::default()
+            let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
@@ -1455,7 +1454,7 @@ mod tests {
                     "{appearance:?} row state must remain a translucent material: {:?}",
                     row.fill
                 );
-                for underlay in [Color::rgb(0x000000), Color::rgb(0xffffff)] {
+                for underlay in [Color::BLACK, Color::WHITE] {
                     let background = row.fill.source_over(material.source_over(underlay));
                     assert!(
                         row.content
@@ -1528,7 +1527,7 @@ mod tests {
                         border: Color| {
             let background = background.source_over(colors.elevated_surface_background);
             ListRowPaint::new(
-                rgba(background.rgba_hex()),
+                gpui_color(background),
                 rgba(
                     crate::ui::appearance::readable_on_backgrounds(
                         foreground,
@@ -1549,7 +1548,7 @@ mod tests {
                     crate::ui::appearance::readable_on_backgrounds(matched, [background; 2], 4.5)
                         .rgba_hex(),
                 ),
-                rgba(border.rgba_hex()),
+                gpui_color(border),
             )
         };
         assert_eq!(

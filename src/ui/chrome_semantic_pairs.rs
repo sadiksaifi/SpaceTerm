@@ -104,12 +104,12 @@ mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, SchemeCatalog, SystemAppearance,
+        CompositionCapabilities, ThemeCatalog, SystemAppearance,
     };
     use crate::ui::appearance::ChromeAppearance;
 
     fn prepare(increase_contrast: bool) -> (crate::appearance::ChromeColors, ChromeAppearance) {
-        let catalog = SchemeCatalog::default();
+        let catalog = ThemeCatalog::default();
         let mut preferences = AppearancePreferences {
             mode: AppearanceMode::Light,
             ..Default::default()

@@ -1,5 +1,6 @@
 //! Repeatable native acceptance fixtures using the production controls and appearance transaction.
 
+use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, Entity, Render, SharedString, TitlebarOptions, Window, WindowBounds,
@@ -428,7 +429,7 @@ impl Gallery {
                     )
                     .rgba_hex(),
             ))
-            .text_color(rgba(appearance.colors.text.rgba_hex()))
+            .text_color(gpui_color(appearance.colors.text))
             .chrome_text(appearance.typography.style(TextRole::Body))
             .child(
                 div()
@@ -459,7 +460,7 @@ impl Gallery {
             )
             .child(
                 div()
-                    .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                    .text_color(gpui_color(appearance.colors.text_muted))
                     .child(self.status.clone()),
             )
             .when(self.preview_inactive, |content| {
@@ -467,7 +468,7 @@ impl Gallery {
                     div()
                         .debug_selector(|| "gallery-synthetic-activity-status".to_owned())
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                        .text_color(gpui_color(appearance.colors.text_muted))
                         .child(
                             "Synthetic inactive-window preview. Native window activity and preferences are unchanged.",
                         ),
@@ -664,7 +665,7 @@ impl Gallery {
         content = content
             .child(
                 div()
-                    .text_color(rgba(appearance.colors.text_muted.rgba_hex()))
+                    .text_color(gpui_color(appearance.colors.text_muted))
                     .child("Progress: determinate extents and the installed indeterminate motion"),
             )
             .child(
@@ -781,7 +782,7 @@ impl Gallery {
                     .on_activate(|_, _, _| {}),
                 ),
         );
-        content=content.child(div().text_color(rgba(appearance.colors.text_muted.rgba_hex())).child("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press Ctrl+Alt+N to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-scheme Pane Captions."));
+        content=content.child(div().text_color(gpui_color(appearance.colors.text_muted)).child("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press Ctrl+Alt+N to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-theme Pane Captions."));
         ModalLayer::new(content).transient(
             Self::action_scope(cx)
                 .absolute()
@@ -1028,8 +1029,8 @@ mod tests {
                         let tone = crate::appearance::Color::rgba(u32::from(shell.backdrop_tone()));
                         let wash = crate::appearance::Color::rgba(u32::from(shell.material()));
                         for endpoint in [
-                            crate::appearance::Color::rgb(0x000000),
-                            crate::appearance::Color::rgb(0xffffff),
+                            crate::appearance::Color::BLACK,
+                            crate::appearance::Color::WHITE,
                         ] {
                             let composite = wash.source_over(tone.source_over(endpoint));
                             let lightness = cie_lightness(composite);
@@ -1094,9 +1095,9 @@ mod tests {
                     .with_scope(|| super::super::super::appearance::shared_chrome(cx)),
             )
         });
-        let active_hover = rgba(active.control_colors.primary_hover_background.rgba_hex());
-        let inactive_hover = rgba(inactive.control_colors.primary_hover_background.rgba_hex());
-        let active_focus = rgba(active.control_colors.focus_ring.rgba_hex());
+        let active_hover = gpui_color(active.control_colors.primary_hover_background);
+        let inactive_hover = gpui_color(inactive.control_colors.primary_hover_background);
+        let active_focus = gpui_color(active.control_colors.focus_ring);
         assert_ne!(
             active_hover, inactive_hover,
             "the fixture must distinguish hover catalogs"

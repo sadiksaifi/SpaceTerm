@@ -1,7 +1,8 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::{ChromeIcons, IconRole};
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
@@ -93,24 +94,22 @@ pub(super) fn prepared_with_rows(
     )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Color;
 
     #[test]
     fn field_colors_should_not_replace_only_the_combo_box_surface() {
         let popup = ChromeColors {
             elevated_surface_background: Color::rgb(0x101010),
             border: Color::rgb(0x808080),
-            text: Color::rgb(0xffffff),
+            text: Color::WHITE,
             text_muted: Color::rgb(0xcccccc),
             text_disabled: Color::rgb(0x777777),
-            input_background: Color::rgb(0xffffff),
-            input_text: Color::rgb(0x000000),
+            input_background: Color::WHITE,
+            input_text: Color::BLACK,
             input_border: Color::rgb(0x0000ff),
             ..ChromeColors::default()
         };

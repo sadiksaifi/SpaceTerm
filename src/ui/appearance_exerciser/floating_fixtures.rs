@@ -1,5 +1,6 @@
 //! Native acceptance support using production controls over controlled high-contrast content.
 
+use crate::ui::appearance::gpui_color;
 use std::{sync::Arc, time::Duration};
 
 use gpui::prelude::*;
@@ -392,7 +393,7 @@ impl Render for FloatingFixtures {
                     .left(px(36.0))
                     .w(px(420.0))
                     .p(appearance.spacing(14.0))
-                    .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
+                    .text_color(gpui_color(appearance.floating_colors.text))
                     .debug_selector(|| "fixture-backdrop-probe".to_owned())
                     .child("Persistent floating probe: compare the backdrop detail behind this surface with Blur off and Blur on."),
             );
@@ -433,7 +434,7 @@ impl Render for FloatingFixtures {
                     .flex()
                     .flex_col()
                     .gap(appearance.spacing(10.0))
-                    .text_color(rgba(appearance.floating_colors.text.rgba_hex()))
+                    .text_color(gpui_color(appearance.floating_colors.text))
                     .child("Interactive material over backdrop content")
                     .child(self.interaction_probe.clone()),
             );
@@ -458,7 +459,7 @@ impl Render for FloatingFixtures {
                                     )
                                     .rgba_hex(),
                             ))
-                            .text_color(rgba(appearance.colors.text.rgba_hex()))
+                            .text_color(gpui_color(appearance.colors.text))
                             .p(appearance.spacing(8.0))
                             .child(controls),
                     )

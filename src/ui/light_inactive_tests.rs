@@ -1,6 +1,6 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeColors, Color, CompositionCapabilities, SchemeCatalog, SystemAppearance,
+    ChromeColors, Color, CompositionCapabilities, ThemeCatalog, SystemAppearance,
 };
 
 use super::appearance::{ChromeAppearance, settings};
@@ -11,7 +11,7 @@ fn resolve_builtin_light(transparency: f32) -> crate::appearance::ResolvedAppear
         ..AppearancePreferences::default()
     };
     preferences.window.transparency = transparency;
-    SchemeCatalog::default()
+    ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,

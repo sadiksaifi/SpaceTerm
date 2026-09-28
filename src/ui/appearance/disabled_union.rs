@@ -78,8 +78,8 @@ impl DisabledPolarity {
 
     const fn endpoint(self) -> Color {
         match self {
-            Self::Dark => Color::rgb(0x000000),
-            Self::Light => Color::rgb(0xffffff),
+            Self::Dark => Color::BLACK,
+            Self::Light => Color::WHITE,
         }
     }
 }
@@ -96,7 +96,7 @@ fn nearest_gray(target_luminance: f64) -> Color {
                 .abs()
                 .total_cmp(&(relative_luminance(*right) - target_luminance).abs())
         })
-        .unwrap_or(Color::rgb(0x000000))
+        .unwrap_or(Color::BLACK)
 }
 
 #[derive(Clone, Copy)]
@@ -806,8 +806,8 @@ fn resolve_disabled_union_color<const N: usize>(
     if disabled_union_contrast(proposed, backgrounds) >= minimum {
         return Some(proposed);
     }
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let (preferred, alternate) = if disabled_union_contrast(dark, backgrounds)
         >= disabled_union_contrast(light, backgrounds)
     {
@@ -1549,7 +1549,7 @@ pub(super) fn reconcile(
         active.floating_colors.elevated_surface_background,
         active.capabilities.increase_contrast,
     );
-    let floating_hosts = [Color::rgb(0), Color::rgb(0xffffff)]
+    let floating_hosts = [Color::BLACK, Color::WHITE]
         .map(|underlay| wash.source_over(material.source_over(underlay)));
     let floors = FloatingContrastFloors {
         interactive: false,
@@ -1781,14 +1781,14 @@ mod tests {
 
     #[test]
     fn feasible_disabled_content_targets_lower_contrast_than_enabled_content() {
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let mut active = ChromeColors {
             background: host,
             element_background: host,
             element_foreground: Color::rgb(0x202020),
             element_disabled: host,
-            element_disabled_foreground: Color::rgb(0x000000),
-            element_disabled_icon: Color::rgb(0x000000),
+            element_disabled_foreground: Color::BLACK,
+            element_disabled_icon: Color::BLACK,
             ..ChromeColors::default()
         };
         let mut inactive = active.clone();
@@ -1817,7 +1817,7 @@ mod tests {
 
     #[test]
     fn text_bearing_disabled_content_flips_coherently_when_the_fill_cap_binds() {
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let authored = ChromeColors {
             background: host,
             text: Color::rgb(0x111111),
@@ -1832,8 +1832,8 @@ mod tests {
         let mut active = ChromeColors {
             background: host,
             primary_background: Color::rgb(0x333333),
-            primary_foreground: Color::rgb(0xffffff),
-            primary_icon: Color::rgb(0xffffff),
+            primary_foreground: Color::WHITE,
+            primary_icon: Color::WHITE,
             primary_disabled_background: Color::rgb(0xdddddd),
             primary_disabled_foreground: Color::rgb(0x0040c0),
             primary_disabled_icon: Color::rgb(0x0040c0),
@@ -1869,7 +1869,7 @@ mod tests {
 
     #[test]
     fn text_bearing_disabled_fill_does_not_outweigh_the_ordinary_enabled_control() {
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let authored = ChromeColors {
             background: host,
             text: Color::rgb(0x111111),
@@ -1881,11 +1881,11 @@ mod tests {
         };
         let mut active = ChromeColors {
             primary_background: Color::rgb(0x0066cc),
-            primary_foreground: Color::rgb(0xffffff),
-            primary_icon: Color::rgb(0xffffff),
+            primary_foreground: Color::WHITE,
+            primary_icon: Color::WHITE,
             primary_disabled_background: authored.element_disabled,
-            primary_disabled_foreground: Color::rgb(0xffffff),
-            primary_disabled_icon: Color::rgb(0xffffff),
+            primary_disabled_foreground: Color::WHITE,
+            primary_disabled_icon: Color::WHITE,
             ..authored.clone()
         };
         let mut inactive = active.clone();
@@ -1927,7 +1927,7 @@ mod tests {
 
     #[test]
     fn host_side_floor_wins_when_relative_separation_is_impossible() {
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let authored = ChromeColors {
             background: host,
             text: Color::rgb(0x111111),
@@ -1963,7 +1963,7 @@ mod tests {
 
     #[test]
     fn shared_fill_cap_pairs_each_activity_fill_with_its_own_host() {
-        let hosts = [Color::rgb(0x000000), Color::rgb(0xffffff)];
+        let hosts = [Color::BLACK, Color::WHITE];
         let active_fill = Color::rgb(0xe0e0e0);
         let inactive_fill = Color::rgb(0x202020);
 
@@ -2000,7 +2000,7 @@ mod tests {
 
     #[test]
     fn impossible_strong_separation_reports_separation_without_misreporting_the_floor() {
-        let host = Color::rgb(0xffffff);
+        let host = Color::WHITE;
         let authored = ChromeColors {
             background: host,
             text: Color::rgb(0x111111),
@@ -2034,7 +2034,7 @@ mod tests {
     fn incompatible_activity_tracks_keep_readable_disabled_ink_and_report_fallback() {
         let mut active = ChromeColors {
             element_background: Color::rgb(0x999999),
-            selection_disabled_background: Color::rgb(0xffffff),
+            selection_disabled_background: Color::WHITE,
             ..ChromeColors::default()
         };
         let mut inactive = ChromeColors {
@@ -2047,7 +2047,7 @@ mod tests {
             &authored,
             &mut active,
             &mut inactive,
-            DisabledActivityHosts::shared([Color::rgb(0); 2]),
+            DisabledActivityHosts::shared([Color::BLACK; 2]),
             4.5,
             true,
             &mut diagnostics,
@@ -2077,17 +2077,17 @@ mod tests {
         let inactive_host = Color::rgb(0x949494);
         let mut active = ChromeColors {
             ghost_element_disabled: Color::rgba(0),
-            ghost_element_disabled_foreground: Color::rgb(0xffffff),
-            ghost_element_disabled_icon: Color::rgb(0xffffff),
-            ghost_element_disabled_border: Color::rgb(0xffffff),
-            link_text_disabled: Color::rgb(0xffffff),
+            ghost_element_disabled_foreground: Color::WHITE,
+            ghost_element_disabled_icon: Color::WHITE,
+            ghost_element_disabled_border: Color::WHITE,
+            link_text_disabled: Color::WHITE,
             ..ChromeColors::default()
         };
         let mut inactive = ChromeColors {
-            ghost_element_disabled_foreground: Color::rgb(0x000000),
-            ghost_element_disabled_icon: Color::rgb(0x000000),
-            ghost_element_disabled_border: Color::rgb(0x000000),
-            link_text_disabled: Color::rgb(0x000000),
+            ghost_element_disabled_foreground: Color::BLACK,
+            ghost_element_disabled_icon: Color::BLACK,
+            ghost_element_disabled_border: Color::BLACK,
+            link_text_disabled: Color::BLACK,
             ..active.clone()
         };
         let authored = active.clone();
@@ -2148,17 +2148,17 @@ mod tests {
         active
             .title_bar_controls
             .colors
-            .ghost_element_disabled_foreground = Color::rgb(0xffffff);
-        active.title_bar_controls.colors.ghost_element_disabled_icon = Color::rgb(0xffffff);
+            .ghost_element_disabled_foreground = Color::WHITE;
+        active.title_bar_controls.colors.ghost_element_disabled_icon = Color::WHITE;
         inactive.title_bar_controls.colors.ghost_element_disabled = Color::rgba(0);
         inactive
             .title_bar_controls
             .colors
-            .ghost_element_disabled_foreground = Color::rgb(0x000000);
+            .ghost_element_disabled_foreground = Color::BLACK;
         inactive
             .title_bar_controls
             .colors
-            .ghost_element_disabled_icon = Color::rgb(0x000000);
+            .ghost_element_disabled_icon = Color::BLACK;
         let authored = ChromeColors::default();
 
         reconcile(&mut active, &mut inactive, &authored);
@@ -2195,9 +2195,9 @@ mod tests {
 
     #[test]
     fn disabled_union_finds_a_feasible_middle_tone_when_both_endpoints_fail() {
-        let backgrounds = [Color::rgb(0x000000), Color::rgb(0xffffff)];
+        let backgrounds = [Color::BLACK, Color::WHITE];
 
-        let resolved = resolve_disabled_union_content([(Color::rgb(0xffffff), 4.5)], backgrounds);
+        let resolved = resolve_disabled_union_content([(Color::WHITE, 4.5)], backgrounds);
 
         let [resolved] = resolved.expect("a middle gray satisfies both endpoint backgrounds");
         for background in backgrounds {

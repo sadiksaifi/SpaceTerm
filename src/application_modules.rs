@@ -8,6 +8,7 @@ mod settings;
 mod ssh;
 mod terminal;
 mod theme;
+mod theme_registry;
 mod ui;
 
 mod desktop_profile;

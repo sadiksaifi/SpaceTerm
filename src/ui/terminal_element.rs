@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use std::sync::Arc;
 
 mod presentation;
@@ -3110,9 +3111,6 @@ fn frame_cursor_paint_plan(
     )
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {
@@ -3752,7 +3750,7 @@ mod tests {
                         px(8.375),
                         batch.line_height,
                         Color::rgb(0xff_ff_ff),
-                        Color::rgb(0),
+                        Color::BLACK,
                         Color::rgb(0xff_ff_ff),
                         window.scale_factor(),
                         window,
@@ -3794,7 +3792,7 @@ mod tests {
                         px(8.375),
                         px(14.0),
                         Color::rgb(0xff_ff_ff),
-                        Color::rgb(0),
+                        Color::BLACK,
                         Color::rgb(0xff_ff_ff),
                         window.scale_factor(),
                         window,
@@ -3855,7 +3853,7 @@ mod tests {
                         px(8.375),
                         px(14.0),
                         Color::rgb(0xff_ff_ff),
-                        Color::rgb(0),
+                        Color::BLACK,
                         Color::rgb(0xff_ff_ff),
                         window.scale_factor(),
                         window,
@@ -3913,7 +3911,7 @@ mod tests {
                     px(8.375),
                     candidate.line_height,
                     Color::rgb(0xff_ff_ff),
-                    Color::rgb(0),
+                    Color::BLACK,
                     Color::rgb(0xff_ff_ff),
                     window.scale_factor(),
                     window,
@@ -3991,7 +3989,7 @@ mod tests {
     }
 
     fn colors() -> crate::terminal::TerminalColorsSnapshot {
-        let mut palette = [Color::rgb(0); 256];
+        let mut palette = [Color::BLACK; 256];
         palette[1] = Color::rgb(0x11_11_11);
         palette[9] = Color::rgb(0x99_99_99);
         palette[200] = Color::rgb(0x20_02_00);
@@ -4304,7 +4302,7 @@ mod tests {
             cell_width: px(8.0),
             line_height: px(20.0),
             foreground: Color::rgb(0xff_ff_ff),
-            background: Color::rgb(0),
+            background: Color::BLACK,
             caret_color: Color::rgb(0xff_ff_ff),
             scale_factor_bits: 2.0f32.to_bits(),
         }

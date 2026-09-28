@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, SchemeCatalog, SchemeId,
+    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, ThemeCatalog, ThemeId,
     TerminalColors, TerminalFontFamily, builtin, preferences::PreferenceError,
 };
 
@@ -189,8 +189,8 @@ pub(crate) struct ResolvedChromeAppearance {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedTerminalAppearance {
-    pub(crate) requested_scheme: SchemeId,
-    pub(crate) effective_scheme: SchemeId,
+    pub(crate) requested_theme: ThemeId,
+    pub(crate) effective_theme: ThemeId,
     pub(crate) appearance: Appearance,
     pub(crate) colors: TerminalColors,
     pub(crate) typography: ResolvedTerminalTypography,
@@ -200,7 +200,7 @@ pub(crate) struct ResolvedTerminalAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AppearanceDiagnostic {
     SystemAppearanceUnavailable,
-    TerminalSchemeUnavailable { appearance: Appearance },
+    TerminalThemeUnavailable { appearance: Appearance },
     TerminalFontUnavailable,
     TerminalFontNotMonospace,
 }
@@ -246,7 +246,7 @@ impl AppearanceChangeSet {
     }
 }
 
-impl SchemeCatalog {
+impl ThemeCatalog {
     pub(crate) fn resolve(
         &self,
         generation: AppearanceGeneration,
@@ -264,7 +264,7 @@ impl SchemeCatalog {
         let capabilities = system.composition;
         let system = system.effective();
         let appearance = preferences.mode.resolve(system);
-        let requested_terminal = preferences.terminal.schemes.get(appearance);
+        let requested_terminal = preferences.terminal.themes.get(appearance);
         let chrome_colors = super::compiler::compile_builtin_chrome(appearance);
         let composition = super::ResolvedWindowComposition::resolve(
             &preferences.window,
@@ -272,9 +272,9 @@ impl SchemeCatalog {
             super::ChromeTone::of(chrome_colors.background),
         );
         let (effective_terminal, mut terminal_colors, found_terminal) =
-            self.resolve_terminal_scheme(requested_terminal, appearance)?;
+            self.resolve_terminal_theme(requested_terminal, appearance)?;
         if !found_terminal {
-            diagnostics.push(AppearanceDiagnostic::TerminalSchemeUnavailable { appearance });
+            diagnostics.push(AppearanceDiagnostic::TerminalThemeUnavailable { appearance });
         }
         if found_terminal
             && let Some(overrides) = preferences.terminal.overrides.get(requested_terminal)
@@ -296,8 +296,8 @@ impl SchemeCatalog {
                 density: preferences.window.density,
             }),
             terminal: Arc::new(ResolvedTerminalAppearance {
-                requested_scheme: requested_terminal.clone(),
-                effective_scheme: effective_terminal,
+                requested_theme: requested_terminal.clone(),
+                effective_theme: effective_terminal,
                 appearance,
                 colors: terminal_colors,
                 typography: terminal_typography,
@@ -307,17 +307,17 @@ impl SchemeCatalog {
         })
     }
 
-    fn resolve_terminal_scheme(
+    fn resolve_terminal_theme(
         &self,
-        requested: &SchemeId,
+        requested: &ThemeId,
         appearance: Appearance,
-    ) -> Result<(SchemeId, TerminalColors, bool), ResolutionError> {
-        if let Some(scheme) = self.get(requested) {
-            if scheme.appearance != appearance {
+    ) -> Result<(ThemeId, TerminalColors, bool), ResolutionError> {
+        if let Some(theme) = self.get(requested) {
+            if theme.appearance != appearance {
                 return Err(ResolutionError::AppearanceMismatch);
             }
             let mut colors = builtin::terminal_base(appearance);
-            colors.apply(&scheme.colors);
+            colors.apply(&theme.colors);
             return Ok((requested.clone(), colors, true));
         }
         let id = builtin::fallback_id(appearance);
@@ -477,7 +477,7 @@ fn interaction_colors(colors: &TerminalColors) -> impl PartialEq + '_ {
 pub(crate) enum ResolutionError {
     #[error("invalid appearance preferences")]
     Preferences(#[source] PreferenceError),
-    #[error("scheme appearance does not match selection")]
+    #[error("theme appearance does not match selection")]
     AppearanceMismatch,
     #[error("resolved color has unsupported alpha")]
     UnsupportedAlpha,

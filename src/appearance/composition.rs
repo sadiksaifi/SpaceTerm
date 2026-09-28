@@ -1010,7 +1010,7 @@ mod tests {
                 .paint(
                     SurfaceRole::Surface,
                     Color::rgb(0xdcdee3),
-                    Color::rgb(0xffffff),
+                    Color::WHITE,
                 )
                 .a,
         );
@@ -1031,7 +1031,7 @@ mod tests {
                 let sheet = material.alpha(SurfaceRole::Sheet);
                 let floating = material.alpha(SurfaceRole::Floating);
                 let raised = material
-                    .paint(SurfaceRole::Surface, base, Color::rgb(0xffffff))
+                    .paint(SurfaceRole::Surface, base, Color::WHITE)
                     .a;
                 let current = (sheet, floating, raised);
                 assert!(
@@ -1143,9 +1143,9 @@ mod tests {
                 0,
                 "a transparent sentinel stays transparent"
             );
-            let opaque = material.paint(role, base, Color::rgb(0xffffff)).a;
+            let opaque = material.paint(role, base, Color::WHITE).a;
             let authored = material
-                .paint(role, base, Color::rgb(0xffffff).with_alpha(128))
+                .paint(role, base, Color::WHITE.with_alpha(128))
                 .a;
             assert!(
                 authored < opaque && u16::from(authored) * 2 <= u16::from(opaque) + 2,

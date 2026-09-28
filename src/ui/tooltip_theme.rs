@@ -1,7 +1,8 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{TooltipMetrics, TooltipPaint, TooltipTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
 pub(super) fn prepared(colors: &ChromeColors, typography: &ChromeTypography) -> TooltipTheme {
@@ -29,9 +30,6 @@ fn metrics(typography: &ChromeTypography) -> TooltipMetrics {
         )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,22 +1,22 @@
-use super::scheme::{ColorScheme, SchemeMetadata, TerminalColorOverrides};
-use super::{Appearance, ChromeColors, Color, SchemeId, TerminalColors};
+use super::terminal_theme::{TerminalTheme, ThemeMetadata, TerminalColorOverrides};
+use super::{Appearance, ChromeColors, Color, ThemeId, TerminalColors};
 
-pub(crate) fn dark_terminal_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.dark")
+pub(crate) fn dark_terminal_id() -> ThemeId {
+    ThemeId::builtin("builtin.spaceterm.dark")
 }
-pub(crate) fn light_terminal_id() -> SchemeId {
-    SchemeId::builtin("builtin.spaceterm.light")
+pub(crate) fn light_terminal_id() -> ThemeId {
+    ThemeId::builtin("builtin.spaceterm.light")
 }
-pub(crate) fn fallback_id(appearance: Appearance) -> SchemeId {
+pub(crate) fn fallback_id(appearance: Appearance) -> ThemeId {
     match appearance {
         Appearance::Dark => dark_terminal_id(),
         Appearance::Light => light_terminal_id(),
     }
 }
-pub(crate) fn builtin_schemes() -> Vec<ColorScheme> {
+pub(crate) fn builtin_themes() -> Vec<TerminalTheme> {
     [Appearance::Dark, Appearance::Light]
         .into_iter()
-        .map(|appearance| ColorScheme {
+        .map(|appearance| TerminalTheme {
             id: fallback_id(appearance),
             name: match appearance {
                 Appearance::Dark => "SpaceTerm Dark",
@@ -24,7 +24,7 @@ pub(crate) fn builtin_schemes() -> Vec<ColorScheme> {
             }
             .into(),
             appearance,
-            metadata: SchemeMetadata {
+            metadata: ThemeMetadata {
                 author: Some("SpaceTerm contributors".into()),
                 license: Some("MIT".into()),
                 description: Some("SpaceTerm-owned Terminal appearance".into()),
@@ -89,6 +89,33 @@ fn spaceterm_dark_chrome() -> ChromeColors {
 /// compiler would otherwise hold to a readability floor against its own fill: control outlines,
 /// switch indicators, and the labels on filled actions. Those floors protect a glyph, and applying
 /// them to a ring or a knob collapses a quiet palette into pure black and white.
+/// The boundary rungs of built-in Light, authored as ink rather than as grays.
+///
+/// Ink over the final host states the same step on the base, on the content tone, and on whatever
+/// the desktop transmits through them, so one value serves every host. The Light palette and the
+/// edges UI preparation adds to Light controls both read these rungs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BoundaryInk {
+    /// Separators inside an already-bounded surface.
+    pub(crate) quiet: Color,
+    /// A disabled boundary, the quietest visible rung.
+    pub(crate) disabled: Color,
+    /// A structural separator, and the rim of a selected segment or switch thumb.
+    pub(crate) rule: Color,
+    /// A field outline and the resting edge of an ordinary control.
+    pub(crate) control: Color,
+    /// The edge of a hovered or pressed control.
+    pub(crate) strong: Color,
+}
+
+pub(crate) const LIGHT_BOUNDARY_INK: BoundaryInk = BoundaryInk {
+    quiet: Color::rgba(0x0000000f),
+    disabled: Color::rgba(0x0000000a),
+    rule: Color::rgba(0x0000001a),
+    control: Color::rgba(0x0000002b),
+    strong: Color::rgba(0x00000040),
+};
+
 pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
     let palette = match appearance {
         Appearance::Dark => ChromePalette {
@@ -185,14 +212,12 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             text_muted: 0x666666,
             text_placeholder: 0x717171,
             text_disabled: 0x828282,
-            // Light authors every boundary as ink, so one value states the same step on the base,
-            // on the content tone, and on whatever the desktop transmits through them.
-            separator: Color::rgba(0x0000001a),
-            separator_quiet: Color::rgba(0x0000000f),
-            separator_disabled: Color::rgba(0x0000000a),
-            field_outline: Color::rgba(0x0000002b),
-            control_outline: Color::rgba(0x0000002b),
-            control_outline_strong: Color::rgba(0x00000040),
+            separator: LIGHT_BOUNDARY_INK.rule,
+            separator_quiet: LIGHT_BOUNDARY_INK.quiet,
+            separator_disabled: LIGHT_BOUNDARY_INK.disabled,
+            field_outline: LIGHT_BOUNDARY_INK.control,
+            control_outline: LIGHT_BOUNDARY_INK.control,
+            control_outline_strong: LIGHT_BOUNDARY_INK.strong,
             tab_separator: Color::rgba(0x00000028),
             // The rim belongs to the chip, not to the strip behind it. Dark states it
             // as light on the far side of the fill, where it reads as the chip's own lit edge

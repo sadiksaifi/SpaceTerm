@@ -1,3 +1,4 @@
+use crate::ui::appearance::gpui_color;
 use super::pane_lifecycle::PaneLifecycleDependencies;
 #[cfg(test)]
 use super::terminal_focus::TerminalFocusBlocker;
@@ -74,7 +75,7 @@ use gpui::{
     AnyElement, App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
     FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, rgba, size,
+    SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, size,
 };
 use spaceterm_ui::{
     Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, FloatingRole,
@@ -4375,9 +4376,6 @@ fn ime_candidate_bounds(
     )
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
-}
 
 /// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
 /// how far along it reports being.

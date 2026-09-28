@@ -1,13 +1,13 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use crate::appearance::{ChromeDensity, ResetTarget, SettingsDocument};
 use crate::settings::storage::StorageError;
-use crate::settings::{PreviewPhase, SchemeImport, SettingsError, UserSettings};
+use crate::settings::{PreviewPhase, ThemeImport, SettingsError, UserSettings};
 use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
 
-const IMPORTED_SCHEME: &[u8] = br##"{"schema_version":1,"schemes":[{"id":"custom.sample","name":"Sample","appearance":"light","colors":{"foreground":"#112233"}}]}"##;
+const IMPORTED_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
 fn setup() -> (SettingsDraft, UserSettings, Arc<MemoryStorage>) {
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
@@ -121,11 +121,11 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
 }
 
 #[test]
-fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
+fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     let (mut draft, _, storage) = setup();
     let preferences = draft.document().preferences.clone();
     let receipt = draft
-        .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
+        .import(ThemeImport::ZedFamily(IMPORTED_FAMILY))
         .unwrap();
     assert_eq!(draft.status(), SaveStatus::Saving);
     assert!(draft.has_unwritten_changes());
@@ -133,10 +133,10 @@ fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
 
     assert!(
         draft
-            .scheme_summaries()
+            .theme_summaries()
             .unwrap()
             .iter()
-            .any(|scheme| &scheme.id == id)
+            .any(|theme| &theme.id == id)
     );
     let exported = draft.export_document().unwrap();
     assert_eq!(
@@ -150,13 +150,13 @@ fn import_and_removal_share_the_draft_without_selecting_a_scheme() {
     assert!(!draft.settle(true, result));
     assert_eq!(draft.status(), SaveStatus::Saved);
 
-    draft.remove_scheme(id).unwrap();
+    draft.remove_themes(std::slice::from_ref(id)).unwrap();
     assert_eq!(draft.status(), SaveStatus::Saving);
     assert!(draft.has_unwritten_changes());
     let result = draft.prepare_commit().unwrap().run();
     assert!(!draft.settle(true, result));
     let retained = storage.document().unwrap();
-    assert!(retained.color_schemes.is_empty());
+    assert!(retained.terminal_themes.is_empty());
     assert_eq!(retained.preferences, preferences);
 }
 
@@ -191,7 +191,7 @@ fn unchanged_or_rejected_edits_preserve_a_save_failure_until_retry_finishes() {
     assert!(!draft.edit(|_| {}));
     assert!(
         draft
-            .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+            .import(ThemeImport::ZedFamily(b"invalid"))
             .is_err()
     );
     assert_eq!(draft.status(), failed);
@@ -338,7 +338,7 @@ fn exporting_while_another_writer_is_busy_uses_the_authoritative_draft() {
 fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
     let (mut draft, settings, _) = setup();
     draft
-        .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
+        .import(ThemeImport::ZedFamily(IMPORTED_FAMILY))
         .unwrap();
     let result = draft.prepare_commit().unwrap().run();
     assert!(!draft.settle(true, result));
@@ -346,13 +346,13 @@ fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
     for operation in 0..3 {
         let result = match operation {
             0 => draft
-                .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+                .import(ThemeImport::ZedFamily(b"invalid"))
                 .map(|_| ()),
             1 => draft
-                .import(SchemeImport::SpaceTerm(IMPORTED_SCHEME), &BTreeSet::new())
+                .import(ThemeImport::ZedFamily(br#"{"themes":[]}"#))
                 .map(|_| ()),
             _ => draft
-                .remove_scheme(&crate::appearance::SchemeId::new("custom.absent").unwrap()),
+                .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()]),
         };
         assert!(result.is_err());
         assert_eq!(draft.status(), SaveStatus::Saved);
@@ -373,12 +373,12 @@ fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
 
     assert!(
         draft
-            .import(SchemeImport::SpaceTerm(b"invalid"), &BTreeSet::new())
+            .import(ThemeImport::ZedFamily(b"invalid"))
             .is_err()
     );
     assert!(
         draft
-            .remove_scheme(&crate::appearance::SchemeId::new("custom.absent").unwrap())
+            .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()])
             .is_err()
     );
 

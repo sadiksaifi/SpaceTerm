@@ -762,6 +762,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
     pub(crate) microphone_access:
         Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
+    /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
+    pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
     pub(crate) remote_workspace:
         Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
 }
@@ -904,6 +906,10 @@ fn start_application(
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         host.adapters.microphone_access.clone(),
+        host.adapters
+            .theme_registry
+            .clone()
+            .map(crate::theme_registry::ZedThemeRegistry::new),
         cx,
     );
     init(
@@ -1008,6 +1014,7 @@ mod runtime_tests {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 microphone_access: None,
+                theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
             services,

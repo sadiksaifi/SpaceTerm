@@ -1,72 +1,68 @@
 use std::collections::BTreeSet;
 
+use super::terminal_theme::MAX_INSTALLED_THEMES;
 use super::*;
 
-fn color_scheme(id: impl Into<String>, name: impl Into<String>) -> ColorScheme {
-    ColorScheme {
-        id: SchemeId::new(id).unwrap(),
+fn terminal_theme(id: impl Into<String>, name: impl Into<String>) -> TerminalTheme {
+    TerminalTheme {
+        id: ThemeId::new(id).unwrap(),
         name: name.into(),
         appearance: Appearance::Dark,
-        metadata: SchemeMetadata::default(),
+        metadata: ThemeMetadata::default(),
         colors: TerminalColorOverrides::default(),
     }
 }
 
-fn imported_scheme_count(catalog: &SchemeCatalog) -> usize {
+fn imported_theme_count(catalog: &ThemeCatalog) -> usize {
     catalog
-        .schemes()
+        .themes()
         .iter()
-        .filter(|scheme| !scheme.id.is_reserved())
+        .filter(|theme| !theme.id.is_reserved())
         .count()
 }
 
-fn native_document(scheme: &str) -> String {
-    format!(r#"{{"schema_version":1,"schemes":[{scheme}]}}"#)
-}
-
 #[test]
-fn native_import_rejects_explicit_null_for_non_nullable_optional_fields() {
-    let schemes = [
+fn stored_themes_reject_explicit_null_for_non_nullable_optional_fields() {
+    let themes = [
         r##"{"id":"custom.null-author","name":"Null","appearance":"dark","author":null,"colors":{}}"##,
         r##"{"id":"custom.null-background","name":"Null","appearance":"dark","colors":{"background":null}}"##,
         r##"{"id":"custom.null-terminal","name":"Null","appearance":"dark","colors":{"foreground":null}}"##,
         r##"{"id":"custom.null-palette","name":"Null","appearance":"dark","colors":{"normal":null}}"##,
     ];
 
-    for scheme in schemes {
+    for theme in themes {
         assert!(
-            parse_color_document(native_document(scheme).as_bytes()).is_err(),
-            "explicit null was accepted in {scheme}"
+            serde_json::from_str::<TerminalTheme>(theme).is_err(),
+            "explicit null was accepted in {theme}"
         );
     }
 }
 
 #[test]
-fn native_import_preserves_the_four_explicitly_nullable_terminal_roles() {
-    let document = native_document(
+fn stored_themes_preserve_the_four_explicitly_nullable_terminal_roles() {
+    let theme: TerminalTheme = serde_json::from_str(
         r##"{"id":"custom.nullable","name":"Nullable","appearance":"dark","colors":{"cursor_text":null,"selection_foreground":null,"find_match_foreground":null,"find_active_match_foreground":null}}"##,
-    );
+    )
+    .unwrap();
 
-    let parsed = parse_color_document(document.as_bytes()).unwrap();
-    let scheme = &parsed.schemes[0];
-    assert_eq!(scheme.colors.cursor_text, OptionalColorOverride::None);
+    assert_eq!(theme.colors.cursor_text, OptionalColorOverride::None);
     assert_eq!(
-        scheme.colors.selection_foreground,
+        theme.colors.selection_foreground,
         OptionalColorOverride::None
     );
     assert_eq!(
-        scheme.colors.find_match_foreground,
+        theme.colors.find_match_foreground,
         OptionalColorOverride::None
     );
     assert_eq!(
-        scheme.colors.find_active_match_foreground,
+        theme.colors.find_active_match_foreground,
         OptionalColorOverride::None
     );
 }
 
 #[test]
 fn catalog_rejects_an_empty_batch_without_advancing_revision() {
-    let mut catalog = SchemeCatalog::default();
+    let mut catalog = ThemeCatalog::default();
 
     assert_eq!(
         catalog.install_batch(&[], 0, &BTreeSet::new()),
@@ -76,92 +72,106 @@ fn catalog_rejects_an_empty_batch_without_advancing_revision() {
 }
 
 #[test]
-fn catalog_replacement_at_capacity_does_not_count_as_an_addition() {
-    let schemes = (0..128)
-        .map(|index| color_scheme(format!("custom.capacity{index}"), format!("Scheme {index}")))
+fn catalog_reinstall_at_capacity_does_not_count_as_an_addition() {
+    let themes = (0..MAX_INSTALLED_THEMES)
+        .map(|index| terminal_theme(format!("custom.capacity{index}"), format!("Theme {index}")))
         .collect::<Vec<_>>();
-    let mut catalog = SchemeCatalog::from_color_schemes(&schemes).unwrap();
-    let replacement = color_scheme("custom.capacity64", "Replaced");
-    let replace = BTreeSet::from([replacement.id.clone()]);
+    let mut catalog = ThemeCatalog::from_terminal_themes(&themes).unwrap();
+    let replacement = terminal_theme("custom.capacity64", "Replaced");
 
     assert_eq!(
         catalog
-            .install_batch(std::slice::from_ref(&replacement), 0, &replace)
+            .install_batch(std::slice::from_ref(&replacement), 0, &BTreeSet::new())
             .unwrap(),
         vec![replacement.id.clone()]
     );
     assert_eq!(catalog.revision(), 1);
-    assert_eq!(imported_scheme_count(&catalog), 128);
+    assert_eq!(imported_theme_count(&catalog), MAX_INSTALLED_THEMES);
     assert_eq!(
         catalog
             .get(&replacement.id)
-            .map(|scheme| scheme.name.as_str()),
+            .map(|theme| theme.name.as_str()),
         Some("Replaced")
     );
     assert_eq!(
         catalog.install_batch(
-            &[color_scheme("custom.over-capacity", "Overflow")],
+            &[terminal_theme("custom.over-capacity", "Overflow")],
             1,
             &BTreeSet::new()
         ),
-        Err(CatalogError::TooManySchemes)
+        Err(CatalogError::TooManyThemes)
     );
     assert_eq!(catalog.revision(), 1);
 }
 
 #[test]
-fn catalog_requires_replacement_intent_to_exactly_match_incoming_collisions() {
-    let original_a = color_scheme("custom.intent-a", "Original A");
-    let original_b = color_scheme("custom.intent-b", "Original B");
-    let mut catalog =
-        SchemeCatalog::from_color_schemes(&[original_a.clone(), original_b.clone()]).unwrap();
-    let before = catalog.schemes();
+fn catalog_retires_themes_in_the_same_batch_and_frees_their_capacity() {
+    let themes = (0..MAX_INSTALLED_THEMES)
+        .map(|index| terminal_theme(format!("custom.retire{index}"), format!("Theme {index}")))
+        .collect::<Vec<_>>();
+    let mut catalog = ThemeCatalog::from_terminal_themes(&themes).unwrap();
+    let retired = BTreeSet::from([themes[0].id.clone(), themes[1].id.clone()]);
+    let incoming = [terminal_theme("custom.incoming", "Incoming")];
 
-    let replacement_a = color_scheme("custom.intent-a", "Replacement A");
-    let extra_intent = BTreeSet::from([original_a.id.clone(), original_b.id.clone()]);
     assert_eq!(
-        catalog.install_batch(std::slice::from_ref(&replacement_a), 0, &extra_intent),
-        Err(CatalogError::UnknownReplacement)
+        catalog.install_batch(&incoming, 0, &retired).unwrap(),
+        vec![incoming[0].id.clone()]
     );
+    assert!(!catalog.contains(&themes[0].id));
+    assert!(!catalog.contains(&themes[1].id));
+    assert!(catalog.contains(&incoming[0].id));
+    assert_eq!(imported_theme_count(&catalog), MAX_INSTALLED_THEMES - 1);
+}
 
-    let new_scheme = color_scheme("custom.intent-new", "New");
-    let nonexistent_intent = BTreeSet::from([new_scheme.id.clone()]);
+#[test]
+fn catalog_retires_only_installed_imported_themes() {
+    let original = terminal_theme("custom.original", "Original");
+    let mut catalog = ThemeCatalog::from_terminal_themes(std::slice::from_ref(&original)).unwrap();
+    let before = catalog.themes();
+    let incoming = [terminal_theme("custom.incoming", "Incoming")];
+
     assert_eq!(
-        catalog.install_batch(&[new_scheme], 0, &nonexistent_intent),
-        Err(CatalogError::UnknownReplacement)
+        catalog.install_batch(
+            &incoming,
+            0,
+            &BTreeSet::from([ThemeId::new("custom.unknown").unwrap()])
+        ),
+        Err(CatalogError::UnknownTheme)
     );
-
     assert_eq!(
-        catalog.install_batch(&[replacement_a], 0, &BTreeSet::new()),
-        Err(CatalogError::DuplicateId)
+        catalog.install_batch(
+            &incoming,
+            0,
+            &BTreeSet::from([ThemeId::builtin("builtin.spaceterm.dark")])
+        ),
+        Err(CatalogError::ReservedId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.schemes(), before);
+    assert_eq!(catalog.themes(), before);
 }
 
 #[test]
 fn catalog_never_replaces_a_reserved_builtin() {
-    let mut catalog = SchemeCatalog::default();
-    let before = catalog.schemes();
-    let reserved = color_scheme("builtin.spaceterm.dark", "Overwrite");
-    let replace = BTreeSet::from([reserved.id.clone()]);
+    let mut catalog = ThemeCatalog::default();
+    let before = catalog.themes();
+    let reserved = terminal_theme("builtin.spaceterm.dark", "Overwrite");
 
     assert_eq!(
-        catalog.install_batch(&[reserved], 0, &replace),
+        catalog.install_batch(&[reserved], 0, &BTreeSet::new()),
         Err(CatalogError::ReservedId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.schemes(), before);
+    assert_eq!(catalog.themes(), before);
 }
 
 #[test]
 fn catalog_batch_failure_is_atomic_after_valid_entries() {
-    let original = color_scheme("custom.atomic-original", "Original");
-    let mut catalog = SchemeCatalog::from_color_schemes(&[original]).unwrap();
-    let before = catalog.schemes();
+    let original = terminal_theme("custom.atomic-original", "Original");
+    let mut catalog = ThemeCatalog::from_terminal_themes(&[original]).unwrap();
+    let before = catalog.themes();
     let batch = [
-        color_scheme("custom.atomic-new", "New"),
-        color_scheme("custom.atomic-new", "Duplicate"),
+        terminal_theme("custom.atomic-new", "New"),
+        terminal_theme("custom.atomic-new", "Duplicate"),
     ];
 
     assert_eq!(
@@ -169,77 +179,95 @@ fn catalog_batch_failure_is_atomic_after_valid_entries() {
         Err(CatalogError::DuplicateId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.schemes(), before);
+    assert_eq!(catalog.themes(), before);
 }
 
 #[test]
-fn catalog_rejects_stale_and_oversized_batches_without_mutation() {
-    let first = color_scheme("custom.first", "First");
-    let mut catalog = SchemeCatalog::default();
+fn catalog_rejects_stale_batches_without_mutation() {
+    let first = terminal_theme("custom.first", "First");
+    let mut catalog = ThemeCatalog::default();
     catalog
         .install_batch(&[first], 0, &BTreeSet::new())
         .unwrap();
-    let before = catalog.schemes();
+    let before = catalog.themes();
 
     assert_eq!(
         catalog.install_batch(
-            &[color_scheme("custom.stale", "Stale")],
+            &[terminal_theme("custom.stale", "Stale")],
             0,
             &BTreeSet::new()
         ),
         Err(CatalogError::RevisionConflict)
     );
-    let oversized = (0..33)
-        .map(|index| color_scheme(format!("custom.batch{index}"), format!("Batch {index}")))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        catalog.install_batch(&oversized, 1, &BTreeSet::new()),
-        Err(CatalogError::TooManySchemes)
-    );
     assert_eq!(catalog.revision(), 1);
-    assert_eq!(catalog.schemes(), before);
+    assert_eq!(catalog.themes(), before);
 }
 
 #[test]
-fn deterministic_zed_reimport_collides_until_explicitly_replaced() {
+fn reinstalling_a_zed_family_replaces_its_themes_in_place() {
     let bytes = include_bytes!("fixtures/vague-pro/theme.json");
-    let imported = [import_zed(bytes, 0).unwrap()];
-    let mut catalog = SchemeCatalog::default();
-    catalog
+    let imported = translate_zed_family(bytes).unwrap();
+    let mut catalog = ThemeCatalog::default();
+    let ids = catalog
         .install_batch(&imported, 0, &BTreeSet::new())
         .unwrap();
-    let before = catalog.schemes();
 
-    let reimported = [import_zed(bytes, 0).unwrap()];
+    let reimported = translate_zed_family(bytes).unwrap();
     assert_eq!(imported, reimported);
     assert_eq!(
-        catalog.install_batch(&reimported, 1, &BTreeSet::new()),
-        Err(CatalogError::DuplicateId)
-    );
-    assert_eq!(catalog.revision(), 1);
-    assert_eq!(catalog.schemes(), before);
-
-    let replace = reimported
-        .iter()
-        .map(|scheme| scheme.id.clone())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        catalog.install_batch(&reimported, 1, &replace).unwrap(),
-        replace.iter().cloned().collect::<Vec<_>>()
+        catalog
+            .install_batch(&reimported, 1, &BTreeSet::new())
+            .unwrap(),
+        ids
     );
     assert_eq!(catalog.revision(), 2);
+    assert_eq!(imported_theme_count(&catalog), ids.len());
 }
 
 #[test]
-fn catalog_scheme_listing_is_globally_sorted_and_includes_builtins() {
-    let catalog = SchemeCatalog::from_color_schemes(&[
-        color_scheme("custom.z-last", "Last"),
-        color_scheme("custom.a-first", "First"),
+fn catalog_theme_listing_is_globally_sorted_and_includes_builtins() {
+    let catalog = ThemeCatalog::from_terminal_themes(&[
+        terminal_theme("custom.z-last", "Last"),
+        terminal_theme("custom.a-first", "First"),
     ])
     .unwrap();
-    let schemes = catalog.schemes();
-    let ids = schemes.iter().map(|scheme| &scheme.id).collect::<Vec<_>>();
+    let themes = catalog.themes();
+    let ids = themes.iter().map(|theme| &theme.id).collect::<Vec<_>>();
 
-    assert_eq!(schemes.len(), 4);
+    assert_eq!(themes.len(), 4);
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn summaries_list_builtins_first_then_installed_themes_by_name() {
+    let extension = ZedExtension {
+        id: String::from("sample-themes"),
+        version: String::from("1.0.0"),
+        families: vec![
+            br#"{"name":"Sample","themes":[{"name":"alpha","appearance":"dark","style":{}}]}"#
+                .to_vec(),
+        ],
+    };
+    let mut themes = translate_zed_extension(&extension).unwrap();
+    themes.push(terminal_theme("custom.zulu", "Zulu"));
+    themes.push(terminal_theme("custom.beta", "Beta"));
+    let catalog = ThemeCatalog::from_terminal_themes(&themes).unwrap();
+    let summaries = catalog.summaries();
+    let names = summaries
+        .iter()
+        .map(|summary| summary.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(summaries[..2].iter().all(|summary| summary.builtin));
+    assert_eq!(names[2..], ["alpha", "Beta", "Zulu"]);
+    assert_eq!(summaries[2].family.as_deref(), Some("Sample"));
+    assert_eq!(summaries[3].family, None);
+    assert_eq!(
+        summaries[2].package,
+        Some(ThemePackage {
+            id: String::from("sample-themes"),
+            version: String::from("1.0.0"),
+        })
+    );
+    assert_eq!(summaries[3].package, None);
 }

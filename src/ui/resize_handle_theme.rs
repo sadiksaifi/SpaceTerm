@@ -1,7 +1,8 @@
-use gpui::{Pixels, Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::{Pixels, px};
 use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme};
 
-use crate::appearance::{ChromeColors, Color};
+use crate::appearance::ChromeColors;
 use crate::ui::chrome_geometry::HAIRLINE;
 
 pub(super) const VISIBLE_THICKNESS: f32 = HAIRLINE;
@@ -24,8 +25,4 @@ pub(super) fn spacious_target_half_thickness(cx: &gpui::App) -> Pixels {
         .global::<ResizeHandleTheme>()
         .pointer_target_thickness(ResizeHandleTarget::Spacious);
     px(f32::from(thickness) / 2.0)
-}
-
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
 }

@@ -4,10 +4,11 @@
 //! label, a control, and an optional reset affordance; a stepper is two icon buttons around a
 //! readout. Interaction behavior stays in `spaceterm-ui`.
 
+use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px, rgba};
+use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -24,15 +25,12 @@ use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, Tex
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
-pub(super) fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 /// A field action rests on its field and uses complete neutral paints while interacting.
 #[cfg(test)]
 pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
     let paint = |background, foreground| {
-        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), rgba(0))
+        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), gpui::rgba(0))
     };
     spaceterm_ui::ButtonVariantStyle::new(
         paint(colors.input_background, colors.input_text),
@@ -47,9 +45,6 @@ pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonV
         paint(colors.input_disabled_background, colors.input_disabled_text),
     )
 }
-
-/// The width every scheme's color strip takes, so the names beside them share one column.
-const SWATCH_WIDTH: f32 = 88.0;
 
 /// The horizontal breathing room every row keeps inside the card that holds it.
 ///
@@ -144,12 +139,14 @@ pub(super) enum SettingsRowLayout {
     Beside,
     /// A label above content that needs the whole row, such as a list.
     Above,
-    /// Content spanning the row with no label of its own, for a group whose title already names
-    /// it. Repeating that title on the only row inside the box says the same thing twice.
+    /// Content spanning the row with no label of its own, for content that presents itself, such
+    /// as a preview or a gallery.
     Full,
 }
 
 /// One titled run of related rows.
+///
+/// An empty title draws no heading, for a group whose content already says what it is.
 ///
 /// The group uses the document surface and its text pair. Its title and surrounding space carry
 /// grouping. The fixed card edge and inset separators keep related rows legible without adding a
@@ -208,18 +205,20 @@ impl SettingsGroup {
             .flex_col()
             .w_full()
             .gap(appearance.spacing(6.0))
-            .child(
+            .when(!self.title.is_empty(), |group| {
                 // The title keeps the rows' inset so it starts on their left edge, and the inset
                 // sits on a wrapper so the title's own box is the type it sets, not the padding
                 // around it.
-                div().px(row_inset + px(HAIRLINE)).child(
-                    div()
-                        .debug_selector(move || title_selector.clone())
-                        .chrome_text(appearance.typography.style(TextRole::Section))
-                        .text_color(gpui_color(appearance.colors.text))
-                        .child(self.title),
-                ),
-            )
+                group.child(
+                    div().px(row_inset + px(HAIRLINE)).child(
+                        div()
+                            .debug_selector(move || title_selector.clone())
+                            .chrome_text(appearance.typography.style(TextRole::Section))
+                            .text_color(gpui_color(appearance.colors.text))
+                            .child(self.title),
+                    ),
+                )
+            })
             .child(
                 spaceterm_ui::ControlHost::Card.mount(
                     div()
@@ -732,52 +731,11 @@ impl gpui::RenderOnce for StepperElement {
     }
 }
 
-/// A left-to-right strip of representative scheme colors.
-///
-/// Every strip is the same size whatever a scheme offers, so the names beside them line up in one
-/// column. A scheme with fewer colors shows wider bands rather than a shorter strip.
-pub(super) fn swatch_strip(
-    selector: String,
-    swatches: &[Color],
-    appearance: &ChromeAppearance,
-) -> impl IntoElement {
-    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-    let background = appearance.materials.paint(
-        crate::appearance::SurfaceRole::Surface,
-        colors.elevated_surface_background,
-        colors.element_background,
-    );
-    let border = appearance
-        .materials
-        .edge(colors.element_background, colors.border);
-    div()
-        .debug_selector(move || selector.clone())
-        .flex()
-        .flex_row()
-        .flex_none()
-        .items_center()
-        .w(appearance.spacing(SWATCH_WIDTH))
-        .h(appearance.spacing(14.0))
-        .rounded(RadiusRole::ControlSmall.pixels())
-        .overflow_hidden()
-        // A strip is bounded by a hairline rather than left to its own colors: a scheme is free to
-        // open on a near-background color, and the built-in dark scheme does, which would otherwise
-        // leave the strip looking short of the column every other strip fills.
-        .border(px(HAIRLINE))
-        .border_color(gpui_color(border))
-        .bg(gpui_color(background))
-        .children(
-            swatches
-                .iter()
-                .map(|color| div().flex_1().h_full().bg(gpui_color(*color))),
-        )
-}
-
-/// A short status a row carries, such as a scheme being the one in use.
+/// A short status a row carries, such as a theme being the one in use.
 ///
 /// It is filled rather than outlined, so it reads as a state rather than as one more frame. The
 /// fill comes from the raised element role rather than the plain element background, which a
-/// scheme may resolve to the window background and would leave the badge invisible.
+/// theme may resolve to the window background and would leave the badge invisible.
 pub(super) fn badge(
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
@@ -820,11 +778,11 @@ mod tests {
     fn field_action_preserves_a_light_field_and_opposite_hover_paint() {
         use crate::appearance::{ChromeColors, Color};
         let colors = ChromeColors {
-            input_background: Color::rgb(0xffffff),
+            input_background: Color::WHITE,
             input_text: Color::rgb(0x111111),
-            text: Color::rgb(0xffffff),
+            text: Color::WHITE,
             ghost_element_hover: Color::rgb(0x111111),
-            ghost_element_hover_foreground: Color::rgb(0xffffff),
+            ghost_element_hover_foreground: Color::WHITE,
             ..ChromeColors::default()
         };
         let style = super::field_action_style(&colors);

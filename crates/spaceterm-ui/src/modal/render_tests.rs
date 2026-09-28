@@ -5,7 +5,7 @@ use std::{
 };
 
 use gpui::{
-    Action, AppContext as _, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler as _,
+    Action, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler as _,
     InputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseMoveEvent,
     Render, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext, WindowBounds, WindowHandle,
     WindowOptions, point, rgba,
@@ -287,6 +287,11 @@ fn install_test_catalogs(cx: &mut TestAppContext) {
     ));
 
     cx.set_global(test_menu_theme());
+    cx.set_global(crate::ScrollbarTheme::new(
+        rgba(0x33373878),
+        rgba(0x60607978),
+        rgba(0xcdcdcdff),
+    ));
     let input_paint = TextInputPaint::new(
         rgba(0xffffffff),
         rgba(0x888888ff),
@@ -1799,6 +1804,13 @@ fn constrained_scaled_dialog_reaches_long_header_body_and_every_action_verticall
         });
         cx.run_until_parked();
     }
+    let thumb = cx
+        .debug_bounds("modal-body-scrollbar-thumb")
+        .expect("a scrolled Dialog body should reveal the overlay scrollbar");
+    assert!(
+        bounds_contains(body, thumb),
+        "the body scrollbar escaped its viewport: {thumb:?} outside {body:?}"
+    );
 
     let action_selectors = [
         "modal-action-constrained-dialog-save",

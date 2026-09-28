@@ -1,4 +1,5 @@
-use gpui::{Rgba, px, rgba};
+use crate::ui::appearance::gpui_color;
+use gpui::px;
 use spaceterm_ui::{
     SegmentedControlTheme, SegmentedMetrics, SegmentedPaint, SegmentedPaints, SegmentedSizes,
     SegmentedValuePaints,
@@ -115,9 +116,6 @@ fn paint(background: Color, label: Color, border: Color) -> SegmentedPaint {
     )
 }
 
-fn gpui_color(color: Color) -> Rgba {
-    rgba(color.rgba_hex())
-}
 
 #[cfg(test)]
 mod tests {

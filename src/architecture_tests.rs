@@ -70,7 +70,7 @@ fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
         (
             "crates/spaceterm-ui/src",
             &[
-                "crate::appearance::Scheme",
+                "crate::appearance::Theme",
                 "crate::settings",
                 "spaceterm::",
                 "ACTIVE_THEME",

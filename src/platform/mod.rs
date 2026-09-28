@@ -5,6 +5,7 @@ pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 pub(crate) mod application_quit;
 pub(crate) mod control_socket;
+pub(crate) mod https_transport;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
 #[cfg(target_os = "macos")]

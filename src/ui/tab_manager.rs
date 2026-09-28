@@ -1,6 +1,9 @@
+use crate::ui::appearance::gpui_color;
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
+#[cfg(test)]
+use gpui::rgba;
 #[cfg(test)]
 use std::cell::Cell;
 use std::rc::Rc;
@@ -62,7 +65,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, Task, Window, div, px, relative, rgba,
+    ScrollHandle, Task, Window, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, CustomIconName, Icon, IconButton,
@@ -1837,9 +1840,6 @@ fn render_tab_identity(
         .into_any_element()
 }
 
-fn gpui_color(color: Color) -> gpui::Rgba {
-    rgba(color.rgba_hex())
-}
 
 fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance) -> Color {
     appearance.title_bar_controls.colors.focus_ring
@@ -1880,10 +1880,10 @@ mod tests {
     ) -> super::super::appearance::ChromeAppearance {
         use crate::appearance::{
             AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-            SchemeCatalog, SystemAppearance,
+            ThemeCatalog, SystemAppearance,
         };
 
-        let mut resolved = SchemeCatalog::default()
+        let mut resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &AppearancePreferences::default(),
@@ -1908,7 +1908,7 @@ mod tests {
     #[test]
     fn title_bar_controls_use_focus_paint_prepared_for_their_actual_host() {
         let appearance =
-            prepared_opposing_title_bar(Color::rgb(0x000000), Color::rgb(0xffffff), true, false);
+            prepared_opposing_title_bar(Color::BLACK, Color::WHITE, true, false);
         let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
         let focus = title_bar_control_focus_ring(&appearance).source_over(host);
         assert!(
@@ -1931,7 +1931,7 @@ mod tests {
     #[test]
     fn show_borders_prepares_tab_edges_for_the_title_bar_host() {
         let appearance =
-            prepared_opposing_title_bar(Color::rgb(0xffffff), Color::rgb(0x000000), false, true);
+            prepared_opposing_title_bar(Color::WHITE, Color::BLACK, false, true);
         let presentation = TabChromePresentation::resolve(true, true, &appearance.colors);
         let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
         let chip = presentation
@@ -2311,12 +2311,12 @@ mod tests {
     fn tab_contextual_controls_should_materialize_hover_against_their_actual_host() {
         use crate::appearance::{
             AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-            SchemeCatalog, SurfaceRole, SystemAppearance,
+            ThemeCatalog, SurfaceRole, SystemAppearance,
         };
 
         let mut preferences = AppearancePreferences::default();
         preferences.window.transparency = 1.0;
-        let resolved = SchemeCatalog::default()
+        let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
@@ -2441,10 +2441,10 @@ mod tests {
         });
         cx.update(|window, cx| {
             let mut active = crate::ui::appearance::chrome(cx).clone();
-            active.colors.tab_active_background = Color::rgb(0x000000);
-            active.colors.tab_active_icon = Color::rgb(0xffffff);
-            active.colors.tab_active_hover_background = Color::rgb(0xffffff);
-            active.colors.tab_active_hover_foreground = Color::rgb(0x000000);
+            active.colors.tab_active_background = Color::BLACK;
+            active.colors.tab_active_icon = Color::WHITE;
+            active.colors.tab_active_hover_background = Color::WHITE;
+            active.colors.tab_active_hover_foreground = Color::BLACK;
             active.colors.tab_active_hover_icon = Color::rgb(0x112233);
             active.colors.tab_hover_icon = Color::rgb(0x445566);
             let mut inactive = active.clone();

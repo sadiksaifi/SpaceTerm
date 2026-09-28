@@ -26,8 +26,8 @@ fn color_on(proposed: Color, background: Color, minimum_contrast: f64) -> Color 
         return rendered;
     }
 
-    let dark = Color::rgb(0x000000);
-    let light = Color::rgb(0xffffff);
+    let dark = Color::BLACK;
+    let light = Color::WHITE;
     let target = if dark.contrast_ratio(background) >= light.contrast_ratio(background) {
         dark
     } else {

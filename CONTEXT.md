@@ -62,8 +62,8 @@ A native window that presents SpaceTerm.
 The application-scoped preferences SpaceTerm retains in `settings.json`.
 
 **Settings Document**:
-The retained form of Settings: every preference SpaceTerm persists together with the Color Schemes
-imported into it. It is named for what it holds rather than for any one Section, so an operation
+The retained form of Settings: every preference SpaceTerm persists together with the Terminal
+Themes installed into it. It is named for what it holds rather than for any one Section, so an operation
 scoped to all of Settings keeps that meaning as Sections are added.
 
 **Settings Window**:
@@ -81,7 +81,7 @@ Fuzzy search over Settings Row labels and keywords that reveals a matching Setti
 
 **Appearance Mode**:
 The application-scoped Light, Dark, or Auto choice selecting the built-in Application Chrome and
-the Terminal Color Scheme slot of that appearance.
+the Terminal Theme slot of that appearance.
 
 ## Focus and transient UI
 
@@ -179,18 +179,31 @@ Bounded content-free failure and unhandled-key metadata exported after an explic
 **Close Confirmation**:
 One authorization for an exact user-requested close that may discard running work.
 
-## Color Schemes
+## Appearance
 
-**Color Scheme**:
-Identifying metadata and authored color decisions for Terminal appearance.
+**Application Chrome**:
+Everything SpaceTerm draws around terminal output: windows, sidebars, tabs, controls, menus, and
+dialogs. Its colors are built in, compiled from one set of Chrome tokens per appearance, and never
+user-selectable. No Terminal Theme reaches it.
 
-**Authored Definition**:
-Color decisions intentionally supplied by a built-in author, imported source or native theme author.
+**Terminal Theme**:
+Identifying metadata and the colors of terminal output in Panes: foreground, background, the
+ANSI palette, cursor, selection, search matches, and links. Built-in Terminal Themes are always
+installed; others are installed from Zed themes.
+
+**Zed Theme**:
+A theme in the format Zed publishes: one family document holding named Light or Dark themes.
+SpaceTerm translates only its terminal roles, and the few editor roles a terminal needs, into a
+Terminal Theme.
+
+**Zed Extension**:
+A package in the Zed extension registry. A theme extension contributes one or more Zed Theme
+family documents. Installing it again, at any version, replaces every Terminal Theme it installed.
 
 **Resolved Theme**:
 Complete validated presentation colors after Terminal override precedence and built-in completion.
 
-**Scheme Origin**:
+**Theme Origin**:
 Source identity and attribution, separate from the installed identifier and display name.
 
 **Window Background Appearance**:

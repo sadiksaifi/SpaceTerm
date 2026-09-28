@@ -287,7 +287,7 @@ fn prepare_surfaces(
     let sidebar_semantic = if chrome.appearance == Appearance::Light {
         chrome.colors.panel_background
     } else {
-        root.mix(Color::rgb(0xffffff), 0.10)
+        root.mix(Color::WHITE, 0.10)
     };
     let elevated = chrome.colors.elevated_surface_background;
     // Dark seats the canvas on the window root, which its lifted navigation already clears. A
@@ -358,7 +358,7 @@ mod tests {
     use crate::appearance::Appearance;
     use crate::appearance::{
         AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, SchemeCatalog, SystemAppearance,
+        CompositionCapabilities, ThemeCatalog, SystemAppearance,
     };
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
                     ..AppearancePreferences::default()
                 };
                 preferences.window.transparency = transparency;
-                let mut resolved = SchemeCatalog::default()
+                let mut resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
                         &preferences,
@@ -425,7 +425,7 @@ mod tests {
             ..AppearancePreferences::default()
         };
         preferences.window.transparency = 1.0;
-        let resolved = SchemeCatalog::default()
+        let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
                 &preferences,
@@ -454,7 +454,7 @@ mod tests {
                 ..AppearancePreferences::default()
             };
             preferences.window.transparency = transparency;
-            let resolved = SchemeCatalog::default()
+            let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
                     &preferences,
