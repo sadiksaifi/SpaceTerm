@@ -3,10 +3,11 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, SharedString, Subscription, Window, div,
+    App, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, SharedString, Subscription, Window, div,
 };
 
+use crate::chord_capture::ChordRelease;
 use crate::{CapturedKey, ChordCapture, FieldState, TextInputVariant};
 
 /// The field's width in multiples of its own height.
@@ -61,8 +62,9 @@ pub(crate) enum ShortcutTone {
 /// A click, or Return or Space while the field is focused, starts recording. While recording, the
 /// recorder intercepts every keystroke in its window before key bindings and menu key equivalents
 /// resolve, so a chord that already means something, such as closing the window, is captured
-/// rather than performed. Escape cancels, Delete or Backspace clears, and Tab cancels and moves
-/// focus on. Losing focus, the window becoming inactive, or a second click also cancels.
+/// rather than performed, and its auto-repeat stays held back until the chord is let go. Escape
+/// cancels, Delete or Backspace clears, and Tab cancels and moves focus on. Losing focus, the window
+/// becoming inactive, or a second click also cancels.
 pub struct ShortcutRecorder {
     id: ElementId,
     accessibility_name: SharedString,
@@ -74,6 +76,8 @@ pub struct ShortcutRecorder {
     format_modifiers: ShortcutModifierFormatter,
     disabled: bool,
     recording: Option<Recording>,
+    /// The chord just recorded, while its keys are still held.
+    release: Option<ChordRelease>,
     debug_selector: Option<SharedString>,
     _subscriptions: [Subscription; 2],
 }
@@ -110,6 +114,7 @@ impl ShortcutRecorder {
             format_modifiers: Rc::new(|_| SharedString::default()),
             disabled: false,
             recording: None,
+            release: None,
             debug_selector: None,
             _subscriptions: subscriptions,
         }
@@ -190,6 +195,7 @@ impl ShortcutRecorder {
         if self.disabled || self.recording.is_some() {
             return;
         }
+        self.release = None;
         self.focus_handle.focus(window, cx);
         let capture = ChordCapture::start(self.focus_handle.clone(), window, cx, Self::captured);
         self.recording = Some(Recording {
@@ -202,10 +208,11 @@ impl ShortcutRecorder {
 
     /// Ends a recording in progress without a change.
     pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        self.release = None;
         self.finish(ShortcutRecorderEvent::Cancelled, cx);
     }
 
-    fn captured(&mut self, key: CapturedKey, _: &mut Window, cx: &mut Context<Self>) {
+    fn captured(&mut self, key: CapturedKey, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = match key {
             CapturedKey::Chord(keystroke) => keystroke,
             CapturedKey::Escape | CapturedKey::Traverse | CapturedKey::FocusLost => {
@@ -221,7 +228,10 @@ impl ShortcutRecorder {
             return;
         };
         match (self.validator)(&keystroke, cx) {
-            Ok(()) => self.finish(ShortcutRecorderEvent::Recorded(keystroke), cx),
+            Ok(()) => {
+                self.release = Some(ChordRelease::hold(&keystroke, window, cx));
+                self.finish(ShortcutRecorderEvent::Recorded(keystroke), cx);
+            }
             Err(reason) => {
                 recording.rejected = true;
                 cx.emit(ShortcutRecorderEvent::Rejected(reason));
@@ -256,12 +266,23 @@ impl ShortcutRecorder {
         }
     }
 
+    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        if self
+            .release
+            .as_ref()
+            .is_some_and(|release| release.is_released_by(event))
+        {
+            self.release = None;
+        }
+    }
+
     fn modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.release = None;
         if let Some(recording) = self.recording.as_mut()
             && recording.held != event.modifiers
         {
@@ -332,6 +353,7 @@ impl Render for ShortcutRecorder {
                     recorder.toggle_recording(window, cx);
                 }))
                 .on_key_down(cx.listener(Self::key_down))
+                .on_key_up(cx.listener(Self::key_up))
                 .on_modifiers_changed(cx.listener(Self::modifiers_changed))
         })
         .child(div().min_w_0().truncate().child(text))

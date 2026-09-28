@@ -134,6 +134,13 @@ impl Harness<'_> {
             .read_with(self.cx, |recorder, _| recorder.presentation())
     }
 
+    /// Lets go of `source`'s key, as the platform reports it.
+    fn release(&mut self, source: &str) {
+        self.cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(source).unwrap(),
+        });
+    }
+
     fn take_events(&mut self) -> Vec<ShortcutRecorderEvent> {
         self.events.borrow_mut().drain(..).collect()
     }
@@ -244,9 +251,36 @@ fn a_bound_chord_is_captured_instead_of_performed(cx: &mut TestAppContext) {
     harness.cx.simulate_keystrokes("cmd-w");
     assert_eq!(harness.closes.get(), 0);
     assert_eq!(harness.take_events(), [recorded("cmd-w")]);
+    harness.release("cmd-w");
     harness.cx.simulate_keystrokes("cmd-w");
     assert_eq!(harness.closes.get(), 1);
     assert!(harness.take_events().is_empty());
+}
+
+#[gpui::test]
+fn a_recorded_chord_held_down_does_not_repeat_into_its_action(cx: &mut TestAppContext) {
+    let mut harness = harness(cx);
+    harness.start();
+    harness.cx.simulate_keystrokes("cmd-w cmd-w cmd-w");
+    assert_eq!(harness.closes.get(), 0, "auto-repeat is held back");
+    assert_eq!(harness.take_events(), [recorded("cmd-w")]);
+
+    harness.cx.simulate_modifiers_change(Modifiers::none());
+    harness.cx.simulate_keystrokes("cmd-w");
+    assert_eq!(
+        harness.closes.get(),
+        1,
+        "letting Command go ends the hold even without the key's release"
+    );
+}
+
+#[gpui::test]
+fn another_key_after_a_recorded_chord_reaches_the_window(cx: &mut TestAppContext) {
+    let mut harness = harness(cx);
+    harness.start();
+    harness.cx.simulate_keystrokes("cmd-shift-k cmd-w");
+    assert_eq!(harness.take_events(), [recorded("cmd-shift-k")]);
+    assert_eq!(harness.closes.get(), 1);
 }
 
 #[gpui::test]

@@ -1,8 +1,11 @@
 //! Chord capture: the keystrokes of one window, taken ahead of key bindings and menu key
 //! equivalents while one focus target holds focus.
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
-use gpui::{AnyWindowHandle, Context, FocusHandle, Keystroke, Modifiers, Subscription, Window};
+use gpui::{
+    AnyWindowHandle, App, Context, FocusHandle, KeyUpEvent, Keystroke, Modifiers, Subscription,
+    Window,
+};
 
 /// Keys GPUI reports when a modifier is pressed and released on its own. A modifier alone never
 /// completes a chord, so capture keeps waiting for the key it modifies.
@@ -62,6 +65,47 @@ impl ChordCapture {
         Self {
             _interceptor: interceptor,
         }
+    }
+}
+
+/// Holds back the auto-repeat of a chord a capture accepted until the chord is let go.
+///
+/// A capture accepts a chord on its key-down, while the keys are still held. Once the capture ends,
+/// the key's auto-repeat would perform what the chord already means, such as closing the window.
+/// The owner keeps the guard until the chord's key is released, the held modifiers change, or focus
+/// leaves; the platform may not report the key's release while Command is held, so the modifiers
+/// changing also lets go. Any other keystroke ends the guard and continues to key bindings.
+pub(crate) struct ChordRelease {
+    key: String,
+    _interceptor: Subscription,
+}
+
+impl ChordRelease {
+    /// Starts holding back repeats of `chord` in `window`.
+    pub(crate) fn hold(chord: &Keystroke, window: &Window, cx: &mut App) -> Self {
+        let capturing: AnyWindowHandle = window.window_handle();
+        let key = chord.key.clone();
+        let modifiers = chord.modifiers;
+        let holding = Rc::new(Cell::new(true));
+        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != capturing || !holding.get() {
+                return;
+            }
+            if event.keystroke.key == key && event.keystroke.modifiers == modifiers {
+                cx.stop_propagation();
+            } else {
+                holding.set(false);
+            }
+        });
+        Self {
+            key: chord.key.clone(),
+            _interceptor: interceptor,
+        }
+    }
+
+    /// Whether `event` releases the held chord's key.
+    pub(crate) fn is_released_by(&self, event: &KeyUpEvent) -> bool {
+        event.keystroke.key == self.key
     }
 }
 
