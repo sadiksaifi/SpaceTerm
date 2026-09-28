@@ -1,19 +1,29 @@
-//! Update presentation: the title bar control, the application menu commands, and their prompts.
+//! Update presentation: the title bar control, the application menu commands, their prompts, and
+//! the launch view.
 //!
 //! [`crate::updates`] owns update policy and state. This module renders that state, turns user
 //! commands into its operations, and settles every install confirmation it claims.
 
+mod launch;
+
+pub(crate) use launch::show_launch;
+
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, Global, SharedString, Subscription, Window, WindowHandle, actions, div,
+    AnyWindowHandle, App, Context, Entity, Global, SharedString, Subscription, Window,
+    WindowHandle, actions, div,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant,
-    DeterminateProgress, FrameSpinner, Icon, IconName, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, Tooltip,
+    Alert, AlertIntent, AlertOutcome, Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant,
+    ButtonVariantStyle, DeterminateProgress, FrameSpinner, Icon, IconButton, IconName, ModalAction,
+    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
+    Tooltip,
 };
 
 use super::WorkspaceManager;
+use super::appearance::gpui_color;
+use super::settings_window::SettingsWindow;
+use crate::updates::policy::UpdateStage;
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
@@ -39,7 +49,7 @@ pub(crate) fn init(cx: &mut App) {
     let states = cx.observe(&service.0, |updates, cx| observe_state(&updates, cx));
     cx.set_global(UpdatePrompts {
         results: CheckResults::default(),
-        install_requested: false,
+        install_requested: None,
         _subscriptions: [notices, states],
     });
 }
@@ -48,8 +58,17 @@ pub(crate) fn init(cx: &mut App) {
 struct UpdatePrompts {
     results: CheckResults,
     /// The user asked to install, so the confirmation is shown even over another prompt.
-    install_requested: bool,
+    install_requested: Option<InstallRequest>,
     _subscriptions: [Subscription; 2],
+}
+
+/// Where the user asked to install, which is where the confirmation belongs.
+#[derive(Clone, Copy, Debug)]
+enum InstallRequest {
+    /// The application menu or a title bar control, answered in the front Workspace window.
+    FrontWorkspace,
+    /// A window that hosts update prompts itself, such as Settings.
+    Window(AnyWindowHandle),
 }
 
 impl Global for UpdatePrompts {}
@@ -98,10 +117,18 @@ impl CheckResults {
     }
 
     /// An unrequested failure is presented too, because it interrupts a download the user began.
+    ///
+    /// A failed check interrupts nobody: it is reported only to a menu check awaiting it, and
+    /// Settings shows it in place.
     fn notice(&mut self, notice: UpdateNotice, state: &UpdateState) -> Option<UpdateState> {
         let unawaited = match notice {
             UpdateNotice::CheckFinished => false,
-            UpdateNotice::Failed => true,
+            UpdateNotice::Failed => !matches!(
+                state,
+                UpdateState::Failed {
+                    error: UpdateError::Check
+                }
+            ),
             UpdateNotice::ReadyToInstall => return None,
         };
         if !(self.awaiting || unawaited) || self.presented.as_ref() == Some(state) {
@@ -130,15 +157,11 @@ fn update_results<R>(update: impl FnOnce(&mut CheckResults) -> R, cx: &mut App) 
     Some(cx.update_global::<UpdatePrompts, _>(|prompts, _| update(&mut prompts.results)))
 }
 
-fn take_install_request(cx: &mut App) -> bool {
+fn take_install_request(cx: &mut App) -> Option<InstallRequest> {
     if !cx.has_global::<UpdatePrompts>() {
-        return false;
+        return None;
     }
-    let requested = cx.global::<UpdatePrompts>().install_requested;
-    if requested {
-        cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.install_requested = false);
-    }
-    requested
+    cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.install_requested.take())
 }
 
 fn service(cx: &App) -> Option<Entity<ApplicationUpdates>> {
@@ -177,18 +200,27 @@ fn check_for_updates(cx: &mut App) {
                 });
             }
         }
-        UpdateState::Ready { .. } => request_install(&updates, cx),
+        UpdateState::Ready { .. } => request_install(&updates, InstallRequest::FrontWorkspace, cx),
         UpdateState::Installing { version } => present_in_front_window(cx, move |window, cx| {
             present_finish_install(&version, window, cx)
         }),
     }
 }
 
-fn request_install(updates: &Entity<ApplicationUpdates>, cx: &mut App) {
+fn request_install(updates: &Entity<ApplicationUpdates>, request: InstallRequest, cx: &mut App) {
     if cx.has_global::<UpdatePrompts>() {
-        cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.install_requested = true);
+        cx.update_global::<UpdatePrompts, _>(|prompts, _| {
+            prompts.install_requested = Some(request);
+        });
     }
     updates.update(cx, |updates, cx| updates.request_install_confirmation(cx));
+}
+
+/// Asks to install from a window that presents the confirmation itself.
+pub(crate) fn request_install_from(window: AnyWindowHandle, cx: &mut App) {
+    if let Some(updates) = service(cx) {
+        request_install(&updates, InstallRequest::Window(window), cx);
+    }
 }
 
 fn receive_notice(notice: UpdateNotice, cx: &mut App) {
@@ -203,13 +235,22 @@ fn receive_notice(notice: UpdateNotice, cx: &mut App) {
             }
         }
         UpdateNotice::ReadyToInstall => {
-            let requested = take_install_request(cx);
+            let request = take_install_request(cx);
+            // An unrequested confirmation waits for the button rather than stacking behind
+            // another decision. The ready control stays prominent until the user acts.
+            let requested = request.is_some();
+            if let Some(InstallRequest::Window(handle)) = request
+                && let Some(settings) = handle.downcast::<SettingsWindow>()
+                && settings
+                    .update(cx, |_, window, cx| present_install(window, cx))
+                    .is_ok()
+            {
+                return;
+            }
             let Some(handle) = front_workspace_window(cx) else {
                 return;
             };
             let _ = handle.update(cx, |_, window, cx| {
-                // An unrequested confirmation waits for the button rather than stacking behind
-                // another decision. The ready control stays prominent until the user acts.
                 if requested || !spaceterm_ui::window_modal_is_open(window, cx) {
                     present_install(window, cx);
                 }
@@ -566,6 +607,16 @@ enum ControlGlyph {
     Progress(f32),
     Activity,
     Restart,
+    Overdue,
+}
+
+/// How far the control reaches for attention after the user has put an update off.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlReminder {
+    /// The control names its step in words instead of the version, in its ordinary accent.
+    Gentle,
+    /// The control also takes the warning paint and glyph.
+    Overdue,
 }
 
 /// What activating the title bar control does.
@@ -582,6 +633,10 @@ enum ControlCommand {
 /// The label stays the release version while the glyph and emphasis carry the phase, so the
 /// control keeps its width and place from download to restart. Accent paint appears only when
 /// the next step is the user's. Every glyph is unframed so the capsule is the only outline.
+///
+/// A reminder prefixes the version with the user's step in words, and stays until the user
+/// dismisses it or acts. It lives in the title bar, so it never covers or moves a Pane and never
+/// takes focus.
 #[derive(Clone, Debug, PartialEq)]
 struct ControlPresentation {
     label: SharedString,
@@ -589,6 +644,7 @@ struct ControlPresentation {
     glyph: ControlGlyph,
     prominent: bool,
     command: Option<ControlCommand>,
+    reminder: Option<ControlReminder>,
 }
 
 impl ControlPresentation {
@@ -599,6 +655,7 @@ impl ControlPresentation {
             glyph,
             prominent: false,
             command: Some(ControlCommand::OfferStop),
+            reminder: None,
         };
         let presentation = match state {
             // Until a release exists there is nothing to show. A check reports through its alert.
@@ -613,6 +670,7 @@ impl ControlPresentation {
                 glyph: ControlGlyph::Download,
                 prominent: true,
                 command: Some(ControlCommand::Download),
+                reminder: None,
             },
             UpdateState::Downloading { version, .. } | UpdateState::Verifying { version }
                 if cancelling =>
@@ -657,6 +715,7 @@ impl ControlPresentation {
                 glyph: ControlGlyph::Restart,
                 prominent: true,
                 command: Some(ControlCommand::RequestInstall),
+                reminder: None,
             },
             // The install was confirmed. Reaching this state visibly means the quit was cancelled.
             UpdateState::Installing { version } => Self {
@@ -665,9 +724,32 @@ impl ControlPresentation {
                 glyph: ControlGlyph::Restart,
                 prominent: true,
                 command: Some(ControlCommand::RetryInstall),
+                reminder: None,
             },
         };
         Some(presentation)
+    }
+
+    /// Applies the service's pending reminder. A reminder speaks only when the next step is the
+    /// user's: while the service works there is nothing to ask for.
+    fn remind(mut self, reminder: Option<UpdateStage>) -> Self {
+        let reminder = match reminder {
+            Some(UpdateStage::Warning) => ControlReminder::Gentle,
+            Some(UpdateStage::Overdue) => ControlReminder::Overdue,
+            Some(UpdateStage::Optional) | None => return self,
+        };
+        let step = match self.command {
+            Some(ControlCommand::Download) => "Download",
+            Some(ControlCommand::RequestInstall | ControlCommand::RetryInstall) => "Install",
+            Some(ControlCommand::OfferStop) | None => return self,
+        };
+        if reminder == ControlReminder::Overdue {
+            self.glyph = ControlGlyph::Overdue;
+            self.tooltip = format!("This update is overdue. {}", self.tooltip).into();
+        }
+        self.label = format!("{step} {}", self.label).into();
+        self.reminder = Some(reminder);
+        self
     }
 }
 
@@ -711,7 +793,9 @@ impl UpdateControl {
                     });
                 });
             }
-            ControlCommand::RequestInstall => request_install(&updates, cx),
+            ControlCommand::RequestInstall => {
+                request_install(&updates, InstallRequest::FrontWorkspace, cx)
+            }
             ControlCommand::RetryInstall => retry_install(cx),
         }
     }
@@ -725,6 +809,7 @@ impl Render for UpdateControl {
         let updates = updates.read(cx);
         let Some(presentation) =
             ControlPresentation::resolve(updates.state(), updates.is_cancelling())
+                .map(|presentation| presentation.remind(updates.reminder()))
         else {
             return div().into_any_element();
         };
@@ -736,6 +821,7 @@ impl Render for UpdateControl {
         let glyph = presentation.glyph;
         let tooltip = presentation.tooltip.clone();
         let command = presentation.command;
+        let reminder = presentation.reminder;
         let button = Button::new("update-control", presentation.label)
             .variant(if presentation.prominent {
                 ButtonVariant::Primary
@@ -752,6 +838,9 @@ impl Render for UpdateControl {
                 }
                 ControlGlyph::Restart => {
                     Icon::new(IconName::RotateCw, glyph_size, foreground).into_any_element()
+                }
+                ControlGlyph::Overdue => {
+                    Icon::new(IconName::TriangleAlert, glyph_size, foreground).into_any_element()
                 }
                 ControlGlyph::Progress(fraction) => DeterminateProgress::new(f64::from(fraction))
                     .map_or_else(
@@ -775,9 +864,43 @@ impl Render for UpdateControl {
                 Tooltip::new("update-control-tooltip", tooltip)
                     .debug_selector("update-control-tooltip"),
             )
+            .when(reminder == Some(ControlReminder::Overdue), |button| {
+                let pair = appearance.semantic_text_pairs.warning_status;
+                let paint = |amount| {
+                    ButtonPaint::new(
+                        gpui_color(pair.background.mix(pair.primary, amount)),
+                        gpui_color(pair.primary),
+                        gpui::rgba(0),
+                    )
+                };
+                button.contextual_style(
+                    ButtonVariantStyle::new(paint(0.0), paint(0.12), paint(0.2), paint(0.0)),
+                    gpui_color(pair.primary),
+                )
+            })
             .when_some(command, |button, command| {
                 button.on_activate(move |_, window, cx| Self::activate(command, window, cx))
             });
+        // Dismissing returns the control to its version label until the reminder comes due again.
+        let dismiss = reminder.map(|_| {
+            IconButton::new(
+                "update-reminder-dismiss",
+                "Remind Me Later",
+                move |foreground| Icon::new(IconName::X, glyph_size, foreground).into_any_element(),
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Small)
+            .debug_selector("update-reminder-dismiss")
+            .tooltip(
+                Tooltip::new("update-reminder-dismiss-tooltip", "Remind Me Later")
+                    .debug_selector("update-reminder-dismiss-tooltip"),
+            )
+            .on_activate(|_, _, cx| {
+                if let Some(updates) = service(cx) {
+                    updates.update(cx, |updates, cx| updates.dismiss_reminder(cx));
+                }
+            })
+        });
         // The control owns its clicks inside the title bar's drag region. Its trailing edge
         // stops where the Pane beneath it stops, and it keeps one frame gap from the Tabs.
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
@@ -786,7 +909,15 @@ impl Render for UpdateControl {
             .flex_none()
             .pl(frame.space())
             .pr(frame.window_edge_inset())
-            .child(div().block_mouse_except_scroll().child(button))
+            .child(
+                div()
+                    .block_mouse_except_scroll()
+                    .flex()
+                    .items_center()
+                    .gap(frame.space() / 2.0)
+                    .child(button)
+                    .children(dismiss),
+            )
             .into_any_element()
     }
 }
@@ -995,6 +1126,69 @@ mod tests {
             let mut results = CheckResults::default();
             assert_eq!(deliver(&mut results, &up_to_date, None, observer_first), []);
         }
+    }
+
+    #[test]
+    fn reminder_should_name_the_users_step_and_escalate_only_when_overdue() {
+        let version = || "0.4.2".to_owned();
+        let remind = |state: UpdateState, stage| {
+            resolve(state)
+                .expect("an update shows the control")
+                .remind(stage)
+        };
+
+        let quiet = remind(UpdateState::Ready { version: version() }, None);
+        assert_eq!((quiet.label.as_ref(), quiet.reminder), ("0.4.2", None));
+        let optional = remind(
+            UpdateState::Ready { version: version() },
+            Some(UpdateStage::Optional),
+        );
+        assert_eq!(optional.reminder, None);
+
+        let gentle = remind(
+            UpdateState::Ready { version: version() },
+            Some(UpdateStage::Warning),
+        );
+        assert_eq!(gentle.label.as_ref(), "Install 0.4.2");
+        assert_eq!(gentle.reminder, Some(ControlReminder::Gentle));
+        assert_eq!(gentle.glyph, ControlGlyph::Restart);
+        assert_eq!(gentle.command, Some(ControlCommand::RequestInstall));
+
+        let overdue = remind(
+            UpdateState::Available { version: version() },
+            Some(UpdateStage::Overdue),
+        );
+        assert_eq!(overdue.label.as_ref(), "Download 0.4.2");
+        assert_eq!(overdue.reminder, Some(ControlReminder::Overdue));
+        assert_eq!(overdue.glyph, ControlGlyph::Overdue);
+        assert_eq!(overdue.command, Some(ControlCommand::Download));
+    }
+
+    #[test]
+    fn reminder_should_wait_while_the_service_works() {
+        let downloading = resolve(UpdateState::Downloading {
+            version: "0.4.2".to_owned(),
+            received: 1,
+            total: 2,
+        })
+        .expect("download shows the control")
+        .remind(Some(UpdateStage::Overdue));
+        assert_eq!(downloading.reminder, None);
+        assert_eq!(downloading.label.as_ref(), "0.4.2");
+    }
+
+    #[test]
+    fn failed_check_should_reach_only_a_check_awaiting_it() {
+        let failed = UpdateState::Failed {
+            error: UpdateError::Check,
+        };
+        let mut results = CheckResults::default();
+        assert_eq!(results.notice(UpdateNotice::Failed, &failed), None);
+        results.request();
+        assert_eq!(
+            results.notice(UpdateNotice::Failed, &failed),
+            Some(failed.clone())
+        );
     }
 
     #[test]

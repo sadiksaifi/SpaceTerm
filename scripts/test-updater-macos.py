@@ -52,7 +52,7 @@ def main():
                 "-framework", "Sparkle", "-framework", "AppKit", "-framework", "Foundation",
                 "-Wl,-rpath,@executable_path/../Frameworks", str(ROOT / "tests/macos_updater_fixture.m"),
                 str(ROOT / "src/platform/macos_updater.m"), "-o", str(binary))
-            for mode in ("tampered", "cancel", "install"):
+            for mode in ("tampered", "cancel", "install", "quit"):
                 directory = root / mode
                 directory.mkdir()
                 log = directory / "events"
@@ -103,7 +103,11 @@ def main():
                         events = log.read_text()
                         if mode == "install" and "relaunched" in events:
                             break
-                        if mode != "install" and process.poll() is not None:
+                        if mode == "quit" and process.poll() is not None:
+                            installed = plistlib.loads((apps[0] / "Contents/Info.plist").read_bytes())["CFBundleVersion"]
+                            if installed == "0.1.1":
+                                break
+                        elif mode != "install" and process.poll() is not None:
                             break
                         time.sleep(0.1)
                     else:
@@ -116,6 +120,11 @@ def main():
                         assert "event:7:3" in events and "event:5:" not in events and version == "0.1.0", events
                     elif mode == "cancel":
                         assert "cancelled" in events and "event:8:" in events and version == "0.1.0", events
+                    elif mode == "quit":
+                        assert "normal-quit" in events and "confirmed" not in events and "relaunched" not in events and version == "0.1.1", events
+                        # A later explicit launch uses the updated bundle without an update prompt.
+                        run(str(apps[0] / "Contents/MacOS/Fixture"))
+                        assert "relaunched" in log.read_text()
                     else:
                         assert "confirmed" in events and "relaunched" in events and version == "0.1.1", events
                     print(f"{mode}: passed", flush=True)

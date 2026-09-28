@@ -4,7 +4,7 @@
 
 // Only bounded classifications and a validated version cross into Rust. Native errors stay here.
 enum { SPTAvailable = 1, SPTCurrent, SPTDownloading, SPTVerifying, SPTReady,
-       SPTInstalling, SPTFailed, SPTFinished };
+       SPTInstalling, SPTFailed, SPTFinished, SPTMetadata };
 enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError,
        SPTInstallationError, SPTReadOnlyError };
 
@@ -55,6 +55,8 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
     self.choice = reply;
     self.ready = state.stage == SPUUserUpdateStageInstalling;
     if (self.cancelling) { [self cancel]; return; }
+    NSTimeInterval published = item.date.timeIntervalSince1970;
+    [self emit:SPTMetadata version:nil first:published > 0 ? (uint64_t)published : 0 second:self.ready];
     [self emit:SPTAvailable version:item.displayVersionString first:0 second:0];
     if (self.ready) [self emit:SPTReady];
 }
@@ -107,7 +109,8 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
     NSString *version = item.versionString;
     NSString *display = item.displayVersionString;
     NSString *url = item.fileURL.absoluteString;
-    BOOL valid = self.validator && version.length <= 48 && display.length <= 48 && url.length <= 512 &&
+    BOOL valid = item.date && item.date.timeIntervalSince1970 > 0 &&
+        item.date.timeIntervalSince1970 <= NSDate.date.timeIntervalSince1970 + 300 && self.validator && version.length <= 48 && display.length <= 48 && url.length <= 512 &&
         [item.installationType isEqualToString:@"application"] &&
         self.validator(version.UTF8String, display.UTF8String, url.UTF8String, item.informationOnlyUpdate);
     if (!valid && error) *error = [NSError errorWithDomain:@"SpaceTermUpdate" code:SPTVerificationError userInfo:@{NSLocalizedDescriptionKey: @"The update metadata could not be verified."}];
@@ -181,5 +184,27 @@ bool spt_updater_install(void *pointer) {
 void spt_updater_destroy(void *pointer) {
     SPTUpdateSession *session = (__bridge_transfer SPTUpdateSession *)pointer;
     session.driver.callback = NULL;
-    [session.driver cancel];
+    if (!session.driver.authorized) [session.driver cancel];
+}
+
+bool spt_updater_finish_on_quit(void *pointer) {
+    SPTUpdateDriver *driver = ((__bridge SPTUpdateSession *)pointer).driver;
+    if (![NSThread isMainThread] || !driver.ready || !driver.choice || driver.cancelling) return false;
+    driver.authorized = YES;
+    void (^reply)(SPUUserUpdateChoice) = driver.choice; driver.choice = nil;
+    // Dismiss leaves Sparkle's verified installer waiting for normal process termination.
+    // It does not request termination or relaunch the application.
+    reply(SPUUserUpdateChoiceDismiss);
+    return true;
+}
+uint64_t spt_updater_read_history(void *pointer, uint8_t *bytes, uint64_t capacity) {
+    if (![NSThread isMainThread] || !pointer || capacity > 4096) return 0;
+    NSData *data = [NSUserDefaults.standardUserDefaults dataForKey:@"SpaceTermUpdateHistory"];
+    if (!data || data.length > capacity) return 0;
+    memcpy(bytes, data.bytes, data.length);
+    return data.length;
+}
+void spt_updater_write_history(void *pointer, const uint8_t *bytes, uint64_t length) {
+    if (![NSThread isMainThread] || !pointer || length > 4096) return;
+    [NSUserDefaults.standardUserDefaults setObject:[NSData dataWithBytes:bytes length:length] forKey:@"SpaceTermUpdateHistory"];
 }

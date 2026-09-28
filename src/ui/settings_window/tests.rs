@@ -123,6 +123,7 @@ fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
         SettingsSectionId::Font => "settings-navigation-settings-section-font",
         SettingsSectionId::Themes => "settings-navigation-settings-section-themes",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
+        SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
     };
     click(selector, cx);
 }

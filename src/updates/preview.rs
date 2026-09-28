@@ -12,6 +12,11 @@ const STEP: Duration = Duration::from_millis(400);
 #[derive(Clone, Copy)]
 pub(crate) enum Scenario {
     Available,
+    Warning,
+    Overdue,
+    StartupOverdue,
+    StartupReady,
+    Offline,
     UpToDate,
     CheckError,
     DownloadError,
@@ -23,6 +28,11 @@ impl Scenario {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "available" => Self::Available,
+            "warning" => Self::Warning,
+            "overdue" => Self::Overdue,
+            "startup-overdue" => Self::StartupOverdue,
+            "startup-ready" => Self::StartupReady,
+            "offline" => Self::Offline,
             "up-to-date" => Self::UpToDate,
             "check-error" => Self::CheckError,
             "download-error" => Self::DownloadError,
@@ -94,11 +104,34 @@ impl UpdateAdapter for PreviewUpdates {
                 (STEP, UpdateEvent::UpToDate),
                 (Duration::ZERO, UpdateEvent::Finished),
             ],
-            Scenario::CheckError => vec![
+            Scenario::CheckError | Scenario::Offline => vec![
                 (STEP, UpdateEvent::Failed(UpdateError::Check)),
                 (Duration::ZERO, UpdateEvent::Finished),
             ],
-            _ => vec![(STEP, UpdateEvent::Available(PREVIEW_VERSION.into()))],
+            _ => {
+                let age = match self.scenario {
+                    Scenario::Warning => super::policy::DAY + 60,
+                    Scenario::Overdue | Scenario::StartupOverdue => 2 * super::policy::DAY + 60,
+                    _ => 0,
+                };
+                let mut events = vec![
+                    (
+                        STEP,
+                        UpdateEvent::ReleaseMetadata {
+                            published_at: super::now().saturating_sub(age),
+                            prepared: matches!(self.scenario, Scenario::StartupReady),
+                        },
+                    ),
+                    (
+                        Duration::ZERO,
+                        UpdateEvent::Available(PREVIEW_VERSION.into()),
+                    ),
+                ];
+                if matches!(self.scenario, Scenario::StartupReady) {
+                    events.push((STEP, UpdateEvent::Ready));
+                }
+                events
+            }
         };
         self.play(events)
     }
@@ -137,6 +170,14 @@ impl UpdateAdapter for PreviewUpdates {
                 let _ = sender.try_send(UpdateEvent::Finished);
             }
         }
+    }
+
+    fn preview_running_session(&self) -> bool {
+        matches!(self.scenario, Scenario::Warning | Scenario::Overdue)
+    }
+
+    fn finish_on_quit(&self) -> Result<(), UpdateError> {
+        self.play(vec![(Duration::ZERO, UpdateEvent::Finished)])
     }
 
     fn install(&self) -> Result<(), UpdateError> {

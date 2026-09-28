@@ -27,6 +27,9 @@
       "items": {
         "$ref": "#/$defs/terminalTheme"
       }
+    },
+    "updates": {
+      "$ref": "#/$defs/updates"
     }
   },
   "$defs": {
@@ -414,6 +417,33 @@
         },
         "origin": {
           "$ref": "#/$defs/themeOrigin"
+        }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "automatic_downloads": {
+          "type": "boolean",
+          "default": true
+        },
+        "check_interval": {
+          "enum": [
+            "hourly",
+            "every_six_hours",
+            "daily"
+          ],
+          "default": "daily"
+        },
+        "reminder_interval": {
+          "enum": [
+            "two_hours",
+            "four_hours",
+            "eight_hours",
+            "daily"
+          ],
+          "default": "two_hours"
         }
       }
     }

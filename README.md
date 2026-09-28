@@ -87,15 +87,29 @@ builds. Intel Macs are unsupported. Drag SpaceTerm into Applications before open
 These builds use ad hoc signing. If macOS blocks the first launch, follow Apple's
 [Open Anyway instructions](https://support.apple.com/en-us/102445) in Privacy & Security.
 
-Installed releases check for updates after launch and daily while running. Update commands are
-available in the SpaceTerm menu. Updates are verified with the application's embedded public key;
-installation and restart require confirmation. Development builds do not update themselves.
+Installed releases check at startup and daily while running. Downloads are automatic by default.
+Settings > Updates controls downloads, check frequency, and overdue reminder frequency. The
+SpaceTerm menu also provides Check for Updates. Every update is verified with the embedded public
+key. Restarting an open app requires confirmation; ordinary quit can finish a verified update so
+its next launch is already current. Development builds do not update themselves.
 
-To preview the update UI before publishing, run `mise run dev:macos:updates`, then choose
-**SpaceTerm Dev > Check for Updates…**. The real controls show a synthetic `0.1.1` update,
-download progress, and restart confirmation. Nothing is downloaded, installed, or restarted.
-The optional scenario argument accepts `up-to-date`, `check-error`, `download-error`,
-`verification-error`, or `install-error`. This mock updater is excluded from release builds.
+Each release is optional for 24 hours after its signed publication date, then shows a gentle
+reminder. After 48 hours an open app shows a dismissible reminder every two hours by default and
+keeps all terminal work usable. A fresh launch obtains and installs an overdue update before
+creating Workspaces. Failed or stalled checks/downloads allow access, including offline. A prepared
+update resumes automatically on a fresh launch. Settings cannot change these deadlines.
+
+To preview without publishing, run `mise run dev:macos:updates`. The real controls use a synthetic
+`0.1.1` update. Nothing is downloaded, installed, or restarted. Preview scenarios include:
+
+- `warning` and `overdue`: reminders in an open Workspace.
+- `startup-overdue` and `startup-ready`: automatic startup update flow.
+- `offline`: access after a failed startup check.
+- `up-to-date`, `check-error`, `download-error`, `verification-error`, and `install-error`: results
+  and recoverable failures.
+
+For example, `mise run dev:macos:updates overdue` previews the overdue banner. Quit the preview
+before selecting another scenario. The mock updater is excluded from release builds.
 
 Releases are managed by [Tagsmith](https://tagsmith.site/).
 Use `npx tagsmith@latest` to create and validate release tags. The annotated Git tag supplies every

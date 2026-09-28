@@ -19,11 +19,19 @@ pub(super) enum SettingsSectionId {
     Themes,
     /// System permissions that tools running in SpaceTerm rely on.
     Privacy,
+    /// The installed version, the latest check, and how SpaceTerm keeps itself current.
+    Updates,
 }
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 4] = [Self::Interface, Self::Font, Self::Themes, Self::Privacy];
+    pub(super) const ALL: [Self; 5] = [
+        Self::Interface,
+        Self::Font,
+        Self::Themes,
+        Self::Privacy,
+        Self::Updates,
+    ];
 
     pub(super) const fn title(self) -> &'static str {
         match self {
@@ -31,6 +39,7 @@ impl SettingsSectionId {
             Self::Font => "Font",
             Self::Themes => "Themes",
             Self::Privacy => "Privacy",
+            Self::Updates => "Updates",
         }
     }
 
@@ -44,6 +53,9 @@ impl SettingsSectionId {
             Self::Privacy => {
                 "System permissions that voice and other tools running in SpaceTerm rely on."
             }
+            Self::Updates => {
+                "SpaceTerm keeps itself current in the background and asks before it restarts."
+            }
         }
     }
 
@@ -53,6 +65,7 @@ impl SettingsSectionId {
             Self::Font => "settings-section-font",
             Self::Themes => "settings-section-themes",
             Self::Privacy => "settings-section-privacy",
+            Self::Updates => "settings-section-updates",
         }
     }
 }
@@ -78,6 +91,12 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
+    /// The installed version, the latest check, and the next step the update service offers.
+    UpdateStatus,
+    AutomaticUpdateDownloads,
+    UpdateCheckInterval,
+    /// How often an overdue update is brought back after it was dismissed.
+    UpdateReminderInterval,
 }
 
 impl SettingsRowId {
@@ -105,7 +124,14 @@ impl SettingsRowId {
             Self::TerminalLineHeight => ResetTarget::TerminalLineHeight,
             Self::TerminalItalic => ResetTarget::TerminalItalic,
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
-            Self::InstalledThemes | Self::MicrophoneAccess => {
+            // Update preferences live outside the appearance preferences, so their rows reset
+            // through their own field instead of an appearance reset target.
+            Self::InstalledThemes
+            | Self::MicrophoneAccess
+            | Self::UpdateStatus
+            | Self::AutomaticUpdateDownloads
+            | Self::UpdateCheckInterval
+            | Self::UpdateReminderInterval => {
                 return None;
             }
         })
@@ -341,6 +367,67 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
         ],
         selector: "settings-row-microphone-access",
     },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateStatus,
+        section: SettingsSectionId::Updates,
+        // The installed version leads the page and needs no title: it is what the page is about.
+        group: "",
+        label: super::updates::CURRENT_VERSION_LABEL,
+        keywords: &[
+            "version",
+            "check",
+            "check now",
+            "check for updates",
+            "last checked",
+            "update",
+            "upgrade",
+            "restart",
+            "install",
+            "release",
+            "about",
+        ],
+        selector: "settings-row-update-status",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::AutomaticUpdateDownloads,
+        section: SettingsSectionId::Updates,
+        group: "Automatic updates",
+        label: "Download updates automatically",
+        keywords: &["automatic", "background", "download", "update", "auto"],
+        selector: "settings-row-automatic-update-downloads",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateCheckInterval,
+        section: SettingsSectionId::Updates,
+        group: "Automatic updates",
+        label: "Check for updates",
+        keywords: &[
+            "frequency",
+            "interval",
+            "hourly",
+            "daily",
+            "schedule",
+            "update",
+        ],
+        selector: "settings-row-update-check-interval",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateReminderInterval,
+        section: SettingsSectionId::Updates,
+        group: "Automatic updates",
+        label: "Remind me about overdue updates",
+        keywords: &[
+            "reminder",
+            "remind",
+            "overdue",
+            "banner",
+            "notification",
+            "frequency",
+            "interval",
+            "update",
+        ],
+        selector: "settings-row-update-reminder-interval",
+    },
 ];
 
 #[cfg(test)]
@@ -350,7 +437,7 @@ mod tests {
     use super::*;
 
     /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 14] = [
+    const EVERY_ROW: [SettingsRowId; 18] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -365,6 +452,10 @@ mod tests {
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
         SettingsRowId::MicrophoneAccess,
+        SettingsRowId::UpdateStatus,
+        SettingsRowId::AutomaticUpdateDownloads,
+        SettingsRowId::UpdateCheckInterval,
+        SettingsRowId::UpdateReminderInterval,
     ];
 
     #[test]
@@ -464,10 +555,7 @@ mod tests {
     fn theme_search_matches_only_the_themes_section() {
         assert_eq!(
             matching_rows("theme").into_iter().collect::<HashSet<_>>(),
-            HashSet::from([
-                SettingsRowId::TerminalTheme,
-                SettingsRowId::InstalledThemes,
-            ])
+            HashSet::from([SettingsRowId::TerminalTheme, SettingsRowId::InstalledThemes,])
         );
     }
 
@@ -565,11 +653,17 @@ mod tests {
     }
 
     #[test]
-    fn every_preference_row_maps_to_a_reset_target() {
+    fn every_appearance_preference_row_maps_to_a_reset_target() {
         for row in ROWS {
+            // Update rows reset their own field; the Updates section tests cover that path.
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::InstalledThemes | SettingsRowId::MicrophoneAccess
+                SettingsRowId::InstalledThemes
+                    | SettingsRowId::MicrophoneAccess
+                    | SettingsRowId::UpdateStatus
+                    | SettingsRowId::AutomaticUpdateDownloads
+                    | SettingsRowId::UpdateCheckInterval
+                    | SettingsRowId::UpdateReminderInterval
             );
             assert_eq!(
                 row.id.reset_target(Appearance::Light).is_some(),

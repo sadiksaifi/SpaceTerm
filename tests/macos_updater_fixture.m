@@ -23,6 +23,9 @@ static void event(void *context, uint32_t kind, const char *version, uint64_t fi
         if ([mode isEqualToString:@"install"]) {
             record(@"confirmed");
             dispatch_async(dispatch_get_main_queue(), ^{ spt_updater_install(session); });
+        } else if ([mode isEqualToString:@"quit"]) {
+            record(@"normal-quit");
+            dispatch_async(dispatch_get_main_queue(), ^{ spt_updater_finish_on_quit(session); });
         } else {
             record(@"cancelled");
             dispatch_async(dispatch_get_main_queue(), ^{ spt_updater_cancel(session); });

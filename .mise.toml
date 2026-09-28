@@ -117,11 +117,11 @@ run = "exec bash scripts/run-development-app-macos.sh dev"
 [tasks."dev:macos:updates"]
 description = "Preview the real update UI in SpaceTerm Dev with a simulated updater"
 usage = '''
-arg "[scenario]" help="available, up-to-date, check-error, download-error, verification-error, install-error" default="available"
+arg "[scenario]" help="available, warning, overdue, startup-overdue, startup-ready, offline, up-to-date, check-error, download-error, verification-error, install-error" default="available"
 '''
 run = '''
 case "${usage_scenario}" in
-  available|up-to-date|check-error|download-error|verification-error|install-error) ;;
+  available|warning|overdue|startup-overdue|startup-ready|offline|up-to-date|check-error|download-error|verification-error|install-error) ;;
   *) echo "Unknown update preview scenario" >&2; exit 2 ;;
 esac
 echo "Update preview: ${usage_scenario}. Choose SpaceTerm Dev > Check for Updates…"

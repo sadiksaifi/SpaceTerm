@@ -867,6 +867,13 @@ impl Button {
         self
     }
 
+    /// Supplies complete paints resolved for a contextual meaning or host, such as a warning.
+    /// Interaction, disabled state, focus geometry, and metrics remain owned by the button.
+    pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.core.contextual_style = Some((style, focus_border));
+        self
+    }
+
     /// Creates a small secondary text button. Its label is also its logical accessibility name.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
