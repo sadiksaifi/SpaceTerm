@@ -21,7 +21,8 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
 use crate::keybindings::{
-    Command, KeybindingState, Reservation, ResolvedKeymap, Shortcut, ShortcutRejection,
+    Command, KeybindingPreferences, KeybindingState, Reservation, ResolvedKeymap, Shortcut,
+    ShortcutRejection,
     SystemReservation, TerminalConvention,
 };
 
@@ -35,8 +36,16 @@ const SEARCH_BY_SHORTCUT: &str = "Search by Shortcut";
 /// that narrows the rows.
 pub(super) struct ShortcutRows {
     recorders: BTreeMap<Command, Entity<ShortcutRecorder>>,
-    notice: Option<(Command, ShortcutNotice)>,
+    notice: Option<RowNotice>,
     search: ShortcutSearch,
+}
+
+/// A notice and the keybindings it describes. It shows only while the draft still has them, so a
+/// Reload, a reset, or an external change that replaces them retires it.
+struct RowNotice {
+    command: Command,
+    notice: ShortcutNotice,
+    keybindings: KeybindingPreferences,
 }
 
 /// The Keybindings search: text matched against Command names and Shortcuts, or one chord pressed
@@ -112,6 +121,12 @@ impl ShortcutRows {
                         settings.apply_recording(command, event, cx);
                     },
                 )
+                .detach();
+                // The section is longer than the window, so Tab can reach a row scrolled out of
+                // sight.
+                cx.on_focus(&recorder.read(cx).focus_handle(), window, move |settings, _, cx| {
+                    settings.scroll_row_into_view(SettingsRowId::Shortcut(command), cx);
+                })
                 .detach();
                 (command, recorder)
             })
@@ -502,13 +517,20 @@ impl SettingsWindow {
         cx: &App,
     ) -> Option<ShortcutDescription> {
         let presentation = DesktopPresentation::get(cx);
-        let (text, tone) = match self.shortcuts.notice.as_ref() {
-            Some((owner, ShortcutNotice::Refused(reason))) if *owner == command => {
+        let keybindings = &self.editor.document().keybindings;
+        let notice = self
+            .shortcuts
+            .notice
+            .as_ref()
+            .filter(|notice| notice.keybindings == *keybindings)
+            .map(|notice| (notice.command, &notice.notice));
+        let (text, tone) = match notice {
+            Some((owner, ShortcutNotice::Refused(reason))) if owner == command => {
                 (reason.clone(), CaptionTone::Error)
             }
             // A reassignment is marked on both rows, so the Command that lost its Shortcut is as
             // easy to find as the one that took it.
-            Some((owner, ShortcutNotice::Reassigned { from })) if *owner == command => {
+            Some((owner, ShortcutNotice::Reassigned { from })) if owner == command => {
                 (format!("Removed from {}.", from.label()).into(), CaptionTone::Warning)
             }
             Some((owner, ShortcutNotice::Reassigned { from })) if *from == command => (
@@ -521,10 +543,7 @@ impl SettingsWindow {
                     CaptionTone::Warning,
                 ),
                 KeybindingState::Blocked(reason) => {
-                    let chord = self
-                        .editor
-                        .document()
-                        .keybindings
+                    let chord = keybindings
                         .get(command)
                         .and_then(Option::as_ref)
                         .map(|shortcut| presentation.format(shortcut))?;
@@ -572,7 +591,11 @@ impl SettingsWindow {
     ) {
         let shortcut = match event {
             ShortcutRecorderEvent::Rejected(reason) => {
-                self.shortcuts.notice = Some((command, ShortcutNotice::Refused(reason.clone())));
+                self.shortcuts.notice = Some(RowNotice {
+                    command,
+                    notice: ShortcutNotice::Refused(reason.clone()),
+                    keybindings: self.editor.document().keybindings.clone(),
+                });
                 cx.notify();
                 return;
             }
@@ -581,7 +604,7 @@ impl SettingsWindow {
                     .shortcuts
                     .notice
                     .as_ref()
-                    .is_some_and(|(owner, _)| *owner == command)
+                    .is_some_and(|notice| notice.command == command)
                 {
                     self.shortcuts.dismiss_notice();
                     cx.notify();
@@ -603,20 +626,22 @@ impl SettingsWindow {
             |draft| assigned = Some(profile.assign(&mut draft.keybindings, command, shortcut)),
             cx,
         );
-        self.shortcuts.notice = match assigned {
+        let notice = match assigned {
             Some(Ok(reassignment)) => reassignment
                 .displaced
-                .map(|from| (command, ShortcutNotice::Reassigned { from })),
-            Some(Err(reservation)) => Some((
-                command,
-                ShortcutNotice::Refused(reservation_message(
-                    reservation,
-                    "This shortcut",
-                    DesktopPresentation::get(cx),
-                )),
-            )),
+                .map(|from| ShortcutNotice::Reassigned { from }),
+            Some(Err(reservation)) => Some(ShortcutNotice::Refused(reservation_message(
+                reservation,
+                "This shortcut",
+                DesktopPresentation::get(cx),
+            ))),
             None => None,
         };
+        self.shortcuts.notice = notice.map(|notice| RowNotice {
+            command,
+            notice,
+            keybindings: self.editor.document().keybindings.clone(),
+        });
         cx.notify();
     }
 }

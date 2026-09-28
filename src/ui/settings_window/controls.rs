@@ -8,7 +8,7 @@ use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Rgba, SharedString, StyledText, Window, div, px};
+use gpui::{AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, div, px};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -155,7 +155,10 @@ pub(super) struct SettingsGroup {
     selector: String,
     title: &'static str,
     rows: Vec<AnyElement>,
+    on_rows_prepainted: Option<RowsPrepainted>,
 }
+
+type RowsPrepainted = Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App)>;
 
 impl SettingsGroup {
     pub(super) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
@@ -163,7 +166,17 @@ impl SettingsGroup {
             selector,
             title,
             rows,
+            on_rows_prepainted: None,
         }
+    }
+
+    /// Reports where each row was laid out on every frame, in row order and window coordinates.
+    pub(super) fn on_rows_prepainted(
+        mut self,
+        listener: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_rows_prepainted = Some(Box::new(listener));
+        self
     }
 
     pub(super) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
@@ -235,20 +248,15 @@ impl SettingsGroup {
                         .overflow_hidden()
                         // A card is a surface resting on the page's base, lighter or brighter than it.
                         .bg(gpui_color(card_background))
+                        .when_some(self.on_rows_prepainted, |card, listener| {
+                            card.on_children_prepainted(listener)
+                        })
                         .children(rows),
                 ),
             )
     }
 }
 
-/// One labeled row: a label, its control, and an optional reset affordance.
-///
-/// The reset follows the label rather than the control. Most rows never carry one, so a column
-/// reserved for it at the far end would stop every control short of the right edge and leave the
-/// form wider on one side than the other. Beside the name it restores, the reset reads as a mark
-/// that this setting was changed, the control stays on the one shared right edge whether or not a
-/// reset is present, and keyboard focus reaches the reset just before the control it restores. The
-/// reset's slot is held empty on a row without one, so the label wraps at the same width either way.
 /// What a row's caption tells the reader, which selects its color.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum CaptionTone {
@@ -261,6 +269,14 @@ pub(super) enum CaptionTone {
     Error,
 }
 
+/// One labeled row: a label, its control, and an optional reset affordance.
+///
+/// The reset follows the label rather than the control. Most rows never carry one, so a column
+/// reserved for it at the far end would stop every control short of the right edge and leave the
+/// form wider on one side than the other. Beside the name it restores, the reset reads as a mark
+/// that this setting was changed, the control stays on the one shared right edge whether or not a
+/// reset is present, and keyboard focus reaches the reset just before the control it restores. The
+/// reset's slot is held empty on a row without one, so the label wraps at the same width either way.
 pub(super) struct SettingsRow {
     selector: &'static str,
     label: &'static str,

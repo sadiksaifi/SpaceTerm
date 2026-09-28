@@ -1,17 +1,18 @@
 //! The Keybindings section driven through its recorders.
 
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::keybindings::{Command, KeybindingPreferences, Shortcut};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
-use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
 use super::super::controls::CaptionTone;
 use super::ShortcutDescription;
 
@@ -19,7 +20,14 @@ fn open_keybindings(
     document: SettingsDocument,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(&document));
+    open_keybindings_with(MemoryStorage::with_document(&document), cx)
+}
+
+fn open_keybindings_with(
+    storage: Arc<MemoryStorage>,
+    cx: &mut TestAppContext,
+) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
+    let settings = crate::settings::UserSettings::load(storage);
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -508,6 +516,71 @@ fn editing_a_found_shortcut_searches_by_text_again(cx: &mut TestAppContext) {
     type_search(&window, "zoom", cx);
 
     assert_eq!(found(&window, cx), vec![Command::TogglePaneZoom]);
+}
+
+#[gpui::test]
+fn a_reassignment_caption_leaves_when_reload_replaces_the_keybindings(cx: &mut TestAppContext) {
+    let storage = MemoryStorage::with_document(&SettingsDocument::default());
+    let (window, cx) = open_keybindings_with(Arc::clone(&storage), cx);
+    storage.fail_writes(Some(StorageError::Conflict));
+    record(&window, Command::NewWorkspace, "cmd-shift-w", cx);
+    assert!(description(&window, Command::CloseTab, cx).is_some());
+
+    storage.fail_writes(None);
+    storage.repair();
+    cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
+    cx.run_until_parked();
+
+    assert_eq!(retained(&window, Command::CloseTab, cx), None);
+    assert_eq!(description(&window, Command::CloseTab, cx), None);
+    assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+}
+
+#[gpui::test]
+fn leaving_the_window_stops_searching_by_shortcut(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    click("settings-keybindings-search-by-shortcut", cx);
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!is_searching_by_shortcut(&window, cx));
+}
+
+/// The window bounds of the Command's recorder in the latest frame.
+fn recorder_bounds(command: Command, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    let selector = control_selector(SettingsRowId::Shortcut(command)).leak();
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"))
+}
+
+fn focus_recorder(window: &Entity<SettingsWindow>, command: Command, cx: &mut VisualTestContext) {
+    let recorder = window.read_with(cx, |settings, _| settings.shortcuts.recorder(command).clone());
+    recorder.update_in(cx, |recorder, window, cx| recorder.focus_handle().focus(window, cx));
+    cx.run_until_parked();
+    // The frame that reports the focus scrolls, and the next one draws the scrolled rows.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn keyboard_focus_scrolls_a_hidden_shortcut_row_into_view(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    let viewport = window.read_with(cx, |settings, _| settings.scroll.bounds());
+    let first = Command::ALL[0];
+    let last = Command::ALL[Command::ALL.len() - 1];
+    assert!(
+        recorder_bounds(last, cx).bottom() > viewport.bottom(),
+        "the last row starts below the viewport"
+    );
+
+    focus_recorder(&window, last, cx);
+    let shown = recorder_bounds(last, cx);
+    assert!(shown.top() >= viewport.top() && shown.bottom() <= viewport.bottom());
+
+    focus_recorder(&window, first, cx);
+    let shown = recorder_bounds(first, cx);
+    assert!(shown.top() >= viewport.top() && shown.bottom() <= viewport.bottom());
 }
 
 #[gpui::test]

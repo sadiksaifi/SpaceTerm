@@ -33,7 +33,7 @@ mod updates_tests;
 mod tests;
 
 use crate::ui::appearance::gpui_color;
-use std::rc::Rc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::prelude::*;
 use gpui::{
@@ -314,6 +314,9 @@ pub(crate) struct SettingsWindow {
     active_section: SettingsSectionId,
     /// The row Settings Search revealed, highlighted so the eye lands on it.
     revealed: Option<SettingsRowId>,
+    /// Where each row of the presented section was laid out in the latest frame, so keyboard focus
+    /// reaching a row outside the viewport can scroll it into view.
+    row_bounds: Rc<RefCell<HashMap<SettingsRowId, Bounds<Pixels>>>>,
     focus_handle: FocusHandle,
     /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
     navigation_focus: FocusHandle,
@@ -461,9 +464,13 @@ impl SettingsWindow {
         .detach();
         // Authorization can change in the system's settings while this window is in the background,
         // most often right after the Denied recovery sent the person there.
+        // Leaving the window also ends searching by Shortcut, which keeps focus but must not keep
+        // taking the chords pressed on return.
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
+            } else {
+                settings.shortcuts.end_search_capture(cx);
             }
             cx.notify();
         })
@@ -495,6 +502,7 @@ impl SettingsWindow {
             scrollbar,
             active_section: SettingsSectionId::Interface,
             revealed: None,
+            row_bounds: Rc::default(),
             focus_handle,
             navigation_focus,
             navigation_focus_visible: true,
@@ -575,6 +583,30 @@ impl SettingsWindow {
         self.query = SharedString::default();
         self.revealed = None;
         self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Scrolls the detail pane the least distance that shows the whole row, for keyboard focus that
+    /// reached a row outside the viewport. A row taller than the viewport shows its top.
+    fn scroll_row_into_view(&mut self, row: SettingsRowId, cx: &mut Context<Self>) {
+        let Some(bounds) = self.row_bounds.borrow().get(&row).copied() else {
+            return;
+        };
+        let viewport = self.scroll.bounds();
+        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height
+        {
+            viewport.top() - bounds.top()
+        } else if bounds.bottom() > viewport.bottom() {
+            viewport.bottom() - bounds.bottom()
+        } else {
+            return;
+        };
+        let offset = self.scroll.offset();
+        let lowest = -self.scroll.max_offset().y;
+        self.scroll.set_offset(gpui::point(
+            offset.x,
+            (offset.y + shift).clamp(lowest, px(0.0)),
+        ));
         cx.notify();
     }
 
@@ -1292,18 +1324,22 @@ impl SettingsWindow {
         };
         // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
         // card. A filtered view groups whatever survived the filter the same way.
-        let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
+        let mut groups: Vec<(&'static str, Vec<SettingsRowId>, Vec<AnyElement>)> = Vec::new();
         for row in rows {
             let title = row.descriptor().group;
             let rendered = self.render_row(row, appearance, window, cx);
             match groups.last_mut() {
-                Some((current, members)) if *current == title => members.push(rendered),
-                _ => groups.push((title, vec![rendered])),
+                Some((current, ids, members)) if *current == title => {
+                    ids.push(row);
+                    members.push(rendered);
+                }
+                _ => groups.push((title, vec![row], vec![rendered])),
             }
         }
+        self.row_bounds.borrow_mut().clear();
         let rendered = groups
             .into_iter()
-            .map(|(title, members)| {
+            .map(|(title, ids, members)| {
                 // The gallery's title names the appearance it is showing, which changes with the
                 // mode and, under Auto, with the slot chosen above it. Its selector stays fixed.
                 let heading = if title == SettingsRowId::InstalledThemes.descriptor().group {
@@ -1311,7 +1347,11 @@ impl SettingsWindow {
                 } else {
                     title
                 };
+                let row_bounds = Rc::clone(&self.row_bounds);
                 SettingsGroup::new(group_selector(section, title), heading, members)
+                    .on_rows_prepainted(move |bounds, _, _| {
+                        row_bounds.borrow_mut().extend(ids.iter().copied().zip(bounds));
+                    })
                     .render(settings)
                     .into_any_element()
             })
