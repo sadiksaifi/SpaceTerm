@@ -48,6 +48,7 @@ mod terminal_symbols;
 mod text_input_theme;
 mod toggle_theme;
 mod tooltip_theme;
+pub(crate) mod updates;
 mod workspace_chrome;
 mod workspace_creation;
 mod workspace_frame;

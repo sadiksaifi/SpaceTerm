@@ -107,6 +107,8 @@ pub enum ButtonShape {
     Rounded,
     /// Render without rounded corners.
     Square,
+    /// Round both ends fully, forming a pill at the selected control height.
+    Capsule,
 }
 
 /// Paint values for one visual button state.
@@ -520,6 +522,7 @@ impl ButtonTheme {
             corner_radius: match shape {
                 ButtonShape::Rounded => metrics.corner_radius,
                 ButtonShape::Square => px(0.0),
+                ButtonShape::Capsule => metrics.height / 2.0,
             },
             border_width: metrics.border_width,
             font_size: metrics.font_size,
@@ -861,6 +864,13 @@ impl Button {
     #[cfg(feature = "appearance-exerciser")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.core.preview_state = Some(state);
+        self
+    }
+
+    /// Supplies complete paints resolved for a contextual meaning or host, such as a warning.
+    /// Interaction, disabled state, focus geometry, and metrics remain owned by the button.
+    pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.core.contextual_style = Some((style, focus_border));
         self
     }
 
@@ -1859,11 +1869,17 @@ mod tests {
             ButtonSize::Large,
             ButtonShape::Square,
         );
+        let capsule = theme.resolve(
+            ButtonVariant::Destructive,
+            ButtonSize::Large,
+            ButtonShape::Capsule,
+        );
 
         assert_eq!(rounded.normal, destructive.normal);
         assert_eq!(rounded.height, px(40.0));
         assert_eq!(rounded.corner_radius, px(8.0));
         assert_eq!(square.corner_radius, px(0.0));
+        assert_eq!(capsule.corner_radius, px(20.0));
     }
 
     #[test]

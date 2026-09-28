@@ -13,6 +13,7 @@ mod microphone;
 mod theme_gallery;
 mod theme_store;
 mod themes;
+mod updates;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -22,6 +23,9 @@ mod control_tests;
 
 #[cfg(test)]
 mod microphone_tests;
+
+#[cfg(test)]
+mod updates_tests;
 
 #[cfg(test)]
 #[path = "settings_window/tests.rs"]
@@ -437,6 +441,11 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+        // The Updates section renders the application's update state as it changes.
+        if let Some(service) = cx.try_global::<crate::updates::UpdateService>() {
+            cx.observe(&service.0.clone(), |_, _, cx| cx.notify())
+                .detach();
+        }
         cx.on_app_quit(|settings, cx| {
             if !settings.editor.flush_for_shutdown(cx) {
                 eprintln!("SpaceTerm Settings could not be saved during shutdown");
@@ -587,6 +596,9 @@ impl SettingsWindow {
 
     /// Whether this row differs from its default, which is when a reset is worth offering.
     fn differs_from_default(&self, row: SettingsRowId) -> bool {
+        if let Some(differs) = self.update_preference_differs(row) {
+            return differs;
+        }
         let Some(target) = row.reset_target(self.fixed_appearance()) else {
             return false;
         };
@@ -608,7 +620,10 @@ impl SettingsWindow {
         if !self.differs_from_default(row) || !self.editor.editable() {
             return None;
         }
-        let target = row.reset_target(self.fixed_appearance())?;
+        let target = row.reset_target(self.fixed_appearance());
+        if target.is_none() && self.update_preference_differs(row).is_none() {
+            return None;
+        }
         let owner = cx.weak_entity();
         Some(
             reset_button(
@@ -621,7 +636,10 @@ impl SettingsWindow {
                 true,
                 move |_, cx| {
                     let target = target.clone();
-                    let _ = owner.update(cx, |settings, cx| settings.editor.reset(target, cx));
+                    let _ = owner.update(cx, |settings, cx| match target {
+                        Some(target) => settings.editor.reset(target, cx),
+                        None => settings.reset_update_preference(row, cx),
+                    });
                 },
             )
             .into_any_element(),
@@ -1047,6 +1065,7 @@ impl SettingsWindow {
                                     SettingsSectionId::Font => IconName::Type,
                                     SettingsSectionId::Themes => IconName::Palette,
                                     SettingsSectionId::Privacy => IconName::Shield,
+                                    SettingsSectionId::Updates => IconName::Download,
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
                             )),
@@ -1337,7 +1356,9 @@ impl SettingsWindow {
             .reset(self.row_reset(row, appearance, cx))
             .matched_indices(matched_indices)
             .highlighted(highlighted);
-        if let Some(description) = self.row_description(row, cx) {
+        if row == SettingsRowId::UpdateStatus {
+            rendered = rendered.description(self.update_status(cx).summary);
+        } else if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
         rendered.render(appearance, window, cx).into_any_element()
@@ -1366,6 +1387,10 @@ impl SettingsWindow {
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, window, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
+            SettingsRowId::UpdateStatus => self.render_update_status(cx),
+            SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
+            SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
+            SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
         }
     }
 
@@ -2249,6 +2274,9 @@ impl SettingsWindow {
                 })
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
+            SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckInterval
+            | SettingsRowId::UpdateReminderInterval => updates::update_row_description(row),
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }

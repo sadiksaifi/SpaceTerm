@@ -111,6 +111,10 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
     );
     assert_eq!(object_keys(&runtime), property_keys(&schema));
     assert_eq!(
+        object_keys(&runtime["updates"]),
+        property_keys(&schema["$defs"]["updates"])
+    );
+    assert_eq!(
         object_keys(&runtime["preferences"]),
         property_keys(&schema["$defs"]["preferences"])
     );

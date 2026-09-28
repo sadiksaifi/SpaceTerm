@@ -143,6 +143,7 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
+    crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
@@ -282,6 +283,7 @@ enum ApplicationQuitCoordinatorState {
     Idle,
     Prompting,
     WaitingForSettings,
+    WaitingForUpdater,
 }
 
 struct ApplicationQuitCoordinator {
@@ -356,6 +358,22 @@ impl ApplicationQuitCoordinator {
             |authorization| authorization.authorizes(&current),
         );
         if authorized {
+            let coordinator = Rc::clone(self);
+            if crate::updates::prepare_before_quit(
+                cx,
+                Rc::new(move |cx| {
+                    if *coordinator.state.borrow()
+                        != ApplicationQuitCoordinatorState::WaitingForUpdater
+                    {
+                        return;
+                    }
+                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                    coordinator.wait_for_settings(Some(current.clone()), cx);
+                }),
+            ) {
+                *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
+                return;
+            }
             if let Some(adapter) = self.adapter.upgrade() {
                 adapter.confirm_quit(cx);
             }
@@ -461,6 +479,14 @@ pub(crate) fn open(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    if cx
+        .try_global::<crate::updates::UpdateService>()
+        .is_some_and(|service| {
+            service.0.read(cx).launch_state() != crate::updates::LaunchState::Open
+        })
+    {
+        return Err(RuntimeError::Initialization);
+    }
     let adapters = crate::ui::WorkspaceManagerAdapters {
         local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
@@ -751,6 +777,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 /// Application-scoped capabilities shared by every Operating-System Window.
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
+    pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
@@ -880,21 +907,34 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let application = gpui_platform::application().with_assets(spaceterm_ui::EmbeddedAssets);
     application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
     application.run(move |cx| {
-        if let Err(error) = start_application(cx, &host) {
+        if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
         } else {
             install_headless_window_actions(cx, Rc::clone(&host));
+            let service = cx.global::<crate::updates::UpdateService>().0.clone();
+            service.update(cx, |updates, cx| {
+                updates.begin_launch(
+                    Rc::new(move |cx| {
+                        if let Err(error) = open_initial_workspace(cx, &host) {
+                            reported_failure.set(Some(error));
+                            cx.quit();
+                        }
+                    }),
+                    cx,
+                );
+            });
+            if service.read(cx).launch_state() != crate::updates::LaunchState::Open {
+                crate::ui::updates::show_launch(cx);
+            }
         }
     });
     failure.get().map_or(Ok(()), Err)
 }
 
-fn start_application(
-    cx: &mut App,
-    host: &HostComposition,
-) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
     cx.set_global(host.window_frame);
+    crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
     }
@@ -920,10 +960,28 @@ fn start_application(
     .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        let service = cx.global::<crate::updates::UpdateService>().0.clone();
+        service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn start_application(
+    cx: &mut App,
+    host: &HostComposition,
+) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    initialize_application(cx, host)?;
+    open_initial_workspace(cx, host)
+}
+
+fn open_initial_workspace(
+    cx: &mut App,
+    host: &HostComposition,
+) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
@@ -1001,6 +1059,7 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
             adapters: ApplicationCapabilities {
+                updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 selected_files: None,
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
@@ -1221,6 +1280,102 @@ mod runtime_tests {
                     ),
                 ),
         )
+    }
+
+    #[gpui::test]
+    fn launch_gate_prevents_workspace_creation_and_reopen_until_offline_fallback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let mut host = host_with_settings();
+        Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            let service = cx.global::<crate::updates::UpdateService>().0.clone();
+            let resumed_host = host.clone();
+            service.update(cx, |updates, cx| {
+                updates.begin_launch(
+                    Rc::new(move |cx| {
+                        open_initial_workspace(cx, &resumed_host).unwrap();
+                    }),
+                    cx,
+                )
+            });
+            assert!(open(cx, &host).is_err());
+            restore_default_window(cx, &host);
+            assert!(workspace_windows(cx).is_empty());
+        });
+        adapter.emit(crate::updates::UpdateEvent::Failed(
+            crate::updates::UpdateError::Check,
+        ));
+        adapter.emit(crate::updates::UpdateEvent::Finished);
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(workspace_windows(cx).len(), 1));
+    }
+
+    #[gpui::test]
+    fn quitting_during_startup_check_does_not_open_a_workspace(cx: &mut gpui::TestAppContext) {
+        quit_during_startup_update(cx, false);
+    }
+
+    #[gpui::test]
+    fn quitting_during_startup_download_retires_the_launch_timeout(cx: &mut gpui::TestAppContext) {
+        quit_during_startup_update(cx, true);
+    }
+
+    fn quit_during_startup_update(
+        cx: &mut gpui::TestAppContext,
+        delayed_download_cancellation: bool,
+    ) {
+        use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
+        adapters.updates = updater.clone();
+        adapters.application_quit = quit.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            let service = cx.global::<UpdateService>().0.clone();
+            let resumed_host = host.clone();
+            service.update(cx, |updates, cx| {
+                updates.begin_launch(
+                    Rc::new(move |cx| {
+                        open_initial_workspace(cx, &resumed_host).unwrap();
+                    }),
+                    cx,
+                );
+            });
+        });
+        if delayed_download_cancellation {
+            updater.emit(UpdateEvent::ReleaseMetadata {
+                published_at: crate::updates::now() - 2 * crate::updates::policy::DAY,
+                prepared: false,
+            });
+            updater.emit(UpdateEvent::Available("0.1.1".into()));
+        }
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert_eq!(updater.cancellations.get(), 1);
+        assert_eq!(quit.confirmations(), 0);
+        if delayed_download_cancellation {
+            assert_eq!(updater.downloads.get(), 1);
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(31));
+            cx.run_until_parked();
+            assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+            // A launch view that fails to open must not revive startup during quit either.
+            cx.update(ApplicationUpdates::release_launch);
+        }
+        updater.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]
@@ -1536,6 +1691,32 @@ mod runtime_tests {
         cx.update(|cx| cx.dispatch_action(&QuitApplication));
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
+    fn cancelling_quit_keeps_the_ready_update_available(cx: &mut gpui::TestAppContext) {
+        let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let mut host = host_with_settings();
+        Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+        });
+        let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(crate::updates::UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(crate::updates::UpdateEvent::Ready);
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(adapter.deferred_installs.get(), 0);
+        assert_eq!(adapter.cancellations.get(), 0);
+        assert!(service.read_with(cx, |updates, _| matches!(
+            updates.state(),
+            crate::updates::UpdateState::Ready { .. }
+        )));
     }
 
     #[gpui::test]

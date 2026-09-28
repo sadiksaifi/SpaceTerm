@@ -131,6 +131,7 @@ lucide_sources! {
     Cog => "cog",
     Columns2 => "columns-2",
     Copy => "copy",
+    Download => "download",
     Ellipsis => "ellipsis",
     ExternalLink => "external-link",
     Eye => "eye",

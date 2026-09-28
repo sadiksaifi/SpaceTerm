@@ -83,6 +83,16 @@ Fuzzy search over Settings Row labels and keywords that reveals a matching Setti
 The application-scoped Light, Dark, or Auto choice selecting the built-in Application Chrome and
 the Terminal Theme slot of that appearance.
 
+## Updates
+
+**Update Deadline**:
+The fixed release age after which a fresh launch requires an obtainable update before opening
+Workspaces. It never revokes access to an existing Workspace or prevents offline terminal work.
+
+**Update Reminder**:
+A notice about an outstanding update that can be deferred without discarding the update.
+It preserves Terminal Input Focus and running Terminal Sessions.
+
 ## Focus and transient UI
 
 **Active Workspace**:

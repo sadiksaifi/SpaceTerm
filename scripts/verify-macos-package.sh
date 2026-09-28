@@ -6,7 +6,7 @@ export LC_ALL=C
 
 readonly APP_NAME="SpaceTerm"
 readonly BUNDLE_IDENTIFIER="io.github.sadiksaifi.spaceterm"
-readonly MINIMUM_MACOS_VERSION="11.0"
+readonly MINIMUM_MACOS_VERSION="26.0"
 readonly ASKPASS_HELPER_MODE="broker-v1"
 readonly ASKPASS_HELPER_TIMEOUT_SECONDS=5
 
@@ -18,25 +18,23 @@ readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 
 APP_PATH="$REPO_ROOT/dist/$APP_NAME.app"
 DMG_PATH="$REPO_ROOT/dist/$APP_NAME.dmg"
-REQUIRE_UNIVERSAL=0
-NATIVE_ARCHITECTURE=""
 TEMP_ROOT=""
 DMG_MOUNTED=0
 MOUNT_POINT=""
 EXPECTED_MARKETING_VERSION=""
+RELEASE_TAG=""
 EXPECTED_BUILD_NUMBER=""
 HELPER_PID=""
 HELPER_WATCHDOG_PID=""
 
 usage() {
     cat <<EOF
-Usage: $(basename -- "$0") [--app PATH] [--dmg PATH] [--universal]
+Usage: $(basename -- "$0") [--app PATH] [--dmg PATH] [--release TAG]
 
 Verify the SpaceTerm application bundle and installer disk image.
 
   --app PATH   Application bundle to verify (default: dist/SpaceTerm.app).
   --dmg PATH   Disk image to verify (default: dist/SpaceTerm.dmg).
-  --universal  Require arm64 and x86_64 slices in both app executables.
   -h, --help   Show this help.
 EOF
 }
@@ -200,13 +198,10 @@ verify_app_bundle() {
         || die "$label executable is not a Mach-O binary: $executable"
     executable_architectures="$(lipo -archs "$executable")" \
         || die "$label executable architecture could not be read: $executable"
-    if (( REQUIRE_UNIVERSAL )); then
-        lipo -verify_arch arm64 x86_64 "$executable" \
-            || die "$label executable is not universal arm64 + x86_64"
-    else
-        [[ "$executable_architectures" == "$NATIVE_ARCHITECTURE" ]] \
-            || die "$label executable must contain only $NATIVE_ARCHITECTURE, got: $executable_architectures"
-    fi
+    [[ "$executable_architectures" == "arm64" ]] \
+        || die "$label executable must contain only Apple Silicon code"
+    [[ "$(xcrun vtool -show-build "$executable" | awk '$1 == "minos" { print $2 }')" == "$MINIMUM_MACOS_VERSION" ]] \
+        || die "$label executable deployment target differs from its bundle minimum"
 
     [[ -f "$icon_path" ]] || die "$label app icon is missing: $icon_path"
     [[ -f "$asset_catalog" ]] \
@@ -269,6 +264,20 @@ verify_app_bundle() {
         || die "$label app entitlements could not be read: $app"
     [[ "$(plist_value "$entitlements" com.apple.security.device.audio-input)" == "true" ]] \
         || die "$label app is missing the audio input entitlement"
+    if [[ -n "$RELEASE_TAG" ]]; then
+        [[ "$marketing_version" == "${RELEASE_TAG#v}" && "$build_number" == "${RELEASE_TAG#v}" ]] \
+            || die "$label bundle version does not match its release tag"
+        [[ "$executable_architectures" == "arm64" ]] || die "$label release must be arm64"
+        [[ "$(plist_value "$plist" SUPublicEDKey)" == "$(cat "$REPO_ROOT/packaging/macos/update-public-key.txt")" ]] \
+            || die "$label update trust root does not match the release key"
+        [[ "$(plist_value "$plist" SUFeedURL)" == "https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/appcast.xml" ]] \
+            || die "$label update feed must be hosted in GitHub Releases"
+        [[ "$(plist_value "$plist" SURequireSignedFeed)" == "true" && "$(plist_value "$plist" SUVerifyUpdateBeforeExtraction)" == "true" ]] \
+            || die "$label must verify update metadata and archives"
+        codesign --verify --deep --strict "$app" >/dev/null 2>&1 \
+            || die "$label nested updater signatures are invalid"
+        [[ -d "$app/Contents/Frameworks/Sparkle.framework" ]] || die "$label updater framework is missing"
+    fi
     verify_askpass_helper_mode "$executable" "$label"
 }
 
@@ -284,8 +293,10 @@ while (( $# > 0 )); do
             DMG_PATH="$2"
             shift
             ;;
-        --universal)
-            REQUIRE_UNIVERSAL=1
+        --release)
+            (( $# >= 2 )) || die "--release requires a tag"
+            RELEASE_TAG="$2"
+            shift
             ;;
         -h|--help)
             usage
@@ -300,11 +311,7 @@ while (( $# > 0 )); do
 done
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS package verification must run on macOS"
-case "$(uname -m)" in
-    arm64|x86_64) NATIVE_ARCHITECTURE="$(uname -m)" ;;
-    *) die "unsupported native macOS architecture: $(uname -m)" ;;
-esac
-readonly NATIVE_ARCHITECTURE
+[[ "$(uname -m)" == "arm64" ]] || die "SpaceTerm supports Apple Silicon Macs only"
 require_command codesign
 require_command assetutil
 require_command cmp

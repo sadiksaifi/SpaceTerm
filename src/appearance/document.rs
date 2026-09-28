@@ -17,6 +17,8 @@ const MAX_DEPTH: usize = 32;
 pub(crate) struct SettingsDocument {
     pub(crate) schema_version: u32,
     pub(crate) revision: u64,
+    #[serde(default)]
+    pub(crate) updates: crate::updates::policy::UpdatePreferences,
     pub(crate) preferences: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
@@ -27,6 +29,7 @@ impl Default for SettingsDocument {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             revision: 0,
+            updates: Default::default(),
             preferences: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
@@ -66,6 +69,7 @@ impl SettingsDocument {
     pub(crate) fn reset_all(&mut self) {
         let defaults = Self::default();
         self.preferences = defaults.preferences;
+        self.updates = defaults.updates;
         self.terminal_themes = defaults.terminal_themes;
     }
 }

@@ -134,7 +134,8 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_sessions(
     let project = root.join("project");
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    let (manager, records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
     choose_pin_directory(&manager, cx);
     let original_counts = manager.read_with(cx, |manager, cx| {
         manager

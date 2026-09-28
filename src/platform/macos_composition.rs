@@ -166,6 +166,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
+            updates: update_adapter(),
             selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
@@ -220,6 +221,16 @@ fn compose(
             Rc::new(super::macos_appearance::MacosAppearancePlatform),
         )
     })
+}
+
+fn update_adapter() -> Rc<dyn crate::updates::UpdateAdapter> {
+    #[cfg(feature = "development-app")]
+    if let Ok(value) = std::env::var("SPACETERM_UPDATE_PREVIEW")
+        && let Some(scenario) = crate::updates::preview::Scenario::parse(&value)
+    {
+        return Rc::new(crate::updates::preview::PreviewUpdates::new(scenario));
+    }
+    Rc::new(super::macos_updates::MacosUpdates::new())
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]

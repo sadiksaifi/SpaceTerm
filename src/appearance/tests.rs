@@ -797,9 +797,7 @@ fn defaults_select_spaceterm_owned_themes_in_both_appearances() {
             resolved.terminal.effective_theme.as_str(),
             format!("builtin.spaceterm.{suffix}")
         );
-        let terminal = catalog
-            .get(&resolved.terminal.effective_theme)
-            .unwrap();
+        let terminal = catalog.get(&resolved.terminal.effective_theme).unwrap();
         assert_eq!(
             terminal.metadata.author.as_deref(),
             Some("SpaceTerm contributors")
@@ -1174,9 +1172,7 @@ fn every_individual_preference_reset_changes_only_its_field() {
         (ResetTarget::Transparency, |value| {
             value.window.transparency = 0.35
         }),
-        (ResetTarget::Blur, |value| {
-            value.window.blur = true
-        }),
+        (ResetTarget::Blur, |value| value.window.blur = true),
         (ResetTarget::TerminalTheme(Appearance::Light), |value| {
             value.terminal.themes.light = AppearancePreferences::default().terminal.themes.light;
         }),
@@ -1487,4 +1483,22 @@ fn color_encoding_accepts_short_forms_and_exports_long_rgba() {
     let color: Color = serde_json::from_str("\"#abc\"").unwrap();
     assert_eq!(color, Color::rgb(0xaabbcc));
     assert_eq!(serde_json::to_string(&color).unwrap(), "\"#aabbccff\"");
+}
+
+#[test]
+fn update_preferences_round_trip_and_reset_with_the_settings_document() {
+    use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
+    let document = SettingsDocument {
+        updates: UpdatePreferences {
+            automatic_downloads: false,
+            check_interval: CheckInterval::Hourly,
+            reminder_interval: ReminderInterval::EightHours,
+        },
+        ..Default::default()
+    };
+    let encoded = export_settings(&document).unwrap();
+    let mut restored = parse_settings(encoded.as_bytes()).unwrap();
+    assert_eq!(restored.updates, document.updates);
+    restored.reset_all();
+    assert_eq!(restored.updates, UpdatePreferences::default());
 }

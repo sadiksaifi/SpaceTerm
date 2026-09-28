@@ -254,6 +254,7 @@ pub(crate) struct WorkspaceManager {
     close_focused_pane_before_reconnect_commit: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
+    update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_confirmation: CloseConfirmation,
 }
@@ -468,6 +469,7 @@ impl WorkspaceManager {
             close_focused_pane_before_reconnect_commit: false,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
+            update_control: cx.new(super::updates::UpdateControl::new),
             pending_final_tab_closes: BTreeSet::new(),
             close_confirmation: CloseConfirmation::default(),
         }
@@ -3155,6 +3157,7 @@ impl WorkspaceManager {
         let sidebar_layout = self.sidebar.read(cx).layout();
         let chrome =
             WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
+        let update_control = gpui::AnyView::from(self.update_control.clone());
         active_tab_manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 sidebar_layout.visible,
@@ -3162,6 +3165,7 @@ impl WorkspaceManager {
                 chrome.width,
                 cx,
             );
+            manager.set_trailing_accessory(Some(update_control), cx);
         });
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
