@@ -77,7 +77,8 @@ pub(super) enum ShortcutNotice {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ShortcutDescription {
     pub(super) text: SharedString,
-    /// The line warns, for a refused recording or an inactive Shortcut, rather than informs.
+    /// The line warns, for a refused recording, a Shortcut taken from another Command, or an
+    /// inactive Shortcut, rather than informs.
     pub(super) warning: bool,
 }
 
@@ -471,13 +472,19 @@ impl SettingsWindow {
             Some((owner, ShortcutNotice::Refused(reason))) if *owner == command => {
                 (reason.clone(), true)
             }
+            // A reassignment is marked on both rows, so the Command that lost its Shortcut is as
+            // easy to find as the one that took it.
             Some((owner, ShortcutNotice::Reassigned { from })) if *owner == command => {
-                (format!("Removed from {}.", from.label()).into(), false)
+                (format!("Removed from {}.", from.label()).into(), true)
             }
+            Some((owner, ShortcutNotice::Reassigned { from })) if *from == command => (
+                format!("Its shortcut is now assigned to {}.", owner.label()).into(),
+                true,
+            ),
             _ => match self.resolved_keymap(cx).state(command) {
                 KeybindingState::Displaced { by } => (
                     format!("Its default shortcut is assigned to {}.", by.label()).into(),
-                    false,
+                    true,
                 ),
                 KeybindingState::Blocked(reason) => {
                     let chord = self

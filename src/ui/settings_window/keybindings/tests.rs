@@ -201,7 +201,14 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Removed from Close Tab.".into(),
-            warning: false,
+            warning: true,
+        })
+    );
+    assert_eq!(
+        description(&window, Command::CloseTab, cx),
+        Some(ShortcutDescription {
+            text: "Its shortcut is now assigned to New Workspace.".into(),
+            warning: true,
         })
     );
 }
@@ -311,7 +318,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Its default shortcut is assigned to Close Workspace.".into(),
-            warning: false,
+            warning: true,
         })
     );
     click("settings-row-shortcut-new-workspace-reset", cx);
