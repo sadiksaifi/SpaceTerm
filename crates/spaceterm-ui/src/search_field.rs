@@ -293,8 +293,8 @@ type ToggleHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 ///
 /// The consumer owns the mode: it passes whether the toggle is on and switches the mode when the
 /// toggle activates. The toggle sits at the field's trailing edge, after the clear action, and is
-/// painted from the installed theme's off or on paints. It takes no keyboard traversal stop of
-/// its own, like the clear action beside it.
+/// painted from the installed theme's off or on paints. Unlike the clear action, it switches a
+/// mode nothing else reaches, so it takes the keyboard traversal stop after the editor.
 pub struct SearchFieldToggle {
     icon: IconName,
     accessibility_name: SharedString,
@@ -485,8 +485,8 @@ fn render_toggle(
     .size(ButtonSize::Compact)
     .target_size(metrics.toggle_target_size())
     .corner_radius(metrics.toggle_corner_radius())
-    .contextual_style(style, rgba(0))
-    .tab_stop(false)
+    .contextual_style(style, theme.frame.ring_color())
+    .tab_stop(true)
     .tooltip(tooltip)
     .on_activate(move |_, window, cx| on_toggle(window, cx));
     match toggle.debug_selector {
