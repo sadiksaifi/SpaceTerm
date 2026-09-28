@@ -1,13 +1,5 @@
 //! Resets malformed Settings while retaining the original file as a backup.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Settings Recovery UI wiring lands in a later step"
-    )
-)]
-
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

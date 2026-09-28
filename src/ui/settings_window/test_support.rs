@@ -9,6 +9,9 @@ use crate::appearance::{SettingsDocument, export_settings};
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, StorageError};
 
+/// The bytes [`MemoryStorage::corrupt`] retains: not a Settings Document.
+pub(crate) const CORRUPT_DOCUMENT: &[u8] = b"{ not settings";
+
 /// In-memory Settings storage that counts writes and can be made to fail on demand.
 #[derive(Default)]
 pub(crate) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>>);
@@ -78,7 +81,7 @@ impl MemoryStorage {
         self.0.lock().unwrap().writes
     }
 
-    pub(super) fn document(&self) -> Option<SettingsDocument> {
+    pub(crate) fn document(&self) -> Option<SettingsDocument> {
         let state = self.0.lock().unwrap();
         let (bytes, _) = state.snapshot.as_ref()?;
         crate::appearance::parse_settings(bytes).ok()
@@ -88,8 +91,17 @@ impl MemoryStorage {
         self.0.lock().unwrap().write_failure = error;
     }
 
-    pub(super) fn corrupt(&self) {
-        self.0.lock().unwrap().snapshot = Some((b"{ not settings".to_vec(), 1));
+    pub(crate) fn corrupt(&self) {
+        self.0.lock().unwrap().snapshot = Some((CORRUPT_DOCUMENT.to_vec(), 1));
+    }
+
+    /// The bytes Settings Recovery moved aside, if it ran.
+    pub(crate) fn backup(&self) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().backup.clone()
+    }
+
+    pub(crate) fn fail_reads(&self, error: Option<StorageError>) {
+        self.0.lock().unwrap().read_failure = error;
     }
 
     pub(super) fn repair(&self) {

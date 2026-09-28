@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary, SettingsDocument};
+use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
 use crate::settings::{
     CommitOutcome, ImportReceipt, PreviewToken, ThemeImport, SettingsError, UserSettings,
@@ -190,17 +191,51 @@ impl SettingsDraft {
         }
     }
 
+    /// Replaces Malformed Settings with defaults, keeping the unreadable file as a backup.
+    ///
+    /// The draft adopts whatever the owner retains afterwards, so a reset that another surface
+    /// finished first also resumes editing here.
+    pub(super) fn recover_by_reset(&mut self) -> Result<(), RecoveryError> {
+        let result = self.settings.recover_by_reset().map(|_| ());
+        self.adopt_retained();
+        match result {
+            Err(RecoveryError::NotMalformed) if self.editable() => Ok(()),
+            result => result,
+        }
+    }
+
     /// Adopts a committed document this editor did not write.
     ///
     /// Another surface may commit while the window is open. With nothing of its own outstanding,
     /// the window should present what is retained rather than a stale draft.
     pub(super) fn synchronize(&mut self) {
+        if matches!(self.status, SaveStatus::Unavailable(error) if error.is_malformed()) {
+            // Settings Recovery may have run from the launch prompt while this window showed the
+            // unreadable file's status.
+            self.adopt_retained();
+            return;
+        }
         if self.has_unwritten_changes() || self.preview.is_some() {
             return;
         }
         let committed = self.settings.snapshot().committed;
         if committed.revision != self.draft.revision {
             self.draft = committed;
+        }
+    }
+
+    /// Presents the retained document and its status. Only called while editing is refused, so
+    /// there is no draft change or preview to lose.
+    fn adopt_retained(&mut self) {
+        let snapshot = self.settings.snapshot();
+        match snapshot.status {
+            Some(error) => self.status = SaveStatus::Unavailable(error),
+            None => {
+                self.draft = snapshot.committed;
+                self.unwritten = false;
+                self.resync = false;
+                self.status = SaveStatus::Saved;
+            }
         }
     }
 

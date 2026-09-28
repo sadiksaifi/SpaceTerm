@@ -989,6 +989,7 @@ fn open_initial_workspace(
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
+    crate::ui::settings_recovery::offer_at_launch(workspace, cx);
     #[cfg(feature = "appearance-exerciser")]
     crate::ui::appearance_exerciser::open(workspace, cx)
         .map_err(|_| RuntimeError::Initialization)?;
@@ -1289,6 +1290,94 @@ mod runtime_tests {
                     ),
                 ),
         )
+    }
+
+    fn host_with_storage(
+        storage: Arc<crate::ui::settings_window::test_support::MemoryStorage>,
+    ) -> HostComposition {
+        HostComposition::new(parts(Rc::default(), Rc::default()))
+            .unwrap()
+            .with_appearance(
+                storage,
+                Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            )
+    }
+
+    fn click(selector: &'static str, cx: &mut gpui::VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be painted"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn launch_offers_settings_recovery_once_for_malformed_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.corrupt();
+        let host = host_with_storage(storage.clone());
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+
+        click("modal-action-settings-recovery-reset", cx);
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert_eq!(
+            storage.backup().as_deref(),
+            Some(crate::ui::settings_window::test_support::CORRUPT_DOCUMENT)
+        );
+        assert!(storage.document().is_some());
+        let status = cx.update(|_, cx| {
+            cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings
+                .snapshot()
+                .status
+        });
+        assert_eq!(status, None);
+        // Only launch asks. A reopened Workspace window does not repeat the prompt.
+        let reopened = cx.update(|_, cx| open(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(reopened.into(), cx);
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn settings_recovery_can_defer_to_the_settings_window(cx: &mut gpui::TestAppContext) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.corrupt();
+        let host = host_with_storage(storage.clone());
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+
+        click("modal-action-settings-recovery-open-settings", cx);
+
+        assert_eq!(storage.backup(), None);
+        assert!(cx.update(|_, cx| {
+            cx.windows().into_iter().any(|window| {
+                window
+                    .downcast::<crate::ui::settings_window::SettingsWindow>()
+                    .is_some()
+            })
+        }));
+    }
+
+    #[gpui::test]
+    fn launch_does_not_offer_recovery_for_settings_it_cannot_safely_replace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        storage.fail_reads(Some(crate::settings::storage::StorageError::Unsafe));
+        let host = host_with_storage(storage);
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     }
 
     #[gpui::test]

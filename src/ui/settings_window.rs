@@ -356,6 +356,21 @@ impl SettingsWindow {
             .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
             .settings
             .clone();
+        // Settings Recovery can run from the launch prompt while this window is open, and a reset
+        // to defaults may leave the installed appearance unchanged, so follow the owner directly.
+        let changes = settings.subscribe();
+        cx.spawn(async move |settings, cx| {
+            while changes.recv().await.is_ok() {
+                let followed = settings.update(cx, |settings, cx| {
+                    settings.editor.synchronize();
+                    cx.notify();
+                });
+                if followed.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let editor = SettingsEditor::new(settings);
         // The window takes focus so its own shortcuts and Tab traversal resolve from the moment it
         // opens, rather than only after something inside it is clicked.
@@ -1874,15 +1889,35 @@ impl SettingsWindow {
                                 .child(explanation),
                         ),
                 )
-                .child(action_button(action_selector, label, true, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        if critical {
-                            settings.editor.reload(cx);
-                        } else {
-                            settings.editor.retry(cx);
-                        }
-                    });
-                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_none()
+                        .gap(appearance.spacing(6.0))
+                        .when(status.recoverable(), |actions| {
+                            let owner = owner.clone();
+                            actions.child(action_button(
+                                "settings-banner-reset-settings",
+                                "Reset Settings…",
+                                true,
+                                move |window, cx| {
+                                    let _ = owner.update(cx, |settings, cx| {
+                                        settings.confirm_settings_recovery(window, cx);
+                                    });
+                                },
+                            ))
+                        })
+                        .child(action_button(action_selector, label, true, move |_, cx| {
+                            let _ = owner.update(cx, |settings, cx| {
+                                if critical {
+                                    settings.editor.reload(cx);
+                                } else {
+                                    settings.editor.retry(cx);
+                                }
+                            });
+                        })),
+                )
                 .into_any_element(),
         )
     }
@@ -2017,6 +2052,36 @@ impl SettingsWindow {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Confirms Settings Recovery. The reset replaces the file SpaceTerm could not read, so the
+    /// alert names the backup that keeps it.
+    fn confirm_settings_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let owner = cx.weak_entity();
+        let result = super::settings_recovery::confirmation_alert().present(
+            window,
+            cx,
+            move |outcome, cx| {
+                if !matches!(
+                    outcome,
+                    spaceterm_ui::AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) {
+                    return;
+                }
+                let _ = owner.update(cx, |settings, cx| {
+                    // A failure keeps the banner, whose status now names what stopped the reset.
+                    if settings.editor.recover_by_reset(cx).is_err() {
+                        eprintln!("SpaceTerm Settings could not be reset");
+                    }
+                });
+            },
+        );
+        if result.is_err() {
+            eprintln!("failed to present the SpaceTerm settings recovery confirmation");
+        }
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -319,6 +319,51 @@ fn an_unreadable_document_refuses_edits_until_it_is_reloaded(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn malformed_settings_reset_keeps_a_backup_and_resumes_editing(cx: &mut TestAppContext) {
+    let storage = Arc::new(MemoryStorage::default());
+    storage.corrupt();
+    let (window, harness, cx) = open_settings_with(cx, storage);
+    assert!(cx.debug_bounds("settings-banner-reset-settings").is_some());
+
+    click("settings-banner-reset-settings", cx);
+    click("modal-action-settings-recovery-confirm-cancel", cx);
+    cx.run_until_parked();
+    assert_eq!(harness.storage.backup(), None);
+    assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+
+    click("settings-banner-reset-settings", cx);
+    click("modal-action-settings-recovery-confirm-reset", cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.storage.backup().as_deref(),
+        Some(super::test_support::CORRUPT_DOCUMENT)
+    );
+    assert!(
+        harness.storage.document().is_some(),
+        "the reset writes a readable default document"
+    );
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert!(cx.debug_bounds("settings-banner").is_none());
+    click("settings-density-comfortable", cx);
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+}
+
+#[gpui::test]
+fn only_malformed_settings_offer_a_reset(cx: &mut TestAppContext) {
+    let storage = Arc::new(MemoryStorage::default());
+    storage.fail_reads(Some(StorageError::Unsafe));
+    let (window, _harness, cx) = open_settings_with(cx, storage);
+
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+    assert!(cx.debug_bounds("settings-banner-reload").is_some());
+    assert!(cx.debug_bounds("settings-banner-reset-settings").is_none());
+}
+
+#[gpui::test]
 fn a_document_published_without_identity_pauses_editing_until_reload(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     harness.storage.drop_identity(true);
