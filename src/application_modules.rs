@@ -3,6 +3,7 @@ mod appearance;
 mod application_identity;
 mod close_confirmation;
 mod domain;
+mod keybindings;
 mod platform;
 mod settings;
 mod ssh;

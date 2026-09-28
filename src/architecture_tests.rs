@@ -191,6 +191,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("application_modules.rs"),
         root.join("app.rs"),
         root.join("desktop_profile.rs"),
+        root.join("keybindings.rs"),
         root.join("desktop_profile/keybindings.rs"),
         root.join("ui/mod.rs"),
         root.join("ui/workspace_manager.rs"),
@@ -219,6 +220,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     for directory in [
         "ui",
         "desktop_profile",
+        "keybindings",
         "ssh",
         "platform/local_filesystem",
         "terminal/session",
