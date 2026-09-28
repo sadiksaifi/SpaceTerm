@@ -8,9 +8,9 @@ use gpui::{
     App, Context, Entity, Global, SharedString, Subscription, Window, WindowHandle, actions, div,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, DeterminateProgress,
-    FrameSpinner, Icon, IconName, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalId, ProgressRing, ProgressSize, Tooltip,
+    Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant,
+    DeterminateProgress, FrameSpinner, Icon, IconName, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, Tooltip,
 };
 
 use super::WorkspaceManager;
@@ -581,7 +581,7 @@ enum ControlCommand {
 ///
 /// The label stays the release version while the glyph and emphasis carry the phase, so the
 /// control keeps its width and place from download to restart. Accent paint appears only when
-/// the next step is the user's.
+/// the next step is the user's. Every glyph is unframed so the capsule is the only outline.
 #[derive(Clone, Debug, PartialEq)]
 struct ControlPresentation {
     label: SharedString,
@@ -743,11 +743,12 @@ impl Render for UpdateControl {
                 ButtonVariant::Secondary
             })
             .size(ButtonSize::Small)
+            .shape(ButtonShape::Capsule)
             .disabled(command.is_none())
             .debug_selector("update-control")
             .leading(move |foreground| match glyph {
                 ControlGlyph::Download => {
-                    Icon::new(IconName::CircleArrowDown, glyph_size, foreground).into_any_element()
+                    Icon::new(IconName::Download, glyph_size, foreground).into_any_element()
                 }
                 ControlGlyph::Restart => {
                     Icon::new(IconName::RotateCw, glyph_size, foreground).into_any_element()
