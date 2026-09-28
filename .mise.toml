@@ -114,6 +114,22 @@ run = "python3 scripts/run-development-app.py dev"
 description = "Run SpaceTerm Dev from a source-built macOS application bundle"
 run = "exec bash scripts/run-development-app-macos.sh dev"
 
+[tasks."dev:macos:updates"]
+description = "Preview the real update UI in SpaceTerm Dev with a simulated updater"
+usage = '''
+arg "[scenario]" help="available, up-to-date, check-error, download-error, verification-error, install-error" default="available"
+'''
+run = '''
+case "${usage_scenario}" in
+  available|up-to-date|check-error|download-error|verification-error|install-error) ;;
+  *) echo "Unknown update preview scenario" >&2; exit 2 ;;
+esac
+echo "Update preview: ${usage_scenario}. Choose SpaceTerm Dev > Check for Updates…"
+echo "Downloads and installation are simulated. Nothing will be installed or restarted."
+export SPACETERM_UPDATE_PREVIEW="${usage_scenario}"
+exec bash scripts/run-development-app-macos.sh dev
+'''
+
 [tasks."dev:appearance"]
 description = "Run the appearance exerciser with isolated retained settings"
 run = "python3 scripts/run-development-app.py appearance"

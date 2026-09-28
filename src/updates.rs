@@ -1,5 +1,8 @@
 //! Application-owned update policy. The platform adapter owns transport and installation.
 
+#[cfg(feature = "development-app")]
+pub(crate) mod preview;
+
 use std::rc::Rc;
 use std::time::Duration;
 

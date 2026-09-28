@@ -91,6 +91,12 @@ Installed releases check for updates after launch and daily while running. Updat
 available in the SpaceTerm menu. Updates are verified with the application's embedded public key;
 installation and restart require confirmation. Development builds do not update themselves.
 
+To preview the update UI before publishing, run `mise run dev:macos:updates`, then choose
+**SpaceTerm Dev > Check for Updates…**. The real controls show a synthetic `0.1.1` update,
+download progress, and restart confirmation. Nothing is downloaded, installed, or restarted.
+The optional scenario argument accepts `up-to-date`, `check-error`, `download-error`,
+`verification-error`, or `install-error`. This mock updater is excluded from release builds.
+
 Releases are managed by [Tagsmith](https://tagsmith.site/).
 Use `npx tagsmith@latest` to create and validate release tags. The annotated Git tag supplies every
 release version after removing the `v` prefix; there is no Cargo version bump or separate build number.
