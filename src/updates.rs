@@ -157,7 +157,6 @@ impl UpdateModel {
             return false;
         }
         self.generation = self.generation.wrapping_add(1);
-        self.version = None;
         self.confirmation_open = false;
         self.install_authorized = false;
         self.cancelling = false;
@@ -237,6 +236,7 @@ impl UpdateModel {
                 return self.manual_check.then_some(UpdateNotice::CheckFinished);
             }
             UpdateEvent::UpToDate => {
+                self.version = None;
                 self.state = UpdateState::UpToDate;
                 return self.manual_check.then_some(UpdateNotice::CheckFinished);
             }
@@ -338,6 +338,7 @@ pub(crate) struct ApplicationUpdates {
     publication: u64,
     prepared: bool,
     automatic_download: bool,
+    download_requested: bool,
     last_attempt: u64,
     _launch_timeout: Option<Task<()>>,
     _events: Task<()>,
@@ -376,8 +377,15 @@ impl ApplicationUpdates {
                         .await;
                 }
             });
+            let history = adapter.load_history();
+            let mut model = UpdateModel::new(available);
+            if available {
+                model.version = history
+                    .pending_version(env!("SPACETERM_VERSION"))
+                    .map(str::to_owned);
+            }
             Self {
-                history: adapter.load_history(),
+                history,
                 launch: LaunchState::Open,
                 resume_launch: None,
                 settings: None,
@@ -386,9 +394,10 @@ impl ApplicationUpdates {
                 publication: 0,
                 prepared: false,
                 automatic_download: false,
+                download_requested: false,
                 last_attempt: 0,
                 _launch_timeout: None,
-                model: UpdateModel::new(available),
+                model,
                 adapter,
                 pending_quit: None,
                 _events: events,
@@ -503,6 +512,18 @@ impl ApplicationUpdates {
         cx.notify();
     }
 
+    /// Retained presentation metadata, never authority to install without a verified check.
+    pub(crate) fn pending_version(&self) -> Option<&str> {
+        self.model.version.as_deref()
+    }
+
+    pub(crate) fn retry_download(&mut self, cx: &mut Context<Self>) {
+        self.check(true, cx);
+        if matches!(self.model.state, UpdateState::Checking) {
+            self.download_requested = true;
+        }
+    }
+
     pub(crate) fn state(&self) -> &UpdateState {
         &self.model.state
     }
@@ -515,6 +536,7 @@ impl ApplicationUpdates {
         self.publication = 0;
         self.prepared = false;
         self.automatic_download = false;
+        self.download_requested = false;
         if let Err(error) = self.adapter.check() {
             self.receive(UpdateEvent::Failed(error), cx);
             self.receive(UpdateEvent::Finished, cx);
@@ -633,9 +655,12 @@ impl ApplicationUpdates {
                 }
             }
             if !self.prepared
-                && (self.preferences().automatic_downloads || self.launch == LaunchState::Required)
+                && (self.download_requested
+                    || self.preferences().automatic_downloads
+                    || self.launch == LaunchState::Required)
             {
-                self.automatic_download = !self.model.manual_check;
+                self.automatic_download = !self.model.manual_check && !self.download_requested;
+                self.download_requested = false;
                 self.download(cx);
             }
             self.tick(time, cx);
@@ -710,6 +735,7 @@ pub(crate) mod testing {
         pub(crate) installations: std::cell::Cell<usize>,
         pub(crate) downloads: std::cell::Cell<usize>,
         pub(crate) deferred_installs: std::cell::Cell<usize>,
+        pub(crate) history: UpdateHistory,
     }
 
     impl UpdateAdapter for RecordingAdapter {
@@ -726,6 +752,9 @@ pub(crate) mod testing {
         fn download(&self) -> Result<(), UpdateError> {
             self.downloads.set(self.downloads.get() + 1);
             Ok(())
+        }
+        fn load_history(&self) -> UpdateHistory {
+            self.history.clone()
         }
         fn finish_on_quit(&self) -> Result<(), UpdateError> {
             self.deferred_installs.set(self.deferred_installs.get() + 1);
@@ -976,6 +1005,19 @@ mod tests {
         assert_eq!(adapter.downloads.get(), 0);
         service.update(cx, |updates, cx| updates.download(cx));
         assert_eq!(adapter.downloads.get(), 1);
+        adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.retry_download(cx));
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates
+                .pending_version()
+                .map(str::to_owned)),
+            Some("0.1.1".into())
+        );
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 2);
     }
 
     #[gpui::test]
@@ -998,6 +1040,49 @@ mod tests {
         cx.run_until_parked();
         assert!(notices.borrow().is_empty());
         assert_eq!(adapter.installations.get(), 0);
+    }
+
+    #[gpui::test]
+    fn known_pending_release_stays_visible_on_an_offline_launch(cx: &mut gpui::TestAppContext) {
+        let mut history = UpdateHistory::default();
+        history.observe("0.1.0", "0.1.1", now() - policy::DAY, now());
+        let mut adapter = RecordingAdapter::available();
+        adapter.history = serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        let adapter = Rc::new(adapter);
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        service.update(cx, |updates, cx| updates.begin_launch(Rc::new(|_| {}), cx));
+        adapter.emit(UpdateEvent::Failed(UpdateError::Check));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates
+                .pending_version()
+                .map(str::to_owned)),
+            Some("0.1.1".into())
+        );
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.launch_state()),
+            LaunchState::Open
+        );
+    }
+
+    #[test]
+    fn pending_release_survives_cancellation_and_failed_rechecks_until_confirmed_current() {
+        let mut model = ready();
+        let later = model.confirmation().unwrap();
+        assert!(!model.confirm(later, false));
+        model.cancelling = true;
+        model.receive(UpdateEvent::Finished);
+        assert_eq!(model.version.as_deref(), Some("0.1.1"));
+        assert!(model.begin_check(true));
+        assert_eq!(model.version.as_deref(), Some("0.1.1"));
+        model.receive(UpdateEvent::Failed(UpdateError::Check));
+        model.receive(UpdateEvent::Finished);
+        assert_eq!(model.version.as_deref(), Some("0.1.1"));
+        assert!(model.begin_check(true));
+        model.receive(UpdateEvent::UpToDate);
+        assert_eq!(model.version, None);
     }
 
     fn ready() -> UpdateModel {

@@ -69,11 +69,12 @@ pub(crate) enum UpdateStage {
 }
 
 /// Cached observations are never installation authority. Sparkle revalidates the signed feed
-/// and archive. These bounded facts only retain elapsed time and reminder cadence.
+/// and archive. These bounded facts retain the pending version, elapsed time, and reminder cadence.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdateHistory {
     version: Option<String>,
+    latest_version: Option<String>,
     published_at: u64,
     high_water: u64,
     last_reminder: Option<u64>,
@@ -114,7 +115,15 @@ impl UpdateHistory {
         if self.version.is_none() {
             self.version = Some(version.to_owned());
         }
+        self.latest_version = Some(version.to_owned());
         self.high_water = self.high_water.max(now);
+    }
+
+    pub(crate) fn pending_version(&self, installed: &str) -> Option<&str> {
+        let version = self.latest_version.as_deref()?;
+        let pending = stable_version(version)?;
+        (!stable_version(installed).is_some_and(|installed| installed >= pending))
+            .then_some(version)
     }
 
     pub(crate) fn stage(&mut self, now: u64) -> UpdateStage {
@@ -174,6 +183,8 @@ mod tests {
         let bytes = serde_json::to_vec(&history).unwrap();
         let mut restored: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(restored.stage(2_000), UpdateStage::Overdue);
+        assert_eq!(restored.pending_version("0.1.0"), Some("0.1.2"));
+        assert_eq!(restored.pending_version("0.1.2"), None);
         restored.observe("0.1.2", "0.1.3", 190_000, 190_000);
         assert_eq!(restored.stage(190_000), UpdateStage::Optional);
     }

@@ -94,9 +94,11 @@ key. Restarting an open app requires confirmation; ordinary quit can finish a ve
 its next launch is already current. Development builds do not update themselves.
 
 Each release is optional for 24 hours after its signed publication date, then shows a gentle
-reminder. After 48 hours an open app shows a dismissible reminder every two hours by default and
-keeps all terminal work usable. A fresh launch obtains and installs an overdue update before
-creating Workspaces. Failed or stalled checks/downloads allow access, including offline. A prepared
+reminder. After 48 hours an open app emphasizes the reminder every two hours by default and
+keeps all terminal work usable. The update pill always shows its action and version while an
+update remains pending, including after Later, cancellation, or a failed download. A fresh launch
+obtains and installs an overdue update before creating Workspaces. Failed or stalled checks/downloads
+allow access, including offline. A prepared
 update resumes automatically on a fresh launch. Settings cannot change these deadlines.
 
 To preview without publishing, run `mise run dev:macos:updates`. The real controls use a synthetic

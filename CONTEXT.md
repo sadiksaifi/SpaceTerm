@@ -90,8 +90,8 @@ The fixed release age after which a fresh launch requires an obtainable update b
 Workspaces. It never revokes access to an existing Workspace or prevents offline terminal work.
 
 **Update Reminder**:
-A dismissible notice about an outstanding update that preserves Terminal Input Focus and running
-Terminal Sessions.
+A notice about an outstanding update that can be deferred without discarding the update.
+It preserves Terminal Input Focus and running Terminal Sessions.
 
 ## Focus and transient UI
 
