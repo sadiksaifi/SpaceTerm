@@ -13,15 +13,13 @@ use spaceterm_ui::{
 #[derive(Clone, Copy)]
 pub(crate) struct DesktopWording {
     pub(crate) file_preview: &'static str,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the later Keybindings Settings Section")
-    )]
     pub(crate) operating_system_name: &'static str,
 }
 
 pub(crate) trait ShortcutFormatter {
-    fn format(&self, shortcut: &Shortcut) -> SharedString;
+    /// Presents one key with its modifiers. The key is GPUI's lowercase key name, such as `k`,
+    /// `enter`, or `f5`.
+    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString;
     fn format_modifiers(&self, modifiers: Modifiers) -> SharedString;
 }
 
@@ -81,13 +79,16 @@ impl DesktopPresentation {
     }
 
     pub(crate) fn format(&self, shortcut: &Shortcut) -> SharedString {
-        self.formatter.format(shortcut)
+        self.formatter
+            .format_chord(shortcut.modifiers(), shortcut.key())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the later shortcut recorder wiring")
-    )]
+    /// Presents a chord that need not be a valid [`Shortcut`], such as one a recorder refused.
+    pub(crate) fn format_keystroke(&self, keystroke: &gpui::Keystroke) -> SharedString {
+        self.formatter
+            .format_chord(keystroke.modifiers, &keystroke.key.to_ascii_lowercase())
+    }
+
     pub(crate) fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
         self.formatter.format_modifiers(modifiers)
     }
@@ -234,15 +235,14 @@ struct TestingShortcutFormatter;
 
 #[cfg(test)]
 impl ShortcutFormatter for TestingShortcutFormatter {
-    fn format(&self, shortcut: &Shortcut) -> SharedString {
-        let key = shortcut.key();
+    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
         let key = match key {
             "enter" => "Enter".to_owned(),
             "space" => "Space".to_owned(),
             "tab" => "Tab".to_owned(),
             _ => key.to_uppercase(),
         };
-        let modifiers = self.format_modifiers(shortcut.modifiers());
+        let modifiers = self.format_modifiers(modifiers);
         if modifiers.is_empty() {
             key.into()
         } else {
@@ -265,6 +265,15 @@ impl ShortcutFormatter for TestingShortcutFormatter {
     }
 }
 
+/// A System Reserved table for tests, standing in for a host's.
+#[cfg(test)]
+fn testing_reserved_shortcuts() -> Vec<crate::keybindings::SystemReserved> {
+    vec![crate::keybindings::SystemReserved {
+        shortcut: Shortcut::parse("cmd-q").expect("static reserved shortcut"),
+        reason: crate::keybindings::SystemReservation::Quit,
+    }]
+}
+
 #[cfg(test)]
 pub(crate) fn testing_presentation() -> DesktopPresentation {
     let mut presentation = DesktopPresentation::new(
@@ -275,7 +284,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         "Primary+Enter".into(),
         Rc::new(TestingShortcutFormatter),
     );
-    let profile = default_keymap::profile(Vec::new()).unwrap();
+    let profile = default_keymap::profile(testing_reserved_shortcuts()).unwrap();
     let keymap = Keymap::new(
         profile
             .resolve(&KeybindingPreferences::default())
@@ -300,7 +309,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
             ComboBoxKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
         ),
-        default_keymap::profile(Vec::new()).unwrap(),
+        default_keymap::profile(testing_reserved_shortcuts()).unwrap(),
         testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
     )

@@ -9,6 +9,7 @@ mod catalog;
 mod controls;
 mod editor;
 mod import;
+mod keybindings;
 mod microphone;
 mod theme_gallery;
 mod theme_store;
@@ -20,6 +21,9 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod control_tests;
+
+#[cfg(test)]
+mod keybindings_tests;
 
 #[cfg(test)]
 mod microphone_tests;
@@ -51,7 +55,7 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::theme_registry::ZedThemeRegistry;
@@ -67,12 +71,13 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
-use catalog::{ROWS, SettingsRowId, SettingsSectionId};
+use catalog::{SettingsRowId, SettingsSectionId};
 use controls::{
     SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
     reset_button, row_horizontal_inset, section_heading,
 };
 use editor::{SaveStatus, SettingsEditor};
+use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -322,6 +327,16 @@ pub(crate) struct SettingsWindow {
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
+    /// One shortcut recorder per Command, kept so a recording survives re-rendering.
+    shortcuts: ShortcutRows,
+}
+
+/// How one row returns to its default.
+#[derive(Clone, Debug)]
+enum RowReset {
+    Appearance(ResetTarget),
+    Update,
+    Shortcut(crate::keybindings::Command),
 }
 
 impl SettingsWindow {
@@ -471,6 +486,7 @@ impl SettingsWindow {
         let theme_gallery = ThemeGallery::new(window, cx);
         let owner = cx.weak_entity();
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
+        let shortcuts = ShortcutRows::new(window, cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -489,6 +505,7 @@ impl SettingsWindow {
             microphone_access: MicrophoneAccessRow::new(microphone_access),
             theme_gallery,
             theme_store,
+            shortcuts,
         }
     }
 
@@ -567,6 +584,7 @@ impl SettingsWindow {
     /// Presents one section. Each section is its own view, so the detail pane starts at its top.
     fn reveal_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
         self.active_section = section;
+        self.shortcuts.dismiss_notice();
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
@@ -610,20 +628,29 @@ impl SettingsWindow {
     }
 
     /// Whether this row differs from its default, which is when a reset is worth offering.
-    fn differs_from_default(&self, row: SettingsRowId) -> bool {
-        if let Some(differs) = self.update_preference_differs(row) {
-            return differs;
+    #[cfg(test)]
+    fn differs_from_default(&self, row: SettingsRowId, cx: &App) -> bool {
+        self.pending_reset(row, cx).is_some()
+    }
+
+    /// How this row returns to its default, when it differs from it.
+    fn pending_reset(&self, row: SettingsRowId, cx: &App) -> Option<RowReset> {
+        if let SettingsRowId::Shortcut(command) = row {
+            return self
+                .shortcut_differs(command, cx)
+                .then_some(RowReset::Shortcut(command));
         }
-        let Some(target) = row.reset_target(self.fixed_appearance()) else {
-            return false;
-        };
+        if let Some(differs) = self.update_preference_differs(row) {
+            return differs.then_some(RowReset::Update);
+        }
+        let target = row.reset_target(self.fixed_appearance())?;
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
         // the document would copy the whole installed theme catalog to answer a question about
         // one field.
         let current = &self.editor.document().preferences;
         let mut reset = current.clone();
-        reset.reset(target);
-        reset != *current
+        reset.reset(target.clone());
+        (reset != *current).then_some(RowReset::Appearance(target))
     }
 
     fn row_reset(
@@ -632,13 +659,10 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.differs_from_default(row) || !self.editor.editable() {
+        if !self.editor.editable() {
             return None;
         }
-        let target = row.reset_target(self.fixed_appearance());
-        if target.is_none() && self.update_preference_differs(row).is_none() {
-            return None;
-        }
+        let reset = self.pending_reset(row, cx)?;
         let owner = cx.weak_entity();
         Some(
             reset_button(
@@ -650,10 +674,11 @@ impl SettingsWindow {
                     .glyph_size,
                 true,
                 move |_, cx| {
-                    let target = target.clone();
-                    let _ = owner.update(cx, |settings, cx| match target {
-                        Some(target) => settings.editor.reset(target, cx),
-                        None => settings.reset_update_preference(row, cx),
+                    let reset = reset.clone();
+                    let _ = owner.update(cx, |settings, cx| match reset {
+                        RowReset::Appearance(target) => settings.editor.reset(target, cx),
+                        RowReset::Update => settings.reset_update_preference(row, cx),
+                        RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
                     });
                 },
             )
@@ -956,8 +981,7 @@ impl SettingsWindow {
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
-                ROWS.iter()
-                    .any(|row| row.section == *section && matching.contains(&row.id))
+                catalog::rows().any(|row| row.section == *section && matching.contains(&row.id))
             })
             .collect()
     }
@@ -1079,6 +1103,7 @@ impl SettingsWindow {
                                     SettingsSectionId::Interface => IconName::AppWindow,
                                     SettingsSectionId::Font => IconName::Type,
                                     SettingsSectionId::Themes => IconName::Palette,
+                                    SettingsSectionId::Keybindings => IconName::Keyboard,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                     SettingsSectionId::Updates => IconName::Download,
                                 },
@@ -1373,6 +1398,14 @@ impl SettingsWindow {
             .highlighted(highlighted);
         if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
+        } else if let SettingsRowId::Shortcut(command) = row {
+            if let Some(description) = self.shortcut_description(command, cx) {
+                rendered = if description.error {
+                    rendered.error(description.text)
+                } else {
+                    rendered.description(description.text)
+                };
+            }
         } else if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
@@ -1406,6 +1439,7 @@ impl SettingsWindow {
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
+            SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
         }
     }
 
@@ -2090,7 +2124,7 @@ impl SettingsWindow {
             ModalId::new("settings-reset-all"),
             "Reset all settings",
             "Reset All Settings",
-            "Every setting returns to its default, and the terminal themes you installed are removed.",
+            "Every setting and keyboard shortcut returns to its default, and the terminal themes you installed are removed.",
             vec![
                 ModalAction::new(
                     true,
@@ -2126,6 +2160,7 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
+                settings.shortcuts.dismiss_notice();
                 settings.editor.reset_all(cx);
                 cx.notify();
             });

@@ -73,7 +73,6 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
             command
         );
         assert!(!command.label().is_empty());
-        assert!(!command.group().title().is_empty());
         if command.group() != previous_group {
             completed_groups.insert(previous_group);
             assert!(!completed_groups.contains(&command.group()));
@@ -384,7 +383,6 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
         SystemReservation::AppSwitcher,
         SystemReservation::WindowCycling,
         SystemReservation::Spotlight,
-        SystemReservation::InputSource,
         SystemReservation::CharacterViewer,
         SystemReservation::ForceQuit,
         SystemReservation::LockScreen,
@@ -566,6 +564,21 @@ fn reset_reclaims_a_default_even_without_an_override_on_the_reset_command() {
         profile.resolve(&prefs).state(Command::NewWorkspace),
         KeybindingState::Default
     );
+}
+
+#[test]
+fn a_displacement_that_restores_a_default_retains_no_override() {
+    let profile = profile();
+    let mut prefs = preferences(r#"{"close_workspace":"cmd-n"}"#);
+    profile.reset(&mut prefs, Command::NewWorkspace);
+    assert_eq!(prefs.get(Command::CloseWorkspace), None);
+    let mut prefs = preferences(r#"{"close_workspace":"cmd-y"}"#);
+    let displaced = profile
+        .assign(&mut prefs, Command::CreateTab, Some(shortcut("cmd-y")))
+        .unwrap()
+        .displaced;
+    assert_eq!(displaced, Some(Command::CloseWorkspace));
+    assert_eq!(prefs.get(Command::CloseWorkspace), None);
 }
 
 #[test]

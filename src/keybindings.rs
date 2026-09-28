@@ -1,11 +1,4 @@
 //! Portable shortcut policy and resolution of host defaults with retained overrides.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the later Keybindings Settings Section"
-    )
-)]
 
 mod keymap;
 mod preferences;
@@ -36,19 +29,6 @@ pub enum CommandGroup {
     Terminal,
     View,
     Settings,
-}
-
-impl CommandGroup {
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Workspace => "Workspace",
-            Self::Tab => "Tab",
-            Self::Pane => "Pane",
-            Self::Terminal => "Terminal",
-            Self::View => "View",
-            Self::Settings => "Settings",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -122,6 +122,7 @@ fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
         SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
         SettingsSectionId::Font => "settings-navigation-settings-section-font",
         SettingsSectionId::Themes => "settings-navigation-settings-section-themes",
+        SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
     };
@@ -687,14 +688,14 @@ fn a_built_in_tile_offers_no_removal(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 
     click("settings-density-comfortable", cx);
 
-    assert!(window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 
     click("settings-row-density-reset", cx);
@@ -703,8 +704,8 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
         document_of(&window, cx).preferences.window.density,
         ChromeDensity::Compact
     );
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::Density)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::Density, cx)
     }));
 }
 
@@ -768,8 +769,8 @@ fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut
 
     // A test frame keeps every selector it has ever drawn, so the reset's absence is read from the
     // row's state rather than from its bounds.
-    assert!(!window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::TerminalItalic)
+    assert!(!window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::TerminalItalic, cx)
     }));
     assert_eq!(bounds("settings-terminal-italic", cx), control);
 }
@@ -848,8 +849,8 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
 
     resize(1400.0, cx);
     click(CONTROL, cx);
-    assert!(window.read_with(cx, |window, _| {
-        window.differs_from_default(SettingsRowId::TerminalBoldAsBright)
+    assert!(window.read_with(cx, |window, cx| {
+        window.differs_from_default(SettingsRowId::TerminalBoldAsBright, cx)
     }));
     let with_reset = measure(cx);
 

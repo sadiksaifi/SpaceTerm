@@ -79,9 +79,8 @@ fn desktop_profile(
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
             },
-            super::macos_shortcut_glyphs::MacosShortcutFormatter.format(
-                &crate::keybindings::Shortcut::parse("cmd-enter").expect("static confirm shortcut"),
-            ),
+            super::macos_shortcut_glyphs::MacosShortcutFormatter
+                .format_chord(gpui::Modifiers::command(), "enter"),
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),
         locale,

@@ -253,6 +253,8 @@ pub(super) struct SettingsRow {
     selector: &'static str,
     label: &'static str,
     description: Option<SharedString>,
+    /// The description reports a refusal rather than guidance.
+    error: bool,
     control: AnyElement,
     reset: Option<AnyElement>,
     highlighted: bool,
@@ -270,6 +272,7 @@ impl SettingsRow {
             selector,
             label,
             description: None,
+            error: false,
             control: control.into_any_element(),
             reset: None,
             highlighted: false,
@@ -281,6 +284,13 @@ impl SettingsRow {
     /// Adds one line of guidance below the control.
     pub(super) fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Reports why the row refused an edit, in place of guidance and in the error color.
+    pub(super) fn error(mut self, message: impl Into<SharedString>) -> Self {
+        self.description = Some(message.into());
+        self.error = true;
         self
     }
 
@@ -345,6 +355,7 @@ impl SettingsRow {
         let above = self.layout == SettingsRowLayout::Above;
         let full = self.layout == SettingsRowLayout::Full;
         let description_selector = format!("{selector}-description");
+        let caption_color = if self.error { colors.error } else { secondary };
         // One rule for the whole form: the label starts at the content's left edge, the control
         // ends at its right edge, and nothing is centered.
         let caption = |description: SharedString| {
@@ -354,7 +365,7 @@ impl SettingsRow {
                     move || description_selector.clone()
                 })
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(secondary))
+                .text_color(gpui_color(caption_color))
                 .whitespace_normal()
                 .child(description)
         };

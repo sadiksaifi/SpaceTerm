@@ -1,13 +1,12 @@
 use gpui::{Modifiers, SharedString};
 
 use crate::desktop_profile::ShortcutFormatter;
-use crate::keybindings::Shortcut;
 
 pub(crate) struct MacosShortcutFormatter;
 
 impl ShortcutFormatter for MacosShortcutFormatter {
-    fn format(&self, shortcut: &Shortcut) -> SharedString {
-        let key = match shortcut.key() {
+    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
+        let key = match key {
             "enter" => "↩".into(),
             "tab" => "⇥".into(),
             "escape" => "⎋".into(),
@@ -25,7 +24,7 @@ impl ShortcutFormatter for MacosShortcutFormatter {
             "insert" => "Insert".into(),
             key => key.to_uppercase(),
         };
-        format!("{}{key}", self.format_modifiers(shortcut.modifiers())).into()
+        format!("{}{key}", self.format_modifiers(modifiers)).into()
     }
 
     fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
@@ -45,6 +44,11 @@ impl ShortcutFormatter for MacosShortcutFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::Shortcut;
+
+    fn format(shortcut: &Shortcut) -> SharedString {
+        MacosShortcutFormatter.format_chord(shortcut.modifiers(), shortcut.key())
+    }
 
     #[test]
     fn shortcut_glyphs_use_native_modifier_order_and_key_spelling() {
@@ -73,7 +77,7 @@ mod tests {
         ] {
             let shortcut = Shortcut::parse(&format!("cmd-shift-alt-ctrl-{key}")).unwrap();
             assert_eq!(
-                MacosShortcutFormatter.format(&shortcut).as_ref(),
+                format(&shortcut).as_ref(),
                 format!("⌃⌥⇧⌘{glyph}")
             );
         }
@@ -89,9 +93,7 @@ mod tests {
             ("shift-cmd-enter", "⇧⌘↩"),
         ] {
             assert_eq!(
-                MacosShortcutFormatter
-                    .format(&Shortcut::parse(source).unwrap())
-                    .as_ref(),
+                format(&Shortcut::parse(source).unwrap()).as_ref(),
                 display
             );
         }

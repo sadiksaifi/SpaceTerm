@@ -7,6 +7,7 @@
 use spaceterm_ui::{FuzzyTarget, fuzzy_filter};
 
 use crate::appearance::{Appearance, ResetTarget};
+use crate::keybindings::{Command, CommandGroup};
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -17,6 +18,8 @@ pub(super) enum SettingsSectionId {
     Font,
     /// The light, dark, or automatic appearance, and the Terminal Theme each appearance uses.
     Themes,
+    /// The Shortcut each Command resolves to.
+    Keybindings,
     /// System permissions that tools running in SpaceTerm rely on.
     Privacy,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
@@ -25,10 +28,11 @@ pub(super) enum SettingsSectionId {
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Interface,
         Self::Font,
         Self::Themes,
+        Self::Keybindings,
         Self::Privacy,
         Self::Updates,
     ];
@@ -38,6 +42,7 @@ impl SettingsSectionId {
             Self::Interface => "Interface",
             Self::Font => "Font",
             Self::Themes => "Themes",
+            Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
             Self::Updates => "Updates",
         }
@@ -49,6 +54,9 @@ impl SettingsSectionId {
             Self::Font => "The typeface and text rendering in terminal panes.",
             Self::Themes => {
                 "Light, dark, or automatic appearance, and the colors terminal panes use in each. Themes published for Zed work too."
+            }
+            Self::Keybindings => {
+                "Shortcuts for SpaceTerm commands. Click a shortcut, then press the new keys. Press Delete to remove it."
             }
             Self::Privacy => {
                 "System permissions that voice and other tools running in SpaceTerm rely on."
@@ -64,6 +72,7 @@ impl SettingsSectionId {
             Self::Interface => "settings-section-interface",
             Self::Font => "settings-section-font",
             Self::Themes => "settings-section-themes",
+            Self::Keybindings => "settings-section-keybindings",
             Self::Privacy => "settings-section-privacy",
             Self::Updates => "settings-section-updates",
         }
@@ -97,11 +106,13 @@ pub(super) enum SettingsRowId {
     UpdateCheckInterval,
     /// How often an overdue update is brought back after it was dismissed.
     UpdateReminderInterval,
+    /// The Keybinding of one Command.
+    Shortcut(Command),
 }
 
 impl SettingsRowId {
     pub(super) fn descriptor(self) -> &'static SettingsRowDescriptor {
-        ROWS.iter()
+        rows()
             .find(|descriptor| descriptor.id == self)
             .expect("every row identity is listed in the catalog")
     }
@@ -131,7 +142,10 @@ impl SettingsRowId {
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
-            | Self::UpdateReminderInterval => {
+            | Self::UpdateReminderInterval
+            // Keybindings live outside the appearance preferences and reset through the keymap
+            // profile, which returns a displaced default to its Command.
+            | Self::Shortcut(_) => {
                 return None;
             }
         })
@@ -161,7 +175,8 @@ pub(super) struct SettingsRowMatch {
 }
 
 pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
-    let fields = ROWS
+    let rows = rows().collect::<Vec<_>>();
+    let fields = rows
         .iter()
         .enumerate()
         .flat_map(|(row_index, descriptor)| {
@@ -173,7 +188,7 @@ pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
             )
         })
         .collect::<Vec<_>>();
-    let mut seen_rows = vec![false; ROWS.len()];
+    let mut seen_rows = vec![false; rows.len()];
 
     fuzzy_filter(&fields, query, |(_, _, text)| FuzzyTarget::new(text))
         .into_iter()
@@ -183,7 +198,7 @@ pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
                 return None;
             }
             Some(SettingsRowMatch {
-                id: ROWS[row_index].id,
+                id: rows[row_index].id,
                 score: matched.score(),
                 matched_indices: if is_label {
                     matched.field_highlight_indices(0)
@@ -203,7 +218,12 @@ pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
         .collect()
 }
 
-pub(super) const ROWS: &[SettingsRowDescriptor] = &[
+/// Every row in table order: the preference rows, then one row per Command.
+pub(super) fn rows() -> impl Iterator<Item = &'static SettingsRowDescriptor> + Clone {
+    PREFERENCE_ROWS.iter().chain(SHORTCUT_ROWS)
+}
+
+const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::Density,
         section: SettingsSectionId::Interface,
@@ -430,14 +450,93 @@ pub(super) const ROWS: &[SettingsRowDescriptor] = &[
     },
 ];
 
+/// The titled box each Command's row shares with the other Commands of its group.
+const fn shortcut_group(group: CommandGroup) -> &'static str {
+    match group {
+        CommandGroup::Workspace => "Workspaces",
+        CommandGroup::Tab => "Tabs",
+        CommandGroup::Pane => "Panes",
+        CommandGroup::Terminal => "Terminal",
+        CommandGroup::View => "View",
+        CommandGroup::Settings => "General",
+    }
+}
+
+const SHORTCUT_KEYWORDS: &[&str] = &["shortcut", "keyboard", "keybinding", "hotkey"];
+
+/// One row per Command, in [`Command::ALL`] order, which already runs group by group.
+macro_rules! shortcut_rows {
+    ($($command:ident => $slug:literal),+ $(,)?) => {
+        const SHORTCUT_ROWS: &[SettingsRowDescriptor] = &[
+            $(
+                SettingsRowDescriptor {
+                    id: SettingsRowId::Shortcut(Command::$command),
+                    section: SettingsSectionId::Keybindings,
+                    group: shortcut_group(Command::$command.group()),
+                    label: Command::$command.label(),
+                    keywords: SHORTCUT_KEYWORDS,
+                    selector: concat!("settings-row-shortcut-", $slug),
+                },
+            )+
+        ];
+    };
+}
+
+shortcut_rows! {
+    SwitchWorkspace => "switch-workspace",
+    NewWorkspace => "new-workspace",
+    NewRemoteWorkspace => "new-remote-workspace",
+    CloseWorkspace => "close-workspace",
+    ActivateWorkspace1 => "activate-workspace-1",
+    ActivateWorkspace2 => "activate-workspace-2",
+    ActivateWorkspace3 => "activate-workspace-3",
+    ActivateWorkspace4 => "activate-workspace-4",
+    ActivateWorkspace5 => "activate-workspace-5",
+    ActivateWorkspace6 => "activate-workspace-6",
+    ActivateWorkspace7 => "activate-workspace-7",
+    ActivateWorkspace8 => "activate-workspace-8",
+    ActivateWorkspace9 => "activate-workspace-9",
+    CreateTab => "create-tab",
+    CloseTab => "close-tab",
+    ActivateTab1 => "activate-tab-1",
+    ActivateTab2 => "activate-tab-2",
+    ActivateTab3 => "activate-tab-3",
+    ActivateTab4 => "activate-tab-4",
+    ActivateTab5 => "activate-tab-5",
+    ActivateTab6 => "activate-tab-6",
+    ActivateTab7 => "activate-tab-7",
+    ActivateTab8 => "activate-tab-8",
+    ActivateTab9 => "activate-tab-9",
+    ClosePane => "close-pane",
+    SplitRight => "split-right",
+    SplitDown => "split-down",
+    FocusPaneLeft => "focus-pane-left",
+    FocusPaneRight => "focus-pane-right",
+    FocusPaneUp => "focus-pane-up",
+    FocusPaneDown => "focus-pane-down",
+    FocusPreviousPane => "focus-previous-pane",
+    FocusNextPane => "focus-next-pane",
+    TogglePaneZoom => "toggle-pane-zoom",
+    OpenTerminalFind => "open-terminal-find",
+    FindNext => "find-next",
+    FindPrevious => "find-previous",
+    ClearTerminalScreenAndScrollback => "clear-terminal-screen-and-scrollback",
+    IncreaseTerminalFontSize => "increase-terminal-font-size",
+    DecreaseTerminalFontSize => "decrease-terminal-font-size",
+    ResetTerminalFontSize => "reset-terminal-font-size",
+    ToggleSidebar => "toggle-sidebar",
+    ToggleSidebarFocus => "toggle-sidebar-focus",
+    OpenSettings => "open-settings",
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
 
-    /// The complete row identity set, so the catalog cannot silently omit one.
-    const EVERY_ROW: [SettingsRowId; 18] = [
+    /// The complete preference row identity set, so the catalog cannot silently omit one.
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 18] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -458,25 +557,50 @@ mod tests {
         SettingsRowId::UpdateReminderInterval,
     ];
 
+    fn every_row() -> Vec<SettingsRowId> {
+        EVERY_PREFERENCE_ROW
+            .into_iter()
+            .chain(Command::ALL.map(SettingsRowId::Shortcut))
+            .collect()
+    }
+
     #[test]
     fn every_row_identity_is_listed_exactly_once() {
-        for id in EVERY_ROW {
-            let listed = ROWS.iter().filter(|row| row.id == id).count();
+        let every_row = every_row();
+        for &id in &every_row {
+            let listed = rows().filter(|row| row.id == id).count();
             assert_eq!(listed, 1, "{id:?} should be listed exactly once");
         }
-        assert_eq!(ROWS.len(), EVERY_ROW.len());
+        assert_eq!(rows().count(), every_row.len());
+    }
+
+    #[test]
+    fn shortcut_rows_follow_command_order_in_the_keybindings_section() {
+        assert!(
+            SHORTCUT_ROWS
+                .iter()
+                .map(|row| row.id)
+                .eq(Command::ALL.map(SettingsRowId::Shortcut))
+        );
+        for row in SHORTCUT_ROWS {
+            let SettingsRowId::Shortcut(command) = row.id else {
+                unreachable!()
+            };
+            assert_eq!(row.section, SettingsSectionId::Keybindings);
+            assert_eq!(row.label, command.label());
+        }
     }
 
     #[test]
     fn every_row_selector_is_unique() {
-        let selectors = ROWS.iter().map(|row| row.selector).collect::<HashSet<_>>();
+        let selectors = rows().map(|row| row.selector).collect::<HashSet<_>>();
 
-        assert_eq!(selectors.len(), ROWS.len());
+        assert_eq!(selectors.len(), rows().count());
     }
 
     #[test]
     fn every_row_belongs_to_a_presented_section() {
-        for row in ROWS {
+        for row in rows() {
             assert!(SettingsSectionId::ALL.contains(&row.section));
         }
     }
@@ -485,7 +609,7 @@ mod tests {
     fn every_section_presents_at_least_one_row() {
         for section in SettingsSectionId::ALL {
             assert!(
-                ROWS.iter().any(|row| row.section == section),
+                rows().any(|row| row.section == section),
                 "{section:?} has no rows"
             );
         }
@@ -497,7 +621,7 @@ mod tests {
     fn every_group_occupies_one_run_of_the_table() {
         let mut seen = HashSet::new();
         let mut previous: Option<(SettingsSectionId, &str)> = None;
-        for row in ROWS {
+        for row in rows() {
             let current = (row.section, row.group);
             if previous == Some(current) {
                 continue;
@@ -513,8 +637,7 @@ mod tests {
     /// One appearance control governs both surfaces.
     #[test]
     fn one_appearance_mode_governs_both_surfaces() {
-        let modes = ROWS
-            .iter()
+        let modes = rows()
             .filter(|row| matches!(row.id, SettingsRowId::AppearanceMode))
             .count();
 
@@ -535,7 +658,7 @@ mod tests {
 
     #[test]
     fn an_empty_query_matches_every_row() {
-        assert_eq!(matching_rows("   ").len(), ROWS.len());
+        assert_eq!(matching_rows("   ").len(), rows().count());
     }
 
     #[test]
@@ -617,6 +740,31 @@ mod tests {
     }
 
     #[test]
+    fn a_command_query_reaches_its_shortcut_row() {
+        assert_eq!(
+            matching_rows("close tab").first(),
+            Some(&SettingsRowId::Shortcut(Command::CloseTab))
+        );
+        assert_eq!(
+            matching_rows("split right").first(),
+            Some(&SettingsRowId::Shortcut(Command::SplitRight))
+        );
+    }
+
+    #[test]
+    fn a_shortcut_query_reaches_every_command() {
+        for query in ["shortcut", "keyboard", "hotkey"] {
+            let matches = matching_rows(query);
+            for command in Command::ALL {
+                assert!(
+                    matches.contains(&SettingsRowId::Shortcut(command)),
+                    "{query:?} should reach {command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_section_name_is_not_an_implicit_search_target() {
         let matches = matching_rows("terminal");
 
@@ -654,8 +802,8 @@ mod tests {
 
     #[test]
     fn every_appearance_preference_row_maps_to_a_reset_target() {
-        for row in ROWS {
-            // Update rows reset their own field; the Updates section tests cover that path.
+        for row in rows() {
+            // Update and shortcut rows reset their own field; their section tests cover that path.
             let resettable = !matches!(
                 row.id,
                 SettingsRowId::InstalledThemes
@@ -664,6 +812,7 @@ mod tests {
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
                     | SettingsRowId::UpdateReminderInterval
+                    | SettingsRowId::Shortcut(_)
             );
             assert_eq!(
                 row.id.reset_target(Appearance::Light).is_some(),

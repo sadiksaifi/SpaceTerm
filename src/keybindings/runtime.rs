@@ -20,10 +20,6 @@ pub(crate) struct KeymapRuntime {
 impl Global for KeymapRuntime {}
 
 impl KeymapRuntime {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the later Keybindings Settings Section")
-    )]
     pub(crate) fn profile(cx: &App) -> Rc<KeymapProfile> {
         Rc::clone(&cx.global::<Self>().profile)
     }

@@ -40,7 +40,6 @@ pub enum SystemReservation {
     AppSwitcher,
     WindowCycling,
     Spotlight,
-    InputSource,
     CharacterViewer,
     ForceQuit,
     LockScreen,
@@ -232,18 +231,7 @@ impl KeymapProfile {
         let displaced = shortcut
             .as_ref()
             .and_then(|shortcut| self.displace(preferences, command, shortcut));
-        // An override equal to an alias-free default, or Unassigned for a command without one,
-        // restates the default and is not retained.
-        let restates_default = match (self.defaults(command), &shortcut) {
-            ([], None) => true,
-            ([default], Some(shortcut)) => default == shortcut,
-            _ => false,
-        };
-        if restates_default {
-            preferences.remove(command);
-        } else {
-            preferences.set(command, shortcut);
-        }
+        self.retain(preferences, command, shortcut);
         Ok(Reassignment { displaced })
     }
 
@@ -264,12 +252,29 @@ impl KeymapProfile {
         let resolved = self.resolve(preferences);
         let owner = resolved.owner(shortcut).filter(|&owner| owner != command)?;
         let primary = resolved.shortcut(owner);
-        if primary == Some(shortcut) {
-            preferences.set(owner, None);
-        } else {
-            preferences.set(owner, primary.cloned());
-        }
+        let kept = primary.filter(|&primary| primary != shortcut).cloned();
+        self.retain(preferences, owner, kept);
         Some(owner)
+    }
+
+    /// Records one Keybinding. An override equal to an alias-free default, or Unassigned for a
+    /// command without one, restates the default and is not retained.
+    fn retain(
+        &self,
+        preferences: &mut KeybindingPreferences,
+        command: Command,
+        shortcut: Option<Shortcut>,
+    ) {
+        let restates_default = match (self.defaults(command), &shortcut) {
+            ([], None) => true,
+            ([default], Some(shortcut)) => default == shortcut,
+            _ => false,
+        };
+        if restates_default {
+            preferences.remove(command);
+        } else {
+            preferences.set(command, shortcut);
+        }
     }
 
     fn defaults(&self, command: Command) -> &[Shortcut] {
