@@ -41,7 +41,7 @@ fn profile() -> KeymapProfile {
             ),
             (
                 Command::IncreaseTerminalFontSize,
-                Some(DefaultBinding::new("cmd-=", &["cmd-+", "shift-cmd-="])),
+                Some(DefaultBinding::new("cmd-=", &["cmd-+", "alt-cmd-="])),
             ),
         ],
         vec![SystemReserved {
@@ -273,11 +273,7 @@ fn resolve_defaults_preserves_primary_alias_order_and_separates_fixed_controls()
     );
     assert_eq!(
         resolved.shortcuts(Command::IncreaseTerminalFontSize),
-        &[
-            shortcut("cmd-="),
-            shortcut("cmd-+"),
-            shortcut("shift-cmd-=")
-        ]
+        &[shortcut("cmd-="), shortcut("cmd-+"), shortcut("alt-cmd-=")]
     );
     assert_eq!(
         resolved.state(Command::CloseWorkspace),
@@ -340,7 +336,7 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
     );
     assert_eq!(
         resolved.shortcuts(Command::IncreaseTerminalFontSize),
-        &[shortcut("cmd-="), shortcut("shift-cmd-=")]
+        &[shortcut("cmd-="), shortcut("alt-cmd-=")]
     );
     assert_eq!(resolved.owner(&shortcut("cmd-n")), None);
     assert_eq!(resolved.owner(&shortcut("cmd-t")), None);
@@ -461,7 +457,7 @@ fn assigning_an_alias_pins_the_primary_and_drops_all_aliases() {
         resolved.shortcuts(Command::IncreaseTerminalFontSize),
         &[shortcut("cmd-=")]
     );
-    assert_eq!(resolved.owner(&shortcut("shift-cmd-=")), None);
+    assert_eq!(resolved.owner(&shortcut("alt-cmd-=")), None);
     profile
         .assign(&mut prefs, Command::NewWorkspace, None)
         .unwrap();
@@ -534,7 +530,7 @@ fn assigning_an_owned_shortcut_keeps_the_command_assigned() {
 fn reset_reclaims_the_primary_and_every_alias_from_current_owners() {
     let profile = profile();
     let mut prefs = preferences(
-        r#"{"increase_terminal_font_size":null,"new_workspace":"cmd-=","create_tab":"cmd-+","close_tab":"shift-cmd-="}"#,
+        r#"{"increase_terminal_font_size":null,"new_workspace":"cmd-=","create_tab":"cmd-+","close_tab":"alt-cmd-="}"#,
     );
     profile.reset(&mut prefs, Command::IncreaseTerminalFontSize);
     assert!(!prefs.is_overridden(Command::IncreaseTerminalFontSize));
@@ -544,11 +540,7 @@ fn reset_reclaims_the_primary_and_every_alias_from_current_owners() {
     let resolved = profile.resolve(&prefs);
     assert_eq!(
         resolved.shortcuts(Command::IncreaseTerminalFontSize),
-        &[
-            shortcut("cmd-="),
-            shortcut("cmd-+"),
-            shortcut("shift-cmd-=")
-        ]
+        &[shortcut("cmd-="), shortcut("cmd-+"), shortcut("alt-cmd-=")]
     );
     assert_eq!(prefs.validate(), Ok(()));
 }
@@ -644,7 +636,7 @@ fn bindings_follow_command_order_and_mirror_each_find_shortcut_immediately() {
         ),
         (
             Command::IncreaseTerminalFontSize,
-            "cmd-shift-=",
+            "alt-cmd-=",
             Some(crate::ui::TERMINAL_KEY_CONTEXT),
         ),
     ]
@@ -673,7 +665,7 @@ fn deterministic_assign_reset_clear_sequence_preserves_unique_ownership() {
         "shift-cmd-g",
         "cmd-=",
         "cmd-+",
-        "shift-cmd-=",
+        "alt-cmd-=",
         "cmd-y",
         "cmd-q",
     ];

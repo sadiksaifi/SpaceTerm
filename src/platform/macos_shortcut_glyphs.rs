@@ -72,14 +72,9 @@ mod tests {
             ("f20", "F20"),
             ("k", "K"),
             ("é", "É"),
-            ("+", "+"),
-            ("-", "-"),
         ] {
             let shortcut = Shortcut::parse(&format!("cmd-shift-alt-ctrl-{key}")).unwrap();
-            assert_eq!(
-                format(&shortcut).as_ref(),
-                format!("⌃⌥⇧⌘{glyph}")
-            );
+            assert_eq!(format(&shortcut).as_ref(), format!("⌃⌥⇧⌘{glyph}"));
         }
         assert_eq!(
             MacosShortcutFormatter
@@ -91,11 +86,11 @@ mod tests {
             ("cmd-k", "⌘K"),
             ("ctrl-1", "⌃1"),
             ("shift-cmd-enter", "⇧⌘↩"),
+            ("cmd-shift-alt-ctrl-+", "⌃⌥⌘+"),
+            ("cmd-shift-alt-ctrl--", "⌃⌥⌘_"),
+            ("shift-cmd-`", "⌘~"),
         ] {
-            assert_eq!(
-                format(&Shortcut::parse(source).unwrap()).as_ref(),
-                display
-            );
+            assert_eq!(format(&Shortcut::parse(source).unwrap()).as_ref(), display);
         }
     }
 }

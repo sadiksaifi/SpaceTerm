@@ -270,9 +270,9 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
         let application_name = self.identity.display_name();
         let menus = menus(application_name);
-        let enter_keys = enter_key_equivalents(&menus, &cx.key_bindings().borrow());
+        let native_keys = native_key_equivalents(&menus, &cx.key_bindings().borrow());
         cx.set_menus(menus);
-        native::decorate(application_name, &enter_keys)
+        native::decorate(application_name, &native_keys)
     }
 
     fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
@@ -426,17 +426,26 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct EnterKeyEquivalent {
+struct NativeKeyEquivalent {
     path: Vec<SharedString>,
     modifiers: Modifiers,
+    key: &'static str,
 }
 
-fn enter_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<EnterKeyEquivalent> {
+fn missing_native_key_equivalent(key: &str) -> Option<&'static str> {
+    match key {
+        "enter" => Some("\r"),
+        "tab" => Some("\t"),
+        _ => None,
+    }
+}
+
+fn native_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<NativeKeyEquivalent> {
     fn collect(
         menu: &Menu,
         path: &mut Vec<SharedString>,
         keymap: &Keymap,
-        keys: &mut Vec<EnterKeyEquivalent>,
+        keys: &mut Vec<NativeKeyEquivalent>,
     ) {
         path.push(menu.name.clone());
         for item in &menu.items {
@@ -448,13 +457,14 @@ fn enter_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<EnterKeyEquival
                         .any(|command| command.action().partial_eq(action.as_ref()))
                         && let Some(shortcut) =
                             crate::desktop_profile::installed_shortcut(keymap, action.as_ref())
-                        && shortcut.key() == "enter"
+                        && let Some(key) = missing_native_key_equivalent(shortcut.key())
                     {
                         let mut item_path = path.clone();
                         item_path.push(name.clone());
-                        keys.push(EnterKeyEquivalent {
+                        keys.push(NativeKeyEquivalent {
                             path: item_path,
                             modifiers: shortcut.modifiers(),
+                            key,
                         });
                     }
                 }
@@ -483,8 +493,8 @@ mod native {
     use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
 
     use super::{
-        ApplicationMenuCommand, ApplicationMenuError, EnterKeyEquivalent, MENU_ITEM_ICONS,
-        MenuItemIcon,
+        ApplicationMenuCommand, ApplicationMenuError, MENU_ITEM_ICONS, MenuItemIcon,
+        NativeKeyEquivalent,
     };
 
     const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
@@ -492,13 +502,13 @@ mod native {
 
     pub(super) fn decorate(
         application_name: &str,
-        enter_keys: &[EnterKeyEquivalent],
+        native_keys: &[NativeKeyEquivalent],
     ) -> Result<(), ApplicationMenuError> {
         let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
         decorate_main_menu(
             &NSApplication::sharedApplication(mtm),
             application_name,
-            enter_keys,
+            native_keys,
         )
     }
 
@@ -557,7 +567,7 @@ mod native {
     fn decorate_main_menu(
         application: &NSApplication,
         application_name: &str,
-        enter_keys: &[EnterKeyEquivalent],
+        native_keys: &[NativeKeyEquivalent],
     ) -> Result<(), ApplicationMenuError> {
         let main_menu = application
             .mainMenu()
@@ -578,8 +588,8 @@ mod native {
                 .ok_or(ApplicationMenuError::Unavailable)?;
             set_symbol_image(&item, decoration.symbol)?;
         }
-        // GPUI cannot translate enter to a native key equivalent.
-        for equivalent in enter_keys {
+        // Complete the named keys omitted by GPUI's native translation.
+        for equivalent in native_keys {
             let (title, menu_path) = equivalent
                 .path
                 .split_last()
@@ -594,7 +604,7 @@ mod native {
             let item = menu
                 .itemWithTitle(&NSString::from_str(title))
                 .ok_or(ApplicationMenuError::Unavailable)?;
-            let key_equivalent = NSString::from_str("\r");
+            let key_equivalent = NSString::from_str(equivalent.key);
             let mut modifiers = NSEventModifierFlags::empty();
             for (enabled, flag) in [
                 (equivalent.modifiers.control, NSEventModifierFlags::Control),
@@ -674,7 +684,7 @@ mod native {
 
     pub(super) fn decorate(
         _: &str,
-        _: &[super::EnterKeyEquivalent],
+        _: &[super::NativeKeyEquivalent],
     ) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
@@ -732,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_equivalents_follow_overrides_for_top_level_and_nested_commands() {
+    fn native_equivalents_follow_overrides_for_top_level_and_nested_commands() {
         let profile = crate::desktop_profile::default_keymap::profile(
             super::super::macos_reserved_shortcuts::shortcuts(),
         )
@@ -751,20 +761,33 @@ mod tests {
                 vec![(vec!["View", "Focus Pane", "Left"], "ctrl-shift-cmd-enter")],
             ),
             (r#"{"toggle_pane_zoom":null}"#, vec![]),
+            (
+                r#"{"toggle_pane_zoom":"ctrl-tab"}"#,
+                vec![(vec!["View", TOGGLE_PANE_ZOOM_TITLE], "ctrl-tab")],
+            ),
+            (
+                r#"{"toggle_pane_zoom":null,"focus_pane_left":"ctrl-shift-tab"}"#,
+                vec![(vec!["View", "Focus Pane", "Left"], "ctrl-shift-tab")],
+            ),
         ] {
             let preferences = serde_json::from_str(preferences).unwrap();
             let keymap = Keymap::new(profile.resolve(&preferences).key_bindings());
             let expected = expected
                 .into_iter()
-                .map(|(path, shortcut)| EnterKeyEquivalent {
+                .map(|(path, shortcut)| NativeKeyEquivalent {
                     path: path.into_iter().map(SharedString::from).collect(),
+                    key: if shortcut.ends_with("tab") {
+                        "\t"
+                    } else {
+                        "\r"
+                    },
                     modifiers: crate::keybindings::Shortcut::parse(shortcut)
                         .unwrap()
                         .modifiers(),
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                enter_key_equivalents(&menus("SpaceTerm"), &keymap),
+                native_key_equivalents(&menus("SpaceTerm"), &keymap),
                 expected
             );
         }
