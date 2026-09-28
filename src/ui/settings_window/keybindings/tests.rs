@@ -170,7 +170,7 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Removed from Close Tab.".into(),
-            error: false,
+            warning: false,
         })
     );
 }
@@ -186,7 +186,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Ctrl+C is reserved for programs running in the terminal.".into(),
-            error: true,
+            warning: true,
         })
     );
 
@@ -196,7 +196,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "K types into the terminal. Add Primary to use it as a shortcut.".into(),
-            error: true,
+            warning: true,
         })
     );
 
@@ -218,7 +218,7 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Primary+Q is reserved by Operating System for Quit.".into(),
-            error: true,
+            warning: true,
         })
     );
 }
@@ -280,7 +280,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
             text: "Its default shortcut is assigned to Close Workspace.".into(),
-            error: false,
+            warning: false,
         })
     );
     click("settings-row-shortcut-new-workspace-reset", cx);

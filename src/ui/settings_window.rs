@@ -1397,8 +1397,8 @@ impl SettingsWindow {
             rendered = rendered.description(self.update_status(cx).summary);
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
-                rendered = if description.error {
-                    rendered.error(description.text)
+                rendered = if description.warning {
+                    rendered.warning(description.text)
                 } else {
                     rendered.description(description.text)
                 };
