@@ -38,6 +38,7 @@ pub(crate) struct StorageCommit {
 
 /// Supplies file effects without exposing paths or native handles to settings policy.
 pub(crate) trait SettingsStorage: Send + Sync {
+    /// Quarantines only the identity retained by the most recent read, including oversized reads.
     fn quarantine(&self) -> Result<(), StorageError>;
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError>;
     fn write(
@@ -50,6 +51,7 @@ pub(crate) trait SettingsStorage: Send + Sync {
 pub(crate) struct ConfigSettingsStorage {
     paths: Arc<AppPaths>,
     directory: Mutex<Option<SecureDirectory>>,
+    observed: Mutex<Option<SecureEntryIdentity>>,
 }
 
 impl ConfigSettingsStorage {
@@ -57,6 +59,7 @@ impl ConfigSettingsStorage {
         Self {
             paths,
             directory: Mutex::new(None),
+            observed: Mutex::new(None),
         }
     }
 
@@ -90,6 +93,11 @@ impl ConfigSettingsStorage {
 
 impl SettingsStorage for ConfigSettingsStorage {
     fn quarantine(&self) -> Result<(), StorageError> {
+        let expected = self
+            .observed
+            .lock()
+            .map_err(|_| StorageError::Unavailable)?;
+        let expected = expected.as_ref().ok_or(StorageError::Conflict)?;
         let directory = self.directory(false)?.ok_or(StorageError::Unavailable)?;
         let source = self.paths.directories().settings_file();
         let backup = self.paths.directories().settings_backup_file();
@@ -99,20 +107,34 @@ impl SettingsStorage for ConfigSettingsStorage {
                 &directory,
                 source.file_name().ok_or(StorageError::Unavailable)?,
                 backup.file_name().ok_or(StorageError::Unavailable)?,
+                expected,
             )
             .map_err(filesystem_error)
     }
 
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
+        let mut observed = self
+            .observed
+            .lock()
+            .map_err(|_| StorageError::Unavailable)?;
+        *observed = None;
         let Some(directory) = self.directory(false)? else {
             return Ok(None);
         };
         let target = self.paths.directories().settings_file();
         let name = target.file_name().ok_or(StorageError::Unavailable)?;
-        self.paths
+        let snapshot = self
+            .paths
             .filesystem()
             .read_private_file(&directory, name, MAXIMUM_DOCUMENT_BYTES)
-            .map_err(filesystem_error)
+            .map_err(filesystem_error)?;
+        if let Some(snapshot) = &snapshot {
+            *observed = Some(snapshot.identity.clone());
+            if snapshot.bytes.len() > MAXIMUM_DOCUMENT_BYTES {
+                return Err(StorageError::TooLarge);
+            }
+        }
+        Ok(snapshot)
     }
 
     fn write(
@@ -170,6 +192,7 @@ fn path_error(error: AppPathsError) -> StorageError {
 fn filesystem_error(error: SecureFilesystemError) -> StorageError {
     match error {
         SecureFilesystemError::Unsafe => StorageError::Unsafe,
+        SecureFilesystemError::Conflict => StorageError::Conflict,
         SecureFilesystemError::TooLarge => StorageError::TooLarge,
         SecureFilesystemError::Missing
         | SecureFilesystemError::AlreadyExists

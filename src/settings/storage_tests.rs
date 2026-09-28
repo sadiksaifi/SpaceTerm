@@ -233,6 +233,42 @@ mod native {
     }
 
     #[test]
+    fn native_recovery_refuses_in_place_and_replacement_repairs_including_oversized_files() {
+        for oversized in [false, true] {
+            for replace in [false, true] {
+                let fixture = Fixture::new();
+                let storage = fixture.storage();
+                storage.write(b"malformed", None).unwrap();
+                let path = fixture.paths.directories().settings_file();
+                if oversized {
+                    fs::write(&path, vec![0xff; MAXIMUM_DOCUMENT_BYTES + 100]).unwrap();
+                }
+                let settings = crate::settings::UserSettings::load(Arc::new(storage));
+                let repaired = crate::appearance::export_settings(
+                    &crate::appearance::SettingsDocument::default(),
+                )
+                .unwrap();
+                if replace {
+                    let successor = fixture.root.join("successor");
+                    fs::write(&successor, &repaired).unwrap();
+                    fs::set_permissions(&successor, fs::Permissions::from_mode(0o600)).unwrap();
+                    fs::rename(successor, &path).unwrap();
+                } else {
+                    fs::write(&path, &repaired).unwrap();
+                }
+                assert_eq!(
+                    settings.recover_by_reset(),
+                    Err(crate::settings::recovery::RecoveryError::Storage(
+                        StorageError::Conflict
+                    ))
+                );
+                assert_eq!(fs::read(&path).unwrap(), repaired.as_bytes());
+                assert!(!fixture.paths.directories().settings_backup_file().exists());
+            }
+        }
+    }
+
+    #[test]
     fn native_settings_create_private_files_and_reject_symlink_successors() {
         let fixture = Fixture::new();
         let storage = fixture.storage();
@@ -306,11 +342,13 @@ fn oversized_settings_are_recoverable_and_quarantine_preserves_all_bytes() {
 #[test]
 fn quarantine_replaces_backup_without_creating_a_missing_config_directory() {
     let (storage, filesystem) = storage();
-    assert_eq!(storage.quarantine(), Err(StorageError::Unavailable));
+    assert_eq!(storage.quarantine(), Err(StorageError::Conflict));
     assert!(filesystem.events.lock().unwrap().is_empty());
     storage.write(b"old", None).unwrap();
+    storage.read().unwrap();
     storage.quarantine().unwrap();
     storage.write(b"new\0\xff", None).unwrap();
+    storage.read().unwrap();
     storage.quarantine().unwrap();
     assert!(storage.read().unwrap().is_none());
     let files = filesystem.files.lock().unwrap();
@@ -318,4 +356,97 @@ fn quarantine_replaces_backup_without_creating_a_missing_config_directory() {
     let (path, (bytes, _)) = files.values.first_key_value().unwrap();
     assert!(path.ends_with("settings.json.bak"));
     assert_eq!(bytes, b"new\0\xff");
+}
+
+#[test]
+fn recovery_refuses_settings_repaired_after_the_malformed_read() {
+    for oversized in [false, true] {
+        let (storage, filesystem) = storage();
+        storage.write(b"malformed", None).unwrap();
+        if oversized {
+            filesystem
+                .files
+                .lock()
+                .unwrap()
+                .values
+                .first_entry()
+                .unwrap()
+                .get_mut()
+                .0 = vec![0xff; MAXIMUM_DOCUMENT_BYTES + 1];
+        }
+        let settings = crate::settings::UserSettings::load(Arc::new(storage));
+        let repaired =
+            crate::appearance::export_settings(&crate::appearance::SettingsDocument::default())
+                .unwrap()
+                .into_bytes();
+        {
+            let mut files = filesystem.files.lock().unwrap();
+            let entry = files.values.first_entry().unwrap().into_mut();
+            entry.0 = repaired.clone();
+            entry.1 += 1;
+        }
+        assert_eq!(
+            settings.recover_by_reset(),
+            Err(crate::settings::recovery::RecoveryError::Storage(
+                StorageError::Conflict
+            ))
+        );
+        let files = filesystem.files.lock().unwrap();
+        assert_eq!(files.values.len(), 1);
+        assert_eq!(files.values.first_key_value().unwrap().1.0, repaired);
+    }
+}
+
+#[test]
+fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
+    let (storage, filesystem) = storage();
+    storage.write(b"malformed", None).unwrap();
+    let settings = crate::settings::UserSettings::load(Arc::new(storage));
+    let successor =
+        crate::appearance::export_settings(&crate::appearance::SettingsDocument::default())
+            .unwrap()
+            .into_bytes();
+    filesystem.files.lock().unwrap().successor_after_commit = Some(successor.clone());
+    settings.recover_by_reset().unwrap();
+    assert_eq!(
+        settings.snapshot().status,
+        Some(crate::settings::SettingsError::Storage(
+            StorageError::Conflict
+        ))
+    );
+    assert!(
+        settings
+            .update_committed(
+                settings.snapshot().committed.revision,
+                crate::appearance::SettingsDocument::default()
+            )
+            .is_err()
+    );
+    settings.reload().unwrap();
+    assert!(
+        settings
+            .begin_preview(settings.snapshot().committed.revision)
+            .is_ok()
+    );
+    let files = filesystem.files.lock().unwrap();
+    assert_eq!(
+        files
+            .values
+            .iter()
+            .find(|(path, _)| path.ends_with("settings.json"))
+            .unwrap()
+            .1
+            .0,
+        successor
+    );
+    assert_eq!(
+        files
+            .values
+            .iter()
+            .find(|(path, _)| path.ends_with("settings.json.bak"))
+            .unwrap()
+            .1
+            .0,
+        b"malformed"
+    );
 }

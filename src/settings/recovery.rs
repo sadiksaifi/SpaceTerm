@@ -48,8 +48,9 @@ impl UserSettings {
                 state.committed = Arc::new(defaults);
                 state.recoverable_candidate = None;
                 state.expected = commit.identity;
-                state.storage_ready = true;
-                state.status = None;
+                state.storage_ready = state.expected.is_some();
+                state.status = (!state.storage_ready)
+                    .then_some(SettingsError::Storage(StorageError::Conflict));
                 state.retire_catalog_revision();
                 self.0.notify();
                 Ok(RecoveryReceipt {
