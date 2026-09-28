@@ -11,7 +11,7 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
-use super::super::{SettingsSectionId, SettingsWindow};
+use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 use super::ShortcutDescription;
 
 fn open_keybindings(
@@ -108,6 +108,37 @@ fn description(
     cx: &mut VisualTestContext,
 ) -> Option<ShortcutDescription> {
     window.read_with(cx, |settings, cx| settings.shortcut_description(command, cx))
+}
+
+/// The Commands whose rows the Keybindings search keeps, in row order.
+fn found(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Vec<Command> {
+    window.read_with(cx, |settings, cx| {
+        let mut rows = settings.rows_for(SettingsSectionId::Keybindings);
+        settings.retain_found_shortcuts(&mut rows, cx);
+        rows.into_iter()
+            .filter_map(|row| match row {
+                SettingsRowId::Shortcut(command) => Some(command),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+fn search_value(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+    window.read_with(cx, |settings, cx| {
+        settings.shortcuts.search_input().read(cx).value().to_owned()
+    })
+}
+
+fn is_searching_by_shortcut(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
+    window.read_with(cx, |settings, _| settings.shortcuts.is_searching_by_shortcut())
+}
+
+fn type_search(window: &Entity<SettingsWindow>, text: &str, cx: &mut VisualTestContext) {
+    let input = window.read_with(cx, |settings, _| settings.shortcuts.search_input().clone());
+    input.update_in(cx, |input, window, cx| input.focus_handle().focus(window, cx));
+    cx.simulate_input(text);
+    cx.run_until_parked();
 }
 
 fn shortcut(source: &str) -> Shortcut {
@@ -308,4 +339,103 @@ fn reset_all_restores_every_keybinding(cx: &mut TestAppContext) {
             .next()
             .is_none()
     }));
+}
+
+#[gpui::test]
+fn searching_by_text_keeps_the_commands_it_names(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    assert!(cx.debug_bounds("settings-keybindings-search-frame").is_some());
+    assert_eq!(found(&window, cx).len(), Command::ALL.len());
+
+    type_search(&window, "split", cx);
+
+    assert_eq!(
+        found(&window, cx),
+        vec![Command::SplitRight, Command::SplitDown]
+    );
+    assert!(cx.debug_bounds("settings-keybindings-no-results").is_none());
+
+    type_search(&window, " sideways", cx);
+
+    assert!(found(&window, cx).is_empty());
+    assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
+    // The search stays in place so the query can be corrected.
+    assert!(cx.debug_bounds("settings-keybindings-search-frame").is_some());
+}
+
+#[gpui::test]
+fn searching_by_shortcut_finds_the_command_the_chord_runs(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    assert!(is_searching_by_shortcut(&window, cx));
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+
+    assert_eq!(found(&window, cx), vec![Command::CreateTab]);
+    assert_eq!(search_value(&window, cx), "Primary+T");
+    // Recording continues, so the next chord replaces the first.
+    assert!(is_searching_by_shortcut(&window, cx));
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    assert_eq!(found(&window, cx), vec![Command::SplitRight]);
+
+    // Escape stops recording and keeps what it found.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!is_searching_by_shortcut(&window, cx));
+    assert_eq!(found(&window, cx), vec![Command::SplitRight]);
+    assert_eq!(
+        window.read_with(cx, |settings, _| settings.active_section),
+        SettingsSectionId::Keybindings
+    );
+}
+
+#[gpui::test]
+fn searching_by_shortcut_captures_a_chord_that_closes_the_window(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+
+    assert_eq!(found(&window, cx), vec![Command::ClosePane]);
+    assert!(cx.debug_bounds("settings-window-surface").is_some());
+}
+
+#[gpui::test]
+fn a_chord_no_command_uses_finds_nothing(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert!(found(&window, cx).is_empty());
+    assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
+}
+
+#[gpui::test]
+fn editing_a_found_shortcut_searches_by_text_again(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    click("settings-keybindings-search-by-shortcut", cx);
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+
+    click("settings-keybindings-search-by-shortcut", cx);
+    assert!(!is_searching_by_shortcut(&window, cx));
+    click("settings-keybindings-search-clear", cx);
+    type_search(&window, "zoom", cx);
+
+    assert_eq!(found(&window, cx), vec![Command::TogglePaneZoom]);
+}
+
+#[gpui::test]
+fn leaving_the_section_stops_searching_by_shortcut(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    click("settings-keybindings-search-by-shortcut", cx);
+
+    click("settings-navigation-settings-section-interface", cx);
+
+    assert!(!is_searching_by_shortcut(&window, cx));
 }

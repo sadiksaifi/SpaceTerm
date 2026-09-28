@@ -582,6 +582,7 @@ impl SettingsWindow {
     fn reveal_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
         self.active_section = section;
         self.shortcuts.dismiss_notice();
+        self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
@@ -1271,12 +1272,24 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let appearance = &settings.chrome;
-        let rows = self.rows_for(section);
+        let mut rows = self.rows_for(section);
         if rows.is_empty() {
             return div()
                 .debug_selector(move || format!("{}-empty", section.selector()))
                 .into_any_element();
         }
+        // The Keybindings search narrows the rows Settings Search left, so it stays in place
+        // above them even when it finds nothing.
+        let (shortcut_search, no_shortcuts) = if section == SettingsSectionId::Keybindings {
+            self.retain_found_shortcuts(&mut rows, cx);
+            let empty = rows
+                .is_empty()
+                .then(|| self.render_no_shortcuts_found(appearance, cx))
+                .flatten();
+            (Some(self.render_shortcut_search(cx)), empty)
+        } else {
+            (None, None)
+        };
         // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
         // card. A filtered view groups whatever survived the filter the same way.
         let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
@@ -1313,6 +1326,8 @@ impl SettingsWindow {
             .w_full()
             .gap(appearance.spacing(26.0))
             .children(notice)
+            .children(shortcut_search)
+            .children(no_shortcuts)
             .children(rendered)
             .into_any_element()
     }

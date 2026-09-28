@@ -3,15 +3,21 @@
 //! [`crate::keybindings`] owns Keymap policy. These rows present the draft's resolved Keymap,
 //! refuse a Reserved Shortcut in the recorder with its reason, and edit the retained overrides
 //! through the Settings draft, which the keymap runtime applies to every window as it changes.
+//! A search above the rows narrows them by Command name or by a Shortcut pressed into it.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Keystroke, Modifiers, SharedString, Window};
-use spaceterm_ui::{ShortcutRecorder, ShortcutRecorderEvent};
+use gpui::{AnyElement, App, Context, Entity, Keystroke, Modifiers, SharedString, Window, div};
+use spaceterm_ui::{
+    CapturedKey, ChordCapture, IconName, SearchField, SearchFieldToggle, ShortcutRecorder,
+    ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
+};
 
+use super::controls::row_horizontal_inset;
 use super::{SettingsRowId, SettingsWindow, control_selector};
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
 use crate::keybindings::{
@@ -22,11 +28,40 @@ use crate::keybindings::{
 /// What the field shows for a Command without a Shortcut.
 const UNASSIGNED_LABEL: &str = "None";
 const RECORDING_PLACEHOLDER: &str = "Type Shortcut";
+const SEARCH_PLACEHOLDER: &str = "Search Keybindings";
+const SEARCH_BY_SHORTCUT: &str = "Search by Shortcut";
 
-/// The recorder of every Command and the one notice the latest recording left behind.
+/// The recorder of every Command, the one notice the latest recording left behind, and the search
+/// that narrows the rows.
 pub(super) struct ShortcutRows {
     recorders: BTreeMap<Command, Entity<ShortcutRecorder>>,
     notice: Option<(Command, ShortcutNotice)>,
+    search: ShortcutSearch,
+}
+
+/// The Keybindings search: text matched against Command names and Shortcuts, or one chord pressed
+/// into the field while it records.
+struct ShortcutSearch {
+    input: Entity<TextInput>,
+    /// The chord the field recorded, while the field still shows it.
+    chord: Option<SearchedChord>,
+    /// Present while the field records chords rather than taking text.
+    capture: Option<ChordCapture>,
+}
+
+/// One chord pressed into the search, and the Shortcut it is when it can be one.
+#[derive(Clone, Debug)]
+struct SearchedChord {
+    text: SharedString,
+    /// `None` for a chord no Command can use, such as a Terminal Reserved one, which finds nothing.
+    shortcut: Option<Shortcut>,
+}
+
+/// What the Keybindings search narrows the rows to.
+enum ShortcutQuery<'a> {
+    Everything,
+    Text(&'a str),
+    Chord(&'a SearchedChord),
 }
 
 /// What the latest recording reports under its row, until the next one.
@@ -80,14 +115,98 @@ impl ShortcutRows {
                 (command, recorder)
             })
             .collect();
+        let input = cx.new(|cx| {
+            TextInput::new(
+                "settings-keybindings-search",
+                SEARCH_PLACEHOLDER,
+                String::new(),
+                window,
+                cx,
+            )
+            .placeholder(SEARCH_PLACEHOLDER)
+            .variant(TextInputVariant::Bare)
+            .input_length_limit(Some(128))
+            .emit_programmatic_changes(true)
+            .debug_selector("settings-keybindings-search")
+        });
+        cx.subscribe_in(
+            &input,
+            window,
+            |settings, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::ValueChanged(_) => {
+                    let search = &mut settings.shortcuts.search;
+                    let value = input.read(cx).value();
+                    // A chord stays the query only while the field still shows it, so editing or
+                    // clearing the text searches by text again.
+                    if search
+                        .chord
+                        .as_ref()
+                        .is_some_and(|chord| chord.text.as_ref() != value)
+                    {
+                        search.chord = None;
+                    }
+                    cx.notify();
+                }
+                TextInputEvent::Cancelled => {
+                    if input.read(cx).value().is_empty() {
+                        settings.focus_handle.focus(window, cx);
+                    } else {
+                        input.update(cx, |input, cx| {
+                            input.clear(cx);
+                        });
+                    }
+                }
+                TextInputEvent::FocusLost => settings.shortcuts.end_search_capture(cx),
+                _ => {}
+            },
+        )
+        .detach();
         Self {
             recorders,
             notice: None,
+            search: ShortcutSearch {
+                input,
+                chord: None,
+                capture: None,
+            },
         }
     }
 
     pub(super) fn dismiss_notice(&mut self) {
         self.notice = None;
+    }
+
+    /// Returns the search field to taking text, keeping whatever it found.
+    pub(super) fn end_search_capture(&mut self, cx: &mut App) {
+        if self.search.capture.take().is_none() {
+            return;
+        }
+        self.search.input.update(cx, |input, cx| {
+            input.set_editable(true, cx);
+            input.set_placeholder(SEARCH_PLACEHOLDER, cx);
+        });
+    }
+
+    fn query<'a>(&'a self, cx: &'a App) -> ShortcutQuery<'a> {
+        if let Some(chord) = &self.search.chord {
+            return ShortcutQuery::Chord(chord);
+        }
+        let text = self.search.input.read(cx).value().trim();
+        if text.is_empty() {
+            ShortcutQuery::Everything
+        } else {
+            ShortcutQuery::Text(text)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn search_input(&self) -> &Entity<TextInput> {
+        &self.search.input
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_searching_by_shortcut(&self) -> bool {
+        self.search.capture.is_some()
     }
 
     #[cfg(test)]
@@ -178,6 +297,145 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
 }
 
 impl SettingsWindow {
+    /// The search above the Keybindings rows, with its toggle for searching by a pressed Shortcut.
+    pub(super) fn render_shortcut_search(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let owner = cx.weak_entity();
+        let toggle = SearchFieldToggle::new(
+            IconName::Keyboard,
+            SEARCH_BY_SHORTCUT,
+            self.shortcuts.search.capture.is_some(),
+            move |window, cx| {
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.toggle_shortcut_search(window, cx);
+                });
+            },
+        )
+        .debug_selector("settings-keybindings-search-by-shortcut");
+        div()
+            .w_full()
+            .child(
+                SearchField::new(
+                    "settings-keybindings-search-frame",
+                    self.shortcuts.search.input.clone(),
+                )
+                .debug_selectors(
+                    "settings-keybindings-search-frame",
+                    "settings-keybindings-search-clear",
+                )
+                .toggle(toggle),
+            )
+            .into_any_element()
+    }
+
+    /// Keeps the Keybindings rows the search finds.
+    pub(super) fn retain_found_shortcuts(&self, rows: &mut Vec<SettingsRowId>, cx: &App) {
+        let presentation = DesktopPresentation::get(cx);
+        let keymap = self.resolved_keymap(cx);
+        let query = self.shortcuts.query(cx);
+        rows.retain(|row| {
+            let SettingsRowId::Shortcut(command) = *row else {
+                return true;
+            };
+            match &query {
+                ShortcutQuery::Everything => true,
+                ShortcutQuery::Chord(chord) => chord
+                    .shortcut
+                    .as_ref()
+                    .is_some_and(|shortcut| keymap.shortcuts(command).contains(shortcut)),
+                ShortcutQuery::Text(text) => {
+                    let label = command.label().to_lowercase();
+                    let shortcut = keymap
+                        .shortcut(command)
+                        .map(|shortcut| presentation.format(shortcut).to_lowercase());
+                    text.split_whitespace().all(|term| {
+                        let term = term.to_lowercase();
+                        label.contains(&term)
+                            || shortcut.as_ref().is_some_and(|chord| chord.contains(&term))
+                    })
+                }
+            }
+        });
+    }
+
+    /// Explains a search that found no Keybindings rows.
+    pub(super) fn render_no_shortcuts_found(
+        &self,
+        appearance: &ChromeAppearance,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let message = match self.shortcuts.query(cx) {
+            ShortcutQuery::Everything => return None,
+            ShortcutQuery::Chord(chord) => format!("No command uses {}.", chord.text),
+            ShortcutQuery::Text(text) => format!("No commands match “{text}”."),
+        };
+        Some(
+            div()
+                .debug_selector(|| "settings-keybindings-no-results".to_owned())
+                .px(row_horizontal_inset(appearance))
+                .text_color(gpui_color(appearance.colors.text_muted))
+                .child(SharedString::from(message))
+                .into_any_element(),
+        )
+    }
+
+    /// Switches the search between taking text and recording the Shortcut to search for.
+    fn toggle_shortcut_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts.search.capture.is_some() {
+            self.shortcuts.end_search_capture(cx);
+            cx.notify();
+            return;
+        }
+        let input = self.shortcuts.search.input.clone();
+        let focus = input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.set_editable(false, cx);
+            input.set_placeholder(RECORDING_PLACEHOLDER, cx);
+            input.focus_handle()
+        });
+        focus.focus(window, cx);
+        self.shortcuts.search.chord = None;
+        self.shortcuts.search.capture = Some(ChordCapture::start(
+            focus,
+            window,
+            cx,
+            Self::capture_shortcut_search,
+        ));
+        cx.notify();
+    }
+
+    /// Applies one key pressed while the search records: a chord becomes the query and recording
+    /// continues, so the next chord replaces it.
+    fn capture_shortcut_search(
+        &mut self,
+        key: CapturedKey,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.shortcuts.search.input.clone();
+        match key {
+            CapturedKey::Chord(keystroke) => {
+                let text = DesktopPresentation::get(cx).format_keystroke(&keystroke);
+                self.shortcuts.search.chord = Some(SearchedChord {
+                    text: text.clone(),
+                    shortcut: Shortcut::from_keystroke(&keystroke).ok(),
+                });
+                input.update(cx, |input, cx| {
+                    input.set_value(text.to_string(), cx);
+                });
+            }
+            CapturedKey::Erase => {
+                self.shortcuts.search.chord = None;
+                input.update(cx, |input, cx| {
+                    input.clear(cx);
+                });
+            }
+            CapturedKey::Escape | CapturedKey::Traverse | CapturedKey::FocusLost => {
+                self.shortcuts.end_search_capture(cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// The Keymap the draft resolves to, which is what every window applies while Settings edits.
     fn resolved_keymap(&self, cx: &App) -> ResolvedKeymap {
         KeymapRuntime::profile(cx).resolve(&self.editor.document().keybindings)
