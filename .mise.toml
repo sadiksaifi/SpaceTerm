@@ -185,6 +185,7 @@ run = [
   "python3 scripts/test-gpui-bump.py",
   "python3 scripts/test-release-version.py",
   "python3 scripts/test-commit-hook.py",
+  "python3 scripts/test-cargo-artifact-supervisor.py",
 ]
 
 [tasks."test:portable"]
