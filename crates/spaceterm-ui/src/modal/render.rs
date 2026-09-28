@@ -1,10 +1,10 @@
 use gpui::{
-    AnyElement, App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId,
-    HitboxBehavior, ImageSource, InspectorElementId, InteractiveElement as _, IntoElement,
-    KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollHandle,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, AppContext as _, Bounds, Context, Element, ElementId, Entity, FocusHandle,
+    GlobalElementId, HitboxBehavior, ImageSource, InspectorElementId, InteractiveElement as _,
+    IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba,
+    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     Button, ButtonRole, ButtonSize, ButtonVariant, ControlHost, FloatingShell, Icon, IconName,
-    ProgressBar, ProgressSize,
+    OverlayScrollbar, OverlayScrollbarEvent, ProgressBar, ProgressSize, ScrollMetrics,
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -269,6 +269,7 @@ fn render_overlay(
         suppression_focus,
         action_focus,
         body_scroll,
+        body_scrollbar,
         footer_scroll,
         body_focus_anchors,
         footer_focus_anchors,
@@ -282,6 +283,7 @@ fn render_overlay(
             state.suppression.clone(),
             state.action_focus.clone(),
             state.body_scroll.clone(),
+            state.body_scrollbar.clone(),
             state.footer_scroll.clone(),
             state.body_focus_anchors.clone(),
             state.footer_focus_anchors.clone(),
@@ -308,6 +310,7 @@ fn render_overlay(
         suppression_is_focused,
         press_owner.clone(),
         body_scroll,
+        body_scrollbar,
         body_focus_anchors,
         metrics,
         paint,
@@ -591,6 +594,7 @@ fn render_body(
     suppression_is_focused: bool,
     press_owner: ModalPressOwner,
     body_scroll: ScrollHandle,
+    body_scrollbar: Entity<OverlayScrollbar<f32>>,
     body_focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
     paint: ModalPaint,
@@ -599,6 +603,10 @@ fn render_body(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    // The body scrolls like every other scrolling region: the shared overlay scrollbar shows its
+    // extent while it moves, without reserving a gutter.
+    let scroll_metrics = body_scroll_metrics(&body_scroll);
+    body_scrollbar.update(cx, |scrollbar, cx| scrollbar.sync(scroll_metrics, cx));
     let content = match &snapshot.semantics {
         PreparedModalSemantics::Alert {
             message,
@@ -773,23 +781,48 @@ fn render_body(
         }
     };
 
+    let revealing = body_scrollbar.downgrade();
+    let revealed_scroll = body_scroll.clone();
     div()
-        .id(("modal-body", snapshot.presentation.value()))
-        .debug_selector(|| "modal-body-viewport".to_owned())
+        .relative()
+        .flex()
+        .flex_col()
         .flex_1()
         .min_h_0()
         .min_w_0()
-        .overflow_x_hidden()
-        .overflow_y_scroll()
-        .track_scroll(&body_scroll)
         .child(
             div()
-                .w_full()
+                .id(("modal-body", snapshot.presentation.value()))
+                .debug_selector(|| "modal-body-viewport".to_owned())
+                .flex_1()
+                .min_h_0()
                 .min_w_0()
-                .p(metrics.surface_padding)
-                .child(content),
+                .overflow_x_hidden()
+                .overflow_y_scroll()
+                .track_scroll(&body_scroll)
+                .on_scroll_wheel(move |_, _, cx| {
+                    let metrics = body_scroll_metrics(&revealed_scroll);
+                    let _ = revealing.update(cx, |scrollbar, cx| scrollbar.reveal(metrics, cx));
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .p(metrics.surface_padding)
+                        .child(content),
+                ),
         )
+        .child(body_scrollbar)
         .into_any_element()
+}
+
+fn body_scroll_metrics(scroll: &ScrollHandle) -> Option<ScrollMetrics<f32>> {
+    ScrollMetrics::for_pixels(
+        0.0,
+        f32::from(scroll.bounds().size.height),
+        f32::from(scroll.max_offset().y),
+        -f32::from(scroll.offset().y),
+    )
 }
 
 struct ModalControlScopeElement {
@@ -1466,6 +1499,7 @@ struct ModalFocusRing {
     suppression: FocusHandle,
     action_focus: Vec<FocusHandle>,
     body_scroll: ScrollHandle,
+    body_scrollbar: Entity<OverlayScrollbar<f32>>,
     footer_scroll: ScrollHandle,
     body_focus_anchors: ModalFocusAnchorRegistry,
     footer_focus_anchors: ModalFocusAnchorRegistry,
@@ -1485,6 +1519,21 @@ impl ModalFocusRing {
         let trailing = cx.focus_handle().tab_stop(true);
         let suppression = cx.focus_handle();
         let body_scroll = ScrollHandle::new();
+        let body_scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("modal-body-scrollbar"));
+        cx.subscribe_in(
+            &body_scrollbar,
+            window,
+            |state, _, event: &OverlayScrollbarEvent<f32>, window, _| {
+                if let OverlayScrollbarEvent::OffsetRequested(offset) = event {
+                    let current = state.body_scroll.offset();
+                    state
+                        .body_scroll
+                        .set_offset(gpui::point(current.x, px(-*offset)));
+                    window.refresh();
+                }
+            },
+        )
+        .detach();
         let footer_scroll = ScrollHandle::new();
         let body_focus_anchors = ModalFocusAnchorRegistry::new(body_scroll.clone());
         let footer_focus_anchors = ModalFocusAnchorRegistry::new(footer_scroll.clone());
@@ -1508,6 +1557,7 @@ impl ModalFocusRing {
             suppression,
             action_focus: Vec::new(),
             body_scroll,
+            body_scrollbar,
             footer_scroll,
             body_focus_anchors,
             footer_focus_anchors,
