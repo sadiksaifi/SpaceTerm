@@ -79,6 +79,9 @@ Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolc
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
 platform segment such as `:macos`.
 
+Write Conventional Commits, for example `fix(updates): preserve active sessions`. Setup installs
+the commit-message hook; existing checkouts can enable it with `mise run hooks:install`.
+
 ## Releases and updates
 
 Release DMGs are hosted in [GitHub Releases](https://github.com/sadiksaifi/SpaceTerm/releases)
@@ -127,6 +130,9 @@ Run `mise run release:preview 0.1.0` on the intended clean commit to review the 
 it. Pushing an annotated release tag runs validation, creates and signs the arm64 package, and
 publishes the DMG, signed `appcast.xml`, and `SHA256SUMS` together. A published release is never
 overwritten; corrections require a new tag.
+
+Release notes are generated from Git commits with git-cliff. Preview pending changes with
+`mise run release:notes:preview`, or inspect the tagged HEAD with `mise run release:notes v0.1.0`.
 
 Run `mise run validate:macos` for the full macOS validation suite, including SpaceTerm's patched
 terminal library. Both `validate:portable` and `validate` include GPUI scene-ordering tests.

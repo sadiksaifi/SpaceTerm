@@ -2,6 +2,7 @@
 """Test release provenance through real isolated Git repositories."""
 
 import importlib.util
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -59,15 +60,21 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(VERSION.resolve(self.root)["version"], f"dev.{self.git('rev-parse', 'HEAD')[:12]}")
 
     def test_publisher_uploads_version_named_assets_before_publishing_the_tag(self):
+        shutil.copyfile(Path(__file__).resolve().parent.parent / "cliff.toml", self.root / "cliff.toml")
+        self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
+        self.git("tag", "-a", "v0.1.0", "-m", "Release")
         directory = self.root / "dist/release"
         directory.mkdir(parents=True)
         assets = [directory / name for name in ("SpaceTerm-0.1.0-darwin-arm64.dmg", "appcast.xml", "SHA256SUMS")]
         for asset in assets:
             asset.write_bytes(b"fixture")
         calls = []
+        notes = []
 
         def github(*args, **kwargs):
             calls.append(args)
+            if "--notes-file" in args:
+                notes.append(Path(args[args.index("--notes-file") + 1]).read_text())
             return subprocess.CompletedProcess(args, 1 if args[:2] == ("release", "view") else 0, "", "")
 
         with patch.object(PUBLISH, "ROOT", self.root), patch.object(PUBLISH, "gh", github), patch("sys.argv", ["publish-release.py", "v0.1.0"]):
@@ -76,6 +83,27 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(calls[2], ("release", "upload", "v0.1.0", *(str(asset) for asset in assets), "--clobber"))
         self.assertIn("--draft", calls[1])
         self.assertIn("--draft=false", calls[3])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("### Features", notes[0])
+        self.assertIn("Add terminal panes", notes[0])
+
+    def test_notes_include_only_the_selected_release_and_mark_breaking_changes(self):
+        shutil.copyfile(Path(__file__).resolve().parent.parent / "cliff.toml", self.root / "cliff.toml")
+        self.git("tag", "-a", "v0.1.0", "-m", "Release")
+        self.git("commit", "-qm", "fix(updates)!: preserve active sessions", "--allow-empty")
+        self.git("tag", "-a", "v0.2.0", "-m", "Release")
+        self.git("commit", "-qm", "feat: future change", "--allow-empty")
+        self.git("tag", "-a", "v0.3.0", "-m", "Release")
+        self.git("checkout", "-q", "v0.2.0")
+        with patch.object(PUBLISH, "ROOT", self.root):
+            notes = PUBLISH.release_notes("v0.2.0")
+            with self.assertRaises(subprocess.CalledProcessError):
+                PUBLISH.release_notes("v0.3.0")
+        self.assertIn("### Fixes", notes)
+        self.assertIn("**Breaking:**", notes)
+        self.assertIn("Preserve active sessions", notes)
+        self.assertNotIn("Initial", notes)
+        self.assertNotIn("Future change", notes)
 
     def test_feed_must_reference_the_exact_release_asset_and_version(self):
         import base64
