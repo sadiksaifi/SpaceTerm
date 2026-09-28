@@ -47,6 +47,13 @@ pub enum SystemReservation {
     Screenshot,
     Help,
     Settings,
+    KeyboardNavigation,
+    DockHiding,
+    Zoom,
+    InvertColors,
+    Contrast,
+    VoiceOver,
+    AccessibilityShortcuts,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

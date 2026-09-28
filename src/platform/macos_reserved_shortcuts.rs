@@ -24,6 +24,7 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
         ("alt-cmd-space", Spotlight),
         ("ctrl-cmd-space", CharacterViewer),
         ("alt-cmd-escape", ForceQuit),
+        ("alt-shift-cmd-escape", ForceQuit),
         ("ctrl-cmd-q", LockScreen),
         ("shift-cmd-q", LogOut),
         ("alt-shift-cmd-q", LogOut),
@@ -36,6 +37,17 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
         ("shift-cmd-6", Screenshot),
         ("ctrl-shift-cmd-6", Screenshot),
         ("shift-cmd-/", Help),
+        ("alt-cmd-'", KeyboardNavigation),
+        ("alt-cmd-d", DockHiding),
+        ("alt-cmd-8", Zoom),
+        ("alt-cmd-=", Zoom),
+        ("alt-cmd--", Zoom),
+        ("alt-cmd-\\", Zoom),
+        ("ctrl-alt-cmd-8", InvertColors),
+        ("ctrl-alt-cmd-,", Contrast),
+        ("ctrl-alt-cmd-.", Contrast),
+        ("cmd-f5", VoiceOver),
+        ("alt-cmd-f5", AccessibilityShortcuts),
     ]
     .into_iter()
     .map(|(source, reason)| SystemReserved {

@@ -301,6 +301,13 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
         SystemReservation::Screenshot => "screenshots",
         SystemReservation::Help => "Help",
         SystemReservation::Settings => "Settings",
+        SystemReservation::KeyboardNavigation => "keyboard navigation",
+        SystemReservation::DockHiding => "hiding the Dock",
+        SystemReservation::Zoom => "Zoom",
+        SystemReservation::InvertColors => "inverting colors",
+        SystemReservation::Contrast => "adjusting contrast",
+        SystemReservation::VoiceOver => "VoiceOver",
+        SystemReservation::AccessibilityShortcuts => "Accessibility Shortcuts",
     }
 }
 
