@@ -361,9 +361,7 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
 // Appearance Mode ----------------------------------------------------------------------------
 
 #[gpui::test]
-fn appearance_mode_switches_both_surfaces_without_changing_any_theme_slot(
-    cx: &mut TestAppContext,
-) {
+fn appearance_mode_switches_both_surfaces_without_changing_any_theme_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
     let before = document_of(&window, cx).preferences;
@@ -496,8 +494,71 @@ fn a_gallery_tile_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContex
     }
 }
 
-/// Removing the theme in use from a tile's context menu asks first, then returns its slot to the
-/// built-in theme instead of leaving panes on a fallback.
+/// The same selection and removal operations remain reachable without a pointer.
+#[gpui::test]
+fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut TestAppContext) {
+    let family = br##"{"themes":[{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(family).unwrap(),
+        ..Default::default()
+    };
+    document.preferences.mode = AppearanceMode::Auto;
+    let imported = document.terminal_themes[0].id.clone();
+    let (settings, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    set_query(&settings, "theme", cx);
+    cx.update(|window, cx| window.focus(&settings.read(cx).focus_handle.clone(), cx));
+
+    // Search, section navigation, then the Light slot.
+    cx.simulate_keystrokes("tab tab tab enter");
+    cx.run_until_parked();
+    assert_eq!(
+        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+        Appearance::Light
+    );
+    cx.simulate_keystrokes("tab space");
+    cx.run_until_parked();
+    assert_eq!(
+        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+        Appearance::Dark
+    );
+
+    // The built-in theme leads the gallery, followed by the imported theme.
+    cx.simulate_keystrokes("tab tab enter");
+    cx.run_until_parked();
+    assert_eq!(
+        document_of(&settings, cx).preferences.terminal.themes.dark,
+        imported
+    );
+    assert_eq!(
+        document_of(&settings, cx).preferences.mode,
+        AppearanceMode::Auto
+    );
+
+    cx.simulate_keystrokes("shift-tab space");
+    cx.run_until_parked();
+    assert_eq!(
+        document_of(&settings, cx).preferences.terminal.themes.dark,
+        builtin_fallback_theme(Appearance::Dark)
+    );
+    cx.simulate_keystrokes("tab enter");
+    cx.run_until_parked();
+    assert_eq!(
+        document_of(&settings, cx).preferences.terminal.themes.dark,
+        imported
+    );
+
+    cx.simulate_keystrokes("shift-f10 down enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-settings-remove-theme-confirm")
+            .is_some()
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(installed_count(&settings, cx), 1);
+}
+
+/// Removing the theme in use asks first, then returns its slot to the built-in theme.
 #[gpui::test]
 fn removing_the_theme_in_use_returns_its_slot_to_the_built_in_theme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument {
@@ -1702,8 +1763,9 @@ fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut T
     assert_eq!(separator.right(), card.right() - px(1.0));
     cx.update(|window, cx| {
         let appearance = crate::ui::appearance::chrome(cx);
-        let divider =
-            crate::ui::appearance::gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
+        let divider = crate::ui::appearance::gpui_color(
+            appearance.separator(spaceterm_ui::ControlHost::Card),
+        );
         let scale = window.scale_factor();
         let quads = window.painted_quads();
         assert!(quads.iter().any(|quad| {
@@ -2399,7 +2461,9 @@ fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> S
 }
 
 fn installed_count(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> usize {
-    window.read_with(cx, |window, _| window.editor.document().terminal_themes.len())
+    window.read_with(cx, |window, _| {
+        window.editor.document().terminal_themes.len()
+    })
 }
 
 /// `debug_bounds` takes a `'static` selector, and section and row selectors are already static
@@ -2801,7 +2865,9 @@ fn store_listing(
     window: &Entity<SettingsWindow>,
     cx: &mut VisualTestContext,
 ) -> super::theme_store::Listing {
-    window.read_with(cx, |window, cx| window.theme_store.read(cx).listing().clone())
+    window.read_with(cx, |window, cx| {
+        window.theme_store.read(cx).listing().clone()
+    })
 }
 
 fn store_status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
@@ -2812,7 +2878,9 @@ fn store_status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> 
 
 fn open_theme_store(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
     cx.update(|gpui_window, cx| {
-        window.update(cx, |settings, cx| settings.open_theme_store(gpui_window, cx));
+        window.update(cx, |settings, cx| {
+            settings.open_theme_store(gpui_window, cx)
+        });
     });
     cx.run_until_parked();
 }

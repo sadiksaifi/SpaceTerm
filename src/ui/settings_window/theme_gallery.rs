@@ -1,11 +1,15 @@
 //! The Themes section: a preview of the Terminal Theme in use and a gallery of installed themes.
 //!
-//! Choosing is clicking, as it is for a desktop picture: a tile applies its theme to the
-//! appearance the gallery is showing. Under Auto the preview shows the Light and Dark slots side by
+//! Activating a tile applies its theme to the appearance the gallery is showing. Under Auto the preview shows the Light and Dark slots side by
 //! side, and selecting one points the gallery at it. A tile's context menu applies or removes it.
 
+use std::collections::BTreeMap;
+
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, Font, SharedString, StyledText, Window, div, px, relative};
+use gpui::{
+    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Window,
+    div, px, relative,
+};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ContextMenu, MenuEntry, ModalAction, ModalActionEmphasis,
     ModalActionIntent, ModalActionRole, ModalId, SearchField, TextInput, TextInputEscapeBehavior,
@@ -60,6 +64,8 @@ pub(super) struct ThemeGallery {
     query: SharedString,
     /// The slot the gallery edits under Auto. Unset, it follows the appearance on screen.
     auto_slot: Option<Appearance>,
+    slot_focus: [FocusHandle; 2],
+    tile_focus: BTreeMap<ThemeId, FocusHandle>,
 }
 
 impl ThemeGallery {
@@ -91,6 +97,8 @@ impl ThemeGallery {
             search,
             query: SharedString::default(),
             auto_slot: None,
+            slot_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            tile_focus: BTreeMap::new(),
         }
     }
 }
@@ -179,6 +187,7 @@ impl SettingsWindow {
     pub(super) fn render_current_theme(
         &mut self,
         appearance: &ChromeAppearance,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summaries = self.editor.theme_summaries().unwrap_or_default();
@@ -201,7 +210,7 @@ impl SettingsWindow {
         let chosen = self.theme_slot(cx);
         let slots = [Appearance::Light, Appearance::Dark].map(|slot| {
             let preview = self.slot_preview(slot, &summaries);
-            self.render_slot_card(preview, chosen == slot, font.clone(), appearance, cx)
+            self.render_slot_card(preview, chosen == slot, font.clone(), appearance, window, cx)
         });
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         content
@@ -237,6 +246,7 @@ impl SettingsWindow {
         selected: bool,
         font: Font,
         appearance: &ChromeAppearance,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
@@ -246,10 +256,12 @@ impl SettingsWindow {
             Appearance::Dark => "Dark",
         };
         let name = preview_name(&preview);
+        let focus = &self.theme_gallery.slot_focus[usize::from(slot == Appearance::Dark)];
         let selector = format!("settings-theme-slot-{}", label.to_ascii_lowercase());
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
+            .track_focus(focus)
             .flex()
             .flex_col()
             .w(appearance.spacing(SLOT_PREVIEW_WIDTH))
@@ -259,6 +271,7 @@ impl SettingsWindow {
                 selected,
                 RadiusRole::Card,
                 appearance,
+                focus.is_focused(window) && window.last_input_was_keyboard(),
             ))
             .child(
                 div()
@@ -284,13 +297,23 @@ impl SettingsWindow {
             .on_click(cx.listener(move |settings, _, _, cx| {
                 settings.select_auto_slot(slot, cx);
             }))
+            .on_key_down(
+                cx.listener(move |settings, event: &KeyDownEvent, window, cx| {
+                    if keyboard_activation(event) {
+                        settings.select_auto_slot(slot, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .into_any_element()
     }
 
-    /// Every installed theme for the chosen slot, as tiles that apply their theme when clicked.
+    /// Every installed theme for the chosen slot, as tiles that apply their theme when activated.
     pub(super) fn render_installed_themes(
         &mut self,
         appearance: &ChromeAppearance,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let slot = self.theme_slot(cx);
@@ -303,6 +326,9 @@ impl SettingsWindow {
             .filter(|summary| summary.appearance == slot)
             .collect::<Vec<_>>();
         let searchable = summaries.len() > SEARCHABLE_GALLERY;
+        self.theme_gallery
+            .tile_focus
+            .retain(|id, _| summaries.iter().any(|theme| &theme.id == id));
         let query = if searchable {
             self.theme_gallery.query.clone()
         } else {
@@ -319,7 +345,7 @@ impl SettingsWindow {
             .iter()
             .map(|matched| {
                 let summary = &summaries[matched.item_index()];
-                self.render_theme_tile(summary, slot, summary.id == selected, appearance, cx)
+                self.render_theme_tile(summary, slot, summary.id == selected, appearance, window, cx)
             })
             .collect::<Vec<_>>();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
@@ -378,16 +404,25 @@ impl SettingsWindow {
     }
 
     fn render_theme_tile(
-        &self,
+        &mut self,
         summary: &ThemeSummary,
         slot: Appearance,
         selected: bool,
         appearance: &ChromeAppearance,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let editable = self.editor.editable();
+        let focus = self
+            .theme_gallery
+            .tile_focus
+            .entry(summary.id.clone())
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
+            .tab_stop(editable);
         let id = summary.id.clone();
+        let keyboard_id = id.clone();
         let selector = format!("settings-theme-tile-{}", summary.id.as_str());
         let tile = div()
             .id(SharedString::from(selector.clone()))
@@ -404,6 +439,7 @@ impl SettingsWindow {
                 selected,
                 RadiusRole::Control,
                 appearance,
+                focus.is_focused(window) && window.last_input_was_keyboard(),
             ))
             .child(
                 div()
@@ -458,12 +494,13 @@ impl SettingsWindow {
         }
         let owner = cx.weak_entity();
         let target = summary.clone();
-        ContextMenu::new(
+        let menu = ContextMenu::new(
             SharedString::from(format!("{selector}-menu")),
             SharedString::from(format!("{} options", summary.name)),
             tile,
             entries,
         )
+        .keyboard_trigger(&focus)
         .disabled(!editable)
         .debug_selector(format!("{selector}-menu"))
         .on_activate(move |activation, window, cx| {
@@ -475,8 +512,19 @@ impl SettingsWindow {
                     settings.confirm_removal(&target, command, window, cx);
                 }
             });
-        })
-        .into_any_element()
+        });
+        div()
+            .on_key_down(
+                cx.listener(move |settings, event: &KeyDownEvent, window, cx| {
+                    if editable && keyboard_activation(event) {
+                        settings.set_theme(slot, keyboard_id.clone(), cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .child(menu)
+            .into_any_element()
     }
 
     /// Asks before removing a theme, or every theme its extension installed, then removes them
@@ -508,10 +556,7 @@ impl SettingsWindow {
             .filter(|slot| ids.contains(slots.get(*slot)))
             .collect::<Vec<_>>();
         let (title, message) = match ids.len() {
-            1 => (
-                "Remove Theme",
-                format!("Remove “{}”?", theme.name),
-            ),
+            1 => ("Remove Theme", format!("Remove “{}”?", theme.name)),
             count => (
                 "Remove Themes",
                 match &theme.family {
@@ -577,6 +622,12 @@ impl SettingsWindow {
             eprintln!("failed to present the SpaceTerm theme removal confirmation");
         }
     }
+}
+
+fn keyboard_activation(event: &KeyDownEvent) -> bool {
+    !event.is_held
+        && !event.keystroke.modifiers.modified()
+        && matches!(event.keystroke.key.as_str(), "enter" | "space")
 }
 
 /// The theme in use beside its name, where it came from, and its sixteen colors.
@@ -657,10 +708,12 @@ fn selection_ring(
     selected: bool,
     radius: RadiusRole,
     appearance: &ChromeAppearance,
-) -> gpui::Div {
+    focused: bool,
+) -> impl IntoElement {
     let accent = appearance.colors.border_focused;
     let hover = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
     div()
+        .relative()
         .w_full()
         .p(px(RING_GAP))
         .rounded(radius.pixels() + px(RING_GAP + RING_WIDTH))
@@ -674,6 +727,16 @@ fn selection_ring(
             ring.hover(move |ring| ring.border_color(gpui_color(hover)))
         })
         .child(content.rounded(radius.pixels()))
+        // Keyboard focus surrounds the selection ring so the two states stay distinct.
+        .child(
+            div()
+                .absolute()
+                .inset(px(-RING_WIDTH - RING_GAP))
+                .rounded(radius.pixels() + px(2.0 * (RING_GAP + RING_WIDTH)))
+                .border(px(RING_WIDTH))
+                .border_color(gpui::rgba(0))
+                .when(focused, |ring| ring.border_color(gpui_color(appearance.colors.focus_ring))),
+        )
 }
 
 #[derive(Clone, Copy)]

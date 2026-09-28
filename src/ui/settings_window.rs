@@ -1331,7 +1331,7 @@ impl SettingsWindow {
         } else {
             appearance
         };
-        let control = self.render_control(row, content_appearance, cx);
+        let control = self.render_control(row, content_appearance, window, cx);
         let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
             .layout(row_layout(row))
             .reset(self.row_reset(row, appearance, cx))
@@ -1347,13 +1347,14 @@ impl SettingsWindow {
         &mut self,
         row: SettingsRowId,
         appearance: &ChromeAppearance,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
-            SettingsRowId::TerminalTheme => self.render_current_theme(appearance, cx),
+            SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(appearance, cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
@@ -1363,7 +1364,7 @@ impl SettingsWindow {
             }
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
-            SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
+            SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, window, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
         }
     }
