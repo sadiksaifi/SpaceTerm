@@ -139,6 +139,7 @@ lucide_sources! {
     Globe => "globe",
     ImageOff => "image-off",
     Info => "info",
+    Keyboard => "keyboard",
     Maximize2 => "maximize-2",
     Minimize2 => "minimize-2",
     Minus => "minus",

@@ -30,6 +30,9 @@ mod progress_tests;
 mod resize_handle;
 mod search_field;
 mod segmented_control;
+mod shortcut_recorder;
+#[cfg(test)]
+mod shortcut_recorder_tests;
 mod text_input;
 mod toggle;
 mod tooltip;
@@ -114,6 +117,9 @@ pub use segmented_control::{
     MAXIMUM_SEGMENTED_OPTIONS, SegmentedActivationSource, SegmentedBuildError, SegmentedChange,
     SegmentedControl, SegmentedControlTheme, SegmentedMetrics, SegmentedOption, SegmentedPaint,
     SegmentedPaints, SegmentedSize, SegmentedSizes, SegmentedValuePaints,
+};
+pub use shortcut_recorder::{
+    ShortcutModifierFormatter, ShortcutRecorder, ShortcutRecorderEvent, ShortcutValidator,
 };
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,

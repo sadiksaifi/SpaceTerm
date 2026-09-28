@@ -194,6 +194,31 @@ impl SearchFieldTheme {
             ..self
         }
     }
+
+    /// The frame and one-line geometry a compact field shares with the search field on the same
+    /// host, so a shortcut field and a search field in one surface stand on the same rhythm.
+    pub(crate) fn compact_field(&self) -> CompactFieldGeometry {
+        let metrics = self.metrics;
+        CompactFieldGeometry {
+            frame: self.frame,
+            height: metrics.height,
+            horizontal_padding: metrics.horizontal_padding,
+            corner_radius: metrics.corner_radius,
+            label_size: metrics.label_size,
+            line_height: metrics.line_height,
+        }
+    }
+}
+
+/// The frame and one-line geometry of a compact field, resolved for the current host and density.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CompactFieldGeometry {
+    pub(crate) frame: FieldFrameTheme,
+    pub(crate) height: Pixels,
+    pub(crate) horizontal_padding: Pixels,
+    pub(crate) corner_radius: Pixels,
+    pub(crate) label_size: Pixels,
+    pub(crate) line_height: Pixels,
 }
 
 impl gpui::Global for SearchFieldTheme {}
