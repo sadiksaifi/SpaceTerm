@@ -899,7 +899,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let (settings, _) = crate::settings::UserSettings::load(
+        let settings = crate::settings::UserSettings::load(
             crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));
@@ -998,7 +998,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let (settings, _) = crate::settings::UserSettings::load(
+        let settings = crate::settings::UserSettings::load(
             crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));

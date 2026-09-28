@@ -38,6 +38,7 @@ pub(crate) struct StorageCommit {
 
 /// Supplies file effects without exposing paths or native handles to settings policy.
 pub(crate) trait SettingsStorage: Send + Sync {
+    fn quarantine(&self) -> Result<(), StorageError>;
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError>;
     fn write(
         &self,
@@ -88,6 +89,20 @@ impl ConfigSettingsStorage {
 }
 
 impl SettingsStorage for ConfigSettingsStorage {
+    fn quarantine(&self) -> Result<(), StorageError> {
+        let directory = self.directory(false)?.ok_or(StorageError::Unavailable)?;
+        let source = self.paths.directories().settings_file();
+        let backup = self.paths.directories().settings_backup_file();
+        self.paths
+            .filesystem()
+            .rename_private_file(
+                &directory,
+                source.file_name().ok_or(StorageError::Unavailable)?,
+                backup.file_name().ok_or(StorageError::Unavailable)?,
+            )
+            .map_err(filesystem_error)
+    }
+
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
         let Some(directory) = self.directory(false)? else {
             return Ok(None);
@@ -155,6 +170,7 @@ fn path_error(error: AppPathsError) -> StorageError {
 fn filesystem_error(error: SecureFilesystemError) -> StorageError {
     match error {
         SecureFilesystemError::Unsafe => StorageError::Unsafe,
+        SecureFilesystemError::TooLarge => StorageError::TooLarge,
         SecureFilesystemError::Missing
         | SecureFilesystemError::AlreadyExists
         | SecureFilesystemError::Unavailable => StorageError::Unavailable,

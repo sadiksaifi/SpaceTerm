@@ -11,7 +11,7 @@ const IMPORTED_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample",
 
 fn setup() -> (SettingsDraft, UserSettings, Arc<MemoryStorage>) {
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
-    let (settings, _) = UserSettings::load(storage.clone());
+    let settings = UserSettings::load(storage.clone());
     (SettingsDraft::new(settings.clone()), settings, storage)
 }
 

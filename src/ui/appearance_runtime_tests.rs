@@ -25,6 +25,9 @@ fn floating(resolved: &ResolvedAppearance) -> u8 {
 #[derive(Default)]
 struct PreviewStorage(Option<Vec<u8>>);
 impl SettingsStorage for PreviewStorage {
+    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+        Err(crate::settings::storage::StorageError::Unavailable)
+    }
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
         Ok(self.0.as_ref().map(|bytes| PrivateFileSnapshot {
             bytes: bytes.clone(),
@@ -41,11 +44,11 @@ impl SettingsStorage for PreviewStorage {
 }
 
 fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform) {
-    let (settings, changed) = UserSettings::load(Arc::new(PreviewStorage::default()));
+    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        install(settings.clone(), changed, Rc::new(platform.clone()), cx).unwrap();
+        install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::initialize_controls(cx).unwrap();
     });
     (settings, platform)
@@ -563,12 +566,12 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
 fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx: &mut TestAppContext,
 ) {
-    let (settings, changed) = UserSettings::load(Arc::new(PreviewStorage::default()));
+    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_reduced_motion(true);
     cx.update(|cx| {
-        install(settings, changed, Rc::new(platform.clone()), cx).unwrap();
+        install(settings, Rc::new(platform.clone()), cx).unwrap();
         crate::ui::initialize_controls(cx).unwrap();
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
@@ -691,11 +694,11 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     let bytes = crate::appearance::export_settings(&committed)
         .unwrap()
         .into_bytes();
-    let (settings, changed) = UserSettings::load(Arc::new(PreviewStorage(Some(bytes))));
+    let settings = UserSettings::load(Arc::new(PreviewStorage(Some(bytes))));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        install(settings.clone(), changed, Rc::new(platform.clone()), cx).unwrap();
+        install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::initialize_controls(cx).unwrap();
     });
     let token = settings.begin_preview(0).unwrap();

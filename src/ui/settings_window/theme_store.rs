@@ -664,6 +664,9 @@ mod tests {
     struct EmptyStorage;
 
     impl SettingsStorage for EmptyStorage {
+        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+            Err(crate::settings::storage::StorageError::Unavailable)
+        }
         fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
             Ok(None)
         }
@@ -722,7 +725,7 @@ mod tests {
 
     #[test]
     fn reimporting_a_zed_family_replaces_its_themes() {
-        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let settings = UserSettings::load(std::sync::Arc::new(EmptyStorage));
         let token = settings.begin_preview(0).unwrap();
         let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
         let install = || {
@@ -738,7 +741,7 @@ mod tests {
 
     #[test]
     fn a_malformed_zed_family_installs_nothing_and_a_corrected_retry_is_clean() {
-        let (settings, _) = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let settings = UserSettings::load(std::sync::Arc::new(EmptyStorage));
         let token = settings.begin_preview(0).unwrap();
         let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Broken","appearance":"sepia","style":{}}]}"##;
         let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Second","appearance":"light","style":{}}]}"##;

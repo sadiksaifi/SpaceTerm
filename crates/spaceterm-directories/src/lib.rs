@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const APP_DIR_NAME: &str = "spaceterm";
 const WINDOWS_VENDOR_DIR_NAME: &str = "sadiksaifi";
+pub const SETTINGS_BACKUP_NAME: &str = "settings.json.bak";
 const SETTINGS_DOCUMENT_NAME: &str = "settings.json";
 const MANAGED_SSH_CONFIG_NAME: &str = "ssh_config";
 
@@ -247,6 +248,11 @@ impl AppDirectories {
     /// Returns the Settings document beneath the Operating-System Config root.
     pub fn settings_file(&self) -> PathBuf {
         self.config.join(SETTINGS_DOCUMENT_NAME)
+    }
+
+    /// Returns the Settings Recovery backup beside the Settings document.
+    pub fn settings_backup_file(&self) -> PathBuf {
+        self.config.join(SETTINGS_BACKUP_NAME)
     }
 
     pub fn managed_ssh_config(&self) -> AppDirectoryFile {
@@ -714,6 +720,10 @@ mod tests {
             Path::new("/home/test/.config/spaceterm/settings.json")
         );
         assert_eq!(
+            directories.settings_backup_file(),
+            Path::new("/home/test/.config/spaceterm/settings.json.bak")
+        );
+        assert_eq!(
             directories.managed_ssh_config().path(),
             Path::new("/home/test/.config/spaceterm/ssh_config")
         );
@@ -746,6 +756,10 @@ mod tests {
         assert_eq!(
             directories.settings_file(),
             Path::new("/isolated/spaceterm/settings.json")
+        );
+        assert_eq!(
+            directories.settings_backup_file(),
+            Path::new("/isolated/spaceterm/settings.json.bak")
         );
         assert_eq!(
             directories.managed_ssh_config().path(),

@@ -71,11 +71,11 @@ fn open_settings_with_capabilities(
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     registry: Option<ZedThemeRegistry>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
-    let (settings, changed) = crate::settings::UserSettings::load(storage.clone());
+    let settings = crate::settings::UserSettings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings.clone(), changed, Rc::new(platform.clone()), cx)
+        appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
@@ -2741,7 +2741,7 @@ fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut Te
     cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
     cx.run_until_parked();
     assert_eq!(document_of(&window, cx).preferences, expected);
-    let (restarted, _) = crate::settings::UserSettings::load(harness.storage);
+    let restarted = crate::settings::UserSettings::load(harness.storage);
     assert_eq!(restarted.snapshot().candidate.preferences, expected);
 }
 

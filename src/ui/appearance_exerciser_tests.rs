@@ -30,6 +30,9 @@ fn caption_fixture_requires_explicit_gallery_activation(cx: &mut TestAppContext)
 pub(super) struct ReadOnlyExerciserStorage;
 
 impl crate::settings::storage::SettingsStorage for ReadOnlyExerciserStorage {
+    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+        Err(crate::settings::storage::StorageError::Unavailable)
+    }
     fn read(
         &self,
     ) -> Result<
@@ -55,13 +58,11 @@ fn exerciser_diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppConte
     use crate::platform::appearance::testing::RecordingAppearancePlatform;
     use crate::ui::appearance_runtime;
 
-    let (settings, changed) =
-        crate::settings::UserSettings::load(Arc::new(ReadOnlyExerciserStorage));
+    let settings = crate::settings::UserSettings::load(Arc::new(ReadOnlyExerciserStorage));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings.clone(), changed, Rc::new(platform.clone()), cx)
-            .unwrap();
+        appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::init(cx).unwrap();
     });
     let (_exerciser, cx) = cx.add_window_view(super::AppearanceExerciser::new);
@@ -101,12 +102,11 @@ fn accessibility_preview_controls_apply_and_reset_synthetic_facts(cx: &mut TestA
     use crate::platform::appearance::{AppearancePlatform, testing::RecordingAppearancePlatform};
     use crate::ui::appearance_runtime;
 
-    let (settings, changed) =
-        crate::settings::UserSettings::load(Arc::new(ReadOnlyExerciserStorage));
+    let settings = crate::settings::UserSettings::load(Arc::new(ReadOnlyExerciserStorage));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
-        appearance_runtime::install(settings, changed, Rc::new(platform.clone()), cx).unwrap();
+        appearance_runtime::install(settings, Rc::new(platform.clone()), cx).unwrap();
         crate::ui::init(cx).unwrap();
     });
     let (exerciser, cx) = cx.add_window_view(super::AppearanceExerciser::new);

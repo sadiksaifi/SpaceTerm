@@ -168,9 +168,6 @@ impl SecureFilesystem for MacosSecureFilesystem {
             .take(maximum_bytes.saturating_add(1) as u64)
             .read_to_end(&mut bytes)
             .map_err(classify)?;
-        if bytes.len() > maximum_bytes {
-            return Err(SecureFilesystemError::Unsafe);
-        }
         let open_version = private_file_version(&file.metadata().map_err(classify)?)?;
         if open_version != version {
             return Err(SecureFilesystemError::Unsafe);
@@ -181,6 +178,9 @@ impl SecureFilesystem for MacosSecureFilesystem {
         if current != version {
             return Err(SecureFilesystemError::Unsafe);
         }
+        if bytes.len() > maximum_bytes {
+            return Err(SecureFilesystemError::TooLarge);
+        }
         let identity = NativeFileIdentity {
             version,
             fingerprint: fingerprint(&bytes),
@@ -189,6 +189,46 @@ impl SecureFilesystem for MacosSecureFilesystem {
             bytes,
             identity: SecureEntryIdentity(Arc::new(identity)),
         }))
+    }
+
+    fn rename_private_file(
+        &self,
+        directory_handle: &SecureDirectory,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> Result<(), SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        let _transaction = lock_private_directory(&directory)?;
+        verify_directory_entry(&directory)?;
+        let from_name = component_cstring(from).map_err(classify)?;
+        let to_name = component_cstring(to).map_err(classify)?;
+        let file = open_file_at(&directory.file, from, libc::O_RDONLY | libc::O_NONBLOCK, 0)
+            .map_err(classify)?;
+        let version = private_file_version(&file.metadata().map_err(classify)?)?;
+        if file_version_at(&directory.file, from)? != Some(version) {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        file_identity_at(&directory.file, to)?;
+        verify_directory_entry(&directory)?;
+        // SAFETY: both component names and the verified directory descriptor remain valid.
+        let result = unsafe {
+            libc::renameat(
+                directory.file.as_raw_fd(),
+                from_name.as_ptr(),
+                directory.file.as_raw_fd(),
+                to_name.as_ptr(),
+            )
+        };
+        if result != 0 {
+            return Err(classify(io::Error::last_os_error()));
+        }
+        verify_directory_entry(&directory)?;
+        if private_file_version(&file.metadata().map_err(classify)?)? != version
+            || file_version_at(&directory.file, to)? != Some(version)
+        {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        directory.file.sync_all().map_err(classify)
     }
 
     fn prepare_private_file(
@@ -483,7 +523,9 @@ fn as_io_error(error: SecureFilesystemError) -> io::Error {
         SecureFilesystemError::Missing => io::ErrorKind::NotFound,
         SecureFilesystemError::AlreadyExists => io::ErrorKind::AlreadyExists,
         SecureFilesystemError::Unsafe => io::ErrorKind::PermissionDenied,
-        SecureFilesystemError::Unavailable => io::ErrorKind::Other,
+        SecureFilesystemError::Unavailable | SecureFilesystemError::TooLarge => {
+            io::ErrorKind::Other
+        }
     };
     io::Error::from(kind)
 }
@@ -1250,6 +1292,96 @@ mod tests {
             .downcast_ref::<NativePreparedFile>()
             .expect("native prepared file");
         root.join(OsStr::from_bytes(prepared.temporary_name.as_bytes()))
+    }
+
+    #[test]
+    fn rename_private_file_preserves_bytes_and_replaces_a_private_backup() {
+        let root = test_root("rename");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        for (name, bytes, nonce) in [
+            ("settings.json", b"broken\0\xff".as_slice(), [40; 16]),
+            ("settings.json.bak", b"old backup".as_slice(), [41; 16]),
+        ] {
+            let prepared = filesystem
+                .prepare_private_file(&directory, OsStr::new(name), bytes, nonce)
+                .unwrap();
+            filesystem.commit_private_file(prepared, None).unwrap();
+        }
+        let identity = fs::metadata(root.join("settings.json")).unwrap().ino();
+        filesystem
+            .rename_private_file(
+                &directory,
+                OsStr::new("settings.json"),
+                OsStr::new("settings.json.bak"),
+            )
+            .unwrap();
+        assert!(!root.join("settings.json").exists());
+        assert_eq!(
+            fs::read(root.join("settings.json.bak")).unwrap(),
+            b"broken\0\xff"
+        );
+        assert_eq!(
+            fs::metadata(root.join("settings.json.bak")).unwrap().ino(),
+            identity
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_private_file_rejects_unsafe_entries_and_replaced_directory() {
+        for unsafe_entry in ["symlink", "hard-link", "public", "directory"] {
+            for source in [true, false] {
+                let root = test_root("unsafe-rename");
+                let filesystem = MacosSecureFilesystem;
+                let directory = filesystem.ensure_private_directory(&root).unwrap();
+                let prepared = filesystem
+                    .prepare_private_file(&directory, OsStr::new("source"), b"preserve", [42; 16])
+                    .unwrap();
+                filesystem.commit_private_file(prepared, None).unwrap();
+                let unsafe_path = root.join(if source { "source" } else { "backup" });
+                if source {
+                    fs::remove_file(&unsafe_path).unwrap();
+                }
+                let outside = root.join("outside");
+                fs::write(&outside, b"outside").unwrap();
+                fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+                match unsafe_entry {
+                    "symlink" => symlink(&outside, &unsafe_path).unwrap(),
+                    "hard-link" => fs::hard_link(&outside, &unsafe_path).unwrap(),
+                    "public" => {
+                        fs::write(&unsafe_path, b"public").unwrap();
+                        fs::set_permissions(&unsafe_path, fs::Permissions::from_mode(0o644))
+                            .unwrap();
+                    }
+                    "directory" => fs::create_dir(&unsafe_path).unwrap(),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    filesystem.rename_private_file(
+                        &directory,
+                        OsStr::new("source"),
+                        OsStr::new("backup")
+                    ),
+                    Err(SecureFilesystemError::Unsafe)
+                );
+                assert_eq!(fs::read(&outside).unwrap(), b"outside");
+                assert!(root.join("source").exists());
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+        let root = test_root("replaced-rename-directory");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let displaced = root.with_extension("displaced");
+        fs::rename(&root, &displaced).unwrap();
+        filesystem.ensure_private_directory(&root).unwrap();
+        assert_eq!(
+            filesystem.rename_private_file(&directory, OsStr::new("source"), OsStr::new("backup")),
+            Err(SecureFilesystemError::Unsafe)
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(displaced).unwrap();
     }
 
     #[test]

@@ -130,7 +130,7 @@ impl SecureFilesystem for RecordingFilesystem {
             .get(&Self::path(directory)?.join(name))
             .map(|(bytes, identity)| {
                 if bytes.len() > maximum_bytes {
-                    return Err(SecureFilesystemError::Unsafe);
+                    return Err(SecureFilesystemError::TooLarge);
                 }
                 Ok(PrivateFileSnapshot {
                     bytes: bytes.clone(),
@@ -138,6 +138,22 @@ impl SecureFilesystem for RecordingFilesystem {
                 })
             })
             .transpose()
+    }
+    fn rename_private_file(
+        &self,
+        directory: &SecureDirectory,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> Result<(), SecureFilesystemError> {
+        self.verify_directory(directory)?;
+        let path = Self::path(directory)?;
+        let mut files = self.files.lock().unwrap();
+        let source = files
+            .values
+            .remove(&path.join(from))
+            .ok_or(SecureFilesystemError::Missing)?;
+        files.values.insert(path.join(to), source);
+        Ok(())
     }
     fn prepare_private_file(
         &self,

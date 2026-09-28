@@ -16,6 +16,7 @@ pub(crate) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>
 #[derive(Default)]
 struct MemoryState {
     snapshot: Option<(Vec<u8>, u64)>,
+    backup: Option<Vec<u8>>,
     writes: usize,
     write_failure: Option<StorageError>,
     read_failure: Option<StorageError>,
@@ -104,6 +105,14 @@ impl MemoryStorage {
 }
 
 impl SettingsStorage for MemoryStorage {
+    fn quarantine(&self) -> Result<(), StorageError> {
+        let mut state = self.0.lock().unwrap();
+        if let Some(error) = state.write_failure {
+            return Err(error);
+        }
+        state.backup = Some(state.snapshot.take().ok_or(StorageError::Unavailable)?.0);
+        Ok(())
+    }
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
         let state = self.0.lock().unwrap();
         if let Some(error) = state.read_failure {

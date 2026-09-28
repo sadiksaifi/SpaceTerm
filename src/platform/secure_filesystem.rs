@@ -23,6 +23,7 @@ impl<T: Any + Eq + Send + Sync> EntryIdentityValue for T {
 pub(crate) enum SecureFilesystemError {
     Missing,
     AlreadyExists,
+    TooLarge,
     Unsafe,
     Unavailable,
 }
@@ -168,6 +169,14 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         name: &OsStr,
         maximum_bytes: usize,
     ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError>;
+
+    /// Renames a private regular file within one verified directory, replacing an older file.
+    fn rename_private_file(
+        &self,
+        directory: &SecureDirectory,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> Result<(), SecureFilesystemError>;
 
     fn prepare_private_file(
         &self,

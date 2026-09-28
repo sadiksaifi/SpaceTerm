@@ -959,10 +959,10 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     )
     .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
-        let (settings, changed) = crate::settings::UserSettings::load(Arc::clone(storage));
+        let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
-        crate::ui::appearance_runtime::install(settings, changed, Rc::clone(platform), cx)
+        crate::ui::appearance_runtime::install(settings, Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
@@ -1249,6 +1249,9 @@ mod runtime_tests {
     struct EmptySettingsStorage;
 
     impl crate::settings::storage::SettingsStorage for EmptySettingsStorage {
+        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+            Err(crate::settings::storage::StorageError::Unavailable)
+        }
         fn read(
             &self,
         ) -> Result<
@@ -1408,6 +1411,9 @@ mod runtime_tests {
         }
 
         impl SettingsStorage for StartupProbe {
+            fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+                Err(crate::settings::storage::StorageError::Unavailable)
+            }
             fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
                 assert!(
                     self.0.load(Ordering::SeqCst),

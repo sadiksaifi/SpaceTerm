@@ -641,6 +641,24 @@ mod tests {
                 }))
         }
 
+        fn rename_private_file(
+            &self,
+            directory: &SecureDirectory,
+            from: &OsStr,
+            to: &OsStr,
+        ) -> Result<(), SecureFilesystemError> {
+            let path = Self::directory_path(directory)?.clone();
+            let mut state = self.state.lock().unwrap();
+            let value = state
+                .files
+                .remove(&(path.clone(), from.to_string_lossy().into_owned()))
+                .ok_or(SecureFilesystemError::Missing)?;
+            state
+                .files
+                .insert((path, to.to_string_lossy().into_owned()), value);
+            Ok(())
+        }
+
         fn prepare_private_file(
             &self,
             directory: &SecureDirectory,
