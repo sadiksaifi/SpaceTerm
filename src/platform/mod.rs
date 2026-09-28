@@ -181,3 +181,8 @@ pub(crate) mod testing;
 #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
 #[allow(dead_code)]
 pub(crate) mod native_main_thread_tests;
+
+#[cfg(target_os = "macos")]
+mod macos_reserved_shortcuts;
+#[cfg(target_os = "macos")]
+mod macos_shortcut_glyphs;

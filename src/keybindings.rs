@@ -12,13 +12,6 @@ mod preferences;
 mod shortcut;
 mod terminal_conventions;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "exported for the later desktop profile and keymap runtime steps"
-    )
-)]
 pub use keymap::*;
 pub use preferences::KeybindingPreferences;
 #[cfg_attr(

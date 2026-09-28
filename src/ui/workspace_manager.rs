@@ -2882,7 +2882,7 @@ impl WorkspaceManager {
             "Switch Workspace",
             self.workspace_switcher_items(cx),
             move |_| {
-                let local = ComboBoxCommand::new(
+                let mut local = ComboBoxCommand::new(
                     WorkspaceCreation::Local,
                     super::workspace_creation::LOCAL_WORKSPACE_LABEL,
                 )
@@ -2894,13 +2894,11 @@ impl WorkspaceManager {
                     )
                     .into_any_element()
                 })
-                .shortcut(new_workspace_shortcut)
                 .debug_selector("workspace-switcher-create-local");
                 let mut remote = ComboBoxCommand::new(
                     WorkspaceCreation::Remote,
                     super::workspace_creation::REMOTE_WORKSPACE_LABEL,
                 )
-                .shortcut(new_remote_workspace_shortcut)
                 .leading_icon(move |foreground, size| {
                     Icon::custom(
                         super::workspace_creation::REMOTE_WORKSPACE_ICON,
@@ -2910,6 +2908,12 @@ impl WorkspaceManager {
                     .into_any_element()
                 })
                 .debug_selector("workspace-switcher-create-remote");
+                if let Some(shortcut) = &new_workspace_shortcut {
+                    local = local.shortcut(shortcut.clone());
+                }
+                if let Some(shortcut) = &new_remote_workspace_shortcut {
+                    remote = remote.shortcut(shortcut.clone());
+                }
                 if let Some(reason) = &remote_unavailable_reason {
                     remote = remote
                         .disabled(true)
@@ -2980,7 +2984,7 @@ impl WorkspaceManager {
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .debug_selector("workspace-switcher-tooltip")
-                .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)),
+                .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )
         .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
             chooser
@@ -2991,7 +2995,9 @@ impl WorkspaceManager {
                 ))
                 .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
                 .full_width(true)
-                .tooltip(tooltip.keyboard_equivalent(presentation.shortcut(&SwitchWorkspace)))
+                .tooltip(tooltip.keyboard_equivalent(
+                    presentation.shortcut(&SwitchWorkspace).unwrap_or_default(),
+                ))
         })
         .on_lifecycle(move |_, cx| {
             let manager = combo_lifecycle_manager.clone();
@@ -3035,7 +3041,9 @@ impl WorkspaceManager {
                 .debug_selector("toggle-sidebar-button")
                 .tooltip(
                     Tooltip::new("toggle-sidebar-tooltip", toggle_label)
-                        .keyboard_equivalent(presentation.shortcut(&ToggleSidebar))
+                        .keyboard_equivalent(
+                            presentation.shortcut(&ToggleSidebar).unwrap_or_default(),
+                        )
                         .debug_selector("toggle-sidebar-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
@@ -3268,8 +3276,8 @@ impl WorkspaceManager {
 fn workspace_activation_shortcut(
     index: usize,
     presentation: &crate::desktop_profile::DesktopPresentation,
-) -> Option<&'static str> {
-    Some(match index {
+) -> Option<gpui::SharedString> {
+    match index {
         0 => presentation.shortcut(&ActivateWorkspace1),
         1 => presentation.shortcut(&ActivateWorkspace2),
         2 => presentation.shortcut(&ActivateWorkspace3),
@@ -3279,8 +3287,8 @@ fn workspace_activation_shortcut(
         6 => presentation.shortcut(&ActivateWorkspace7),
         7 => presentation.shortcut(&ActivateWorkspace8),
         8 => presentation.shortcut(&ActivateWorkspace9),
-        _ => return None,
-    })
+        _ => None,
+    }
 }
 
 fn classify_remote_workspace_restart_failure(

@@ -940,6 +940,12 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     }
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
     host.profile.install(cx);
+    gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
+        cx,
+        |presentation, cx| {
+            presentation.refresh(cx);
+        },
+    );
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }

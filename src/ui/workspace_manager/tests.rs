@@ -6004,10 +6004,13 @@ fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut Test
         );
     }
     let presentation = cx.update(|_, _| testing_presentation());
-    assert_eq!(presentation.shortcut(&NewWorkspace), "Primary+N");
     assert_eq!(
-        presentation.shortcut(&NewRemoteWorkspace),
-        "Primary+Shift+N"
+        presentation.shortcut(&NewWorkspace).as_deref(),
+        Some("Primary+N")
+    );
+    assert_eq!(
+        presentation.shortcut(&NewRemoteWorkspace).as_deref(),
+        Some("Primary+Shift+N")
     );
 }
 
@@ -8629,8 +8632,10 @@ fn collapsed_sidebar_toggle_should_show_its_tooltip_over_the_icon(cx: &mut TestA
     cx.run_until_parked();
     assert!(cx.debug_bounds("toggle-sidebar-tooltip").is_some());
     assert_eq!(
-        crate::desktop_profile::testing_presentation().shortcut(&ToggleSidebar),
-        "Primary+B"
+        crate::desktop_profile::testing_presentation()
+            .shortcut(&ToggleSidebar)
+            .as_deref(),
+        Some("Primary+B")
     );
 }
 

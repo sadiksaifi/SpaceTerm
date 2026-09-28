@@ -188,6 +188,12 @@ fn init_with_text_direction(
     );
     initialize_controls(cx)?;
     crate::desktop_profile::testing_profile(direction).install(cx);
+    gpui::BorrowAppContext::update_global::<crate::desktop_profile::DesktopPresentation, _>(
+        cx,
+        |presentation, cx| {
+            presentation.refresh(cx);
+        },
+    );
     Ok(())
 }
 
