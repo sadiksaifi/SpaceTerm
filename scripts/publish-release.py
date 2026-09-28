@@ -19,7 +19,8 @@ def main():
     parser.add_argument("tag")
     args = parser.parse_args()
     directory = ROOT / "dist/release"
-    assets = [directory / f"SpaceTerm-{args.tag}-darwin-arm64.dmg", directory / "appcast.xml", directory / "SHA256SUMS"]
+    version = args.tag.removeprefix("v")
+    assets = [directory / f"SpaceTerm-{version}-darwin-arm64.dmg", directory / "appcast.xml", directory / "SHA256SUMS"]
     if not all(path.is_file() for path in assets):
         parser.exit(1, "error: complete release assets are required\n")
     existing = gh("release", "view", args.tag, "--json", "isDraft,tagName", check=False)
