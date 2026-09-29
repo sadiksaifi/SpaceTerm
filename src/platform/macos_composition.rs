@@ -79,6 +79,7 @@ fn desktop_profile(
             DesktopWording {
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
+                system_directory_selection: "Choose in Finder…",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),
@@ -389,6 +390,10 @@ mod tests {
             );
             assert_eq!(presentation.wording().file_preview, "Quick Look");
             assert_eq!(presentation.wording().operating_system_name, "macOS");
+            assert_eq!(
+                presentation.wording().system_directory_selection,
+                "Choose in Finder…"
+            );
         });
     }
 }

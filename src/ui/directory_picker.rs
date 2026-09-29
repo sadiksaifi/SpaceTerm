@@ -29,8 +29,10 @@ use super::{
 
 use crate::domain::PinnedDirectory;
 
+mod local_source;
 mod remote_source;
 
+pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
     RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
 };
@@ -39,6 +41,8 @@ const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "directory-picker-create-directory";
 /// Identifies the search line's Pin or Create action.
 const CONFIRM_ACTION: &str = "directory-picker-confirm";
+/// Identifies the confirm action's menu item that hands off to System Directory Selection.
+const SYSTEM_SELECTION_ACTION: &str = "directory-picker-system-selection";
 /// Identifies the row that opens the enclosing directory.
 const ENCLOSING_ROW: &str = "directory-picker-enclosing";
 const TRUNCATED_LISTING_NOTE: &str =
@@ -389,6 +393,8 @@ pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
     Confirmed(PinnedDirectory),
+    /// The picker closed so System Directory Selection can choose the directory instead.
+    SystemSelectionRequested,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,6 +462,8 @@ struct ValidationCompletion {
 /// One machine's directory chooser built on the reusable Command Palette.
 pub(super) struct DirectoryPicker {
     source: Rc<dyn DirectorySource>,
+    /// Labels the confirm action's menu item that hands off to System Directory Selection.
+    system_selection: Option<SharedString>,
     palette: Entity<CommandPalette<DirectoryPickerItemId>>,
     opening: bool,
     open: bool,
@@ -506,6 +514,7 @@ impl DirectoryPicker {
         .detach();
         Self {
             source,
+            system_selection: None,
             palette,
             opening: false,
             open: false,
@@ -525,6 +534,12 @@ impl DirectoryPicker {
             refresh_task: None,
             validation_task: None,
         }
+    }
+
+    /// Offers System Directory Selection, labeled `label`, beside the confirm action.
+    pub(super) fn with_system_selection(mut self, label: SharedString) -> Self {
+        self.system_selection = Some(label);
+        self
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -680,11 +695,34 @@ impl DirectoryPicker {
             CommandPaletteEvent::HeaderAction(action) if action == CONFIRM_ACTION => {
                 self.confirm_current(window, cx);
             }
+            CommandPaletteEvent::HeaderAction(action) if action == SYSTEM_SELECTION_ACTION => {
+                self.request_system_selection(window, cx);
+            }
             _ => {}
         }
     }
 
+    /// Closes the picker and hands the choice to System Directory Selection.
+    fn request_system_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || self.busy.is_some() || self.system_selection.is_none() {
+            return;
+        }
+        self.end_session(Some(DirectoryPickerEvent::SystemSelectionRequested), cx);
+        self.palette.update(cx, |palette, cx| {
+            palette.dismiss_without_restoring_focus(window, cx);
+        });
+    }
+
     fn finish_close(&mut self, reason: CommandPaletteCloseReason, cx: &mut Context<Self>) {
+        let outcome = match reason {
+            CommandPaletteCloseReason::Completed => None,
+            _ => Some(DirectoryPickerEvent::Dismissed),
+        };
+        self.end_session(outcome, cx);
+    }
+
+    /// Clears the session's state and requests, then reports how it ended.
+    fn end_session(&mut self, outcome: Option<DirectoryPickerEvent>, cx: &mut Context<Self>) {
         if !self.open && !self.opening {
             return;
         }
@@ -703,9 +741,8 @@ impl DirectoryPicker {
         self.validation_task.take();
         self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
         self.operation_generation = self.operation_generation.wrapping_add(1);
-        match reason {
-            CommandPaletteCloseReason::Completed => {}
-            _ => cx.emit(DirectoryPickerEvent::Dismissed),
+        if let Some(outcome) = outcome {
+            cx.emit(outcome);
         }
         cx.emit(DirectoryPickerEvent::StateChanged);
         cx.notify();
@@ -1109,11 +1146,16 @@ impl DirectoryPicker {
         }
     }
 
-    /// Returns the search line's action that pins to or creates the exact path.
+    /// Returns the search line's action that pins to or creates the exact path, with System
+    /// Directory Selection in its menu when offered.
     fn confirm_action(&self) -> CommandPalettePrimaryAction {
-        CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.confirmation_label())
+        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.confirmation_label())
             .disabled(!self.can_confirm())
-            .debug_selector(CONFIRM_ACTION)
+            .debug_selector(CONFIRM_ACTION);
+        match &self.system_selection {
+            Some(label) => action.menu_item(SYSTEM_SELECTION_ACTION, label.clone()),
+            None => action,
+        }
     }
 
     /// Returns the listed rows: the enclosing directory, then the matching children.
@@ -1619,13 +1661,35 @@ mod tests {
         Rc<RefCell<Vec<DirectoryPickerEvent>>>,
         &mut VisualTestContext,
     ) {
+        directory_picker_offering(provider, None, cx)
+    }
+
+    fn directory_picker_offering<'a>(
+        provider: Arc<ScriptedRemoteDirectoryProvider>,
+        system_selection: Option<&'static str>,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        gpui::Entity<DirectoryPicker>,
+        Rc<RefCell<Vec<DirectoryPickerEvent>>>,
+        &'a mut VisualTestContext,
+    ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
+            let picker = cx.new(|cx| {
+                let picker = DirectoryPicker::new(
+                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    window,
+                    cx,
+                );
+                match system_selection {
+                    Some(label) => picker.with_system_selection(label.into()),
+                    None => picker,
+                }
+            });
             cx.subscribe(
                 &picker,
                 move |_, _, event: &DirectoryPickerEvent, _| {
@@ -2198,6 +2262,50 @@ mod tests {
                 .borrow()
                 .contains(&DirectoryPickerEvent::Dismissed)
         );
+    }
+
+    #[gpui::test]
+    fn choosing_system_selection_should_close_and_hand_off_instead_of_dismissing(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(ExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (picker, events, cx) =
+            directory_picker_offering(provider, Some("Choose Directory…"), cx);
+
+        let menu = cx
+            .debug_bounds("directory-picker-confirm-menu")
+            .expect("the confirm action did not offer System Directory Selection");
+        cx.simulate_click(menu.center(), Modifiers::none());
+        cx.run_until_parked();
+        let item = cx
+            .debug_bounds("command-palette-primary-menu-directory-picker-system-selection")
+            .expect("the menu did not open");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(!picker.read_with(cx, |picker, _| picker.is_open()));
+        let events = events.borrow();
+        assert!(events.contains(&DirectoryPickerEvent::SystemSelectionRequested));
+        assert!(!events.contains(&DirectoryPickerEvent::Dismissed));
+    }
+
+    #[gpui::test]
+    fn a_picker_without_system_selection_should_offer_no_menu(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(ExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (_, _, cx) = directory_picker(provider, cx);
+
+        assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
+        assert!(cx.debug_bounds("directory-picker-confirm-menu").is_none());
     }
 
     #[gpui::test]

@@ -1433,6 +1433,8 @@ fn present_test_alert(
     })
 }
 
+/// Pins the active Local Workspace through the Directory Picker's hand-off to System Directory
+/// Selection.
 fn choose_pin_directory(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -1440,6 +1442,11 @@ fn choose_pin_directory(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestC
         })
     });
     cx.run_until_parked();
+    click("directory-picker-confirm-menu", cx);
+    click(
+        "command-palette-primary-menu-directory-picker-system-selection",
+        cx,
+    );
 }
 
 fn open_workspace_switcher(cx: &mut VisualTestContext) {
@@ -4032,7 +4039,9 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
         workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
+            let workspace_id = manager.workspaces.active_workspace_id();
+            manager.transient.pin_target = Some(workspace_id);
+            manager.choose_local_pin_directory(workspace_id, window, cx);
             // Selection validation retains its valid authority; activation independently fails.
             manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
                 crate::platform::local_filesystem::LocalFilesystemError::Capacity,
@@ -4052,6 +4061,41 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
         cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
         None
     );
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("local-picker");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("command-palette-query-prefix").is_none(),
+        "a local path should not name a machine"
+    );
+
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input(&format!("{}/", project.to_str().unwrap()));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    let pinned = manager.read_with(cx, |manager, _| {
+        match manager.workspaces.active_workspace().pinned_directory() {
+            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
+            _ => None,
+        }
+    });
+    assert_eq!(pinned, Some(project.clone()));
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
     fs::remove_dir_all(project).unwrap();
 }
 

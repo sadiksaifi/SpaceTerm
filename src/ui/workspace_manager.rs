@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use super::directory_picker::{
-    DirectoryPicker, DirectoryPickerEvent, DirectorySource, RemoteDirectorySource,
+    DirectoryPicker, DirectoryPickerEvent, DirectorySource, LocalDirectorySource,
+    RemoteDirectorySource,
 };
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
@@ -1052,32 +1053,60 @@ impl WorkspaceManager {
         .present(window, cx, |_, _| {});
     }
 
+    /// Opens the Directory Picker for the Workspace's machine. A Local Workspace also offers
+    /// System Directory Selection from the picker.
     fn open_pin_picker(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
-            return;
-        };
-        let Some(WorkspaceLocation::Remote { key, .. }) = self
+        let Some(location) = self
             .workspaces
             .workspace(workspace_id)
-            .map(|workspace| workspace.location())
+            .map(|workspace| workspace.location().clone())
         else {
             return;
         };
-        let Some(session) = runtime.session.as_ref() else {
-            Self::show_pin_error(window, cx);
-            return;
+        let (source, remote_generation): (Rc<dyn DirectorySource>, Option<u64>) = match location {
+            WorkspaceLocation::Local => (
+                Rc::new(LocalDirectorySource::new(
+                    self.local_filesystem.clone(),
+                    self.local_home_directory_path.clone(),
+                    cx.background_executor().clone(),
+                )),
+                None,
+            ),
+            WorkspaceLocation::Remote { key, .. } => {
+                let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
+                    return;
+                };
+                let Some(session) = runtime.session.as_ref() else {
+                    Self::show_pin_error(window, cx);
+                    return;
+                };
+                let host = key.destination().host().to_owned();
+                (
+                    Rc::new(RemoteDirectorySource::new(session.provider(), &host)),
+                    Some(runtime.generation),
+                )
+            }
         };
-        let generation = runtime.generation;
+        let system_selection = remote_generation.is_none().then(|| {
+            gpui::SharedString::from(
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .system_directory_selection,
+            )
+        });
         let operation = self.pin_operation;
-        let provider = session.provider();
-        let host = key.destination().host().to_owned();
-        let source: Rc<dyn DirectorySource> = Rc::new(RemoteDirectorySource::new(provider, &host));
-        let picker = cx.new(|cx| DirectoryPicker::new(source, window, cx));
+        let picker = cx.new(|cx| {
+            let picker = DirectoryPicker::new(source, window, cx);
+            match system_selection {
+                Some(label) => picker.with_system_selection(label),
+                None => picker,
+            }
+        });
         cx.subscribe_in(
             &picker,
             window,
@@ -1088,19 +1117,26 @@ impl WorkspaceManager {
                 match event {
                     DirectoryPickerEvent::Confirmed(pinned) => {
                         let current = manager.pin_operation == operation
-                            && manager
-                                .remote_workspace_runtimes
-                                .get(&workspace_id)
-                                .is_some_and(|runtime| {
-                                    runtime.generation == generation && runtime.session.is_some()
-                                });
+                            && remote_generation.is_none_or(|generation| {
+                                manager
+                                    .remote_workspace_runtimes
+                                    .get(&workspace_id)
+                                    .is_some_and(|runtime| {
+                                        runtime.generation == generation
+                                            && runtime.session.is_some()
+                                    })
+                            });
                         let applied = current
-                            && manager.apply_directory_pin(
-                                workspace_id,
-                                Some(pinned.clone()),
-                                window,
-                                cx,
-                            );
+                            && match pinned.clone() {
+                                PinnedDirectory::Local(directory) => manager
+                                    .apply_validated_local_pin(workspace_id, directory, window, cx),
+                                remote => manager.apply_directory_pin(
+                                    workspace_id,
+                                    Some(remote),
+                                    window,
+                                    cx,
+                                ),
+                            };
                         let picker = picker.clone();
                         let owner = cx.entity();
                         window.defer(cx, move |window, cx| {
@@ -1120,6 +1156,10 @@ impl WorkspaceManager {
                                 });
                             }
                         });
+                    }
+                    DirectoryPickerEvent::SystemSelectionRequested => {
+                        manager.pin_picker = None;
+                        manager.choose_local_pin_directory(workspace_id, window, cx);
                     }
                     DirectoryPickerEvent::Dismissed => {
                         manager.pin_picker = None;
@@ -1162,17 +1202,7 @@ impl WorkspaceManager {
 
         self.transient.pin_target = Some(workspace_id);
         self.pin_operation = self.pin_operation.wrapping_add(1);
-        if self
-            .workspaces
-            .workspace(workspace_id)
-            .is_some_and(|workspace| {
-                matches!(workspace.location(), WorkspaceLocation::Remote { .. })
-            })
-        {
-            self.open_pin_picker(workspace_id, window, cx);
-            return;
-        }
-        self.choose_local_pin_directory(workspace_id, window, cx);
+        self.open_pin_picker(workspace_id, window, cx);
     }
 
     /// Selects a Local Workspace's Pinned Directory through System Directory Selection.

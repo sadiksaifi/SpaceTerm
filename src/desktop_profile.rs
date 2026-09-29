@@ -14,6 +14,8 @@ use spaceterm_ui::{
 pub(crate) struct DesktopWording {
     pub(crate) file_preview: &'static str,
     pub(crate) operating_system_name: &'static str,
+    /// The command that opens System Directory Selection.
+    pub(crate) system_directory_selection: &'static str,
 }
 
 pub(crate) trait ShortcutFormatter {
@@ -269,6 +271,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         DesktopWording {
             file_preview: "Preview File",
             operating_system_name: "Operating System",
+            system_directory_selection: "Choose Directory…",
         },
         Rc::new(TestingShortcutFormatter),
     );
