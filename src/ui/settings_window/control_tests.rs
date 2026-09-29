@@ -3,9 +3,7 @@ use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use crate::appearance::{
-    Appearance, AppearanceMode, ThemeId, SettingsDocument, TerminalFontFamily,
-};
+use crate::appearance::{Appearance, AppearanceMode, SettingsDocument, TerminalFontFamily};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::ui::appearance_runtime;
 
@@ -521,22 +519,33 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
     );
 }
 
-/// A theme that is no longer installed stays the choice: the page names it, and nothing in the
-/// gallery claims to be selected in its place.
+/// A Settings file that selects an uninstalled theme opens with that slot on the built-in theme,
+/// which the list shows in use.
 #[gpui::test]
-fn unavailable_theme_ids_remain_selected(cx: &mut TestAppContext) {
+fn a_missing_theme_selection_opens_on_the_builtin_theme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
     document.preferences.mode = crate::appearance::AppearanceMode::Dark;
-    document.preferences.terminal.themes.dark = ThemeId::new("user.missing-terminal").unwrap();
-    let (settings, cx) = open_settings(&document, cx);
+    let bytes = crate::appearance::export_settings(&document)
+        .unwrap()
+        .replace("builtin.spaceterm.dark", "user.missing-terminal")
+        .into_bytes();
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_bytes(bytes));
+    let platform = RecordingAppearancePlatform::default();
+    platform.set_system_appearance(Some(Appearance::Dark));
+    cx.update(|cx| {
+        appearance_runtime::install(settings, Rc::new(platform), cx)
+            .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+    });
+    let (settings, cx) = cx.add_window_view(SettingsWindow::new);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
 
     click("settings-navigation-settings-section-themes", cx);
-    assert!(cx.debug_bounds("settings-current-theme-name").is_some());
     assert!(
-        cx.debug_bounds("settings-theme-tile-user.missing-terminal")
-            .is_none()
+        cx.debug_bounds("settings-theme-row-builtin.spaceterm.dark-in-use")
+            .is_some()
     );
-
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.editor.document().clone()),
         document

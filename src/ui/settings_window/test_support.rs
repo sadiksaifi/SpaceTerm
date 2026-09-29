@@ -69,10 +69,15 @@ impl MemoryStorage {
     }
 
     pub(crate) fn with_document(document: &SettingsDocument) -> Arc<Self> {
-        let storage = Arc::new(Self::default());
         let bytes = export_settings(document)
             .expect("fixture document")
             .into_bytes();
+        Self::with_bytes(bytes)
+    }
+
+    /// Stores a Settings file as written, including content this build would not write.
+    pub(crate) fn with_bytes(bytes: Vec<u8>) -> Arc<Self> {
+        let storage = Arc::new(Self::default());
         storage.0.lock().unwrap().snapshot = Some((bytes, 1));
         storage
     }

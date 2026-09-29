@@ -779,6 +779,7 @@ fn install_themes(
         !retired.contains(&theme.id) && !installed.contains(&theme.id)
     });
     candidate.terminal_themes.extend(themes);
+    candidate.select_builtin_for_missing_themes();
     Ok((validate_candidate(candidate, document.revision)?, installed))
 }
 
@@ -795,6 +796,7 @@ fn remove_themes(
     }
     let mut candidate = document.clone();
     candidate.terminal_themes.retain(|theme| !ids.contains(&theme.id));
+    candidate.select_builtin_for_missing_themes();
     validate_candidate(candidate, document.revision)
 }
 
