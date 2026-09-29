@@ -967,6 +967,8 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
+    crate::ui::appearance_runtime::register_terminal_fonts(cx)
+        .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
@@ -1305,6 +1307,23 @@ mod runtime_tests {
                 storage,
                 Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
             )
+    }
+
+    #[test]
+    fn startup_registers_bundled_terminal_fonts_before_catalog_discovery() {
+        let cx = crate::ui::appearance_runtime::font_catalog_test_app();
+        let host = host_with_settings();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            assert_eq!(
+                crate::ui::appearance_runtime::current(cx)
+                    .terminal
+                    .typography
+                    .regular
+                    .primary_family,
+                "JetBrainsMono Nerd Font"
+            );
+        });
     }
 
     fn click(selector: &'static str, cx: &mut gpui::VisualTestContext) {
