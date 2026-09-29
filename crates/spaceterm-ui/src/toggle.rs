@@ -960,6 +960,7 @@ fn checkbox_indicator(
     let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
     let mark_state_id = SharedString::from(format!("{selector}-mark-state"));
+    let ring_id = SharedString::from(format!("{state_id}-focus-ring"));
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
@@ -1018,19 +1019,20 @@ fn checkbox_indicator(
                         })
                     }),
             )
-        })
-        .when(focused, |indicator| {
-            indicator.child(
-                crate::focus_ring(
-                    "focus-ring",
-                    style.focus_border,
-                    metrics.checkbox_radius,
-                    metrics.border_width,
-                )
-                .debug_selector(focus_selector),
-            )
         });
-    indicator.into_any_element()
+    crate::Ringed::new(
+        indicator,
+        focused.then(|| {
+            crate::focus_ring(
+                ring_id,
+                style.focus_border,
+                metrics.checkbox_radius,
+                metrics.border_width,
+            )
+            .debug_selector(focus_selector)
+        }),
+    )
+    .into_any_element()
 }
 
 #[expect(
@@ -1065,6 +1067,7 @@ fn switch_indicator(
         off_offset
     };
     let radius = metrics.switch_height / 2.0;
+    let ring_id = SharedString::from(format!("{state_id}-focus-ring"));
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
@@ -1104,19 +1107,15 @@ fn switch_indicator(
                         .group_hover(INTERACTION_GROUP, move |style| hovered.thumb(style))
                         .group_active(INTERACTION_GROUP, move |style| pressed.thumb(style))
                 }),
-        )
-        .when(focused, |indicator| {
-            indicator.child(
-                crate::focus_ring(
-                    "focus-ring",
-                    style.focus_border,
-                    radius,
-                    metrics.border_width,
-                )
-                .debug_selector(focus_selector),
-            )
-        });
-    indicator.into_any_element()
+        );
+    crate::Ringed::new(
+        indicator,
+        focused.then(|| {
+            crate::focus_ring(ring_id, style.focus_border, radius, metrics.border_width)
+                .debug_selector(focus_selector)
+        }),
+    )
+    .into_any_element()
 }
 
 struct ToggleControlState {

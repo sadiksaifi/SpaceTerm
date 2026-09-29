@@ -188,18 +188,14 @@ impl ProgressSizes {
 pub struct ProgressTheme {
     paint: ProgressPaint,
     sizes: ProgressSizes,
-    motion: ControlMotion,
 }
 
 impl ProgressTheme {
-    /// Creates a complete progress theme from resolved paint, the named geometries, and the
-    /// application's resolved motion preference.
-    pub const fn new(paint: ProgressPaint, sizes: ProgressSizes, motion: ControlMotion) -> Self {
-        Self {
-            paint,
-            sizes,
-            motion,
-        }
+    /// Creates a complete progress theme from resolved paint and the named geometries.
+    ///
+    /// Motion comes from the control catalog, which every animating control shares.
+    pub const fn new(paint: ProgressPaint, sizes: ProgressSizes) -> Self {
+        Self { paint, sizes }
     }
 
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
@@ -378,6 +374,7 @@ impl RenderOnce for ProgressBar {
                 self.right_to_left,
                 metrics,
                 theme,
+                crate::control_motion(cx),
             ))
     }
 }
@@ -435,7 +432,7 @@ impl RenderOnce for FrameSpinner {
             .debug_selector(move || root_selector.to_string())
             .flex_none()
             .size(extent);
-        match theme.motion {
+        match crate::control_motion(cx) {
             ControlMotion::Reduced => {
                 let reduced_selector = selector.clone();
                 root.debug_selector(move || format!("{reduced_selector}-reduced-motion"))
@@ -526,6 +523,7 @@ fn bar_fill(
     right_to_left: bool,
     metrics: ProgressMetrics,
     theme: ProgressTheme,
+    motion: ControlMotion,
 ) -> AnyElement {
     match state {
         ProgressState::Determinate(progress) => {
@@ -554,7 +552,7 @@ fn bar_fill(
                 .h(metrics.bar_thickness)
                 .rounded(metrics.bar_corner_radius)
                 .bg(shaded(theme.paint.indicator, BAR_RESTING_OPACITY));
-            match theme.motion {
+            match motion {
                 ControlMotion::Reduced => {
                     let reduced_selector = selector.clone();
                     activity

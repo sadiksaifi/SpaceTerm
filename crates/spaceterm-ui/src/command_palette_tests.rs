@@ -394,8 +394,8 @@ fn install_control_themes(cx: &mut TestAppContext) {
             crate::ProgressMetrics::new(px(3.0), px(1.5), px(12.0), px(1.5)),
             crate::ProgressMetrics::new(px(4.0), px(2.0), px(18.0), px(2.0)),
         ),
-        crate::ControlMotion::Reduced,
     ));
+    cx.set_global(crate::ControlMotion::Reduced);
     let variant = crate::button::ButtonVariantStyle::new(
         crate::button::ButtonPaint::new(rgba(0x00000000), rgba(0xcdcdcdff), rgba(0x00000000)),
         crate::button::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000)),

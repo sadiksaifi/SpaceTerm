@@ -1,32 +1,37 @@
 //! The keyboard focus ring every focusable control draws around itself.
 //!
-//! One band, measured from AppKit on macOS: it starts 2pt outside the control's edge and runs
-//! 3.5pt inward, so it covers the control's own border rather than floating beside it. Its corners
-//! stay concentric with the control's. The control keeps its resting border underneath; the ring
-//! alone states focus. On gaining focus the band starts wide and far out, faint, and contracts onto
-//! the control while it fades in. On losing focus it disappears at once.
+//! One band, measured from AppKit on macOS: its outer edge sits 3pt outside the control's fill and
+//! it runs 3.5pt inward, so it overlaps the fill by half a point and covers any border drawn around
+//! the fill. Its corners stay concentric with the control's. The ring wraps its control and paints
+//! after it, so nothing the control draws, its border included, shows through the band. The control
+//! keeps its resting appearance; the ring alone states focus. On gaining focus the band starts wide
+//! and far out, faint, and contracts onto the control while it fades in. On losing focus it
+//! disappears at once.
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Div, Element, ElementId, FocusHandle, GlobalElementId, InspectorElementId,
-    LayoutId, Pixels, Rgba, Window, div, px,
+    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, FocusHandle, GlobalElementId,
+    InspectorElementId, Interactivity, LayoutId, Pixels, Rgba, StyleRefinement, Window, div, px,
 };
 
 use crate::ControlMotion;
 
-/// How far the ring's outer edge sits beyond the control's outer edge.
-const OUTSET: f32 = 2.0;
-/// The band's width, which covers the control's border and a little of its interior.
+/// How far the ring's outer edge sits beyond the control's fill.
+const REACH: f32 = 3.0;
+/// The band's width, which covers the control's border and half a point of its fill.
 const WIDTH: f32 = 3.5;
 /// How much wider and further out the band starts when it appears.
 const ENTRANCE_SPREAD: f32 = 17.0;
 const ENTRANCE: Duration = Duration::from_millis(250);
 
-/// Creates the ring for a control that already knows whether it has keyboard focus.
+/// Creates the ring for a control with the given outer corner radius and border width.
 ///
-/// Attach it as a child of the control and only while the ring should show: mounting it starts
-/// the entrance, and unmounting it removes the ring at once.
+/// Wrap the control with [`FocusRing::around`] only while the ring should show: mounting it starts
+/// the entrance, and unmounting it removes the ring at once. The id must be unique among the
+/// control's siblings; derive it from the control's own id.
 pub fn focus_ring(
     id: impl Into<ElementId>,
     color: Rgba,
@@ -39,19 +44,29 @@ pub fn focus_ring(
         corner_radius,
         border_width,
         visibility: Visibility::Shown,
+        target: None,
         debug_selector: None,
     }
 }
 
-/// A keyboard focus ring positioned from its control's outer geometry.
+/// The ring id for a control with the given id, unique wherever the control's id is.
+pub(crate) fn ring_id(control: &ElementId) -> ElementId {
+    ElementId::NamedChild(std::sync::Arc::new(control.clone()), "focus-ring".into())
+}
+
+/// A keyboard focus ring positioned from its control's geometry.
 pub struct FocusRing {
     id: ElementId,
     color: Rgba,
     corner_radius: Pixels,
     border_width: Pixels,
     visibility: Visibility,
+    target: Option<FocusRingTarget>,
     debug_selector: Option<String>,
 }
+
+/// Bounds a wrapped control reports while it prepaints, for a ring around one of its parts.
+pub(crate) type FocusRingTarget = Rc<Cell<Option<Bounds<Pixels>>>>;
 
 #[derive(Clone)]
 enum Visibility {
@@ -76,54 +91,95 @@ impl FocusRing {
         self
     }
 
+    /// Surrounds the part of the wrapped control whose bounds `target` holds after the control
+    /// prepaints, instead of the whole control. Without bounds the ring surrounds the control.
+    pub(crate) fn target(mut self, target: FocusRingTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
     /// Names the ring's resting bounds for layout tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
-}
 
-impl IntoElement for FocusRing {
-    type Element = Div;
+    /// Wraps `host` so the ring paints after everything the host paints.
+    pub fn around<E>(self, host: E) -> Ringed<E> {
+        Ringed::new(host, Some(self))
+    }
 
-    fn into_element(self) -> Self::Element {
-        // Absolute insets resolve against the control's padding box, so the control's own border
-        // is added back to reach its outer edge.
-        let offset = px(OUTSET) + self.border_width;
-        let selector = self.debug_selector;
-        div()
-            .absolute()
-            .top(-offset)
-            .right(-offset)
-            .bottom(-offset)
-            .left(-offset)
-            .when_some(selector, |ring, selector| {
-                ring.debug_selector(move || selector)
-            })
-            .child(FocusRingBand {
-                id: self.id,
-                color: self.color,
-                corner_radius: self.corner_radius,
-                visibility: self.visibility,
-            })
+    /// The band's resting bounds and outer corner radius around a control's border box.
+    fn resting(&self, control: Bounds<Pixels>) -> (Bounds<Pixels>, Pixels) {
+        let reach = px(REACH) - self.border_width;
+        let inner_radius = (self.corner_radius - self.border_width).max(px(0.0));
+        (control.dilate(reach), inner_radius + px(REACH))
     }
 }
 
-/// Paints the band inside the ring's resting bounds, which the animation may extend past.
-struct FocusRingBand {
-    id: ElementId,
-    color: Rgba,
-    corner_radius: Pixels,
-    visibility: Visibility,
+/// A control and the focus ring that may surround it.
+///
+/// It lays out exactly as the control does and forwards the control's builder traits, so wrapping
+/// changes neither the control's layout nor its element ids.
+pub struct Ringed<E> {
+    host: E,
+    ring: Option<FocusRing>,
 }
 
-/// When the ring became visible, retained across frames by the band's element id.
+impl<E> Ringed<E> {
+    /// Wraps `host` with a ring that may be absent, for a control whose ring comes and goes.
+    pub fn new(host: E, ring: Option<FocusRing>) -> Self {
+        Self { host, ring }
+    }
+}
+
+impl<E: Styled> Styled for Ringed<E> {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.host.style()
+    }
+}
+
+impl<E: ParentElement> ParentElement for Ringed<E> {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.host.extend(elements);
+    }
+}
+
+impl<E: InteractiveElement> InteractiveElement for Ringed<E> {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.host.interactivity()
+    }
+}
+
+impl<E: StatefulInteractiveElement> StatefulInteractiveElement for Ringed<E> {}
+
+impl<E: IntoElement> IntoElement for Ringed<E> {
+    type Element = RingedElement;
+
+    fn into_element(self) -> Self::Element {
+        RingedElement {
+            host: self.host.into_any_element(),
+            ring: self.ring,
+            marker: None,
+        }
+    }
+}
+
+/// The element a [`Ringed`] control becomes.
+pub struct RingedElement {
+    host: AnyElement,
+    ring: Option<FocusRing>,
+    /// An empty element over the ring's resting bounds, which carries its debug selector.
+    marker: Option<AnyElement>,
+}
+
+/// When the ring became visible, retained across frames by the ring's id.
 #[derive(Default)]
 struct BandState {
     shown_since: Option<Instant>,
 }
 
-impl IntoElement for FocusRingBand {
+impl IntoElement for RingedElement {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -131,12 +187,13 @@ impl IntoElement for FocusRingBand {
     }
 }
 
-impl Element for FocusRingBand {
+impl Element for RingedElement {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
+        // The ring keys its own state, so the control keeps the ids it has without a ring.
+        None
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -150,27 +207,39 @@ impl Element for FocusRingBand {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let style = gpui::Style {
-            size: gpui::size(gpui::relative(1.0), gpui::relative(1.0)).map(Into::into),
-            ..Default::default()
-        };
-        (window.request_layout(style, [], cx), ())
+        (self.host.request_layout(window, cx), ())
     }
 
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _: &mut Window,
-        _: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
+        self.host.prepaint(window, cx);
+        let Some(ring) = &self.ring else {
+            return;
+        };
+        let Some(selector) = ring.debug_selector.clone() else {
+            return;
+        };
+        let (resting, _) = ring.resting(ring.control_bounds(bounds));
+        let mut marker = div()
+            .w(resting.size.width)
+            .h(resting.size.height)
+            .debug_selector(move || selector)
+            .into_any_element();
+        marker.layout_as_root(AvailableSpace::min_size(), window, cx);
+        marker.prepaint_at(resting.origin, window, cx);
+        self.marker = Some(marker);
     }
 
     fn paint(
         &mut self,
-        id: Option<&GlobalElementId>,
+        _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
@@ -178,28 +247,45 @@ impl Element for FocusRingBand {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.host.paint(window, cx);
+        if let Some(marker) = &mut self.marker {
+            marker.paint(window, cx);
+        }
+        if let Some(ring) = &self.ring {
+            ring.paint(bounds, window, cx);
+        }
+    }
+}
+
+impl FocusRing {
+    fn control_bounds(&self, host: Bounds<Pixels>) -> Bounds<Pixels> {
+        self.target
+            .as_ref()
+            .and_then(|target| target.get())
+            .unwrap_or(host)
+    }
+
+    fn paint(&self, host: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let shown = match &self.visibility {
             Visibility::Shown => true,
             Visibility::Tracking { focus, pinned } => *pinned || focus.is_focused(window),
         };
-        let now = cx.background_executor().now();
-        let motion = crate::control_theme_catalog(cx)
-            .map_or_else(ControlMotion::default, |c| c.installed_motion());
         let pinned = matches!(self.visibility, Visibility::Tracking { pinned: true, .. });
-        let Some(id) = id else {
-            return;
-        };
-        let progress = window.with_element_state(id, |state: Option<BandState>, _| {
-            let mut state = state.unwrap_or_default();
-            state.shown_since = shown.then(|| state.shown_since.unwrap_or(now));
-            let progress = state.shown_since.map(|since| {
-                if motion == ControlMotion::Reduced || pinned {
-                    1.0
-                } else {
-                    entrance_progress(now.saturating_duration_since(since))
-                }
-            });
-            (progress, state)
+        let now = cx.background_executor().now();
+        let motion = crate::control_motion(cx);
+        let progress = window.with_global_id(self.id.clone(), |id, window| {
+            window.with_element_state(id, |state: Option<BandState>, _| {
+                let mut state = state.unwrap_or_default();
+                state.shown_since = shown.then(|| state.shown_since.unwrap_or(now));
+                let progress = state.shown_since.map(|since| {
+                    if motion == ControlMotion::Reduced || pinned {
+                        1.0
+                    } else {
+                        entrance_progress(now.saturating_duration_since(since))
+                    }
+                });
+                (progress, state)
+            })
         });
         let Some(progress) = progress else {
             return;
@@ -215,10 +301,11 @@ impl Element for FocusRingBand {
         if color.a <= 0.0 {
             return;
         }
+        let (resting, radius) = self.resting(self.control_bounds(host));
         let spread = px(band.spread);
         window.paint_quad(gpui::quad(
-            bounds.dilate(spread),
-            self.corner_radius + px(OUTSET) + spread,
+            resting.dilate(spread),
+            radius + spread,
             gpui::transparent_black(),
             px(WIDTH) + spread,
             color,
@@ -297,17 +384,17 @@ mod tests {
     impl gpui::Render for Fixture {
         fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
             div().size_full().p(px(40.0)).child(
-                div()
-                    .debug_selector(|| "control".to_owned())
-                    .relative()
-                    .w(px(200.0))
-                    .h(px(24.0))
-                    .rounded(px(6.0))
-                    .border(self.border_width)
-                    .child(
-                        focus_ring("ring", RING, px(6.0), self.border_width)
-                            .tracking(&self.focus, false)
-                            .debug_selector("control-ring"),
+                focus_ring("ring", RING, px(6.0), self.border_width)
+                    .tracking(&self.focus, false)
+                    .debug_selector("control-ring")
+                    .around(
+                        div()
+                            .debug_selector(|| "control".to_owned())
+                            .w(px(200.0))
+                            .h(px(24.0))
+                            .rounded(px(6.0))
+                            .border(self.border_width)
+                            .border_color(BORDER),
                     ),
             )
         }
@@ -318,6 +405,13 @@ mod tests {
         g: 0.66,
         b: 1.0,
         a: 0.5,
+    };
+
+    const BORDER: Rgba = Rgba {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
     };
 
     /// The ring bands painted, one per band. The window paints a border-only quad as strips
@@ -360,11 +454,12 @@ mod tests {
             cx.update(|window, cx| root.read(cx).focus.clone().focus(window, cx));
             settle(cx);
 
+            // The outer edge sits a fixed reach outside the fill, which the border insets.
             let control = cx.debug_bounds("control").unwrap();
             let resting = cx.debug_bounds("control-ring").unwrap();
             assert_eq!(
                 resting,
-                control.dilate(px(OUTSET)),
+                control.dilate(px(REACH) - border_width),
                 "border {border_width:?}"
             );
             let scale = cx.update(|window, _| window.scale_factor());
@@ -373,7 +468,10 @@ mod tests {
                 panic!("expected one ring quad, painted {quads:?}");
             };
             assert_eq!(ring.bounds, scaled(resting, cx));
-            assert_eq!(ring.corner_radii.top_left, px(6.0 + OUTSET).scale(scale));
+            assert_eq!(
+                ring.corner_radii.top_left,
+                (px(6.0) - border_width + px(REACH)).scale(scale)
+            );
             assert_eq!(ring.border_widths.left, px(WIDTH).scale(scale));
             assert!((Rgba::from(ring.border_color).a - RING.a).abs() < 0.001);
             assert!(ring.background.is_transparent());
@@ -414,7 +512,7 @@ mod tests {
 
     #[gpui::test]
     fn reduced_motion_shows_the_ring_at_rest(cx: &mut gpui::TestAppContext) {
-        let catalog = crate::catalog_tests::catalog(1).motion(ControlMotion::Reduced);
+        let catalog = crate::catalog_tests::catalog_with_motion(1, ControlMotion::Reduced);
         cx.update(|cx| crate::init(cx, catalog).unwrap());
         let (root, cx) = cx.add_window_view(|_, cx| Fixture {
             focus: cx.focus_handle(),
@@ -430,5 +528,30 @@ mod tests {
         };
         assert_eq!(ring.bounds, resting);
         assert!((Rgba::from(ring.border_color).a - RING.a).abs() < 0.001);
+    }
+
+    #[gpui::test]
+    fn ring_paints_over_its_control_border(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| Fixture {
+            focus: cx.focus_handle(),
+            border_width: px(1.0),
+        });
+        cx.update(|window, cx| root.read(cx).focus.clone().focus(window, cx));
+        settle(cx);
+
+        let ring = ring_quads(cx)[0].order;
+        let border = cx.update(|window, _| {
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| {
+                    let color = Rgba::from(quad.border_color);
+                    (color.r - BORDER.r).abs() < 0.01 && (color.b - BORDER.b).abs() < 0.01
+                })
+                .map(|quad| quad.order)
+                .max()
+                .expect("the control paints its border")
+        });
+        assert!(ring > border, "the band must cover the control's border");
     }
 }

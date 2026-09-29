@@ -265,13 +265,13 @@ fn test_progress_theme() -> ProgressTheme {
             ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
             ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
         ),
-        ControlMotion::Reduced,
     )
 }
 
 fn install_test_catalogs(cx: &mut TestAppContext) {
     cx.set_global(test_button_theme());
     cx.set_global(test_progress_theme());
+    cx.set_global(ControlMotion::Reduced);
     let toggle_paint = crate::TogglePaint::new(
         rgba(0x202020ff),
         rgba(0xffffffff),

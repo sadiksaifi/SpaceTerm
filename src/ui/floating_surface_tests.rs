@@ -3114,7 +3114,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
             prepared.capabilities.show_borders,
         ),
         super::toggle_theme::prepared(colors, &prepared.typography),
-        super::progress_theme::theme(colors, spaceterm_ui::ControlMotion::Standard),
+        super::progress_theme::theme(colors),
         super::segmented_control_theme::prepared(
             &prepared.floating_segmented_colors,
             &prepared.typography,
@@ -3153,21 +3153,18 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         &prepared.panel_controls,
         reference,
         &popup,
-        spaceterm_ui::ControlMotion::Standard,
         &prepared,
     );
     let expected_title_bar = super::control_theme_catalog::surface_control_themes(
         &prepared.title_bar_controls,
         reference,
         &popup,
-        spaceterm_ui::ControlMotion::Standard,
         &prepared,
     );
     let expected_card = super::control_theme_catalog::surface_control_themes(
         &prepared.card_controls,
         reference,
         &popup,
-        spaceterm_ui::ControlMotion::Standard,
         &prepared,
     );
     let expected_panel = with_elevation(expected_panel);

@@ -2327,7 +2327,15 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         let enabled = !snapshot.disabled;
         let label = snapshot.trigger_label();
         let focus = snapshot.trigger_focus.clone();
-        let focused = focus.is_focused(window);
+        // A popup opened from the focused trigger returns focus to it on close, so the ring stays
+        // at rest while the popup is open instead of replaying its entrance afterwards.
+        let focused = focus.is_focused(window)
+            || (open
+                && snapshot
+                    .restore_focus
+                    .as_ref()
+                    .and_then(|restore| restore.upgrade())
+                    .is_some_and(|restore| restore == focus));
 
         let bounds_state = state.downgrade();
         let pointer_state = state.downgrade();
@@ -2427,6 +2435,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         } else {
             trigger_border
         };
+        let ring_id = crate::focus_ring::ring_id(&self.id);
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -2547,17 +2556,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                             )),
                     )
             })
-            .when_some(focus_ring, |trigger, ring_color| {
-                trigger.child(
-                    crate::focus_ring(
-                        "focus-ring",
-                        ring_color,
-                        metrics.trigger_corner_radius,
-                        metrics.border_width,
-                    )
-                    .debug_selector(focus_selector),
-                )
-            })
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !enabled || key_event_is_modified(event) {
@@ -2580,6 +2578,18 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                 });
                 cx.stop_propagation();
             });
+        let trigger = crate::Ringed::new(
+            trigger,
+            focus_ring.map(|ring_color| {
+                crate::focus_ring(
+                    ring_id,
+                    ring_color,
+                    metrics.trigger_corner_radius,
+                    metrics.border_width,
+                )
+                .debug_selector(focus_selector)
+            }),
+        );
         let trigger = if let Some(tooltip) = self.tooltip {
             tooltip
                 .attach(trigger, TooltipTargetVisibility::Visible)

@@ -813,18 +813,6 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                             .flex_none()
                             .child(option.label.clone()),
                     )
-                    // Arrow keys move the selection, so the selected segment is the focused one.
-                    .when(focused && selected, |segment| {
-                        segment.child(
-                            crate::focus_ring(
-                                "focus-ring",
-                                style.focus_border,
-                                metrics.radius,
-                                metrics.border_width,
-                            )
-                            .debug_selector(format!("{selector}-keyboard-focus")),
-                        )
-                    })
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -833,7 +821,42 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         let key_state = state;
         let selected_index = self.selected;
         let right_to_left = self.right_to_left;
+        // Arrow keys move the selection, so the selected segment is the focused one and holds the
+        // ring. The track owns the ring so it paints after every segment and the track border, and
+        // so moving the selection keeps the ring's state instead of restarting its entrance.
+        let ring_target = crate::focus_ring::FocusRingTarget::default();
+        let ring = focused.then(|| {
+            let ring = match selected_index {
+                Some(_) => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    metrics.radius,
+                    metrics.border_width,
+                )
+                .target(ring_target.clone()),
+                // Without a selection the ring surrounds the track.
+                None if card => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    px(0.0),
+                    px(0.0),
+                ),
+                None => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    metrics.radius + metrics.border_width,
+                    metrics.border_width,
+                ),
+            };
+            ring.debug_selector(format!("{selector}-keyboard-focus"))
+        });
         let track = div()
+            .when_some(selected_index, |track, index| {
+                let target = ring_target.clone();
+                track.on_children_prepainted(move |bounds, _, _| {
+                    target.set(bounds.get(index).copied());
+                })
+            })
             .id(self.id)
             .debug_selector({
                 let selector = selector.clone();
@@ -915,23 +938,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     },
                 )
             })
-            .children(segments)
-            // Without a selection there is no segment to hold the ring, so it surrounds the track.
-            .when(focused && self.selected.is_none(), |track| {
-                track.child(
-                    crate::focus_ring(
-                        "focus-ring",
-                        style.focus_border,
-                        if card {
-                            px(0.0)
-                        } else {
-                            metrics.radius + metrics.border_width
-                        },
-                        if card { px(0.0) } else { metrics.border_width },
-                    )
-                    .debug_selector(format!("{selector}-keyboard-focus")),
-                )
-            });
+            .children(segments);
+        let track = crate::Ringed::new(track, ring);
 
         let control = if let Some(tooltip) = self.tooltip {
             tooltip

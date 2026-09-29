@@ -227,10 +227,9 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::TooltipTheme>()
                 && cx.has_global::<spaceterm_ui::ModalTheme>()
                 && *cx.global::<spaceterm_ui::ProgressTheme>()
-                    == progress_theme::theme(
-                        &appearance::chrome(cx).colors,
-                        spaceterm_ui::ControlMotion::Standard,
-                    )
+                    == progress_theme::theme(&appearance::chrome(cx).colors)
+                && *cx.global::<spaceterm_ui::ControlMotion>()
+                    == spaceterm_ui::ControlMotion::Standard
                 && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme(floating)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()

@@ -110,13 +110,18 @@ const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
 fn navigation_chip(
     selected: bool,
     available: bool,
+    emphasized: bool,
     appearance: &ChromeAppearance,
     selection_colors: &crate::appearance::ChromeColors,
 ) -> SelectionChip {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
     let paint_colors = if selected { selection_colors } else { colors };
     let paint = navigation_chip_paint(selected, available, paint_colors);
-    let paint = if selected {
+    let paint = if selected && emphasized {
+        // The accent selection is opaque, like an AppKit source list with keyboard focus, so the
+        // window's material does not thin it.
+        paint
+    } else if selected {
         paint.selected_on(appearance, colors.panel_background)
     } else {
         paint.raised_on(appearance, colors.panel_background)
@@ -132,8 +137,8 @@ fn navigation_chip_paint(
     available: bool,
     colors: &crate::appearance::ChromeColors,
 ) -> ChipPaint {
-    // Hover changes the fill. Keyboard focus has a separate neutral indicator, so pointer
-    // selection does not leave a focus-like rim behind it.
+    // Hover changes the fill. Keyboard focus changes the selection colors rather than adding a
+    // rim, so pointer selection does not leave a focus-like edge behind it.
     if selected {
         ChipPaint {
             fill: Some(colors.row_selected_background),
@@ -153,6 +158,22 @@ fn navigation_chip_paint(
             hover_rim: None,
         }
     }
+}
+
+/// The selection paints of a navigation list with keyboard focus: the accent fill with its
+/// foreground on the label and icon, at rest and under the pointer.
+fn emphasized_selection_colors(
+    colors: &crate::appearance::ChromeColors,
+) -> crate::appearance::ChromeColors {
+    let mut emphasized = colors.clone();
+    emphasized.row_selected_background = colors.primary_background;
+    emphasized.row_selected_hover_background = colors.primary_background;
+    emphasized.row_selected_border = colors.primary_background;
+    emphasized.row_selected_foreground = colors.primary_foreground;
+    emphasized.row_selected_icon = colors.primary_foreground;
+    emphasized.row_selected_hover_foreground = colors.primary_foreground;
+    emphasized.row_selected_hover_icon = colors.primary_foreground;
+    emphasized
 }
 
 /// The one Settings Window, so a second request activates the existing window.
@@ -1026,7 +1047,12 @@ impl SettingsWindow {
         let available = self.navigable_sections();
         let list_focused = self.navigation_has_visible_focus(window);
         let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-        let selection_colors = if appearance.active && !list_focused {
+        // AppKit source lists draw no focus ring. Keyboard focus emphasizes the selection in the
+        // accent color instead, and a list without focus shows it in the unfocused colors.
+        let emphasized = list_focused && appearance.active;
+        let selection_colors = if emphasized {
+            emphasized_selection_colors(panel_colors)
+        } else if appearance.active {
             appearance
                 .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
                 .clone()
@@ -1059,7 +1085,13 @@ impl SettingsWindow {
                 };
                 // The same chip the Workspace sidebar rests its current row on, so the two
                 // navigation surfaces read as one material rather than as two conventions.
-                let chip = navigation_chip(selected, has_matches, appearance, &selection_colors);
+                let chip = navigation_chip(
+                    selected,
+                    has_matches,
+                    emphasized,
+                    appearance,
+                    &selection_colors,
+                );
                 let chip_selector = format!("settings-navigation-chip-{}", section.selector());
                 div()
                     .id(SharedString::from(format!(
@@ -1084,21 +1116,6 @@ impl SettingsWindow {
                     .cursor_default()
                     .chrome_text(appearance.typography.style(TextRole::Navigation))
                     .child(chip.render(chip_selector, &row_group))
-                    .when(selected && list_focused && appearance.active, |entry| {
-                        entry.child(
-                            div()
-                                .debug_selector(|| "settings-navigation-focus-indicator".to_owned())
-                                .absolute()
-                                .inset_0()
-                                .rounded(RadiusRole::Control.pixels())
-                                .border(px(if appearance.capabilities.increase_contrast {
-                                    2.0
-                                } else {
-                                    HAIRLINE
-                                }))
-                                .border_color(gpui_color(colors.icon)),
-                        )
-                    })
                     .when(has_matches, |entry| {
                         entry
                             .hover(move |entry| entry.text_color(gpui_color(hover_foreground)))

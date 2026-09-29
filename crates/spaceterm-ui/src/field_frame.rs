@@ -2,6 +2,8 @@
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, FocusHandle, Stateful, div, px};
 
+use crate::Ringed;
+
 /// Caller-owned validation and availability, independent of keyboard focus.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FieldState {
@@ -112,7 +114,7 @@ pub fn field_frame(
     state: FieldState,
     corner_radius: gpui::Pixels,
     cx: &App,
-) -> Stateful<Div> {
+) -> Ringed<Stateful<Div>> {
     let theme = crate::floating_surface::hosted_text_input_theme(cx).frame;
     themed_field_frame(theme, id, focus, state, corner_radius)
 }
@@ -124,29 +126,28 @@ pub(crate) fn themed_field_frame(
     focus: &FocusHandle,
     state: FieldState,
     corner_radius: gpui::Pixels,
-) -> Stateful<Div> {
+) -> Ringed<Stateful<Div>> {
     let id = id.into();
-    let ring_id = ElementId::NamedChild(std::sync::Arc::new(id.clone()), "focus-ring".into());
+    let ring_id = crate::focus_ring::ring_id(&id);
     #[cfg(not(feature = "appearance-exerciser"))]
     let pinned = false;
     #[cfg(feature = "appearance-exerciser")]
     let pinned = state.preview_focused;
-    themed_field_surface(theme, id, state)
+    let frame = themed_field_surface(theme, id, state)
         .rounded(corner_radius)
-        .track_focus(focus)
-        .when(!state.disabled, |frame| {
-            // The ring resolves focus while painting, so the caller need not know whether the
-            // editor is focused when it builds its layout.
-            frame.child(
-                crate::focus_ring(
-                    ring_id,
-                    theme.ring_color(),
-                    corner_radius,
-                    px(FRAME_BORDER_WIDTH),
-                )
-                .tracking(focus, pinned),
-            )
-        })
+        .track_focus(focus);
+    // The ring resolves focus while painting, so the caller need not know whether the editor is
+    // focused when it builds its layout.
+    let ring = (!state.disabled).then(|| {
+        crate::focus_ring(
+            ring_id,
+            theme.ring_color(),
+            corner_radius,
+            px(FRAME_BORDER_WIDTH),
+        )
+        .tracking(focus, pinned)
+    });
+    Ringed::new(frame, ring)
 }
 
 /// Creates shared input presentation for a composite without one editor focus handle.
@@ -217,7 +218,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn focused_invalid_field_keeps_its_frame_under_a_hollow_ring(cx: &mut gpui::TestAppContext) {
+    fn focused_invalid_field_paints_a_hollow_ring_over_its_frame(cx: &mut gpui::TestAppContext) {
         let fill = gpui::rgba(0x20202080);
         let invalid = gpui::rgba(0xcc0000ff);
         let ring = gpui::rgba(0x00aa00ff);
@@ -269,6 +270,16 @@ mod tests {
         assert!(outline.top() < frame.top());
         assert!(outline.right() > frame.right());
         assert!(outline.bottom() > frame.bottom());
+        let order_for = |color: gpui::Rgba| {
+            quads
+                .iter()
+                .filter(move |quad| quad.border_color == color.into())
+                .map(|quad| quad.order)
+        };
+        assert!(
+            order_for(ring).min() > order_for(invalid).max(),
+            "the invalid border must not show through the ring"
+        );
 
         root.update(cx, |root, cx| {
             root.state = root.state.disabled(true);

@@ -1412,6 +1412,7 @@ impl ButtonCore {
         let content = build_content(paint.foreground, paint.icon_foreground);
         let preserve_ancestor_hover = self.preserve_ancestor_hover;
 
+        let ring_id = crate::focus_ring::ring_id(&self.id);
         let button = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1488,21 +1489,17 @@ impl ButtonCore {
                 cx.stop_propagation();
             })
             .child(content)
-            .when_some(focus_ring, move |button, ring_color| {
-                button.child(
-                    crate::focus_ring(
-                        "focus-ring",
-                        ring_color,
-                        style.corner_radius,
-                        style.border_width,
-                    )
-                    .debug_selector(focus_selector),
-                )
-            })
             .child(pointer_tracker)
             .when_some(focus_anchor, |button, anchor| {
                 button.child(anchor.bounds_tracker(style.border_width))
             });
+        let button = crate::Ringed::new(
+            button,
+            focus_ring.map(|ring_color| {
+                crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
+                    .debug_selector(focus_selector)
+            }),
+        );
 
         if let Some(tooltip) = tooltip {
             tooltip

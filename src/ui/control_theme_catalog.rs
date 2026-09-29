@@ -56,21 +56,18 @@ pub(super) fn catalog(
         &appearance.title_bar_controls,
         &row_reference,
         &popup,
-        motion,
         appearance,
     );
     let panel_controls = surface_control_themes(
         &appearance.panel_controls,
         &row_reference,
         &popup,
-        motion,
         appearance,
     );
     let card_controls = surface_control_themes(
         &appearance.card_controls,
         &row_reference,
         &popup,
-        motion,
         appearance,
     );
     let catalog = ControlThemeCatalog::new(
@@ -81,7 +78,7 @@ pub(super) fn catalog(
             appearance.capabilities.show_borders,
         ),
         toggle_theme::prepared(colors, &appearance.typography),
-        progress_theme::theme(colors, motion),
+        progress_theme::theme(colors),
         scrollbar_theme::theme(colors),
         resize_handle_theme::theme(colors),
         segmented_control_theme::prepared(
@@ -119,6 +116,7 @@ pub(super) fn catalog(
         text_input_theme::theme(colors),
         tooltip_theme::prepared(host, &appearance.typography),
         modal_theme::theme(floating_controls),
+        motion,
     )
     .title_bar_controls(title_bar_controls)
     .resting_controls(panel_controls, card_controls)
@@ -132,7 +130,7 @@ pub(super) fn catalog(
                 appearance.capabilities.show_borders,
             ),
             toggle_theme::prepared(floating_controls, &appearance.typography),
-            progress_theme::theme(floating_controls, motion),
+            progress_theme::theme(floating_controls),
             segmented_control_theme::prepared(
                 floating_segmented,
                 &appearance.typography,
@@ -171,8 +169,7 @@ pub(super) fn catalog(
     // Role sizes already include the additive base-size and density policy. Only structural
     // spacing still uses the legacy scaling seam while the reusable catalog migrates family by
     // family.
-    .scale_metrics(1.0, appearance.spacing_scale)
-    .motion(motion);
+    .scale_metrics(1.0, appearance.spacing_scale);
 
     let shadow_opacity = if appearance.active { 89 } else { 53 };
     let shadow = ControlShadow::single(ControlShadowLayer::new(
@@ -237,7 +234,6 @@ pub(super) fn surface_control_themes(
     host: &super::appearance::PreparedControlHost,
     row_reference: &crate::appearance::ChromeColors,
     popup: &crate::appearance::ChromeColors,
-    motion: spaceterm_ui::ControlMotion,
     appearance: &super::appearance::ChromeAppearance,
 ) -> spaceterm_ui::SurfaceControlThemes {
     let typography = &appearance.typography;
@@ -248,7 +244,7 @@ pub(super) fn surface_control_themes(
     spaceterm_ui::SurfaceControlThemes::new(
         button_theme::prepared(&host.colors, typography, icons, show_borders),
         toggle_theme::prepared(&host.colors, typography),
-        progress_theme::theme(&host.colors, motion),
+        progress_theme::theme(&host.colors),
         segmented_control_theme::prepared(&host.segmented, typography, show_borders),
         search_field_theme::prepared(&host.reference, &host.colors, typography, icons),
         text_input_theme::theme(&host.colors),

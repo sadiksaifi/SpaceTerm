@@ -1525,6 +1525,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             .map(|selector| format!("{selector}-keyboard-focus"))
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
+        let ring_id = crate::focus_ring::ring_id(&self.id);
         let mut trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1590,9 +1591,19 @@ impl<A: Clone + 'static> MenuControl<A> {
                 }
             });
 
+        let mut ring = None;
         if self.kind != TriggerKind::Context {
             let paint = menu_trigger_paint(cx);
             let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
+            ring = focus_ring.map(|ring_color| {
+                crate::focus_ring(
+                    ring_id,
+                    ring_color,
+                    style.metrics.trigger_corner_radius,
+                    style.metrics.border_width,
+                )
+                .debug_selector(focus_selector)
+            });
             trigger = trigger
                 .flex()
                 .items_center()
@@ -1611,13 +1622,11 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .rounded(style.metrics.trigger_corner_radius)
                 .border(style.metrics.border_width)
                 .border_color(trigger_border)
-                .bg(
-                    if enabled && (open || (focused && paint.focus_border.a == 0.0)) {
-                        paint.trigger_hover_background
-                    } else {
-                        paint.trigger_background
-                    },
-                )
+                .bg(if enabled && open {
+                    paint.trigger_hover_background
+                } else {
+                    paint.trigger_background
+                })
                 .text_color(if enabled {
                     paint.foreground
                 } else {
@@ -1628,24 +1637,13 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .font(font)
                 .when(enabled && !open, |trigger| {
                     trigger.hover(move |style| style.bg(paint.trigger_hover_background))
-                })
-                .when_some(focus_ring, |trigger, ring_color| {
-                    trigger.child(
-                        crate::focus_ring(
-                            "focus-ring",
-                            ring_color,
-                            style.metrics.trigger_corner_radius,
-                            style.metrics.border_width,
-                        )
-                        .debug_selector(focus_selector),
-                    )
                 });
         }
 
         div()
             .relative()
             .when(fill_parent_width, |root| root.w_full())
-            .child(trigger)
+            .child(crate::Ringed::new(trigger, ring))
             .when(open && !combo_box_overlay_hosted, |root| {
                 root.child(render_overlay(state, window, cx))
             })
@@ -3622,7 +3620,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ringless_menu_and_picker_focus_uses_the_open_hover_fill(cx: &mut TestAppContext) {
+    fn focused_ghost_triggers_show_the_ring_over_their_resting_fill(cx: &mut TestAppContext) {
         struct Triggers;
         impl Render for Triggers {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -3654,7 +3652,7 @@ mod tests {
         theme.paint = theme
             .paint
             .trigger(rgba(0), hover, rgba(0))
-            .focus_border(rgba(0));
+            .focus_border(rgba(0x3399ffff));
         cx.set_global(theme);
         let (_, cx) = cx.add_window_view(|_, _| Triggers);
         cx.update(|window, _| window.activate_window());
@@ -3667,21 +3665,23 @@ mod tests {
             cx.run_until_parked();
             let bounds = cx.debug_bounds(selector).unwrap();
             let keyboard_focus = cx.update(|window, cx| window.focused(cx)).unwrap();
-            assert!(cx.debug_bounds(focus_selector).is_none());
+            assert!(
+                cx.debug_bounds(focus_selector).is_some(),
+                "focused {selector} must show the ring"
+            );
             cx.update(|window, _| {
                 assert!(
-                    window.painted_quads().iter().any(|quad| {
+                    !window.painted_quads().iter().any(|quad| {
                         quad.bounds.intersect(&quad.content_mask.bounds)
                             == bounds.scale(window.scale_factor())
                             && quad.background == hover.into()
                     }),
-                    "focused {selector} must retain ghost hover feedback"
+                    "focused {selector} must keep its resting fill; the ring states focus"
                 );
             });
             cx.simulate_keystrokes("space");
             cx.run_until_parked();
             assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
-            assert!(cx.debug_bounds(focus_selector).is_none());
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
             assert!(cx.update(|window, _| keyboard_focus.is_focused(window)));
@@ -3744,6 +3744,7 @@ mod tests {
         let ring = cx
             .debug_bounds("menu-trigger-keyboard-focus")
             .expect("focused menu trigger should submit its outline");
+        // The ring reaches 3pt past the fill, which the trigger's 1pt border insets.
         let outset = px(2.0);
         assert!(
             ring.left() == trigger.left() - outset

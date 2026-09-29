@@ -27,6 +27,10 @@ fn segmented_control_theme(
 }
 
 pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
+    catalog_with_motion(generation, ControlMotion::Standard)
+}
+
+pub(super) fn catalog_with_motion(generation: u64, motion: ControlMotion) -> ControlThemeCatalog {
     let clear = rgba(0x00000000);
     let text = rgba(0xffffffff);
     let surface = rgba(0x202024ff);
@@ -84,7 +88,6 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
                 ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
                 ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
             ),
-            ControlMotion::Standard,
         ),
         ScrollbarTheme::new(muted, text, accent),
         ResizeHandleTheme::new(
@@ -126,6 +129,7 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
             ModalPaint::new(text, muted, accent, accent, accent),
             ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
         ),
+        motion,
     )
     .generation(ControlThemeGeneration::new(generation));
     let floating_controls = SurfaceControlThemes::new(
@@ -204,7 +208,7 @@ fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCont
     });
 
     let active = catalog(2);
-    let inactive = catalog(2).motion(crate::ControlMotion::Reduced);
+    let inactive = catalog_with_motion(2, ControlMotion::Reduced);
     assert_eq!(
         cx.update(|cx| replace_control_theme_catalogs(cx, active.clone(), inactive.clone())),
         Ok(ControlThemeReplacement::Applied)

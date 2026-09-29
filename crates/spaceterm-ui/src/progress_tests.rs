@@ -9,14 +9,13 @@ use crate::{
 
 const BAR_WIDTH: f32 = 240.0;
 
-fn test_theme(motion: ControlMotion) -> ProgressTheme {
+fn test_theme() -> ProgressTheme {
     ProgressTheme::new(
         ProgressPaint::new(rgba(0x303030ff), rgba(0x5599ffff)),
         ProgressSizes::new(
             ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
             ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
         ),
-        motion,
     )
 }
 
@@ -71,7 +70,8 @@ fn fixture_window(
     size: ProgressSize,
     motion: ControlMotion,
 ) -> &mut VisualTestContext {
-    cx.set_global(test_theme(motion));
+    cx.set_global(test_theme());
+    cx.set_global(motion);
     let (_, cx) = cx.add_window_view(move |_, _| ProgressFixture { kind, state, size });
     cx.run_until_parked();
     cx

@@ -1024,6 +1024,7 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
     let ring = cx
         .debug_bounds("combo-box-trigger-keyboard-focus")
         .expect("focused ComboBox trigger should submit its outline");
+    // The ring reaches 3pt past the fill, which the trigger's 1pt border insets.
     let outset = px(2.0);
     assert!(
         ring.left() == trigger.left() - outset
@@ -1481,6 +1482,41 @@ fn down_key_on_the_focused_trigger_should_open_the_popup(cx: &mut TestAppContext
     assert_eq!(
         events.borrow().as_slice(),
         [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Opened)]
+    );
+}
+
+#[gpui::test]
+fn the_trigger_ring_stays_at_rest_through_a_keyboard_opened_popup(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    focus_trigger(cx);
+    crate::focus_ring::settle(cx);
+    let resting = cx
+        .debug_bounds("combo-box-trigger-keyboard-focus")
+        .expect("the focused trigger should draw its ring");
+
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-panel").is_none());
+
+    let ring = rgba(0x7e98e8ff);
+    let (bands, resting) = cx.update(|window, _| {
+        let bands: Vec<_> = window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                let color = gpui::Rgba::from(quad.border_color);
+                (color.r - ring.r).abs() < 0.01 && (color.b - ring.b).abs() < 0.01
+            })
+            .collect();
+        (bands, resting.scale(window.scale_factor()))
+    });
+    assert!(!bands.is_empty(), "the trigger regains its ring");
+    assert!(
+        bands.iter().all(|band| band.bounds == resting),
+        "closing the popup must not replay the ring's entrance"
     );
 }
 

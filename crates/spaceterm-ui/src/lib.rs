@@ -75,7 +75,7 @@ pub use floating_surface::{
     FloatingShell, FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme,
     SurfaceControlThemes, floating_surface_theme,
 };
-pub use focus_ring::{FocusRing, focus_ring};
+pub use focus_ring::{FocusRing, Ringed, RingedElement, focus_ring};
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
@@ -392,11 +392,12 @@ impl ControlThemeCatalog {
         text_input: TextInputTheme,
         tooltip: TooltipTheme,
         modal: ModalTheme,
+        motion: ControlMotion,
     ) -> Self {
         Self {
             generation: ControlThemeGeneration::default(),
             typography: ControlTypography::default(),
-            motion: ControlMotion::default(),
+            motion,
             button,
             toggle,
             progress,
@@ -482,16 +483,6 @@ impl ControlThemeCatalog {
     pub fn typography(mut self, typography: ControlTypography) -> Self {
         self.typography = typography;
         self
-    }
-
-    /// Sets whether controls animate, which a focus ring reads when it appears.
-    pub fn motion(mut self, motion: ControlMotion) -> Self {
-        self.motion = motion;
-        self
-    }
-
-    pub(crate) fn installed_motion(&self) -> ControlMotion {
-        self.motion
     }
 
     /// Returns the catalog's application-issued generation.
@@ -728,6 +719,7 @@ fn install_control_theme_catalogs(
     cx.set_global(active.text_input);
     cx.set_global(active.tooltip);
     cx.set_global(active.modal);
+    cx.set_global(active.motion);
     cx.set_global(active.floating.unwrap_or_default());
     cx.set_global(active.as_ref().clone());
     cx.set_global(InstalledControlThemeCatalogs {
@@ -781,6 +773,14 @@ pub(crate) fn control_theme_catalog(cx: &App) -> Option<&ControlThemeCatalog> {
             catalog.as_ref()
         })
         .or_else(|| cx.try_global::<ControlThemeCatalog>())
+}
+
+/// Whether controls animate, from the installed catalog or, without one, the installed motion.
+pub(crate) fn control_motion(cx: &App) -> ControlMotion {
+    control_theme_catalog(cx)
+        .map(|catalog| catalog.motion)
+        .or_else(|| cx.try_global::<ControlMotion>().copied())
+        .unwrap_or_default()
 }
 
 fn control_typography(cx: &App) -> ControlTypography {

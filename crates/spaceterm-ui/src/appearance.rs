@@ -104,6 +104,8 @@ pub enum ControlMotion {
     Reduced,
 }
 
+impl gpui::Global for ControlMotion {}
+
 /// One bounded layer of a semantic chrome shadow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlShadowLayer {

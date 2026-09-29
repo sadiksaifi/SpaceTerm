@@ -598,10 +598,11 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
         crate::ui::initialize_controls(cx).unwrap();
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(
-                &crate::ui::appearance::chrome(cx).colors,
-                spaceterm_ui::ControlMotion::Reduced,
-            )
+            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+        );
+        assert_eq!(
+            cx.global::<spaceterm_ui::ControlMotion>(),
+            &spaceterm_ui::ControlMotion::Reduced
         );
         assert!(current(cx).chrome.composition.capabilities.reduce_motion);
     });
@@ -612,10 +613,11 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx.update(|cx| {
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(
-                &crate::ui::appearance::chrome(cx).colors,
-                spaceterm_ui::ControlMotion::Standard,
-            )
+            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+        );
+        assert_eq!(
+            cx.global::<spaceterm_ui::ControlMotion>(),
+            &spaceterm_ui::ControlMotion::Standard
         );
         assert!(!current(cx).chrome.composition.capabilities.reduce_motion);
     });
