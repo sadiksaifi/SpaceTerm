@@ -833,3 +833,49 @@ fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
         );
     }
 }
+
+#[test]
+fn control_shift_reservations_are_resolved_after_the_settings_document_is_read() {
+    let mut json = serde_json::to_value(crate::appearance::SettingsDocument::default()).unwrap();
+    json["keybindings"] = serde_json::json!({
+        "new_workspace": "ctrl-shift-2",
+        "create_tab": "ctrl-shift-6",
+        "close_tab": "ctrl-shift--",
+    });
+    let document = crate::appearance::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
+    let us = KeymapProfile::new(
+        crate::platform::keyboard_layout::testing::us(),
+        [],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    for command in [Command::NewWorkspace, Command::CreateTab, Command::CloseTab] {
+        assert_eq!(
+            us.resolve(&document.keybindings).state(command),
+            KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+        );
+    }
+
+    let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
+    layout.insert(false, "2", "\"");
+    let norwegian =
+        KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let native = gpui::Keystroke::parse("ctrl-\"").unwrap();
+    let recorded = Shortcut::from_keystroke(&native).unwrap();
+    let resolved = norwegian.resolve(&document.keybindings);
+    assert_eq!(resolved.shortcut(Command::NewWorkspace), Some(&recorded));
+    assert_eq!(norwegian.check(&recorded), Ok(()));
+    assert_eq!(norwegian.check(&shortcut("ctrl-shift-2")), Ok(()));
+    assert!(resolved.key_bindings().iter().any(|binding| {
+        binding
+            .action()
+            .partial_eq(Command::NewWorkspace.action().as_ref())
+            && native.should_match(&binding.keystrokes()[0])
+    }));
+    assert_eq!(
+        serde_json::to_value(&document).unwrap()["keybindings"],
+        json["keybindings"]
+    );
+}

@@ -18,8 +18,7 @@ pub(super) fn reservation(shortcut: &super::Shortcut) -> Option<TerminalConventi
     if !modifiers.control {
         return Some(TerminalConvention::TextInput);
     }
-    if (modifiers.shift && matches!(key, "2" | "6" | "-"))
-        || (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic())
+    if (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic())
         || matches!(
             key,
             "@" | "[" | "{" | "\\" | "|" | "]" | "}" | "^" | "_" | "/" | "?" | "space"
@@ -81,9 +80,6 @@ mod tests {
                     "ctrl-/",
                     "ctrl-?",
                     "ctrl-space",
-                    "ctrl-shift-2",
-                    "ctrl-shift-6",
-                    "ctrl-shift--",
                 ],
             ),
             (
@@ -143,9 +139,6 @@ mod tests {
             "tab", "enter",
         ] {
             for modifier in ["ctrl", "ctrl-shift"] {
-                if modifier == "ctrl-shift" && matches!(key, "2" | "6" | "-") {
-                    continue;
-                }
                 let source = format!("{modifier}-{key}");
                 assert!(Shortcut::parse(&source).is_ok(), "{source}");
                 assert!(

@@ -221,9 +221,31 @@ pub(crate) mod tests {
                 KeybindingState::Blocked(SystemReservation::Screenshot)
             );
         }
-        for (id, source, key) in [
-            ("com.apple.keylayout.Norwegian", "shift-cmd-7", "/"),
-            ("com.apple.keylayout.Turkish-QWERTY-PC", "shift-cmd-ı", "I"),
+        for (id, source, key, modifiers) in [
+            (
+                "com.apple.keylayout.Norwegian",
+                "shift-cmd-7",
+                "/",
+                gpui::Modifiers::command(),
+            ),
+            (
+                "com.apple.keylayout.Turkish-QWERTY-PC",
+                "shift-cmd-ı",
+                "I",
+                gpui::Modifiers::command(),
+            ),
+            (
+                "com.apple.keylayout.Norwegian",
+                "ctrl-shift-2",
+                "\"",
+                gpui::Modifiers::control(),
+            ),
+            (
+                "com.apple.keylayout.German",
+                "ctrl-shift-2",
+                "\"",
+                gpui::Modifiers::control(),
+            ),
         ] {
             let profile = crate::desktop_profile::default_keymap::profile(
                 Rc::new(layout(id)),
@@ -233,7 +255,7 @@ pub(crate) mod tests {
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
             let native = gpui::Keystroke {
-                modifiers: gpui::Modifiers::command(),
+                modifiers,
                 key: key.into(),
                 key_char: None,
             };
