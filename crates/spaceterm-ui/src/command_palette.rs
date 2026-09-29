@@ -12,7 +12,7 @@ use gpui::{
 use crate::{
     FloatingRole, FloatingShell, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
     TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
-    button::{Button, ButtonSize, ButtonVariant, IconButton},
+    button::{Button, ButtonShape, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -617,6 +617,58 @@ impl CommandPaletteAction {
     /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
+    }
+}
+
+/// The search line's primary command, presented as a labeled button at its trailing edge.
+///
+/// The confirm key activates it while it is enabled, and so does Return while no result is
+/// presented. Activation emits [`CommandPaletteEvent::HeaderAction`] with the caller's identity
+/// and leaves the palette open; the caller decides what follows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandPalettePrimaryAction {
+    id: SharedString,
+    label: SharedString,
+    disabled: bool,
+    debug_selector: Option<String>,
+}
+
+impl CommandPalettePrimaryAction {
+    /// Creates an enabled action. The label is also its logical accessibility name.
+    pub fn new(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            disabled: false,
+            debug_selector: None,
+        }
+    }
+
+    /// Controls whether the action can activate.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Returns the caller-owned identity reported on activation.
+    pub fn id(&self) -> &SharedString {
+        &self.id
+    }
+
+    /// Returns the button label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns whether the action can activate.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
     }
 }
 
@@ -1437,7 +1489,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
     header_actions: Vec<CommandPaletteAction>,
-    confirm_item: Option<I>,
+    primary_action: Option<CommandPalettePrimaryAction>,
     matching: CommandPaletteMatching,
     activation: CommandPaletteActivationPolicy,
     selected: Option<I>,
@@ -1845,7 +1897,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             leading_columns,
             input_leading_icon: None,
             header_actions: Vec::new(),
-            confirm_item: None,
+            primary_action: None,
             matching: CommandPaletteMatching::Semantic,
             activation: CommandPaletteActivationPolicy::Close,
             selected,
@@ -1909,12 +1961,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx.notify();
     }
 
-    /// Designates the item the palette's confirm key activates regardless of selection.
+    /// Replaces the search line's primary command.
     ///
-    /// The item activates only while it is presented and enabled, exactly as Return would activate
-    /// it. `None` leaves the confirm key for the surrounding application.
-    pub fn set_confirm_item(&mut self, id: Option<I>, cx: &mut gpui::Context<Self>) {
-        self.confirm_item = id;
+    /// `None` leaves the confirm key for the surrounding application.
+    pub fn set_primary_action(
+        &mut self,
+        action: Option<CommandPalettePrimaryAction>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.primary_action = action;
         cx.notify();
     }
 
@@ -2628,7 +2683,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let input_focus = self.input.read(cx).focus_handle();
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
-        let maximum_steps = self.header_actions.len() + self.presented_empty_actions().len();
+        let maximum_steps = self.header_actions.len()
+            + usize::from(self.primary_action.is_some())
+            + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
             window.focus_next(cx);
             if !self.focus_scope.contains_focused(window, cx) {
@@ -2654,6 +2711,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.matches.is_empty() {
             if let Some(action) = self.empty.default_action() {
                 cx.emit(CommandPaletteEvent::EmptyAction(action.id.clone()));
+            } else {
+                self.activate_primary_action(cx);
             }
             return;
         }
@@ -2663,17 +2722,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.activate_item(item_id, source, window, cx);
     }
 
-    fn activate_confirm_item(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn activate_primary_action(&mut self, cx: &mut gpui::Context<Self>) {
         if self.loading {
             return;
         }
-        if let Some(item_id) = self.confirm_item.clone() {
-            self.activate_item(
-                item_id,
-                CommandPaletteActivationSource::Keyboard,
-                window,
-                cx,
-            );
+        if let Some(action) = self
+            .primary_action
+            .as_ref()
+            .filter(|action| !action.disabled)
+        {
+            cx.emit(CommandPaletteEvent::HeaderAction(action.id.clone()));
         }
     }
 
@@ -3028,9 +3086,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 cx.stop_propagation();
             }))
-            .when(self.confirm_item.is_some(), |overlay| {
-                overlay.on_action(cx.listener(|palette, _: &Confirm, window, cx| {
-                    palette.activate_confirm_item(window, cx);
+            .when(self.primary_action.is_some(), |overlay| {
+                overlay.on_action(cx.listener(|palette, _: &Confirm, _, cx| {
+                    palette.activate_primary_action(cx);
                     cx.stop_propagation();
                 }))
             })
@@ -3314,6 +3372,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         ),
                 )
             })
+            .when_some(self.primary_action.as_ref(), |editor, action| {
+                editor.child(render_primary_action(palette.clone(), action))
+            })
             .into_any_element()
     }
 
@@ -3494,6 +3555,30 @@ fn render_header_action<I: Clone + Eq + 'static>(
         button = button.debug_selector(selector);
     }
     button.into_any_element()
+}
+
+/// Renders the search line's primary command as a prominent capsule at its trailing edge.
+fn render_primary_action<I: Clone + Eq + 'static>(
+    palette: WeakEntity<CommandPalette<I>>,
+    action: &CommandPalettePrimaryAction,
+) -> AnyElement {
+    let id = action.id.clone();
+    Button::new("command-palette-primary-action", action.label.clone())
+        .variant(ButtonVariant::Primary)
+        .size(ButtonSize::Small)
+        .shape(ButtonShape::Capsule)
+        .disabled(action.disabled)
+        .tab_stop(true)
+        .when_some(action.debug_selector.clone(), |button, selector| {
+            button.debug_selector(selector)
+        })
+        .on_activate(move |_, _, cx| {
+            let id = id.clone();
+            let _ = palette.update(cx, |_, cx| {
+                cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+            });
+        })
+        .into_any_element()
 }
 
 fn render_section(

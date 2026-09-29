@@ -26,7 +26,6 @@ pub(crate) trait ShortcutFormatter {
 #[derive(Clone)]
 pub(crate) struct DesktopPresentation {
     wording: DesktopWording,
-    command_palette_confirm_shortcut: SharedString,
     formatter: Rc<dyn ShortcutFormatter>,
     shortcuts: Vec<PresentedShortcut>,
 }
@@ -48,12 +47,10 @@ impl Clone for PresentedShortcut {
 impl DesktopPresentation {
     pub(crate) fn new(
         wording: DesktopWording,
-        command_palette_confirm_shortcut: SharedString,
         formatter: Rc<dyn ShortcutFormatter>,
     ) -> Self {
         Self {
             wording,
-            command_palette_confirm_shortcut,
             formatter,
             shortcuts: Vec::new(),
         }
@@ -65,10 +62,6 @@ impl DesktopPresentation {
 
     pub(crate) const fn wording(&self) -> DesktopWording {
         self.wording
-    }
-
-    pub(crate) fn command_palette_confirm_shortcut(&self) -> &str {
-        &self.command_palette_confirm_shortcut
     }
 
     pub(crate) fn shortcut(&self, action: &dyn Action) -> Option<SharedString> {
@@ -181,8 +174,6 @@ impl ControlKeybindingProfiles {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DesktopProfileError {
-    #[error("a required desktop capability is unavailable")]
-    MissingCapability,
     #[error("desktop policy and capabilities disagree")]
     InvalidCombination,
 }
@@ -193,17 +184,14 @@ impl DesktopProfile {
         keymap: KeymapProfile,
         presentation: DesktopPresentation,
         locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
-    ) -> Result<Self, DesktopProfileError> {
-        if presentation.command_palette_confirm_shortcut.is_empty() {
-            return Err(DesktopProfileError::MissingCapability);
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             presentation,
             modal_policy,
             control_keys,
             keymap,
             locale,
-        })
+        }
     }
     pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
         cx.set_global(self.presentation.clone());
@@ -282,7 +270,6 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             file_preview: "Preview File",
             operating_system_name: "Operating System",
         },
-        "Primary+Enter".into(),
         Rc::new(TestingShortcutFormatter),
     );
     let profile = default_keymap::profile(
@@ -322,7 +309,6 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
         testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
     )
-    .expect("valid explicit desktop profile fixture")
 }
 
 #[cfg(test)]

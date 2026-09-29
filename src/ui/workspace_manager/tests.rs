@@ -7930,7 +7930,7 @@ fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mu
     cx.simulate_keystrokes("cmd-shift-n");
     cx.run_until_parked();
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    click("remote-directory-picker-current", cx);
+    click("remote-directory-picker-confirm", cx);
     assert!(manager.read_with(cx, |manager, _| {
         manager
             .workspaces

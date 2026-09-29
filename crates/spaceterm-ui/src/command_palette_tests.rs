@@ -1063,7 +1063,7 @@ fn continuing_activation_should_report_the_item_without_closing(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn the_confirm_key_should_stay_unclaimed_without_a_confirm_item(cx: &mut TestAppContext) {
+fn the_confirm_key_should_stay_unclaimed_without_a_primary_action(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
 
@@ -1075,11 +1075,11 @@ fn the_confirm_key_should_stay_unclaimed_without_a_confirm_item(cx: &mut TestApp
             .borrow()
             .iter()
             .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
-        "a palette without a confirm item claimed the confirm key"
+        "a palette without a primary action claimed the confirm key"
     );
     assert!(
         palette.read_with(cx, |palette, _| palette.is_open()),
-        "the confirm key closed a palette that had no confirm item"
+        "the confirm key closed a palette that had no primary action"
     );
 }
 
@@ -1225,14 +1225,24 @@ fn the_panel_should_contain_a_wrapped_empty_description_and_its_actions(cx: &mut
     );
 }
 
+fn header_actions(events: &RefCell<Vec<CommandPaletteEvent<u8>>>) -> Vec<SharedString> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::HeaderAction(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[gpui::test]
-fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
+fn the_confirm_key_should_activate_the_primary_action_regardless_of_selection(
     cx: &mut TestAppContext,
 ) {
     let (root, palette, events, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
-        palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
-        palette.set_confirm_item(Some(3), cx);
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
     });
     open_palette(&root, &palette, cx);
     assert_eq!(
@@ -1243,33 +1253,83 @@ fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
-    let activated = events
-        .borrow()
-        .iter()
-        .filter_map(|event| match event {
-            CommandPaletteEvent::Activated(activation) => Some(*activation.item_id()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(activated, vec![3]);
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
+        "the confirm key activated the selected row instead of the primary action"
+    );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 }
 
 #[gpui::test]
-fn the_confirm_key_should_ignore_a_disabled_confirm_item(cx: &mut TestAppContext) {
+fn the_confirm_key_should_ignore_a_disabled_primary_action(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| palette.set_confirm_item(Some(2), cx));
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("pin", "Pin").disabled(true)),
+            cx,
+        );
+    });
     open_palette(&root, &palette, cx);
 
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
     assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
-        "the confirm key activated a disabled item"
+        header_actions(&events).is_empty(),
+        "the confirm key activated a disabled primary action"
     );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn return_should_activate_the_primary_action_when_no_result_is_presented(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
+    });
+    show_empty_state(&root, &palette, CommandPaletteEmpty::new("No folders"), cx);
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+}
+
+#[gpui::test]
+fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("pin", "Pin").debug_selector("primary-pin")),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    let button = cx
+        .debug_bounds("primary-pin")
+        .expect("the primary action was not rendered");
+    assert!(
+        button.left() >= input.right(),
+        "the button overlapped the query"
+    );
+    assert!(button.right() < editor.right());
+    assert_eq!(
+        button.top() - editor.top(),
+        editor.bottom() - button.bottom(),
+        "the button was not centered on the search line"
+    );
+
+    cx.simulate_click(button.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 }
 
