@@ -1,4 +1,3 @@
-use crate::ui::appearance::gpui_color;
 use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use super::workspace_chrome::{
@@ -18,6 +17,7 @@ use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
+use crate::ui::appearance::gpui_color;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -3147,10 +3147,9 @@ impl WorkspaceManager {
             .left_0()
             .w(layout.width)
             .h(frame.top_chrome_height(appearance.top_height()))
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                background,
-            )))
+            .bg(gpui_color(
+                appearance.surface(crate::appearance::SurfaceRole::Base, background),
+            ))
             .into_any_element()
     }
 
@@ -3423,7 +3422,6 @@ fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity 
         ),
     }
 }
-
 
 fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
     if path == home {

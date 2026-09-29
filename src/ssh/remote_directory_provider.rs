@@ -15,8 +15,8 @@ use super::remote_utility::{
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
 use crate::ui::directory_picker::{
-    ExactPathState, DirectoryListing, RemoteDirectoryProvider,
-    RemoteDirectoryProviderError, DirectoryRow,
+    DirectoryListing, DirectoryRow, ExactPathState, RemoteDirectoryProvider,
+    RemoteDirectoryProviderError,
 };
 
 const REMOTE_DIRECTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,10 +108,7 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
                 .map(|name| DirectoryRow::new(name.clone()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
-            Ok(DirectoryListing::bounded(
-                rows,
-                listing.is_truncated(),
-            ))
+            Ok(DirectoryListing::bounded(rows, listing.is_truncated()))
         })
     }
 
@@ -124,9 +121,7 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
                 .probe_exact_path_with_cancellation(directory, cancellation)
                 .await
                 .map(|state| match state {
-                    RemoteDirectoryProbe::ReadableDirectory => {
-                        ExactPathState::ReadableDirectory
-                    }
+                    RemoteDirectoryProbe::ReadableDirectory => ExactPathState::ReadableDirectory,
                     RemoteDirectoryProbe::Missing => ExactPathState::Missing,
                 })
                 .map_err(map_error)

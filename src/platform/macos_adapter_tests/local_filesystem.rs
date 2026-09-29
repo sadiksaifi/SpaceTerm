@@ -419,10 +419,7 @@ fn child_directory_listing_follows_links_to_directories_only() {
     symlink(root.0.join("missing"), root.0.join("dangling")).unwrap();
     let authority = LocalFilesystemAuthority::testing();
 
-    let mut names = authority
-        .list_child_directories(&root.0, 8)
-        .unwrap()
-        .names;
+    let mut names = authority.list_child_directories(&root.0, 8).unwrap().names;
     names.sort();
 
     assert_eq!(names, ["alias", "target"]);

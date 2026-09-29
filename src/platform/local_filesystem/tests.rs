@@ -259,10 +259,7 @@ fn child_directory_listing_names_only_directories_and_stops_at_its_limit() {
     let bounded = authority.list_child_directories(&root.0, 1).unwrap();
     assert_eq!(bounded.names.len(), 1);
     assert!(bounded.truncated);
-    assert_eq!(
-        format!("{bounded:?}"),
-        "LocalChildDirectories(<redacted>)"
-    );
+    assert_eq!(format!("{bounded:?}"), "LocalChildDirectories(<redacted>)");
 
     assert_eq!(
         authority

@@ -11,6 +11,7 @@ pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
+pub(crate) mod directory_picker;
 #[cfg(test)]
 mod floating_surface_tests;
 #[cfg(test)]
@@ -24,7 +25,6 @@ mod pane_host;
 pub(crate) mod pane_lifecycle;
 mod progress_theme;
 mod remote_child_launch;
-pub(crate) mod directory_picker;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 mod resize_handle_theme;

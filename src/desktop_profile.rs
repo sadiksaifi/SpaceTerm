@@ -47,10 +47,7 @@ impl Clone for PresentedShortcut {
 }
 
 impl DesktopPresentation {
-    pub(crate) fn new(
-        wording: DesktopWording,
-        formatter: Rc<dyn ShortcutFormatter>,
-    ) -> Self {
+    pub(crate) fn new(wording: DesktopWording, formatter: Rc<dyn ShortcutFormatter>) -> Self {
         Self {
             wording,
             formatter,

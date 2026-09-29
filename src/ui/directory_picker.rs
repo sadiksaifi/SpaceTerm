@@ -197,9 +197,7 @@ impl ParsedPickerPath {
     }
 }
 
-pub(super) fn parse_picker_path(
-    input: &str,
-) -> Result<ParsedPickerPath, PickerPathError> {
+pub(super) fn parse_picker_path(input: &str) -> Result<ParsedPickerPath, PickerPathError> {
     if input == "~" {
         return Err(PickerPathError::BareTilde);
     }
@@ -215,9 +213,7 @@ pub(super) fn parse_picker_path(
     let (enumeration_spelling, descend_prefix, leaf_filter) = if trailing_separator {
         (input, input.to_owned(), String::new())
     } else {
-        let separator = input
-            .rfind('/')
-            .ok_or(PickerPathError::Relative)?;
+        let separator = input.rfind('/').ok_or(PickerPathError::Relative)?;
         let directory_with_separator = &input[..=separator];
         let enumeration_spelling =
             if directory_with_separator == "/" || directory_with_separator == "~/" {
@@ -367,10 +363,7 @@ pub(super) fn descend_query(
 ///
 /// The home spells its enclosing directory from the physical home, so `~/` leads to the absolute
 /// directory that contains it.
-fn enclosing_directory_query(
-    parsed: &ParsedPickerPath,
-    home: &PickerPath,
-) -> Option<String> {
+fn enclosing_directory_query(parsed: &ParsedPickerPath, home: &PickerPath) -> Option<String> {
     let listed = parsed
         .enumeration_directory()
         .as_str()
@@ -873,9 +866,7 @@ impl DirectoryPicker {
             None => {}
         }
         self.status = match completion.probe {
-            Ok(ExactPathState::ReadableDirectory) => {
-                DirectoryPickerStatus::Readable
-            }
+            Ok(ExactPathState::ReadableDirectory) => DirectoryPickerStatus::Readable,
             Ok(ExactPathState::Missing) => DirectoryPickerStatus::Missing,
             Err(error) => status_for_source_error(error),
         };
@@ -1222,20 +1213,22 @@ impl DirectoryPicker {
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, "No subdirectories"),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
-            Some(DirectorySourceError::UnsupportedLoginShell) => {
-                UNSUPPORTED_LOGIN_SHELL_NOTICE
-            }
+            Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
                     .description("Your account can\u{2019}t list this directory.")
             }
-            Some(DirectorySourceError::Missing) => {
-                EmptyNotice::new(IconName::CircleAlert, "Enclosing directory doesn\u{2019}t exist")
+            Some(DirectorySourceError::Missing) => EmptyNotice::new(
+                IconName::CircleAlert,
+                "Enclosing directory doesn\u{2019}t exist",
+            ),
+            Some(DirectorySourceError::NotDirectory) => EmptyNotice::new(
+                IconName::CircleAlert,
+                "Enclosing path isn\u{2019}t a directory",
+            ),
+            Some(DirectorySourceError::Other) => {
+                EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory")
             }
-            Some(DirectorySourceError::NotDirectory) => {
-                EmptyNotice::new(IconName::CircleAlert, "Enclosing path isn\u{2019}t a directory")
-            }
-            Some(DirectorySourceError::Other) => EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory"),
         }
     }
 
@@ -1245,8 +1238,7 @@ impl DirectoryPicker {
             || (self.rows.is_empty()
                 && matches!(
                     self.status,
-                    DirectoryPickerStatus::DiscoveringAccount
-                        | DirectoryPickerStatus::Loading
+                    DirectoryPickerStatus::DiscoveringAccount | DirectoryPickerStatus::Loading
                 ))
     }
 
@@ -1622,12 +1614,8 @@ mod tests {
     }
 
     fn scripted_provider(
-        listings: impl IntoIterator<
-            Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>,
-        >,
-        probes: impl IntoIterator<
-            Item = Result<ExactPathState, RemoteDirectoryProviderError>,
-        >,
+        listings: impl IntoIterator<Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>>,
+        probes: impl IntoIterator<Item = Result<ExactPathState, RemoteDirectoryProviderError>>,
         creations: impl IntoIterator<Item = Result<(), RemoteDirectoryProviderError>>,
         validations: impl IntoIterator<
             Item = Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
@@ -1686,12 +1674,9 @@ mod tests {
                     None => picker,
                 }
             });
-            cx.subscribe(
-                &picker,
-                move |_, _, event: &DirectoryPickerEvent, _| {
-                    recorded_events.borrow_mut().push(event.clone());
-                },
-            )
+            cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
+                recorded_events.borrow_mut().push(event.clone());
+            })
             .detach();
             DirectoryPickerHarness { picker }
         });
@@ -1738,12 +1723,7 @@ mod tests {
 
     #[gpui::test]
     fn missing_remote_path_should_note_that_open_creates_it(cx: &mut TestAppContext) {
-        let provider = scripted_provider(
-            [Ok(Vec::new())],
-            [Ok(ExactPathState::Missing)],
-            [],
-            [],
-        );
+        let provider = scripted_provider([Ok(Vec::new())], [Ok(ExactPathState::Missing)], [], []);
         let (picker, _, cx) = directory_picker(provider, cx);
 
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
@@ -1780,7 +1760,11 @@ mod tests {
         );
         let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
         assert!(matches!(
-            picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
+            picker.read_with(cx, |picker, cx| picker
+                .palette
+                .read(cx)
+                .selected_item_id()
+                .cloned()),
             Some(DirectoryPickerItemId::Child { .. })
         ));
 
@@ -1815,7 +1799,14 @@ mod tests {
         cx.simulate_keystrokes("cmd-enter");
         cx.run_until_parked();
 
-        assert!(provider.state.lock().unwrap().validated_directories.is_empty());
+        assert!(
+            provider
+                .state
+                .lock()
+                .unwrap()
+                .validated_directories
+                .is_empty()
+        );
         assert!(
             !events
                 .borrow()
@@ -1905,7 +1896,11 @@ mod tests {
             "the enclosing row should be an ordinary row directly above the children"
         );
         assert!(matches!(
-            picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
+            picker.read_with(cx, |picker, cx| picker
+                .palette
+                .read(cx)
+                .selected_item_id()
+                .cloned()),
             Some(DirectoryPickerItemId::Child { .. })
         ));
 
@@ -1926,13 +1921,15 @@ mod tests {
     #[test]
     fn the_enclosing_directory_should_contain_the_listed_directory() {
         let home = PickerPath::new("/home/tester".to_owned()).unwrap();
-        let enclosing = |input: &str| {
-            enclosing_directory_query(&parse_picker_path(input).unwrap(), &home)
-        };
+        let enclosing =
+            |input: &str| enclosing_directory_query(&parse_picker_path(input).unwrap(), &home);
 
         assert_eq!(enclosing("~/Projects/"), Some(HOME_DISPLAY.to_owned()));
         assert_eq!(enclosing("~/Projects/Space"), Some(HOME_DISPLAY.to_owned()));
-        assert_eq!(enclosing("~/Projects//SpaceTerm/"), Some("~/Projects/".to_owned()));
+        assert_eq!(
+            enclosing("~/Projects//SpaceTerm/"),
+            Some("~/Projects/".to_owned())
+        );
         assert_eq!(enclosing("~/"), Some("/home/".to_owned()));
         assert_eq!(enclosing("~/Proj"), Some("/home/".to_owned()));
         assert_eq!(enclosing("/usr/local/"), Some("/usr/".to_owned()));
@@ -2088,7 +2085,13 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(
+                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    window,
+                    cx,
+                )
+            });
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
@@ -2124,7 +2127,13 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(
+                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    window,
+                    cx,
+                )
+            });
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
@@ -2169,7 +2178,10 @@ mod tests {
         assert_eq!(
             picker.read_with(cx, |picker, _| {
                 (
-                    picker.palette_items().first().map(|item| item.section_text().is_none()),
+                    picker
+                        .palette_items()
+                        .first()
+                        .map(|item| item.section_text().is_none()),
                     picker.results_note(),
                 )
             }),
@@ -2255,11 +2267,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(!picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
-        assert!(
-            events
-                .borrow()
-                .contains(&DirectoryPickerEvent::Dismissed)
-        );
+        assert!(events.borrow().contains(&DirectoryPickerEvent::Dismissed));
     }
 
     #[gpui::test]
@@ -2321,11 +2329,7 @@ mod tests {
         );
         cx.run_until_parked();
 
-        assert!(
-            events
-                .borrow()
-                .contains(&DirectoryPickerEvent::Dismissed)
-        );
+        assert!(events.borrow().contains(&DirectoryPickerEvent::Dismissed));
     }
 
     #[gpui::test]
@@ -2425,11 +2429,7 @@ mod tests {
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
         });
         cx.run_until_parked();
-        assert!(
-            events
-                .borrow()
-                .contains(&DirectoryPickerEvent::Dismissed)
-        );
+        assert!(events.borrow().contains(&DirectoryPickerEvent::Dismissed));
         assert!(
             !events
                 .borrow()
@@ -2534,10 +2534,7 @@ mod tests {
             parse_picker_path("Projects"),
             Err(PickerPathError::Relative)
         );
-        assert_eq!(
-            parse_picker_path("~"),
-            Err(PickerPathError::BareTilde)
-        );
+        assert_eq!(parse_picker_path("~"), Err(PickerPathError::BareTilde));
         assert_eq!(
             parse_picker_path("~other/Projects"),
             Err(PickerPathError::UnsupportedTilde)
@@ -2606,9 +2603,7 @@ mod tests {
         let row = DirectoryRow::new("SpaceTerm".to_owned()).unwrap();
 
         assert_eq!(
-            descend_query(&parsed, &row)
-                .unwrap()
-                .as_str(),
+            descend_query(&parsed, &row).unwrap().as_str(),
             "~//Projects//SpaceTerm/"
         );
     }

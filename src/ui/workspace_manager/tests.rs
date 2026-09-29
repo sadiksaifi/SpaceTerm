@@ -495,8 +495,7 @@ use crate::terminal::testing::{
 };
 use crate::terminal::{SessionEvent, SessionExit};
 use crate::ui::directory_picker::{
-    ExactPathState, DirectoryListing, RemoteDirectoryProvider,
-    RemoteDirectoryProviderError,
+    DirectoryListing, ExactPathState, RemoteDirectoryProvider, RemoteDirectoryProviderError,
 };
 use crate::ui::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
@@ -4052,9 +4051,16 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
 
     assert_eq!(records.starts().len(), 1);
     assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().pinned_directory().is_none()
+        manager
+            .workspaces
+            .active_workspace()
+            .pinned_directory()
+            .is_none()
     }));
-    assert!(cx.debug_bounds("modal-action-workspace-pin-error-ok").is_some());
+    assert!(
+        cx.debug_bounds("modal-action-workspace-pin-error-ok")
+            .is_some()
+    );
     click("modal-action-workspace-pin-error-ok", cx);
     cx.run_until_parked();
     assert_eq!(
@@ -4107,7 +4113,8 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     let project = root.join("project");
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    let (manager, records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
     choose_pin_directory(&manager, cx);
     assert_eq!(records.starts().len(), 1);
 
@@ -4152,7 +4159,8 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
 #[gpui::test]
 fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppContext) {
     let missing = temporary_directory("missing");
-    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(missing))], cx);
+    let (manager, records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(missing))], cx);
 
     choose_pin_directory(&manager, cx);
 
@@ -6151,7 +6159,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
 fn workspace_pin_indicator_should_track_explicit_pin_state(cx: &mut TestAppContext) {
     let directory = temporary_directory("pinned-directory");
     fs::create_dir_all(&directory).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
+    let (manager, records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
     assert!(cx.debug_bounds("workspace-row-pin-1").is_none());
     choose_pin_directory(&manager, cx);
     assert!(cx.debug_bounds("workspace-row-pin-1").is_some());
@@ -6372,7 +6381,8 @@ fn collapsed_workspace_switcher_should_stop_at_the_tab_item_maximum(cx: &mut Tes
 fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut TestAppContext) {
     let directory = temporary_directory("collapsed-pin");
     fs::create_dir_all(&directory).unwrap();
-    let (manager, _, cx) = workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
+    let (manager, _, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
     choose_pin_directory(&manager, cx);
     manager.update(cx, |manager, cx| {
         manager
@@ -9053,9 +9063,7 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
 /// first Tab paints in the chrome's bounds. An opaque material gives the chrome an opaque title-bar
 /// surface, and nothing the Workspace paints afterwards may cover the mark.
 #[gpui::test]
-fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(
-    cx: &mut TestAppContext,
-) {
+fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, cx| {
         let appearance = crate::ui::appearance::ChromeAppearance {

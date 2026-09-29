@@ -174,7 +174,11 @@ mod tests {
             home.0.to_str().unwrap()
         );
         let listing = source.list_directories(path("~/")).await.unwrap();
-        let names = listing.rows().iter().map(DirectoryRow::name).collect::<Vec<_>>();
+        let names = listing
+            .rows()
+            .iter()
+            .map(DirectoryRow::name)
+            .collect::<Vec<_>>();
         assert_eq!(names, ["Projects"]);
         assert_eq!(
             source.probe_exact_path(path("~/Projects/")).await,
@@ -191,9 +195,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn creating_and_pinning_yield_a_validated_local_directory(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn creating_and_pinning_yield_a_validated_local_directory(cx: &mut gpui::TestAppContext) {
         let home = Fixture::new("pin");
         let source = source(&home, cx);
 

@@ -1028,7 +1028,12 @@ mod tests {
 
     #[test]
     fn ssh_destination_host_should_omit_the_account() {
-        let host = |value: &str| SshDestination::new(value.to_owned()).unwrap().host().to_owned();
+        let host = |value: &str| {
+            SshDestination::new(value.to_owned())
+                .unwrap()
+                .host()
+                .to_owned()
+        };
 
         assert_eq!(host("orb"), "orb");
         assert_eq!(host("tester@orb"), "orb");

@@ -56,7 +56,10 @@ pub(crate) struct RemoteDirectorySource {
 
 impl RemoteDirectorySource {
     /// Creates a source for the machine `host` names.
-    pub(crate) fn new(provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>, host: &str) -> Self {
+    pub(crate) fn new(
+        provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
+        host: &str,
+    ) -> Self {
         Self {
             provider,
             host: host.to_owned(),

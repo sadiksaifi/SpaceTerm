@@ -12,7 +12,6 @@ use thiserror::Error;
 
 use crate::domain::ValidatedLocalDirectory;
 
-
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum LocalFilesystemError {
     #[error("the path is not absolute")]

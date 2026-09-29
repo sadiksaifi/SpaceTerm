@@ -573,9 +573,7 @@ impl RemoteWorkspaceFlowState {
 
     fn take_retained_connection(&mut self) -> Option<ConnectedHost> {
         match self {
-            Self::HostSelection { retained } | Self::AddingHost { retained, .. } => {
-                retained.take()
-            }
+            Self::HostSelection { retained } | Self::AddingHost { retained, .. } => retained.take(),
             _ => None,
         }
     }
@@ -1503,7 +1501,7 @@ mod tests {
     use super::*;
     use crate::ssh::destination::SshHostAlias;
     use crate::ui::directory_picker::{
-        ExactPathState, DirectoryListing, RemoteDirectoryProviderError,
+        DirectoryListing, ExactPathState, RemoteDirectoryProviderError,
     };
 
     #[derive(Default)]
@@ -2276,11 +2274,7 @@ mod tests {
 
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
-                flow.reduce_host_event(
-                    &SshHostPickerEvent::RequestAddHost,
-                    window,
-                    cx,
-                );
+                flow.reduce_host_event(&SshHostPickerEvent::RequestAddHost, window, cx);
             });
         });
         cx.run_until_parked();
