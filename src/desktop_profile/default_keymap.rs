@@ -8,6 +8,7 @@ use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
 
 pub(crate) fn profile(
+    layout: std::rc::Rc<dyn crate::platform::keyboard_layout::KeyboardLayoutAdapter>,
     system_reserved: Vec<SystemReserved>,
 ) -> Result<KeymapProfile, KeymapProfileError> {
     let defaults = [
@@ -150,7 +151,7 @@ pub(crate) fn profile(
         ),
         (
             Command::IncreaseTerminalFontSize,
-            Some(DefaultBinding::new("cmd-=", &["cmd-+"])),
+            Some(DefaultBinding::new("cmd-=", &["cmd-+", "shift-cmd-="])),
         ),
         (
             Command::DecreaseTerminalFontSize,
@@ -170,6 +171,7 @@ pub(crate) fn profile(
         ),
     ];
     KeymapProfile::new(
+        layout,
         defaults,
         system_reserved,
         fixed_bindings(),

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, BorrowAppContext, Global, Task};
+use gpui::{App, BorrowAppContext, Global, Subscription, Task};
 
 use super::{CUSTOMIZABLE_BINDINGS, KeybindingPreferences, KeymapProfile, ResolvedKeymap};
 use crate::desktop_profile::DesktopPresentation;
@@ -14,6 +14,7 @@ pub(crate) struct KeymapRuntime {
     applied: KeybindingPreferences,
     menu: Option<Rc<dyn ApplicationMenuAdapter>>,
     task: Option<Task<()>>,
+    _layout_subscription: Subscription,
     // Retain the insertion point when every customizable Command is Unassigned.
     segment_start: usize,
 }
@@ -50,11 +51,13 @@ pub(crate) fn install(profile: KeymapProfile, cx: &mut App) {
             })
     };
     cx.set_global(InstalledKeymap(Rc::new(profile.resolve(&applied))));
+    let layout_subscription = cx.on_keyboard_layout_change(refresh_layout);
     cx.set_global(KeymapRuntime {
         profile: Rc::new(profile),
         applied,
         menu: None,
         task: None,
+        _layout_subscription: layout_subscription,
         segment_start,
     });
 }
@@ -77,11 +80,30 @@ pub(crate) fn follow(settings: &UserSettings, cx: &mut App) {
     cx.global_mut::<KeymapRuntime>().task = Some(task);
 }
 
-fn apply(preferences: &KeybindingPreferences, cx: &mut App) {
-    let runtime = cx.global::<KeymapRuntime>();
-    if runtime.applied == *preferences {
-        return;
+fn refresh_layout(cx: &mut App) {
+    let mut profile = (*KeymapRuntime::profile(cx)).clone();
+    match profile.refresh_layout() {
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("failed to refresh shortcuts: {error}");
+            return;
+        }
+        Ok(true) => {}
     }
+    let runtime = cx.global_mut::<KeymapRuntime>();
+    runtime.profile = Rc::new(profile);
+    let preferences = runtime.applied.clone();
+    replace(&preferences, cx);
+}
+
+fn apply(preferences: &KeybindingPreferences, cx: &mut App) {
+    if cx.global::<KeymapRuntime>().applied != *preferences {
+        replace(preferences, cx);
+    }
+}
+
+fn replace(preferences: &KeybindingPreferences, cx: &mut App) {
+    let runtime = cx.global::<KeymapRuntime>();
     let resolved = runtime.profile.resolve(preferences);
     let effective_changed = *InstalledKeymap::get(cx) != resolved;
     let menu = runtime.menu.clone();

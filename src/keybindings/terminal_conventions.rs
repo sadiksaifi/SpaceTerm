@@ -18,7 +18,8 @@ pub(super) fn reservation(shortcut: &super::Shortcut) -> Option<TerminalConventi
     if !modifiers.control {
         return Some(TerminalConvention::TextInput);
     }
-    if (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic())
+    if (modifiers.shift && matches!(key, "2" | "6" | "-"))
+        || (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic())
         || matches!(
             key,
             "@" | "[" | "{" | "\\" | "|" | "]" | "}" | "^" | "_" | "/" | "?" | "space"

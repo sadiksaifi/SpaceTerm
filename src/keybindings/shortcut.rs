@@ -58,7 +58,7 @@ impl Shortcut {
         Self::from_parts(keystroke.modifiers, &keystroke.key.to_ascii_lowercase())
     }
 
-    fn from_parts(mut modifiers: Modifiers, key: &str) -> Result<Self, ShortcutRejection> {
+    fn from_parts(modifiers: Modifiers, key: &str) -> Result<Self, ShortcutRejection> {
         if modifiers.function || matches!(key, "fn" | "function") {
             return Err(ShortcutRejection::FunctionModifier);
         }
@@ -114,41 +114,6 @@ impl Shortcut {
         if !printable && !named {
             return Err(ShortcutRejection::UnsupportedKey);
         }
-        // Match GPUI's native symbol form. Named keys and ASCII letters retain Shift.
-        let key = if modifiers.shift {
-            let shifted = match key {
-                "`" | "~" => Some("~"),
-                "1" | "!" => Some("!"),
-                "2" | "@" => Some("@"),
-                "3" | "#" => Some("#"),
-                "4" | "$" => Some("$"),
-                "5" | "%" => Some("%"),
-                "6" | "^" => Some("^"),
-                "7" | "&" => Some("&"),
-                "8" | "*" => Some("*"),
-                "9" | "(" => Some("("),
-                "0" | ")" => Some(")"),
-                "-" | "_" => Some("_"),
-                "=" | "+" => Some("+"),
-                "[" | "{" => Some("{"),
-                "]" | "}" => Some("}"),
-                "\\" | "|" => Some("|"),
-                ";" | ":" => Some(":"),
-                "'" | "\"" => Some("\""),
-                "," | "<" => Some("<"),
-                "." | ">" => Some(">"),
-                "/" | "?" => Some("?"),
-                _ => None,
-            };
-            if let Some(shifted) = shifted {
-                modifiers.shift = false;
-                shifted
-            } else {
-                key
-            }
-        } else {
-            key
-        };
         let shortcut = Self {
             modifiers,
             key: key.into(),
@@ -157,6 +122,20 @@ impl Shortcut {
             return Err(ShortcutRejection::TerminalReserved(convention));
         }
         Ok(shortcut)
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        layout: &crate::platform::keyboard_layout::KeyboardLayout,
+    ) -> Self {
+        let mut resolved = self.clone();
+        if self.modifiers.shift
+            && let Some(key) = layout.shifted(self.modifiers.platform, &self.key)
+        {
+            resolved.modifiers.shift = false;
+            resolved.key = key.into();
+        }
+        resolved
     }
 
     #[cfg(test)]
@@ -225,6 +204,13 @@ mod tests {
         );
     }
     #[test]
+    fn retained_shifted_spellings_survive_layout_changes() {
+        let shortcut: Shortcut = serde_json::from_str("\"shift-cmd-7\"").unwrap();
+        assert_eq!(shortcut.to_string(), "shift-cmd-7");
+        assert_eq!(serde_json::to_string(&shortcut).unwrap(), "\"shift-cmd-7\"");
+    }
+
+    #[test]
     fn shifted_punctuation_has_one_identity_and_matches_native_dispatch() {
         for (base, symbol) in [
             ("`", "~"),
@@ -249,7 +235,11 @@ mod tests {
             (".", ">"),
             ("/", "?"),
         ] {
-            let shortcut = Shortcut::parse(&format!("shift-cmd-{base}")).unwrap();
+            let retained = Shortcut::parse(&format!("shift-cmd-{base}")).unwrap();
+            let layout = crate::platform::keyboard_layout::testing::us()
+                .snapshot()
+                .unwrap();
+            let shortcut = retained.resolve(&layout);
             let native = Keystroke::parse(&format!("cmd-{symbol}")).unwrap();
             assert_eq!(shortcut, Shortcut::from_keystroke(&native).unwrap());
             assert_eq!(shortcut.to_string(), format!("cmd-{symbol}"));
@@ -261,7 +251,7 @@ mod tests {
                     &serde_json::to_string(&format!("shift-cmd-{base}")).unwrap()
                 )
                 .unwrap(),
-                shortcut
+                retained
             );
         }
     }

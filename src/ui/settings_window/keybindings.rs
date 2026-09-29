@@ -17,14 +17,13 @@ use spaceterm_ui::{
 
 use super::controls::{CaptionTone, row_horizontal_inset};
 use super::{SettingsRowId, SettingsWindow, control_selector};
-use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
 use crate::keybindings::{
     Command, KeybindingPreferences, KeybindingState, Reservation, ResolvedKeymap, Shortcut,
-    ShortcutRejection,
-    SystemReservation, TerminalConvention,
+    ShortcutRejection, SystemReservation, TerminalConvention,
 };
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
 
 /// What the field shows for a Command without a Shortcut.
 const UNASSIGNED_LABEL: &str = "None";
@@ -124,9 +123,13 @@ impl ShortcutRows {
                 .detach();
                 // The section is longer than the window, so Tab can reach a row scrolled out of
                 // sight.
-                cx.on_focus(&recorder.read(cx).focus_handle(), window, move |settings, _, cx| {
-                    settings.scroll_row_into_view(SettingsRowId::Shortcut(command), cx);
-                })
+                cx.on_focus(
+                    &recorder.read(cx).focus_handle(),
+                    window,
+                    move |settings, _, cx| {
+                        settings.scroll_row_into_view(SettingsRowId::Shortcut(command), cx);
+                    },
+                )
                 .detach();
                 (command, recorder)
             })
@@ -261,9 +264,7 @@ fn rejection_message(
         ShortcutRejection::Malformed
         | ShortcutRejection::Chord
         | ShortcutRejection::ModifierOnly
-        | ShortcutRejection::UnsupportedKey => {
-            "SpaceTerm can't use this key in a shortcut.".into()
-        }
+        | ShortcutRejection::UnsupportedKey => "SpaceTerm can't use this key in a shortcut.".into(),
     }
 }
 
@@ -397,7 +398,10 @@ impl SettingsWindow {
         // A Reserved Shortcut reads in the same error color the recorder refuses it in.
         let reserved = matches!(
             self.shortcuts.query(cx),
-            ShortcutQuery::Chord(SearchedChord { shortcut: Err(_), .. })
+            ShortcutQuery::Chord(SearchedChord {
+                shortcut: Err(_),
+                ..
+            })
         );
         let color = if reserved {
             appearance.colors.error
@@ -530,9 +534,10 @@ impl SettingsWindow {
             }
             // A reassignment is marked on both rows, so the Command that lost its Shortcut is as
             // easy to find as the one that took it.
-            Some((owner, ShortcutNotice::Reassigned { from })) if owner == command => {
-                (format!("Removed from {}.", from.label()).into(), CaptionTone::Warning)
-            }
+            Some((owner, ShortcutNotice::Reassigned { from })) if owner == command => (
+                format!("Removed from {}.", from.label()).into(),
+                CaptionTone::Warning,
+            ),
             Some((owner, ShortcutNotice::Reassigned { from })) if *from == command => (
                 format!("Its shortcut is now assigned to {}.", owner.label()).into(),
                 CaptionTone::Warning,
@@ -542,11 +547,16 @@ impl SettingsWindow {
                     format!("Its default shortcut is assigned to {}.", by.label()).into(),
                     CaptionTone::Warning,
                 ),
+                KeybindingState::TerminalBlocked(_) => (
+                    "This shortcut is reserved for terminal input and isn't active.".into(),
+                    CaptionTone::Error,
+                ),
                 KeybindingState::Blocked(reason) => {
                     let chord = keybindings
                         .get(command)
                         .and_then(Option::as_ref)
-                        .map(|shortcut| presentation.format(shortcut))?;
+                        .map(|shortcut| presentation.format(shortcut))
+                        .unwrap_or_else(|| "Its default shortcut".into());
                     (
                         format!(
                             "{chord} is reserved by {} for {} and isn't active.",

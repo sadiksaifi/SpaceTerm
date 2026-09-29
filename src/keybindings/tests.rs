@@ -14,6 +14,7 @@ fn preferences(source: &str) -> KeybindingPreferences {
 
 fn profile() -> KeymapProfile {
     KeymapProfile::new(
+        crate::platform::keyboard_layout::testing::us(),
         [
             (
                 Command::NewWorkspace,
@@ -181,6 +182,7 @@ fn preferences_are_sparse_and_validate_only_override_conflicts() {
 fn profile_rejects_invalid_duplicate_and_system_reserved_defaults() {
     let build = |defaults| {
         KeymapProfile::new(
+            crate::platform::keyboard_layout::testing::us(),
             defaults,
             vec![SystemReserved {
                 shortcut: shortcut("cmd-q"),
@@ -254,7 +256,14 @@ fn profile_rejects_invalid_duplicate_and_system_reserved_defaults() {
         reason: SystemReservation::Quit,
     };
     assert_eq!(
-        KeymapProfile::new([], vec![reserved.clone(), reserved], vec![], vec![]).unwrap_err(),
+        KeymapProfile::new(
+            crate::platform::keyboard_layout::testing::us(),
+            [],
+            vec![reserved.clone(), reserved],
+            vec![],
+            vec![]
+        )
+        .unwrap_err(),
         KeymapProfileError::DuplicateSystemReservation
     );
 }
@@ -386,6 +395,7 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
         SystemReservation::Help,
     ] {
         let profile = KeymapProfile::new(
+            crate::platform::keyboard_layout::testing::us(),
             [],
             vec![SystemReserved {
                 shortcut: shortcut("cmd-q"),
@@ -709,4 +719,59 @@ fn deterministic_assign_reset_clear_sequence_preserves_unique_ownership() {
             prefs
         );
     }
+}
+
+#[test]
+fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord() {
+    let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
+    layout.insert(true, "7", "/");
+    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
+    assert_eq!(prefs.validate(), Ok(()));
+    let resolved = profile.resolve(&prefs);
+    assert_eq!(
+        resolved.owner(&shortcut("cmd-/")),
+        Some(Command::NewWorkspace)
+    );
+    assert_eq!(
+        resolved.state(Command::CreateTab),
+        KeybindingState::Displaced {
+            by: Command::NewWorkspace
+        }
+    );
+    assert_eq!(
+        profile
+            .assign(&mut prefs, Command::CreateTab, Some(shortcut("cmd-/")))
+            .unwrap()
+            .displaced,
+        Some(Command::NewWorkspace)
+    );
+    assert_eq!(
+        profile.resolve(&prefs).shortcut(Command::NewWorkspace),
+        None
+    );
+    assert_eq!(
+        profile.resolve(&prefs).owner(&shortcut("cmd-/")),
+        Some(Command::CreateTab)
+    );
+}
+
+#[test]
+fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
+    let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
+    layout.insert(false, "7", "/");
+    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut prefs = preferences(r#"{"new_workspace":"ctrl-shift-7"}"#);
+    assert_eq!(
+        profile.resolve(&prefs).state(Command::NewWorkspace),
+        KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+    );
+    assert_eq!(
+        profile.assign(
+            &mut prefs,
+            Command::CreateTab,
+            Some(shortcut("ctrl-shift-7"))
+        ),
+        Err(Reservation::Terminal(TerminalConvention::ControlCharacter))
+    );
 }

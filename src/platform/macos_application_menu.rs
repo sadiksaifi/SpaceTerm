@@ -488,7 +488,8 @@ mod native {
     use objc2_app_kit::{
         NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
         NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSApplication,
-        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSWorkspace,
+        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment,
+        NSWorkspace,
     };
     use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
 
@@ -752,6 +753,7 @@ mod tests {
     #[test]
     fn native_equivalents_follow_overrides_for_top_level_and_nested_commands() {
         let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
             super::super::macos_reserved_shortcuts::shortcuts(),
         )
         .unwrap();

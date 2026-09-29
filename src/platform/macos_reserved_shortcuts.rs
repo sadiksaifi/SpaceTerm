@@ -36,7 +36,7 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
         ("ctrl-shift-cmd-5", Screenshot),
         ("shift-cmd-6", Screenshot),
         ("ctrl-shift-cmd-6", Screenshot),
-        ("shift-cmd-/", Help),
+        ("cmd-?", Help),
         ("alt-cmd-'", KeyboardNavigation),
         ("alt-cmd-d", DockHiding),
         ("alt-cmd-8", Zoom),
@@ -64,7 +64,11 @@ mod tests {
 
     #[test]
     fn settings_keeps_its_standard_shortcut_and_no_command_can_take_it() {
-        let profile = crate::desktop_profile::default_keymap::profile(shortcuts()).unwrap();
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            shortcuts(),
+        )
+        .unwrap();
         let settings = Shortcut::parse("cmd-,").unwrap();
 
         assert_eq!(
@@ -80,7 +84,11 @@ mod tests {
 
     #[test]
     fn system_reservations_allow_the_complete_default_profile() {
-        let profile = crate::desktop_profile::default_keymap::profile(shortcuts()).unwrap();
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            shortcuts(),
+        )
+        .unwrap();
         let resolved = profile.resolve(&KeybindingPreferences::default());
         assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
         for command in Command::ALL {
@@ -101,7 +109,11 @@ mod tests {
 
     #[test]
     fn native_shifted_symbols_and_hand_edited_overrides_remain_system_reserved() {
-        let profile = crate::desktop_profile::default_keymap::profile(shortcuts()).unwrap();
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            shortcuts(),
+        )
+        .unwrap();
         for (key, physical, reason) in [
             ("#", "3", SystemReservation::Screenshot),
             ("$", "4", SystemReservation::Screenshot),
@@ -154,7 +166,11 @@ mod tests {
 
     #[test]
     fn shifted_default_alias_dispatches_and_overrides_share_its_identity() {
-        let profile = crate::desktop_profile::default_keymap::profile(super::shortcuts()).unwrap();
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            super::shortcuts(),
+        )
+        .unwrap();
         let resolved = profile.resolve(&KeybindingPreferences::default());
         let native = gpui::Keystroke::parse("cmd-+").unwrap();
         assert!(resolved.key_bindings().iter().any(|binding| {
@@ -196,7 +212,7 @@ mod tests {
             )
             .unwrap()
             .validate()
-            .is_err()
+            .is_ok()
         );
     }
 }

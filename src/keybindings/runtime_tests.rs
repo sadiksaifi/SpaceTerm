@@ -273,3 +273,107 @@ fn following_another_settings_owner_retires_the_previous_subscription(cx: &mut T
         );
     });
 }
+
+#[derive(Debug)]
+struct ChangingLayout(std::cell::RefCell<crate::platform::keyboard_layout::KeyboardLayout>);
+
+impl crate::platform::keyboard_layout::KeyboardLayoutAdapter for ChangingLayout {
+    fn snapshot(
+        &self,
+    ) -> Result<
+        crate::platform::keyboard_layout::KeyboardLayout,
+        crate::platform::keyboard_layout::KeyboardLayoutUnavailable,
+    > {
+        Ok(self.0.borrow().clone())
+    }
+}
+
+#[gpui::test]
+fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_settings(
+    cx: &mut TestAppContext,
+) {
+    use crate::keybindings::{KeybindingState, SystemReservation, SystemReserved};
+    let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
+        crate::platform::keyboard_layout::testing::us()
+            .snapshot()
+            .unwrap(),
+    )));
+    let preferences: KeybindingPreferences =
+        serde_json::from_str(r#"{"create_tab":"shift-cmd-7","new_workspace":"cmd-§"}"#).unwrap();
+    let retained = serde_json::to_value(&preferences).unwrap();
+    let menu = Rc::new(RecordingApplicationMenuAdapter::default());
+    let dispatches = Rc::new(Cell::new(0));
+    let observed = dispatches.clone();
+    cx.update(|cx| {
+        crate::ui::init(cx).unwrap();
+        let profile = crate::desktop_profile::default_keymap::profile(
+            layout.clone(),
+            vec![SystemReserved {
+                shortcut: Shortcut::parse("shift-cmd-3").unwrap(),
+                reason: SystemReservation::Screenshot,
+            }],
+        )
+        .unwrap();
+        install(profile, cx);
+        attach_application_menu(menu.clone(), cx);
+        apply(&preferences, cx);
+        cx.on_action(move |_: &CreateTab, _| observed.set(observed.get() + 1));
+    });
+    let (_, cx) = cx.add_window_view(|_, _| DispatchView);
+    cx.simulate_keystrokes("cmd-&");
+    assert_eq!(dispatches.get(), 1);
+    // Replace the host snapshot, preserving the retained spellings.
+    let mut changed = crate::platform::keyboard_layout::KeyboardLayout::default();
+    changed.insert(true, "7", "/");
+    changed.insert(true, "3", "§");
+    changed.insert(true, "=", "*");
+    *layout.0.borrow_mut() = changed;
+    cx.update(|_, cx| {
+        refresh_layout(cx);
+        let resolved = InstalledKeymap::get(cx);
+        assert_eq!(
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Blocked(SystemReservation::Screenshot)
+        );
+        assert_eq!(
+            KeymapRuntime::profile(cx).check(&Shortcut::parse("cmd-§").unwrap()),
+            Err(crate::keybindings::Reservation::System(
+                SystemReservation::Screenshot
+            ))
+        );
+        assert_eq!(
+            DesktopPresentation::get(cx).shortcut(&CreateTab).as_deref(),
+            Some("Primary+/")
+        );
+        assert!(
+            resolved
+                .shortcuts(Command::IncreaseTerminalFontSize)
+                .contains(&Shortcut::parse("cmd-*").unwrap())
+        );
+        assert_eq!(
+            serde_json::to_value(&cx.global::<KeymapRuntime>().applied).unwrap(),
+            retained
+        );
+        assert_eq!(menu.installs(), 2);
+        refresh_layout(cx);
+        assert_eq!(menu.installs(), 2);
+    });
+    cx.simulate_keystrokes("cmd-&");
+    assert_eq!(dispatches.get(), 1);
+    cx.simulate_keystrokes("cmd-/");
+    assert_eq!(dispatches.get(), 2);
+    *layout.0.borrow_mut() = crate::platform::keyboard_layout::testing::us()
+        .snapshot()
+        .unwrap();
+    cx.update(|_, cx| {
+        refresh_layout(cx);
+        assert_eq!(
+            InstalledKeymap::get(cx).state(Command::NewWorkspace),
+            KeybindingState::Overridden
+        );
+    });
+    cx.simulate_keystrokes("cmd-/");
+    assert_eq!(dispatches.get(), 2);
+    cx.simulate_keystrokes("cmd-&");
+    assert_eq!(dispatches.get(), 3);
+}

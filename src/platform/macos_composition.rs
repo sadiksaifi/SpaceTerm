@@ -71,6 +71,7 @@ fn desktop_profile(
             spaceterm_ui::TextInputKeybindingProfile::MacOs,
         ),
         crate::desktop_profile::default_keymap::profile(
+            Rc::new(super::macos_keyboard_layout::MacosKeyboardLayout),
             super::macos_reserved_shortcuts::shortcuts(),
         )
         .map_err(|_| DesktopProfileError::InvalidCombination)?,

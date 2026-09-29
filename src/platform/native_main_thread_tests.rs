@@ -1,4 +1,7 @@
-use super::{macos_appearance, macos_application_quit, macos_pasteboard, macos_services, macos_window_backdrop};
+use super::{
+    macos_appearance, macos_application_quit, macos_pasteboard, macos_services,
+    macos_window_backdrop,
+};
 
 pub(crate) fn run() {
     use objc2::rc::autoreleasepool;
@@ -31,6 +34,8 @@ pub(crate) fn run() {
             println!("{} ... ok", stringify!($path));
         };
     }
+
+    native_test!(super::macos_keyboard_layout::tests::native_layouts_resolve_dispatch_and_system_reservations);
 
     native_test!(super::macos_accessibility::tests::bundled_font_metadata_does_not_require_system_installation);
 
