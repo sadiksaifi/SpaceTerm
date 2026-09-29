@@ -1393,21 +1393,31 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             style.disabled
         };
         let icon_size = menu_style(self.menu.size, cx).metrics.trigger_icon_size;
-        // The divider starts the segment, so it marks the seam between the two segments.
+        // The divider sits on the segment's leading edge, marking the seam between the segments.
         let content = div()
-            .h_full()
+            .relative()
+            .size_full()
             .flex()
             .items_center()
-            .gap(style.horizontal_padding * 0.6)
+            .justify_center()
             .child(
                 div()
-                    .debug_selector(|| "combo-button-divider".to_owned())
-                    .h(style.height / 2.0)
-                    .w(style.border_width.max(px(1.0)))
-                    .bg(Rgba {
-                        a: paint.foreground().a * 0.35,
-                        ..paint.foreground()
-                    }),
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .debug_selector(|| "combo-button-divider".to_owned())
+                            .h(style.height / 2.0)
+                            .w(style.border_width.max(px(1.0)))
+                            .bg(Rgba {
+                                a: paint.foreground().a * 0.35,
+                                ..paint.foreground()
+                            }),
+                    ),
             )
             .child(Icon::new(
                 IconName::ChevronDown,
@@ -1777,8 +1787,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             trigger = trigger
                 .flex()
                 .items_center()
-                .h(style.height)
-                .pr(style.horizontal_padding * 0.8)
+                .size(style.height)
                 .rounded_tr(corner_radii.top_right)
                 .rounded_br(corner_radii.bottom_right)
                 .border(style.border_width)

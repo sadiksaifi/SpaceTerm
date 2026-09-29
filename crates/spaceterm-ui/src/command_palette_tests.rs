@@ -1436,6 +1436,10 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
     assert_eq!(menu.left(), button.right(), "the segments did not join");
     assert_eq!(menu.top(), button.top());
     assert_eq!(menu.bottom(), button.bottom());
+    assert_eq!(
+        menu.size.width, menu.size.height,
+        "the menu segment was not square"
+    );
     let divider = cx
         .debug_bounds("combo-button-divider")
         .expect("the segment divider was not rendered");
