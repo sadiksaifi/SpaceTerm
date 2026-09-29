@@ -2018,6 +2018,24 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(None)], cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let pane_host = manager.read_with(cx, |manager, cx| {
+        manager
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .active_pane_host()
+    });
+    let terminal_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            pane_host
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        })
+    };
+    assert!(terminal_focused(cx));
 
     choose_pin_directory(&manager, cx);
 
@@ -2026,6 +2044,10 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
         1
     );
     assert_eq!(records.starts().len(), 1);
+    assert!(
+        terminal_focused(cx),
+        "cancelling System Directory Selection left the terminal without focus"
+    );
 }
 
 #[gpui::test]

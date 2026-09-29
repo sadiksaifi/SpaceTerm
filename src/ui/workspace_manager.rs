@@ -1250,15 +1250,16 @@ impl WorkspaceManager {
         }
         self.transient.pin_target = None;
         let pinned = match selection {
-            LocalPinSelection::Cancelled => return,
+            LocalPinSelection::Cancelled => None,
             LocalPinSelection::Chosen(Ok(directory)) => {
-                self.apply_validated_local_pin(workspace_id, directory, window, cx)
+                Some(self.apply_validated_local_pin(workspace_id, directory, window, cx))
             }
-            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => false,
+            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => Some(false),
         };
-        if pinned {
-            self.focus(window, cx);
-        } else {
+        // The Directory Picker handed off without restoring focus, so focus returns to the
+        // Workspace on every outcome, before an error alert that restores it on dismissal.
+        self.focus(window, cx);
+        if pinned == Some(false) {
             Self::show_pin_error(window, cx);
         }
         cx.notify();
