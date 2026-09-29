@@ -36,6 +36,8 @@ const CURRENT_PREVIEW_WIDTH: f32 = 272.0;
 const SLOT_PREVIEW_WIDTH: f32 = 216.0;
 /// The width of the preview leading each row of the installed themes.
 const ROW_PREVIEW_WIDTH: f32 = 64.0;
+/// The width of a row's Use button, wider than its label so the target is easy to hit.
+const USE_BUTTON_WIDTH: f32 = 60.0;
 /// The space between a selected preview and the ring around it.
 const RING_GAP: f32 = 3.0;
 const RING_WIDTH: f32 = 2.0;
@@ -433,9 +435,10 @@ impl SettingsWindow {
             let owner = cx.weak_entity();
             let id = summary.id.clone();
             let use_selector = format!("{selector}-use");
-            spaceterm_ui::Button::new(SharedString::from(use_selector.clone()), "Use")
+            let button = spaceterm_ui::Button::new(SharedString::from(use_selector.clone()), "Use")
                 .variant(spaceterm_ui::ButtonVariant::Outline)
                 .size(spaceterm_ui::ButtonSize::Small)
+                .full_width(true)
                 .disabled(!editable)
                 .tab_stop(true)
                 .debug_selector(use_selector)
@@ -443,7 +446,11 @@ impl SettingsWindow {
                     let _ = owner.update(cx, |settings, cx| {
                         settings.set_theme(slot, id.clone(), cx);
                     });
-                })
+                });
+            div()
+                .flex_none()
+                .w(appearance.spacing(USE_BUTTON_WIDTH))
+                .child(button)
                 .into_any_element()
         };
         let remove = (!summary.builtin).then(|| {
