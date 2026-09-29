@@ -1341,6 +1341,12 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
+    /// Controls whether the menu segment can open, independently of the primary command.
+    pub fn menu_disabled(mut self, disabled: bool) -> Self {
+        self.menu.disabled = disabled;
+        self
+    }
+
     /// Controls whether keyboard traversal may stop on the primary segment.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.button = self.button.tab_stop(tab_stop);

@@ -1154,6 +1154,7 @@ impl DirectoryPicker {
     fn confirm_action(&self) -> CommandPalettePrimaryAction {
         let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open")
             .disabled(!self.can_confirm())
+            .menu_disabled(self.busy.is_some())
             .debug_selector(CONFIRM_ACTION);
         match &self.system_selection {
             Some(label) => action.menu_item(SYSTEM_SELECTION_ACTION, label.clone()),

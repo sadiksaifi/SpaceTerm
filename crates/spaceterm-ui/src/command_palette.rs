@@ -634,6 +634,7 @@ pub struct CommandPalettePrimaryAction {
     label: SharedString,
     disabled: bool,
     menu_items: Vec<(SharedString, SharedString)>,
+    menu_disabled: bool,
     debug_selector: Option<String>,
 }
 
@@ -645,6 +646,7 @@ impl CommandPalettePrimaryAction {
             label: label.into(),
             disabled: false,
             menu_items: Vec::new(),
+            menu_disabled: false,
             debug_selector: None,
         }
     }
@@ -665,25 +667,16 @@ impl CommandPalettePrimaryAction {
         self
     }
 
+    /// Controls whether the action's menu can open, independently of the action itself.
+    pub fn menu_disabled(mut self, disabled: bool) -> Self {
+        self.menu_disabled = disabled;
+        self
+    }
+
     /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
-    }
-
-    /// Returns the caller-owned identity reported on activation.
-    pub fn id(&self) -> &SharedString {
-        &self.id
-    }
-
-    /// Returns the button label.
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Returns whether the action can activate.
-    pub fn is_disabled(&self) -> bool {
-        self.disabled
     }
 }
 
@@ -3725,6 +3718,7 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     .variant(ButtonVariant::Primary)
     .size(ButtonSize::Small)
     .disabled(action.disabled)
+    .menu_disabled(action.menu_disabled)
     .tab_stop(true)
     .placement(MenuPlacementConfig::new(
         MenuPlacement::Bottom,

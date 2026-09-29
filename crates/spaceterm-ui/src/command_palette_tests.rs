@@ -1422,7 +1422,7 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
             Some(
                 CommandPalettePrimaryAction::new("pin", "Pin")
                     .debug_selector("primary-pin")
-                    .menu_item("choose", "Choose in Finder…"),
+                    .menu_item("choose", "Choose Directory…"),
             ),
             cx,
         );
@@ -1464,6 +1464,34 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
 
     assert_eq!(header_actions(&events), vec![SharedString::from("choose")]);
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn a_disabled_primary_action_menu_should_not_open(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .menu_item("choose", "Choose Directory\u{2026}")
+                    .menu_disabled(true),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let menu = cx
+        .debug_bounds("primary-open-menu")
+        .expect("the menu segment was not rendered");
+    cx.simulate_click(menu.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("command-palette-primary-menu-choose")
+            .is_none(),
+        "a disabled menu opened"
+    );
 }
 
 #[gpui::test]
