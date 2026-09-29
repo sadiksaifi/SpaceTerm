@@ -133,7 +133,6 @@ lucide_sources! {
     Cog => "cog",
     Columns2 => "columns-2",
     Copy => "copy",
-    CornerLeftUp => "corner-left-up",
     Download => "download",
     Ellipsis => "ellipsis",
     ExternalLink => "external-link",
@@ -168,6 +167,7 @@ lucide_sources! {
     Trash2 => "trash-2",
     TriangleAlert => "triangle-alert",
     Type => "type",
+    Undo2 => "undo-2",
     X => "x",
 }
 

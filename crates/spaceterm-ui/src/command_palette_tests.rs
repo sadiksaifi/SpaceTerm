@@ -128,19 +128,45 @@ fn presented_results_should_separate_an_untitled_group_without_a_heading() {
         &[
             PaletteRow::Item {
                 position: 0,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
             PaletteRow::Separator,
             PaletteRow::Item {
                 position: 1,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
             PaletteRow::Item {
                 position: 2,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
         ]
     );
+}
+
+#[test]
+fn a_compact_item_should_take_half_a_single_line_row() {
+    let items = vec![
+        CommandPaletteItem::new(1, "..").compact(),
+        CommandPaletteItem::new(2, "Documents"),
+    ];
+    let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Caller);
+    let results = PresentedResults::new(&items, &matches, None);
+    let metrics = CommandPaletteMetrics::new(px(420.0), px(40.0)).single_line_row_height(px(28.0));
+
+    assert_eq!(
+        results.rows(),
+        &[
+            PaletteRow::Item {
+                position: 0,
+                size: ItemRowSize::Compact
+            },
+            PaletteRow::Item {
+                position: 1,
+                size: ItemRowSize::SingleLine
+            },
+        ]
+    );
+    assert_eq!(results.rows()[0].height(metrics), px(14.0));
 }
 
 #[test]
@@ -154,25 +180,25 @@ fn presented_results_should_own_section_order_and_match_mapping() {
                 PaletteRow::Section("Recent".into()),
                 PaletteRow::Item {
                     position: 0,
-                    single_line: true
+                    size: ItemRowSize::SingleLine
                 },
                 PaletteRow::Item {
                     position: 1,
-                    single_line: true
+                    size: ItemRowSize::SingleLine
                 },
                 PaletteRow::Separator,
                 PaletteRow::Section("All".into()),
                 PaletteRow::Item {
                     position: 2,
-                    single_line: true
+                    size: ItemRowSize::SingleLine
                 },
                 PaletteRow::Item {
                     position: 3,
-                    single_line: true
+                    size: ItemRowSize::SingleLine
                 },
                 PaletteRow::Item {
                     position: 4,
-                    single_line: true
+                    size: ItemRowSize::SingleLine
                 },
             ][..],
             Some(5),
@@ -196,16 +222,16 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
             PaletteRow::Section("SSH Config Warning".into()),
             PaletteRow::Item {
                 position: 0,
-                single_line: true,
+                size: ItemRowSize::SingleLine,
             },
             PaletteRow::Separator,
             PaletteRow::Item {
                 position: 1,
-                single_line: true,
+                size: ItemRowSize::SingleLine,
             },
             PaletteRow::Item {
                 position: 2,
-                single_line: true,
+                size: ItemRowSize::SingleLine,
             },
         ]
     );
@@ -1627,17 +1653,17 @@ fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
             PaletteRow::Section("Recent".into()),
             PaletteRow::Item {
                 position: 0,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
             PaletteRow::Item {
                 position: 1,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
             PaletteRow::Separator,
             PaletteRow::Section("All".into()),
             PaletteRow::Item {
                 position: 2,
-                single_line: true
+                size: ItemRowSize::SingleLine
             },
         ]
     );

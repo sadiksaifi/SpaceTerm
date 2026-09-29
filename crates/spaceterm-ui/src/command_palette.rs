@@ -821,6 +821,7 @@ pub struct CommandPaletteItem<I> {
     description: Option<SharedString>,
     section: Option<SharedString>,
     group: Option<SharedString>,
+    compact: bool,
     keywords: Vec<SharedString>,
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
@@ -859,6 +860,7 @@ impl<I> CommandPaletteItem<I> {
             description: None,
             section: None,
             group: None,
+            compact: false,
             keywords: Vec::new(),
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
@@ -889,6 +891,13 @@ impl<I> CommandPaletteItem<I> {
     /// Like sections, groups follow provider order and apply within one section.
     pub fn group(mut self, value: impl Into<SharedString>) -> Self {
         self.group = Some(value.into());
+        self
+    }
+
+    /// Presents this item at half the single-line row height, for a navigation row such as one
+    /// that opens an enclosing directory. A compact item shows no description.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 
@@ -1586,8 +1595,18 @@ mod presented_results {
     pub(super) enum PaletteRow {
         Section(SharedString),
         Separator,
-        Item { position: usize, single_line: bool },
+        Item { position: usize, size: ItemRowSize },
         Note(SharedString),
+    }
+
+    /// How tall one item row is.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum ItemRowSize {
+        /// Half a single-line row, for a navigation row that yields space to the results.
+        Compact,
+        SingleLine,
+        /// A label with its description below.
+        TwoLine,
     }
 
     impl PaletteRow {
@@ -1596,10 +1615,18 @@ mod presented_results {
                 Self::Section(_) => metrics.section_height,
                 Self::Separator => metrics.separator_height,
                 Self::Item {
-                    single_line: true, ..
+                    size: ItemRowSize::Compact,
+                    ..
+                } => metrics.single_line_row_height / 2.0,
+                Self::Item {
+                    size: ItemRowSize::SingleLine,
+                    ..
                 }
                 | Self::Note(_) => metrics.single_line_row_height,
-                Self::Item { .. } => metrics.row_height,
+                Self::Item {
+                    size: ItemRowSize::TwoLine,
+                    ..
+                } => metrics.row_height,
             }
         }
 
@@ -1645,7 +1672,13 @@ mod presented_results {
                 started = true;
                 rows.push(PaletteRow::Item {
                     position,
-                    single_line: item.description.is_none(),
+                    size: if item.compact {
+                        ItemRowSize::Compact
+                    } else if item.description.is_none() {
+                        ItemRowSize::SingleLine
+                    } else {
+                        ItemRowSize::TwoLine
+                    },
                 });
             }
             if started && let Some(note) = note {
@@ -1794,6 +1827,8 @@ mod presented_results {
     }
 }
 
+#[cfg(test)]
+use presented_results::ItemRowSize;
 use presented_results::{PaletteRow, PresentedResults};
 
 impl<I: Clone + Eq + 'static> EventEmitter<CommandPaletteEvent<I>> for CommandPalette<I> {}
@@ -3933,22 +3968,25 @@ fn render_row<I: Clone + Eq + 'static>(
         .justify_center()
         .gap(metrics.row_line_gap)
         .child(label_line)
-        .when_some(item.description.clone(), |text, description| {
-            text.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .line_height(metrics.secondary_line_height)
-                    .child(highlighted_text(
-                        description,
-                        description_highlights,
-                        secondary,
-                        match_foreground,
-                        metrics.secondary_size,
-                    )),
-            )
-        });
+        .when_some(
+            item.description.clone().filter(|_| !item.compact),
+            |text, description| {
+                text.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .line_height(metrics.secondary_line_height)
+                        .child(highlighted_text(
+                            description,
+                            description_highlights,
+                            secondary,
+                            match_foreground,
+                            metrics.secondary_size,
+                        )),
+                )
+            },
+        );
     row = row.child(text);
 
     if !item.disabled {

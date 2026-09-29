@@ -1384,8 +1384,9 @@ fn enclosing_directory_item(
         "..",
     )
     .group(ENCLOSING_ROW)
+    .compact()
     .leading_icon(|foreground, size| {
-        Icon::new(IconName::CornerLeftUp, size, foreground).into_any_element()
+        Icon::new(IconName::Undo2, size, foreground).into_any_element()
     })
     .debug_selector(ENCLOSING_ROW)
 }
@@ -1906,6 +1907,11 @@ mod tests {
             .debug_bounds("directory-picker-row-SpaceTerm")
             .expect("the child row should be rendered");
         assert!(enclosing.bottom() <= child.top());
+        assert_eq!(
+            enclosing.size.height,
+            child.size.height / 2.0,
+            "the enclosing row should be half a directory row"
+        );
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
             Some(DirectoryPickerItemId::Child { .. })
