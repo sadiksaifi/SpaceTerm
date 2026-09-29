@@ -53,7 +53,7 @@ pub(super) enum ExtensionAction {
     Installing,
     /// Installed at an older version.
     Update,
-    /// At least one theme remains at the listed version; reinstalling restores removed themes.
+    /// Installed at the listed version, so the row offers removal instead.
     Installed,
 }
 
@@ -215,6 +215,38 @@ impl ThemeStore {
             }
         };
         self.status = Some(message);
+        cx.notify();
+    }
+
+    /// Removes every theme the extension installed. The sheet cannot stack a confirmation, and Get
+    /// sits in the same place to restore them.
+    fn remove(&mut self, extension: &RegistryExtension, cx: &mut Context<Self>) {
+        if !self.editable(cx) {
+            return;
+        }
+        let removed = self.owner.update(cx, |settings, cx| {
+            let ids = settings
+                .editor
+                .theme_summaries()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|summary| {
+                    summary
+                        .package
+                        .as_ref()
+                        .is_some_and(|package| package.id == extension.id)
+                })
+                .map(|summary| summary.id)
+                .collect::<Vec<_>>();
+            settings
+                .remove_installed_themes(&ids, cx)
+                .then_some(ids.len())
+        });
+        self.status = Some(match removed {
+            Ok(Some(1)) => format!("Removed 1 theme from {}.", extension.name).into(),
+            Ok(Some(count)) => format!("Removed {count} themes from {}.", extension.name).into(),
+            _ => SharedString::from("Those themes could not be removed."),
+        });
         cx.notify();
     }
 
@@ -482,6 +514,20 @@ fn render_extension_row(
     }
     byline.push(download_count(extension.downloads));
     let selector = format!("settings-zed-extension-action-{}", extension.id);
+    let remove = || {
+        let store = cx.weak_entity();
+        let target = extension.clone();
+        let selector = format!("settings-zed-extension-remove-{}", extension.id);
+        spaceterm_ui::Button::new(SharedString::from(selector.clone()), "Remove")
+            .variant(spaceterm_ui::ButtonVariant::Outline)
+            .size(spaceterm_ui::ButtonSize::Small)
+            .disabled(!editable)
+            .tab_stop(true)
+            .debug_selector(selector)
+            .on_activate(move |_, _, cx| {
+                let _ = store.update(cx, |store, cx| store.remove(&target, cx));
+            })
+    };
     let button = |label: &'static str| {
         let store = cx.weak_entity();
         let target = extension.clone();
@@ -506,23 +552,30 @@ fn render_extension_row(
         .size(ProgressSize::Compact)
         .into_any_element(),
         ExtensionAction::Installed => div()
-            .debug_selector({
-                let selector = format!("settings-zed-extension-installed-{}", extension.id);
-                move || selector
-            })
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(4.0))
-            .text_color(gpui_color(colors.text_secondary))
-            .chrome_text(appearance.typography.style(TextRole::Secondary))
-            .child(Icon::new(
-                IconName::Check,
-                appearance.icons.metrics(IconRole::Caption).glyph_size,
-                gpui_color(colors.text_secondary),
-            ))
-            .child("Installed")
-            .child(button("Reinstall"))
+            .gap(appearance.spacing(10.0))
+            .child(
+                div()
+                    .debug_selector({
+                        let selector = format!("settings-zed-extension-installed-{}", extension.id);
+                        move || selector
+                    })
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(appearance.spacing(4.0))
+                    .text_color(gpui_color(colors.text_secondary))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .child(Icon::new(
+                        IconName::Check,
+                        appearance.icons.metrics(IconRole::Caption).glyph_size,
+                        gpui_color(colors.text_secondary),
+                    ))
+                    .child("Installed"),
+            )
+            .child(remove())
             .into_any_element(),
     };
     let row_selector = format!("settings-zed-extension-{}", extension.id);

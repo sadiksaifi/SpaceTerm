@@ -2994,11 +2994,15 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     );
     assert!(
         cx.debug_bounds("settings-zed-extension-action-sample-themes")
-            .is_some(),
-        "the listed version can be reinstalled"
+            .is_none(),
+        "the listed version is already installed"
     );
     assert!(
         cx.debug_bounds("settings-zed-extension-installed-sample-themes")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-zed-extension-remove-sample-themes")
             .is_some()
     );
 
@@ -3011,6 +3015,44 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
             "https://api.zed.dev/extensions/sample-themes/1.0.0/download"
         ],
         "reopening the sheet reuses the listing"
+    );
+}
+
+/// Remove in Get More Themes removes every theme the extension installed at once, because the
+/// sheet cannot stack a confirmation, and offers Get again. A slot that used one of them returns
+/// to its built-in theme.
+#[gpui::test]
+fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
+    select_section(SettingsSectionId::Themes, cx);
+    open_theme_store(&window, cx);
+    click("settings-zed-extension-action-sample-themes", cx);
+    let selected = document_of(&window, cx)
+        .terminal_themes
+        .iter()
+        .find(|theme| theme.name == "Sample Dark")
+        .map(|theme| theme.id.clone())
+        .expect("the dark theme is installed");
+    window.update(cx, |settings, cx| {
+        settings.set_theme(Appearance::Dark, selected, cx);
+    });
+    cx.run_until_parked();
+
+    click("settings-zed-extension-remove-sample-themes", cx);
+
+    let document = document_of(&window, cx);
+    assert!(document.terminal_themes.is_empty());
+    assert_eq!(
+        document.preferences.terminal.themes.dark,
+        SettingsDocument::default().preferences.terminal.themes.dark
+    );
+    assert_eq!(
+        store_status(&window, cx).as_deref(),
+        Some("Removed 2 themes from Sample Themes.")
+    );
+    assert!(
+        cx.debug_bounds("settings-zed-extension-action-sample-themes")
+            .is_some()
     );
 }
 
