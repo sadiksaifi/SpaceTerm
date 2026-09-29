@@ -8,6 +8,7 @@ use spaceterm_ui::{
     CommandPaletteCloseReason,
     CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
     CommandPaletteMatching, CommandPalettePrimaryAction, CommandPaletteReplacementFocus,
+    CommandPaletteScope,
     FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
     fuzzy_filter,
 };
@@ -447,13 +448,19 @@ pub(super) struct RemoteDirectoryPicker {
 impl EventEmitter<RemoteDirectoryPickerEvent> for RemoteDirectoryPicker {}
 
 impl RemoteDirectoryPicker {
+    /// Creates a closed picker for the machine `host` names.
     pub(super) fn new(
         provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
+        host: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let scope = CommandPaletteScope::new(host.to_owned()).leading_icon(|tint, size| {
+            Icon::new(IconName::Server, size, tint).into_any_element()
+        });
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
+            palette.set_query_scope(Some(scope), cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
@@ -1558,7 +1565,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, window, cx));
+            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
             cx.subscribe(
                 &picker,
                 move |_, _, event: &RemoteDirectoryPickerEvent, _| {
@@ -1927,7 +1934,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, window, cx));
+            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
             RemoteDirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());

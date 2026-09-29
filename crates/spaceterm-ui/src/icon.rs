@@ -156,6 +156,7 @@ lucide_sources! {
     RotateCw => "rotate-cw",
     Rows2 => "rows-2",
     Search => "search",
+    Server => "server",
     Shield => "shield",
     Square => "square",
     SquareCheckBig => "square-check-big",

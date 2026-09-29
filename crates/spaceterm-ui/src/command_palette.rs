@@ -620,6 +620,31 @@ impl CommandPaletteAction {
     }
 }
 
+/// A fixed label presented before the query, naming what the query is scoped to.
+///
+/// The label is not part of the editable query, so editing never changes or removes it.
+#[derive(Clone)]
+pub struct CommandPaletteScope {
+    label: SharedString,
+    leading_icon: Option<IconBuilder>,
+}
+
+impl CommandPaletteScope {
+    /// Creates a scope label. The label is also its logical accessibility name.
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            leading_icon: None,
+        }
+    }
+
+    /// Adds an icon built with the resolved label foreground color and live size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
+        self.leading_icon = Some(Rc::new(build));
+        self
+    }
+}
+
 /// The search line's primary command, presented as a labeled button at its trailing edge.
 ///
 /// The confirm key activates it while it is enabled, and so does Return while no result is
@@ -1489,6 +1514,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
     leading_action: Option<CommandPaletteAction>,
+    query_scope: Option<CommandPaletteScope>,
     header_actions: Vec<CommandPaletteAction>,
     primary_action: Option<CommandPalettePrimaryAction>,
     matching: CommandPaletteMatching,
@@ -1898,6 +1924,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             leading_columns,
             input_leading_icon: None,
             leading_action: None,
+            query_scope: None,
             header_actions: Vec::new(),
             primary_action: None,
             matching: CommandPaletteMatching::Semantic,
@@ -2008,6 +2035,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.leading_action = action;
+        cx.notify();
+    }
+
+    /// Replaces the fixed label presented before the query.
+    pub fn set_query_scope(
+        &mut self,
+        scope: Option<CommandPaletteScope>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.query_scope = scope;
         cx.notify();
     }
 
@@ -3383,6 +3420,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         .child(icon(theme.paint.muted, metrics.input_icon_size)),
                 )
             })
+            .when_some(self.query_scope.as_ref(), |editor, scope| {
+                editor.child(render_query_scope(scope, theme))
+            })
             .child(div().min_w_0().flex_1().child(self.input.clone()))
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
@@ -3600,6 +3640,37 @@ fn search_line_icon_button<I: Clone + Eq + 'static>(
         button = button.debug_selector(selector);
     }
     button
+}
+
+/// Renders the query scope as a quiet capsule that reads as part of the search line.
+fn render_query_scope(scope: &CommandPaletteScope, theme: CommandPaletteTheme) -> AnyElement {
+    let metrics = theme.metrics;
+    let paint = theme.paint;
+    div()
+        .debug_selector(|| "command-palette-scope".to_owned())
+        .flex_shrink_0()
+        .max_w(gpui::relative(0.4))
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(metrics.accessory_padding)
+        .px(metrics.accessory_padding * 2.0)
+        .py(metrics.accessory_line_padding)
+        .rounded_full()
+        .bg(theme.shell.divider())
+        .text_size(metrics.label_size)
+        .line_height(metrics.body_line_height)
+        .text_color(paint.foreground)
+        .when_some(scope.leading_icon.as_ref(), |label, icon| {
+            label.child(
+                div()
+                    .flex_shrink_0()
+                    .child(icon(paint.muted, metrics.icon_size)),
+            )
+        })
+        .child(div().min_w_0().truncate().child(scope.label.clone()))
+        .into_any_element()
 }
 
 /// Renders the search line's primary command as a prominent capsule at its trailing edge.

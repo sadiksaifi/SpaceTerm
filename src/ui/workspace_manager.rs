@@ -1059,6 +1059,13 @@ impl WorkspaceManager {
         let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
             return;
         };
+        let Some(WorkspaceLocation::Remote { key, .. }) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.location())
+        else {
+            return;
+        };
         let Some(session) = runtime.session.as_ref() else {
             Self::show_pin_error(window, cx);
             return;
@@ -1066,7 +1073,8 @@ impl WorkspaceManager {
         let generation = runtime.generation;
         let operation = self.pin_operation;
         let provider = session.provider();
-        let picker = cx.new(|cx| RemoteDirectoryPicker::new(provider, window, cx));
+        let host = key.destination().host().to_owned();
+        let picker = cx.new(|cx| RemoteDirectoryPicker::new(provider, &host, window, cx));
         cx.subscribe_in(
             &picker,
             window,
@@ -3140,14 +3148,9 @@ impl WorkspaceManager {
                     path: path.into(),
                     machine: match workspace.location() {
                         WorkspaceLocation::Local => None,
-                        WorkspaceLocation::Remote { key, .. } => Some(
-                            key.destination()
-                                .as_str()
-                                .rsplit_once('@')
-                                .map_or(key.destination().as_str(), |(_, host)| host)
-                                .to_owned()
-                                .into(),
-                        ),
+                        WorkspaceLocation::Remote { key, .. } => {
+                            Some(key.destination().host().to_owned().into())
+                        }
                     },
                     tooltip: tooltip.into(),
                     pinned: workspace.pinned_directory().is_some(),
