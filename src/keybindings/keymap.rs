@@ -4,7 +4,10 @@ use crate::platform::keyboard_layout::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use gpui::{DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex};
+use gpui::{
+    KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, KeybindingKeystroke, Keystroke,
+    PlatformKeyboardMapper,
+};
 use thiserror::Error;
 
 use super::{Command, KeybindingPreferences, Shortcut, ShortcutRejection, TerminalConvention};
@@ -441,8 +444,22 @@ fn binding(command: Command, shortcut: &Shortcut, context: Option<&str>) -> KeyB
         predicate,
         false,
         None,
-        &DummyKeyboardMapper,
+        &ResolvedShortcutMapper(shortcut),
     )
     .expect("Shortcut guarantees GPUI-parseable spelling")
     .with_meta(CUSTOMIZABLE_BINDINGS)
+}
+
+// GPUI parses uppercase ASCII as Shift + lowercase. A native layout can instead produce
+// uppercase ASCII with Shift consumed, so restore the resolved identity at its mapping seam.
+struct ResolvedShortcutMapper<'a>(&'a Shortcut);
+
+impl PlatformKeyboardMapper for ResolvedShortcutMapper<'_> {
+    fn map_key_equivalent(&self, _: Keystroke, _: bool) -> KeybindingKeystroke {
+        KeybindingKeystroke::from_keystroke(self.0.to_keystroke())
+    }
+
+    fn get_key_equivalents(&self) -> Option<&rustc_hash::FxHashMap<char, char>> {
+        None
+    }
 }

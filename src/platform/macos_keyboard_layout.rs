@@ -221,27 +221,36 @@ pub(crate) mod tests {
                 KeybindingState::Blocked(SystemReservation::Screenshot)
             );
         }
-        let norwegian = layout("com.apple.keylayout.Norwegian");
-        let profile = crate::desktop_profile::default_keymap::profile(
-            Rc::new(norwegian),
-            super::super::macos_reserved_shortcuts::shortcuts(),
-        )
-        .unwrap();
-        let preferences: KeybindingPreferences =
-            serde_json::from_str(r#"{"new_workspace":"shift-cmd-7"}"#).unwrap();
-        let native = gpui::Keystroke::parse("cmd-/").unwrap();
-        assert!(
-            profile
-                .resolve(&preferences)
-                .key_bindings()
-                .iter()
-                .any(|binding| {
-                    binding
-                        .action()
-                        .partial_eq(Command::NewWorkspace.action().as_ref())
-                        && native.should_match(&binding.keystrokes()[0])
-                })
-        );
+        for (id, source, key) in [
+            ("com.apple.keylayout.Norwegian", "shift-cmd-7", "/"),
+            ("com.apple.keylayout.Turkish-QWERTY-PC", "shift-cmd-ı", "I"),
+        ] {
+            let profile = crate::desktop_profile::default_keymap::profile(
+                Rc::new(layout(id)),
+                super::super::macos_reserved_shortcuts::shortcuts(),
+            )
+            .unwrap();
+            let preferences: KeybindingPreferences =
+                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+            let native = gpui::Keystroke {
+                modifiers: gpui::Modifiers::command(),
+                key: key.into(),
+                key_char: None,
+            };
+            assert!(
+                profile
+                    .resolve(&preferences)
+                    .key_bindings()
+                    .iter()
+                    .any(|binding| {
+                        binding
+                            .action()
+                            .partial_eq(Command::NewWorkspace.action().as_ref())
+                            && native.should_match(&binding.keystrokes()[0])
+                    }),
+                "{id}"
+            );
+        }
         assert_eq!(
             Shortcut::parse("shift-cmd-k")
                 .unwrap()

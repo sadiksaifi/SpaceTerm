@@ -800,3 +800,36 @@ fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
         Some(Command::CloseTab)
     );
 }
+
+#[test]
+fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
+    let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
+    layout.insert(true, "ı", "I");
+    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let prefs = preferences(r#"{"new_workspace":"shift-cmd-ı","create_tab":"shift-cmd-i"}"#);
+    let resolved = profile.resolve(&prefs);
+    let native = gpui::Keystroke {
+        modifiers: gpui::Modifiers::command(),
+        key: "I".into(),
+        key_char: None,
+    };
+    let other = gpui::Keystroke::parse("shift-cmd-i").unwrap();
+    for (command, matches, excludes) in [
+        (Command::NewWorkspace, &native, &other),
+        (Command::CreateTab, &other, &native),
+    ] {
+        let bindings = resolved.key_bindings();
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.action().partial_eq(command.action().as_ref()))
+            .unwrap();
+        assert!(
+            matches.should_match(&binding.keystrokes()[0]),
+            "{command:?}"
+        );
+        assert!(
+            !excludes.should_match(&binding.keystrokes()[0]),
+            "{command:?}"
+        );
+    }
+}

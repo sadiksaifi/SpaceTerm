@@ -138,7 +138,6 @@ impl Shortcut {
         resolved
     }
 
-    #[cfg(test)]
     pub fn to_keystroke(&self) -> Keystroke {
         Keystroke {
             modifiers: self.modifiers,
