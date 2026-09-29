@@ -406,8 +406,8 @@ fn help_menu() -> Menu {
         name: "Help".into(),
         items: vec![
             MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
-            MenuItem::action(RELEASE_NOTES_TITLE, OpenReleaseNotes),
             MenuItem::separator(),
+            MenuItem::action(RELEASE_NOTES_TITLE, OpenReleaseNotes),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
         ],
     }
@@ -906,8 +906,8 @@ mod tests {
                     .to_vec(),
                 [
                     "SpaceTerm Help",
-                    "Release Notes",
                     "|",
+                    "Release Notes",
                     "Export Terminal Diagnostics…"
                 ]
                 .map(str::to_owned)
