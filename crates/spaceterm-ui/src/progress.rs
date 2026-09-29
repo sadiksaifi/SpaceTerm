@@ -936,10 +936,27 @@ fn paint_ring_trail(
     window: &mut Window,
 ) {
     let stroke = shaded(paint, RING_TRAIL_OPACITY);
-    for layer in 0..RING_TRAIL_STROKES {
-        let sweep = RING_TRAIL_SWEEP * (1.0 - layer as f32 / RING_TRAIL_STROKES as f32);
-        paint_ring_arc(bounds, thickness, stroke, head - sweep, sweep, window);
+    for (start, sweep) in ring_trail_strokes(head) {
+        paint_ring_arc(bounds, thickness, stroke, start, sweep, window);
     }
+}
+
+/// Returns each trail stroke's start and sweep in turns, longest first, all ending at `head`.
+pub(crate) fn ring_trail_strokes(head: f32) -> impl Iterator<Item = (f32, f32)> {
+    (0..RING_TRAIL_STROKES).map(move |layer| {
+        let sweep = RING_TRAIL_SWEEP * (1.0 - layer as f32 / RING_TRAIL_STROKES as f32);
+        (head - sweep, sweep)
+    })
+}
+
+/// Returns the trail's opacity `behind` turns back from its leading end, as a share of the
+/// indicator's own opacity.
+#[cfg(test)]
+pub(crate) fn ring_trail_opacity(behind: f32) -> f32 {
+    let covering = ring_trail_strokes(0.0)
+        .filter(|(start, _)| -start > behind)
+        .count();
+    1.0 - (1.0 - RING_TRAIL_OPACITY).powi(covering as i32)
 }
 
 /// Paints one arc as a single stroked path.
