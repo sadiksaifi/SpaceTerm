@@ -446,9 +446,6 @@ impl SettingsWindow {
                 })
                 .into_any_element()
         };
-        let removal_width = cx
-            .global::<spaceterm_ui::ButtonTheme>()
-            .icon_button_size(spaceterm_ui::ButtonSize::Small);
         let remove = (!summary.builtin).then(|| {
             let owner = cx.weak_entity();
             let target = summary.clone();
@@ -520,16 +517,7 @@ impl SettingsWindow {
                     .items_center()
                     .gap(appearance.spacing(6.0))
                     .child(action)
-                    // A built-in theme keeps the removal's place empty, so Use and In Use end on
-                    // one edge down the list.
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .w(removal_width)
-                            .children(remove),
-                    ),
+                    .children(remove),
             )
             .into_any_element()
     }
