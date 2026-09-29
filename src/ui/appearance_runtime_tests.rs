@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceMode, ThemeId, SettingsDocument};
+use crate::appearance::{Appearance, AppearanceMode, SettingsDocument};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
@@ -642,30 +642,6 @@ fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut
     assert_eq!(platform.applied.borrow().last(), Some(&Appearance::Dark));
     // The forced application appearance never changes the captured Operating-System fact.
     assert_eq!(platform.system_appearance(), Some(Appearance::Light));
-}
-
-#[gpui::test]
-fn identical_effective_colors_still_publish_requested_fallback_and_diagnostics(
-    cx: &mut TestAppContext,
-) {
-    let (settings, _) = start(cx);
-    let token = settings.begin_preview(0).unwrap();
-    let mut candidate = SettingsDocument::default();
-    candidate.preferences.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
-    settings.update_preview(&token, candidate).unwrap();
-    cx.run_until_parked();
-    cx.update(|cx| {
-        let resolved = current(cx);
-        assert_eq!(
-            resolved.terminal.requested_theme.as_str(),
-            "custom.missing"
-        );
-        assert_eq!(
-            resolved.terminal.effective_theme.as_str(),
-            "builtin.spaceterm.dark"
-        );
-        assert!(!resolved.diagnostics.is_empty());
-    });
 }
 
 #[gpui::test]

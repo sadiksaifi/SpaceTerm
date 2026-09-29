@@ -1481,7 +1481,7 @@ impl SettingsWindow {
             }
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
-            SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, window, cx),
+            SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),

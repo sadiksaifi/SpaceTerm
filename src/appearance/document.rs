@@ -57,6 +57,19 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Returns each Terminal Theme slot that names an uninstalled theme to the built-in theme for
+    /// its appearance, so every selection names a theme terminal panes can draw.
+    pub(crate) fn select_builtin_for_missing_themes(&mut self) {
+        let Ok(catalog) = ThemeCatalog::from_terminal_themes(&self.terminal_themes) else {
+            return;
+        };
+        for slot in [Appearance::Light, Appearance::Dark] {
+            if catalog.get(self.preferences.terminal.themes.get(slot)).is_none() {
+                self.preferences.reset(ResetTarget::TerminalTheme(slot));
+            }
+        }
+    }
+
     pub(crate) fn reset(&mut self, target: ResetTarget) -> Result<(), SettingsDocumentError> {
         let mut candidate = self.clone();
         candidate.preferences.reset(target);
@@ -91,8 +104,7 @@ fn validate_selection(
         (&slots.dark, Appearance::Dark),
     ];
     for (id, expected) in selections {
-        let same = catalog.get(id).map(|theme| theme.appearance);
-        if same.is_some_and(|actual| actual != expected) {
+        if catalog.get(id).map(|theme| theme.appearance) != Some(expected) {
             return Err(SettingsDocumentError::InvalidPreferences);
         }
     }
@@ -101,8 +113,9 @@ fn validate_selection(
 
 pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
     preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
-    let document: SettingsDocument =
+    let mut document: SettingsDocument =
         serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
+    document.select_builtin_for_missing_themes();
     document.validate()?;
     Ok(document)
 }

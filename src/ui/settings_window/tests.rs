@@ -95,14 +95,12 @@ fn open_settings_with_capabilities(
     )
 }
 
-fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
-    let position = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("{selector} was not rendered"))
-        .center();
-    cx.simulate_mouse_move(position, None, Modifiers::none());
-    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
-    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+/// Presses and releases Return, since a focused button activates on release.
+fn press_return(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
     cx.run_until_parked();
 }
 
@@ -496,10 +494,10 @@ fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext
     assert_eq!(document_of(&window, cx).preferences, expected);
 }
 
-/// A tile applies its theme to the slot the gallery shows: the fixed mode's slot, or the slot
-/// selected under Auto. The other slot and the mode stay as they were.
+/// A row's Use button applies its theme to the slot the list shows: the fixed mode's slot, or the
+/// slot selected under Auto. The other slot and the mode stay as they were.
 #[gpui::test]
-fn a_gallery_tile_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
+fn use_applies_a_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
     for (mode, slot) in [
@@ -532,8 +530,15 @@ fn a_gallery_tile_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContex
         let before = document_of(&window, cx).preferences;
         let chosen = builtin_fallback_theme(slot);
         click(
-            leaked_owned(format!("settings-theme-tile-{}", chosen.as_str())),
+            leaked_owned(format!("settings-theme-row-{}-use", chosen.as_str())),
             cx,
+        );
+        assert!(
+            cx.debug_bounds(leaked_owned(format!(
+                "settings-theme-row-{}-in-use",
+                chosen.as_str()
+            )))
+            .is_some()
         );
         let mut expected = before;
         expected.terminal.themes.set(slot, chosen);
@@ -541,7 +546,7 @@ fn a_gallery_tile_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContex
     }
 }
 
-/// The same selection and removal operations remain reachable without a pointer.
+/// The same slot selection, Use, and removal operations remain reachable without a pointer.
 #[gpui::test]
 fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut TestAppContext) {
     let family = br##"{"themes":[{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
@@ -569,9 +574,19 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
         Appearance::Dark
     );
 
-    // The built-in theme leads the gallery, followed by the imported theme.
-    cx.simulate_keystrokes("tab tab enter");
+    // The list's search and Get More Themes lead its rows. The built-in theme is in use, so the
+    // imported theme's Use and removal buttons follow.
+    cx.simulate_keystrokes("tab tab tab tab");
+    press_return(cx);
+    assert!(
+        cx.debug_bounds("modal-action-settings-remove-theme-confirm")
+            .is_some()
+    );
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+
+    cx.simulate_keystrokes("shift-tab");
+    press_return(cx);
     assert_eq!(
         document_of(&settings, cx).preferences.terminal.themes.dark,
         imported
@@ -580,36 +595,23 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
         document_of(&settings, cx).preferences.mode,
         AppearanceMode::Auto
     );
+    assert_eq!(installed_count(&settings, cx), 1);
 
-    cx.simulate_keystrokes("shift-tab space");
-    cx.run_until_parked();
-    assert_eq!(
-        document_of(&settings, cx).preferences.terminal.themes.dark,
-        builtin_fallback_theme(Appearance::Dark)
-    );
-    cx.simulate_keystrokes("tab enter");
-    cx.run_until_parked();
-    assert_eq!(
-        document_of(&settings, cx).preferences.terminal.themes.dark,
-        imported
-    );
-
-    cx.simulate_keystrokes("shift-f10 down enter");
-    cx.run_until_parked();
+    // Use gives way to In Use, so keyboard focus moves on to the same row's removal button.
+    press_return(cx);
     assert!(
         cx.debug_bounds("modal-action-settings-remove-theme-confirm")
             .is_some()
     );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert_eq!(installed_count(&settings, cx), 1);
 }
 
-/// Removing the theme in use asks first, then returns its slot to the built-in theme.
+/// Removing the theme in use asks first, removes every theme its file imported, then returns its
+/// slot to the built-in theme.
 #[gpui::test]
 fn removing_the_theme_in_use_returns_its_slot_to_the_built_in_theme(cx: &mut TestAppContext) {
+    let family = br##"{"name":"Sample","themes":[{"name":"Sample Light","appearance":"light","style":{}},{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
     let mut document = SettingsDocument {
-        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+        terminal_themes: crate::appearance::translate_zed_family(family)
             .expect("fixture Zed family"),
         ..Default::default()
     };
@@ -624,11 +626,10 @@ fn removing_the_theme_in_use_returns_its_slot_to_the_built_in_theme(cx: &mut Tes
     document.preferences.terminal.themes.light = imported.clone();
     let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
-    let tile = leaked_owned(format!("settings-theme-tile-{}", imported.as_str()));
+    let row = leaked_owned(format!("settings-theme-row-{}", imported.as_str()));
 
-    right_click(tile, cx);
     click(
-        leaked_owned(format!("settings-theme-tile-{}-remove", imported.as_str())),
+        leaked_owned(format!("settings-theme-row-{}-remove", imported.as_str())),
         cx,
     );
     assert_eq!(
@@ -639,47 +640,58 @@ fn removing_the_theme_in_use_returns_its_slot_to_the_built_in_theme(cx: &mut Tes
     click("modal-action-settings-remove-theme-confirm", cx);
 
     let after = document_of(&window, cx);
-    assert!(after.terminal_themes.iter().all(|theme| theme.id != imported));
+    assert!(after.terminal_themes.is_empty());
     assert_eq!(
         after.preferences.terminal.themes.light,
-        SettingsDocument::default().preferences.terminal.themes.light
+        SettingsDocument::default()
+            .preferences
+            .terminal
+            .themes
+            .light
     );
-    assert!(cx.debug_bounds(tile).is_none());
+    assert!(cx.debug_bounds(row).is_none());
 }
 
-/// Built-in themes offer only to be used, since there is nothing to remove.
+/// The list always offers search and Get More Themes. Only themes SpaceTerm did not ship offer
+/// Remove.
 #[gpui::test]
-fn a_built_in_tile_offers_no_removal(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    // Choosing another theme leaves the built-in one something to use.
-    window.update(cx, |settings, cx| {
-        settings.set_appearance_mode(AppearanceMode::Dark, cx);
-        settings.set_theme(
-            Appearance::Dark,
-            crate::appearance::ThemeId::new("user.unavailable").unwrap(),
-            cx,
-        );
-    });
+fn only_installed_themes_offer_removal(cx: &mut TestAppContext) {
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    document.preferences.mode = AppearanceMode::Light;
+    let imported = document.terminal_themes[0].id.clone();
+    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
-    let builtin = builtin_fallback_theme(Appearance::Dark);
-    right_click(
-        leaked_owned(format!("settings-theme-tile-{}", builtin.as_str())),
-        cx,
-    );
 
     assert!(
+        cx.debug_bounds("settings-theme-gallery-search-frame")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("settings-get-more-themes").is_some());
+    let builtin = builtin_fallback_theme(Appearance::Light);
+    assert!(
         cx.debug_bounds(leaked_owned(format!(
-            "settings-theme-tile-{}-use",
+            "settings-theme-row-{}",
             builtin.as_str()
         )))
         .is_some()
     );
     assert!(
         cx.debug_bounds(leaked_owned(format!(
-            "settings-theme-tile-{}-remove",
+            "settings-theme-row-{}-remove",
             builtin.as_str()
         )))
         .is_none()
+    );
+    assert!(
+        cx.debug_bounds(leaked_owned(format!(
+            "settings-theme-row-{}-remove",
+            imported.as_str()
+        )))
+        .is_some()
     );
 }
 
@@ -2514,6 +2526,8 @@ fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
 
 // Helpers --------------------------------------------------------------------------------------
 
+/// A family with one light and one dark theme, in that order.
+const PAIRED_FAMILY: &[u8] = br##"{"name":"Paired","themes":[{"name":"Paired Light","appearance":"light","style":{}},{"name":"Paired Dark","appearance":"dark","style":{}}]}"##;
 const IMPORTABLE_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
 fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> SettingsDocument {
@@ -2746,16 +2760,18 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
 
 #[gpui::test]
 fn resetting_theme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
-    let mut document = SettingsDocument::default();
-    document.preferences.terminal.themes.dark =
-        crate::appearance::ThemeId::new("custom.previous.terminal").unwrap();
-    document.preferences.terminal.themes.dark =
-        crate::appearance::ThemeId::new("custom.previous.terminal").unwrap();
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(PAIRED_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    document.preferences.terminal.themes.light = document.terminal_themes[0].id.clone();
+    document.preferences.terminal.themes.dark = document.terminal_themes[1].id.clone();
     let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.editor.reset(
-                crate::appearance::ResetTarget::TerminalTheme(Appearance::Dark),
+                crate::appearance::ResetTarget::TerminalTheme(Appearance::Light),
                 cx,
             );
             settings.editor.reset(
@@ -2770,25 +2786,25 @@ fn resetting_theme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestA
     let preferences = document_of(&window, cx).preferences;
     let defaults = SettingsDocument::default().preferences;
     assert_eq!(preferences.terminal.themes, defaults.terminal.themes);
-    assert_eq!(preferences.terminal.themes, defaults.terminal.themes);
 }
 
 #[gpui::test]
 fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(PAIRED_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    let themes = [
+        document.terminal_themes[0].id.clone(),
+        document.terminal_themes[1].id.clone(),
+    ];
+    let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            for slot in [Appearance::Light, Appearance::Dark] {
-                settings.set_theme(
-                    slot,
-                    crate::appearance::ThemeId::new(
-                        format!("user.saved.{slot:?}").to_ascii_lowercase(),
-                    )
-                    .unwrap(),
-                    cx,
-                );
-            }
+            settings.set_theme(Appearance::Light, themes[0].clone(), cx);
+            settings.set_theme(Appearance::Dark, themes[1].clone(), cx);
         })
     });
     cx.run_until_parked();
@@ -2989,11 +3005,15 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     );
     assert!(
         cx.debug_bounds("settings-zed-extension-action-sample-themes")
-            .is_some(),
-        "the listed version can be reinstalled"
+            .is_none(),
+        "the listed version is already installed"
     );
     assert!(
         cx.debug_bounds("settings-zed-extension-installed-sample-themes")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-zed-extension-remove-sample-themes")
             .is_some()
     );
 
@@ -3009,10 +3029,48 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     );
 }
 
-/// A tile's context menu removes every theme its extension installed. A slot that used one of
-/// them returns to its built-in theme.
+/// Remove in Get More Themes removes every theme the extension installed at once, because the
+/// sheet cannot stack a confirmation, and offers Get again. A slot that used one of them returns
+/// to its built-in theme.
 #[gpui::test]
-fn removing_an_extension_from_a_tile_removes_all_of_its_themes(cx: &mut TestAppContext) {
+fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
+    select_section(SettingsSectionId::Themes, cx);
+    open_theme_store(&window, cx);
+    click("settings-zed-extension-action-sample-themes", cx);
+    let selected = document_of(&window, cx)
+        .terminal_themes
+        .iter()
+        .find(|theme| theme.name == "Sample Dark")
+        .map(|theme| theme.id.clone())
+        .expect("the dark theme is installed");
+    window.update(cx, |settings, cx| {
+        settings.set_theme(Appearance::Dark, selected, cx);
+    });
+    cx.run_until_parked();
+
+    click("settings-zed-extension-remove-sample-themes", cx);
+
+    let document = document_of(&window, cx);
+    assert!(document.terminal_themes.is_empty());
+    assert_eq!(
+        document.preferences.terminal.themes.dark,
+        SettingsDocument::default().preferences.terminal.themes.dark
+    );
+    assert_eq!(
+        store_status(&window, cx).as_deref(),
+        Some("Removed 2 themes from Sample Themes.")
+    );
+    assert!(
+        cx.debug_bounds("settings-zed-extension-action-sample-themes")
+            .is_some()
+    );
+}
+
+/// Removing any theme an extension installed removes every theme it installed, including those
+/// of the other appearance. A slot that used one of them returns to its built-in theme.
+#[gpui::test]
+fn removing_a_theme_removes_every_theme_its_extension_installed(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
     select_section(SettingsSectionId::Themes, cx);
     open_theme_store(&window, cx);
@@ -3030,13 +3088,9 @@ fn removing_an_extension_from_a_tile_removes_all_of_its_themes(cx: &mut TestAppC
     });
     settle(cx);
 
-    let tile = leaked_owned(format!("settings-theme-tile-{}", selected.as_str()));
-    right_click(tile, cx);
+    let row = leaked_owned(format!("settings-theme-row-{}", selected.as_str()));
     click(
-        leaked_owned(format!(
-            "settings-theme-tile-{}-remove-extension",
-            selected.as_str()
-        )),
+        leaked_owned(format!("settings-theme-row-{}-remove", selected.as_str())),
         cx,
     );
     click("modal-action-settings-remove-theme-confirm", cx);
@@ -3047,11 +3101,11 @@ fn removing_an_extension_from_a_tile_removes_all_of_its_themes(cx: &mut TestAppC
         document.preferences.terminal.themes.dark,
         SettingsDocument::default().preferences.terminal.themes.dark
     );
-    assert!(cx.debug_bounds(tile).is_none());
+    assert!(cx.debug_bounds(row).is_none());
 }
 
 #[gpui::test]
-fn reinstalling_an_extension_restores_a_removed_theme_without_changing_selection(
+fn reinstalling_an_extension_restores_its_removed_themes_without_changing_selection(
     cx: &mut TestAppContext,
 ) {
     let transport = sample_registry();
@@ -3061,12 +3115,6 @@ fn reinstalling_an_extension_restores_a_removed_theme_without_changing_selection
     click("settings-zed-extension-action-sample-themes", cx);
     click("modal-action-settings-theme-store-done", cx);
     let themes = document_of(&window, cx).terminal_themes;
-    let dark = themes
-        .iter()
-        .find(|theme| theme.name == "Sample Dark")
-        .unwrap()
-        .id
-        .clone();
     let light = themes
         .iter()
         .find(|theme| theme.name == "Sample Light")
@@ -3074,23 +3122,17 @@ fn reinstalling_an_extension_restores_a_removed_theme_without_changing_selection
         .id
         .clone();
     window.update(cx, |settings, cx| {
-        settings.set_theme(Appearance::Dark, dark.clone(), cx);
         settings.set_appearance_mode(AppearanceMode::Light, cx);
     });
     settle(cx);
 
-    right_click(
-        leaked_owned(format!("settings-theme-tile-{}", light.as_str())),
-        cx,
-    );
     click(
-        leaked_owned(format!("settings-theme-tile-{}-remove", light.as_str())),
+        leaked_owned(format!("settings-theme-row-{}-remove", light.as_str())),
         cx,
     );
     click("modal-action-settings-remove-theme-confirm", cx);
-    assert_eq!(installed_count(&window, cx), 1);
+    assert_eq!(installed_count(&window, cx), 0);
     let preferences = document_of(&window, cx).preferences;
-    assert_eq!(preferences.terminal.themes.dark, dark);
 
     open_theme_store(&window, cx);
     click("settings-zed-extension-action-sample-themes", cx);

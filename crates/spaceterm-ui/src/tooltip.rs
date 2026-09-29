@@ -1275,7 +1275,7 @@ impl Element for TooltipOverlay {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         child_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
@@ -1309,7 +1309,8 @@ impl Element for TooltipOverlay {
             self.metrics.viewport_margin,
             window.mouse_position(),
         );
-        let offset = placed.origin - child_bounds.origin - bounds.origin;
+        // The child's bounds already include the element offset of a scrolled target.
+        let offset = placed.origin - child_bounds.origin;
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
         true
     }
@@ -1476,7 +1477,8 @@ fn clamp_axis_origin(origin: Pixels, length: Pixels, minimum: Pixels, maximum: P
 mod tests {
     use gpui::{
         AppContext as _, Context, Entity, FocusHandle, Modifiers, MouseButton, Render,
-        TestAppContext, VisualTestContext, WindowBounds, WindowOptions, rgba, size,
+        ScrollHandle, StatefulInteractiveElement as _, TestAppContext, VisualTestContext,
+        WindowBounds, WindowOptions, rgba, size,
     };
 
     use super::*;
@@ -1617,6 +1619,7 @@ mod tests {
         disabled: bool,
         target_visibility: TooltipTargetVisibility,
         target_left: Pixels,
+        scroll: ScrollHandle,
         second_target: bool,
         long_detail: bool,
         focus_handle: FocusHandle,
@@ -1635,27 +1638,41 @@ mod tests {
                 .size_full()
                 .track_focus(&self.focus_handle)
                 .when(self.show_target, |root| {
+                    // The target sits in scrolled content, as a control in a scrolled list does.
                     root.child(
-                        div().absolute().left(self.target_left).top(px(80.0)).child(
-                            Tooltip::new("test-tooltip-target", "Primary help")
-                                .detail(detail)
-                                .keyboard_equivalent("⌘K")
-                                .debug_selector("test-tooltip")
-                                .attach(
-                                    div()
-                                        .id("test-tooltip-button")
-                                        .debug_selector(|| "test-tooltip-button".to_owned())
-                                        .w(px(80.0))
-                                        .h(px(24.0))
-                                        .bg(rgba(0x404040ff))
-                                        .when(
-                                            target_visibility == TooltipTargetVisibility::Hidden,
-                                            |target| target.invisible(),
-                                        ),
-                                    target_visibility,
-                                )
-                                .disabled(self.disabled),
-                        ),
+                        div()
+                            .id("test-tooltip-scroll")
+                            .absolute()
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(
+                                div().relative().h(px(2000.0)).child(
+                                    div().absolute().left(self.target_left).top(px(80.0)).child(
+                                        Tooltip::new("test-tooltip-target", "Primary help")
+                                            .detail(detail)
+                                            .keyboard_equivalent("⌘K")
+                                            .debug_selector("test-tooltip")
+                                            .attach(
+                                                div()
+                                                    .id("test-tooltip-button")
+                                                    .debug_selector(|| {
+                                                        "test-tooltip-button".to_owned()
+                                                    })
+                                                    .w(px(80.0))
+                                                    .h(px(24.0))
+                                                    .bg(rgba(0x404040ff))
+                                                    .when(
+                                                        target_visibility
+                                                            == TooltipTargetVisibility::Hidden,
+                                                        |target| target.invisible(),
+                                                    ),
+                                                target_visibility,
+                                            )
+                                            .disabled(self.disabled),
+                                    ),
+                                ),
+                            ),
                     )
                 })
                 .when(self.second_target, |root| {
@@ -1687,6 +1704,7 @@ mod tests {
             disabled: false,
             target_visibility: TooltipTargetVisibility::Visible,
             target_left: px(80.0),
+            scroll: ScrollHandle::new(),
             second_target: false,
             long_detail: false,
             focus_handle: cx.focus_handle(),
@@ -1908,6 +1926,7 @@ mod tests {
                         disabled: false,
                         target_visibility: TooltipTargetVisibility::Visible,
                         target_left: px(80.0),
+                        scroll: ScrollHandle::new(),
                         second_target: false,
                         long_detail: true,
                         focus_handle: cx.focus_handle(),
@@ -2046,6 +2065,28 @@ mod tests {
         let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
 
         assert_eq!(owner_count, 0);
+    }
+
+    #[gpui::test]
+    fn a_scrolled_target_should_place_its_tooltip_beside_the_visible_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, cx) = tooltip_window(cx);
+        root.update(cx, |root, cx| {
+            root.scroll.set_offset(point(px(0.0), px(-40.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        hover_for_show_delay(cx, "test-tooltip-button");
+
+        let target = cx
+            .debug_bounds("test-tooltip-button")
+            .unwrap_or_else(|| panic!("target was not painted"));
+        let tooltip = cx
+            .debug_bounds("test-tooltip")
+            .unwrap_or_else(|| panic!("tooltip was not painted"));
+        assert_eq!(target.top(), px(40.0));
+        assert_eq!(tooltip.top(), target.bottom() + px(6.0));
     }
 
     #[gpui::test]

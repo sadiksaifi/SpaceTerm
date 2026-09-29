@@ -1,8 +1,5 @@
 use super::*;
-use crate::appearance::{
-    AppearanceGeneration, AppearanceMode, AvailableFonts, SystemAppearance, TerminalColorOverrides,
-    ZedExtension,
-};
+use crate::appearance::{AppearanceMode, TerminalColorOverrides, ZedExtension};
 use crate::platform::secure_filesystem::PrivateFileSnapshot;
 use storage::StorageCommit;
 
@@ -311,6 +308,37 @@ fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
     assert_eq!(versions, ["2.0.0", "2.0.0"]);
 }
 
+/// An update that no longer ships the selected theme returns its slot to the built-in theme.
+#[test]
+fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() {
+    let (settings, _) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    let first = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedExtension(&zed_extension("1.0.0", &["Dropped"])),
+        )
+        .unwrap();
+    let mut candidate = (*settings.snapshot().candidate).clone();
+    candidate.preferences.terminal.themes.dark = first.installed[0].clone();
+    settings.update_preview(&token, candidate).unwrap();
+
+    settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
+            ThemeImport::ZedExtension(&zed_extension("2.0.0", &["Added"])),
+        )
+        .unwrap();
+
+    assert_eq!(installed_names(&settings), ["Added"]);
+    assert_eq!(
+        settings.snapshot().candidate.preferences.terminal.themes.dark,
+        ThemeId::builtin("builtin.spaceterm.dark")
+    );
+}
+
 #[test]
 fn a_failed_extension_update_keeps_the_installed_version() {
     let (settings, _) = setup();
@@ -343,8 +371,9 @@ fn a_failed_extension_update_keeps_the_installed_version() {
     );
 }
 
+/// Removing the selected theme returns its slot to the built-in theme and changes nothing else.
 #[test]
-fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback() {
+fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
     let (settings, storage) = setup();
     let token = settings.begin_preview(0).unwrap();
     let imported = settings
@@ -366,28 +395,27 @@ fn preview_deletion_preserves_selected_request_and_resolves_to_builtin_fallback(
     settings.update_preview(&token, candidate).unwrap();
 
     let catalog_revision = settings.snapshot().catalog_revision;
-    let preferences_before_deletion = settings.snapshot().candidate.preferences.clone();
+    let mut expected = settings.snapshot().candidate.preferences.clone();
+    expected.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let removed_revision = settings
         .remove_themes_preview(&token, catalog_revision, std::slice::from_ref(&selected))
         .unwrap();
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
     assert!(snapshot.candidate.terminal_themes.is_empty());
-    assert_eq!(snapshot.candidate.preferences, preferences_before_deletion);
-    let resolved = ThemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &snapshot.candidate.preferences,
-            SystemAppearance::unavailable(),
-            &AvailableFonts::default(),
-        )
-        .unwrap();
-    assert_eq!(resolved.terminal.requested_theme, selected);
-    assert_eq!(
-        resolved.terminal.effective_theme,
-        ThemeId::builtin("builtin.spaceterm.light")
-    );
+    assert_eq!(snapshot.candidate.preferences, expected);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
+}
+
+/// Every selection names an installed theme, so a preview cannot select one that is missing.
+#[test]
+fn preview_rejects_a_missing_theme_selection() {
+    let (settings, _storage) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    let mut candidate = (*settings.snapshot().candidate).clone();
+    candidate.preferences.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
+
+    assert!(settings.update_preview(&token, candidate).is_err());
 }
 
 #[test]
