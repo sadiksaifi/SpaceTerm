@@ -8945,3 +8945,58 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
             .focused_terminal_is_focused(window, cx)
     }));
 }
+
+/// The first Tab's leading inset reaches under the top-left chrome, so the mark before an inactive
+/// first Tab paints in the chrome's bounds. An opaque material gives the chrome an opaque title-bar
+/// surface, and nothing the Workspace paints afterwards may cover the mark.
+#[gpui::test]
+fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        let appearance = crate::ui::appearance::ChromeAppearance {
+            materials: crate::appearance::SurfaceMaterials::OPAQUE,
+            ..crate::ui::appearance::chrome(cx).clone()
+        };
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
+        window.activate_window();
+        window.refresh();
+    });
+    cx.simulate_keystrokes("cmd-t cmd-2");
+    cx.run_until_parked();
+
+    let mark = cx
+        .debug_bounds("tab-separator-start-1")
+        .expect("the mark before inactive Tab 1 should be drawn beside the visible sidebar");
+    let chrome = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("Workspace top chrome must be rendered");
+    assert!(
+        chrome.intersects(&mark),
+        "the mark should rest inside the top chrome's bounds for this check to guard its paint \
+         order, got {mark:?} and {chrome:?}"
+    );
+    cx.update(|window, _| {
+        let mark = mark.scale(window.scale_factor());
+        let quads = window.painted_quads();
+        let visible = |quad: &gpui::Quad| quad.bounds.intersect(&quad.content_mask.bounds);
+        let mark_order = quads
+            .iter()
+            .find(|quad| visible(quad) == mark)
+            .expect("the mark should be painted")
+            .order;
+        let covering = quads
+            .iter()
+            .filter(|quad| quad.order > mark_order && !quad.background.is_transparent())
+            .map(visible)
+            .filter(|bounds| bounds.intersects(&mark))
+            .collect::<Vec<_>>();
+        assert!(
+            covering.is_empty(),
+            "no surface should paint over the strip-start mark at {mark:?}, got {covering:?}"
+        );
+    });
+}
