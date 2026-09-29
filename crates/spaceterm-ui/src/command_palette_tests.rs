@@ -109,7 +109,7 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
     (
-        PresentedResults::new(&items, &matches),
+        PresentedResults::new(&items, &matches, None),
         CommandPaletteMetrics::new(px(420.0), px(40.0)),
     )
 }
@@ -159,7 +159,7 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
         CommandPaletteItem::new(3, "prod.example.com"),
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
-    let results = PresentedResults::new(&items, &matches);
+    let results = PresentedResults::new(&items, &matches, None);
 
     assert_eq!(
         results.rows(),
@@ -1333,6 +1333,33 @@ fn the_confirm_key_should_activate_the_primary_action_while_results_load(cx: &mu
     cx.run_until_parked();
 
     assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+}
+
+#[gpui::test]
+fn a_results_note_should_follow_the_last_result(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_results_note(Some("Only some results are shown".into()), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    let last_row = cx.debug_bounds("row-close").unwrap();
+    let note = cx
+        .debug_bounds("command-palette-results-note")
+        .expect("the results note was not rendered");
+    assert!(note.top() >= last_row.bottom());
+}
+
+#[gpui::test]
+fn a_results_note_should_yield_to_the_empty_state(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_results_note(Some("Only some results are shown".into()), cx);
+    });
+    show_empty_state(&root, &palette, CommandPaletteEmpty::new("No folders"), cx);
+
+    assert!(cx.debug_bounds("command-palette-empty").is_some());
+    assert!(cx.debug_bounds("command-palette-results-note").is_none());
 }
 
 #[gpui::test]

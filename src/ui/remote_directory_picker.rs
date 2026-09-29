@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, fmt, sync::Arc};
 
 use gpui::prelude::*;
-use gpui::{Action, App};
+use gpui::{Action, App, SharedString};
 use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteAction, CommandPaletteActivationPolicy,
@@ -34,8 +34,8 @@ const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 const CONFIRM_ACTION: &str = "remote-directory-picker-confirm";
 /// Identifies the search line's control that opens the enclosing directory.
 const BACK_ACTION: &str = "remote-directory-picker-back";
-const TRUNCATED_LISTING_NOTICE: &str =
-    "First 1024 directories shown; type an exact path for others";
+const TRUNCATED_LISTING_NOTE: &str =
+    "Showing the first 1024 directories. Type a path to open others.";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
@@ -1136,17 +1136,16 @@ impl RemoteDirectoryPicker {
         self.rows
             .iter()
             .cloned()
-            .enumerate()
-            .map(|(index, matched)| {
-                child_directory_item(
-                    matched.row,
-                    directory.clone(),
-                    self.operation_generation,
-                    self.listing_truncated && index == 0,
-                )
-                .matched_indices(matched.matched_indices)
+            .map(|matched| {
+                child_directory_item(matched.row, directory.clone(), self.operation_generation)
+                    .matched_indices(matched.matched_indices)
             })
             .collect()
+    }
+
+    /// Returns the caption after the last row when the listing omits directories.
+    fn results_note(&self) -> Option<&'static str> {
+        self.listing_truncated.then_some(TRUNCATED_LISTING_NOTE)
     }
 
     /// Explains the list area whenever it presents no child directory.
@@ -1228,6 +1227,7 @@ impl RemoteDirectoryPicker {
         let busy = self.busy.is_some();
         let awaiting_results = self.awaiting_results();
         let empty = self.empty_state();
+        let results_note = self.results_note().map(SharedString::from);
         let items = self.child_items();
         let first_child = items.first().map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
@@ -1244,6 +1244,7 @@ impl RemoteDirectoryPicker {
             palette.set_leading_action(Some(back_action), cx);
             palette.set_primary_action(Some(confirm_action), cx);
             palette.set_empty(empty, cx);
+            palette.set_results_note(results_note, cx);
             palette.set_loading(awaiting_results, cx);
             palette.set_query_editable(!busy, cx);
             palette.set_dismissible(!busy, cx);
@@ -1342,7 +1343,6 @@ fn child_directory_item(
     row: RemoteDirectoryRow,
     directory: RemoteDirectory,
     operation_generation: u64,
-    show_truncation_notice: bool,
 ) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
     let selector = format!("remote-directory-picker-row-{}", row.name());
     let label = row.name().to_owned();
@@ -1351,16 +1351,11 @@ fn child_directory_item(
         directory,
         operation_generation,
     };
-    let palette_item = CommandPaletteItem::new(id, label)
+    CommandPaletteItem::new(id, label)
         .leading_icon(move |foreground, size| {
             Icon::new(IconName::Folder, size, foreground).into_any_element()
         })
-        .debug_selector(selector);
-    if show_truncation_notice {
-        palette_item.section(TRUNCATED_LISTING_NOTICE)
-    } else {
-        palette_item
-    }
+        .debug_selector(selector)
 }
 
 fn status_for_provider_error(error: RemoteDirectoryProviderError) -> RemoteDirectoryPickerStatus {
@@ -2081,12 +2076,15 @@ mod tests {
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
         assert_eq!(
             picker.read_with(cx, |picker, _| {
-                picker
-                    .child_items()
-                    .first()
-                    .and_then(|item| item.section_text().map(str::to_owned))
+                (
+                    picker.child_items().first().map(|item| item.section_text().is_none()),
+                    picker.results_note(),
+                )
             }),
-            Some("First 1024 directories shown; type an exact path for others".to_owned())
+            (
+                Some(true),
+                Some("Showing the first 1024 directories. Type a path to open others.")
+            )
         );
     }
 

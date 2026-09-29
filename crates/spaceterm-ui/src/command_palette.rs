@@ -1535,6 +1535,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     query_scope: Option<CommandPaletteScope>,
     header_actions: Vec<CommandPaletteAction>,
     primary_action: Option<CommandPalettePrimaryAction>,
+    results_note: Option<SharedString>,
     matching: CommandPaletteMatching,
     activation: CommandPaletteActivationPolicy,
     selected: Option<I>,
@@ -1580,12 +1581,14 @@ mod presented_results {
 
     use super::{CommandPaletteItem, CommandPaletteMatch, CommandPaletteMetrics};
 
-    /// One presented list row. Section headings and separators are derived, never caller-painted.
+    /// One presented list row. Section headings, separators, and the results note are derived,
+    /// never caller-painted.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(super) enum PaletteRow {
         Section(SharedString),
         Separator,
         Item { position: usize, single_line: bool },
+        Note(SharedString),
     }
 
     impl PaletteRow {
@@ -1595,7 +1598,8 @@ mod presented_results {
                 Self::Separator => metrics.separator_height,
                 Self::Item {
                     single_line: true, ..
-                } => metrics.single_line_row_height,
+                }
+                | Self::Note(_) => metrics.single_line_row_height,
                 Self::Item { .. } => metrics.row_height,
             }
         }
@@ -1603,7 +1607,7 @@ mod presented_results {
         pub(super) const fn item_position(&self) -> Option<usize> {
             match self {
                 Self::Item { position, .. } => Some(*position),
-                Self::Section(_) | Self::Separator => None,
+                Self::Section(_) | Self::Separator | Self::Note(_) => None,
             }
         }
     }
@@ -1617,8 +1621,9 @@ mod presented_results {
         pub(super) fn new<I>(
             items: &[CommandPaletteItem<I>],
             matches: &[CommandPaletteMatch],
+            note: Option<&SharedString>,
         ) -> Self {
-            let mut rows = Vec::with_capacity(matches.len());
+            let mut rows = Vec::with_capacity(matches.len() + 1);
             let mut current: Option<SharedString> = None;
             let mut started = false;
             for (position, matched) in matches.iter().enumerate() {
@@ -1639,6 +1644,9 @@ mod presented_results {
                     position,
                     single_line: item.description.is_none(),
                 });
+            }
+            if started && let Some(note) = note {
+                rows.push(PaletteRow::Note(note.clone()));
             }
             Self { rows }
         }
@@ -1926,7 +1934,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let matches: Rc<[CommandPaletteMatch]> =
             match_command_palette_items(&items, "", CommandPaletteMatching::Semantic).into();
         let selected = first_enabled_id(&items, &matches);
-        let presented_results = Rc::new(PresentedResults::new(&items, &matches));
+        let presented_results = Rc::new(PresentedResults::new(&items, &matches, None));
         let leading_columns = palette_leading_columns(&items);
         let list =
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
@@ -1945,6 +1953,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             query_scope: None,
             header_actions: Vec::new(),
             primary_action: None,
+            results_note: None,
             matching: CommandPaletteMatching::Semantic,
             activation: CommandPaletteActivationPolicy::Close,
             selected,
@@ -2005,6 +2014,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     /// Activating one of its actions emits [`CommandPaletteEvent::EmptyAction`].
     pub fn set_empty(&mut self, empty: CommandPaletteEmpty, cx: &mut gpui::Context<Self>) {
         self.empty = empty;
+        cx.notify();
+    }
+
+    /// Sets the caption presented after the last result, such as a bound on listed results.
+    ///
+    /// The note is never selectable, and the empty state replaces it when nothing matches.
+    pub fn set_results_note(&mut self, note: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        if self.results_note == note {
+            return;
+        }
+        self.results_note = note;
+        self.present_results();
         cx.notify();
     }
 
@@ -2473,11 +2494,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if selected_was_fallback && self.ordinary_match_count > 0 {
             self.selected = None;
         }
-        self.presented_results =
-            Rc::new(PresentedResults::new(&self.presented_items, &self.matches));
-        self.list.reset(self.presented_results.len());
+        self.present_results();
         self.repair_selection();
         self.selection_reveal_pending = true;
+    }
+
+    fn present_results(&mut self) {
+        self.presented_results = Rc::new(PresentedResults::new(
+            &self.presented_items,
+            &self.matches,
+            self.results_note.as_ref(),
+        ));
+        self.list.reset(self.presented_results.len());
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
@@ -3513,6 +3541,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         PaletteRow::Separator => {
                             render_row_separator(row_height, theme).into_any_element()
                         }
+                        PaletteRow::Note(note) => {
+                            let font = typography.section_font().clone();
+                            render_results_note(note.clone(), row_height, theme, font)
+                                .into_any_element()
+                        }
                         PaletteRow::Item { position, .. } => matches
                             .get(*position)
                             .and_then(|matched| {
@@ -3744,6 +3777,30 @@ fn render_section(
         .font(font)
         .text_color(theme.paint.section_foreground)
         .child(label)
+}
+
+/// Sets the note in caption type on the row grid, aligned with row labels.
+fn render_results_note(
+    note: SharedString,
+    height: Pixels,
+    theme: CommandPaletteTheme,
+    font: gpui::Font,
+) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .debug_selector(|| "command-palette-results-note".to_owned())
+        .w_full()
+        .h(height)
+        .pl(metrics.content_leading_inset())
+        .pr(metrics.panel_padding)
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .text_size(metrics.section_size)
+        .line_height(metrics.section_line_height)
+        .font(font)
+        .text_color(theme.paint.muted)
+        .child(div().min_w_0().truncate().child(note))
 }
 
 fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl IntoElement {
