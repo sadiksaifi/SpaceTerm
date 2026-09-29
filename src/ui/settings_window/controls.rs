@@ -495,7 +495,14 @@ impl SettingsRow {
             .w_full()
             .gap(appearance.spacing(3.0))
             .px(row_horizontal_padding(appearance))
-            .py(row_vertical_inset(appearance))
+            // A one-line row centers its control, so a thinner inset above and below reads as
+            // even. A full-width row holds a block whose own edges show, so it sits the same
+            // distance from every edge of the row.
+            .py(if full {
+                row_horizontal_padding(appearance)
+            } else {
+                row_vertical_inset(appearance)
+            })
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(highlighted_row_background(appearance)))
             })

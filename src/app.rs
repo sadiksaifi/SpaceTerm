@@ -58,6 +58,13 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             Arc::clone(&self.paths),
         ))
     }
+    /// The same file the settings storage reads and writes, as other programs open it.
+    pub(crate) fn settings_file(&self) -> Rc<dyn crate::platform::settings_file::SettingsFileAccess> {
+        Rc::new(crate::platform::settings_file::SystemSettingsFile::new(
+            self.paths.directories().settings_file(),
+            &self.home_directory,
+        ))
+    }
     pub(crate) fn capture(
         path_environment: AppDirectoryEnvironment,
         ssh_environment: StartupSshEnvironment,
@@ -783,6 +790,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
+    /// Opens and watches the settings file the person edits in their own editor.
+    pub(crate) settings_file: Option<Rc<dyn crate::platform::settings_file::SettingsFileAccess>>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility:
@@ -976,6 +985,9 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
+        if let Some(file) = &host.adapters.settings_file {
+            crate::ui::settings_file::SettingsFile::install(settings.clone(), Rc::clone(file), cx);
+        }
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     Ok(())
@@ -1074,6 +1086,7 @@ mod runtime_tests {
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 selected_files: None,
+                settings_file: None,
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
                 ),

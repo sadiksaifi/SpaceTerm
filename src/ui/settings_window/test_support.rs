@@ -82,7 +82,7 @@ impl MemoryStorage {
         storage
     }
 
-    pub(super) fn writes(&self) -> usize {
+    pub(crate) fn writes(&self) -> usize {
         self.0.lock().unwrap().writes
     }
 
@@ -107,6 +107,22 @@ impl MemoryStorage {
 
     pub(crate) fn fail_reads(&self, error: Option<StorageError>) {
         self.0.lock().unwrap().read_failure = error;
+    }
+
+    /// Saves `document` as another program would, under a new identity.
+    pub(crate) fn save_elsewhere(&self, document: &SettingsDocument) {
+        self.save_bytes_elsewhere(
+            export_settings(document)
+                .expect("fixture document")
+                .into_bytes(),
+        );
+    }
+
+    /// Saves `bytes`, which need not be a Settings Document, as another program would.
+    pub(crate) fn save_bytes_elsewhere(&self, bytes: Vec<u8>) {
+        let mut state = self.0.lock().unwrap();
+        let identity = state.snapshot.as_ref().map_or(0, |(_, identity)| *identity) + 100;
+        state.snapshot = Some((bytes, identity));
     }
 
     pub(super) fn repair(&self) {

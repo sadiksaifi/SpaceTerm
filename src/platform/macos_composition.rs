@@ -93,6 +93,7 @@ fn compose(
     identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
     let settings_storage = startup.settings_storage();
+    let settings_file = startup.settings_file();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
@@ -138,6 +139,7 @@ fn compose(
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(),
             selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
+            settings_file: Some(settings_file),
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),

@@ -219,6 +219,7 @@ impl DesktopProfile {
         spaceterm_ui::install_portable_modal_keybindings(cx);
         spaceterm_ui::install_modal_keybindings(cx, self.control_keys.modal);
         spaceterm_ui::install_text_input_keybindings(cx, self.control_keys.text_input);
+        spaceterm_ui::install_text_area_keybindings(cx, self.control_keys.text_input);
         cx.bind_keys(
             self.keymap
                 .resolve(&KeybindingPreferences::default())

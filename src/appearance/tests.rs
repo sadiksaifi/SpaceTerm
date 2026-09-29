@@ -1667,3 +1667,19 @@ fn bundled_default_preserves_a_named_system_font_choice() {
         "system-installed"
     );
 }
+
+#[test]
+fn replacing_settings_takes_the_imported_catalog_and_keeps_identity() {
+    let imported = reset_fixture();
+    let mut document = SettingsDocument {
+        revision: 4,
+        ..SettingsDocument::default()
+    };
+
+    document.replace_settings(imported.clone());
+
+    assert_eq!(document.preferences, imported.preferences);
+    assert_eq!(document.terminal_themes, imported.terminal_themes);
+    assert_eq!(document.revision, 4);
+    document.validate().unwrap();
+}

@@ -93,6 +93,15 @@ impl SettingsDocument {
         self.keybindings = defaults.keybindings;
         self.terminal_themes = defaults.terminal_themes;
     }
+
+    /// Replaces every Setting and the imported catalog with those of `imported`, keeping this
+    /// document's identity fields for the same reason [`Self::reset_all`] does.
+    pub(crate) fn replace_settings(&mut self, imported: Self) {
+        self.preferences = imported.preferences;
+        self.updates = imported.updates;
+        self.keybindings = imported.keybindings;
+        self.terminal_themes = imported.terminal_themes;
+    }
 }
 
 fn validate_selection(

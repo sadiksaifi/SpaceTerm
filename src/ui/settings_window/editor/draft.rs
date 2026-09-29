@@ -61,6 +61,15 @@ impl SettingsDraft {
         &self.draft
     }
 
+    pub(super) fn shared_document(&self) -> Arc<SettingsDocument> {
+        Arc::clone(&self.draft)
+    }
+
+    /// The write that creates the settings file, when no file holds the document yet.
+    pub(super) fn prepare_file(&mut self) -> Result<Option<crate::settings::CommitJob>, SettingsError> {
+        self.settings.ensure_file()
+    }
+
     /// Whether controls may request changes.
     ///
     /// A document that could not be read or that changed underneath SpaceTerm is not editable: the
@@ -206,21 +215,23 @@ impl SettingsDraft {
 
     /// Adopts a committed document this editor did not write.
     ///
-    /// Another surface may commit while the window is open. With nothing of its own outstanding,
-    /// the window should present what is retained rather than a stale draft.
+    /// Another surface may commit, and an outside editor may change the settings file, while the
+    /// window is open. With nothing of its own outstanding, the window presents what is retained
+    /// and whether it can be written, rather than a stale draft.
     pub(super) fn synchronize(&mut self) {
-        if matches!(self.status, SaveStatus::Unavailable(error) if error.is_malformed()) {
-            // Settings Recovery may have run from the launch prompt while this window showed the
-            // unreadable file's status.
-            self.adopt_retained();
-            return;
-        }
         if self.has_unwritten_changes() || self.preview.is_some() {
             return;
         }
-        let committed = self.settings.snapshot().committed;
-        if committed.revision != self.draft.revision {
-            self.draft = committed;
+        let snapshot = self.settings.snapshot();
+        if let Some(error) = snapshot.status {
+            self.status = SaveStatus::Unavailable(error);
+            return;
+        }
+        if snapshot.committed.revision != self.draft.revision {
+            self.draft = snapshot.committed;
+        }
+        if matches!(self.status, SaveStatus::Unavailable(_)) {
+            self.status = SaveStatus::Saved;
         }
     }
 

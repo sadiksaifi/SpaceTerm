@@ -123,6 +123,7 @@ fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
         SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
+        SettingsSectionId::Advanced => "settings-navigation-settings-section-advanced",
     };
     click(selector, cx);
 }
@@ -930,6 +931,7 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
         "the fixture should install one theme"
     );
 
+    select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
     settle(cx);
@@ -969,6 +971,7 @@ fn resetting_everything_releases_a_selected_imported_theme(cx: &mut TestAppConte
         "the fixture should select the imported theme"
     );
 
+    select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
     settle(cx);
@@ -1302,7 +1305,7 @@ fn escape_blurs_an_active_search(cx: &mut TestAppContext) {
 #[gpui::test]
 fn escape_inside_a_confirmation_dismisses_it_rather_than_clearing_search(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
-    set_query(&window, "line", cx);
+    set_query(&window, "factory", cx);
     click("settings-reset-all", cx);
     assert!(
         cx.update(|gpui_window, cx| spaceterm_ui::window_modal_is_open(gpui_window, cx)),
@@ -1319,8 +1322,7 @@ fn escape_inside_a_confirmation_dismisses_it_rather_than_clearing_search(cx: &mu
     );
 }
 
-/// Reset All is reached by a single click on a quiet strip, and what it destroys cannot be given
-/// back, so the click may only ever open the confirmation. Nothing is written until the
+/// Reset All is reached by a single click, and what it destroys cannot be given back, so the click may only ever open the confirmation. Nothing is written until the
 /// confirmation is answered, which is what makes a mistaken click harmless.
 #[gpui::test]
 fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
@@ -1329,6 +1331,7 @@ fn pressing_reset_all_only_opens_the_confirmation(cx: &mut TestAppContext) {
     settle(cx);
     let writes = harness.storage.writes();
 
+    select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     settle(cx);
 
@@ -1355,6 +1358,7 @@ fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
     settle(cx);
     let writes = harness.storage.writes();
 
+    select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-cancel", cx);
     settle(cx);
@@ -1372,6 +1376,7 @@ fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
     click("settings-density-comfortable", cx);
     settle(cx);
 
+    select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
     settle(cx);
@@ -1847,123 +1852,70 @@ fn grouped_rows_use_a_leading_inset_hairline_without_an_inter_row_gap(cx: &mut T
     });
 }
 
-fn assert_reset_all_leads_the_content_footer(document: SettingsDocument, cx: &mut TestAppContext) {
+/// The footer closes the content column alone, so the sidebar runs unbroken to the window's
+/// bottom edge and the save status ends on the content gutter.
+fn assert_the_footer_closes_only_the_content_column(
+    document: SettingsDocument,
+    cx: &mut TestAppContext,
+) {
     let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    // A button holds its label clear of its edge by a padding that follows the density scale and a
-    // border that does not, so the expected offset is built from each in its own scale.
-    let label_inset = cx.update(|_, cx| {
-        crate::ui::appearance::chrome(cx)
-            .spacing(crate::ui::button_theme::COMPACT_HORIZONTAL_PADDING)
-            + px(crate::ui::button_theme::CONTROL_BORDER_WIDTH)
-    });
     for section in SettingsSectionId::ALL {
         select_section(section, cx);
-        let navigation = cx.debug_bounds("settings-navigation").unwrap();
-        // The heading spans the content gutter on both sides, and the title, group headings and
-        // row labels all start on it, so it is the column the strip has to join.
+        let surface = cx.debug_bounds("settings-window-surface").unwrap();
+        let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
+        let footer = cx.debug_bounds("settings-footer").unwrap();
+        let status = cx.debug_bounds("settings-save-status").unwrap();
         let heading = cx
             .debug_bounds(leaked_owned(format!("{}-heading", section.selector())))
             .unwrap();
-        let reset = cx.debug_bounds("settings-reset-all").unwrap();
-        let footer = cx.debug_bounds("settings-footer").unwrap();
-        let status = cx.debug_bounds("settings-save-status").unwrap();
-        // The button's label, not its edge, carries that alignment, so the edge sits exactly one
-        // label inset to the left of the column it continues.
         assert_eq!(
-            reset.left() + label_inset,
-            heading.left(),
-            "Reset All's label should land on the content gutter in {section:?}"
+            sidebar.bottom(),
+            surface.bottom(),
+            "the sidebar should reach the window's bottom edge in {section:?}"
+        );
+        assert_eq!(
+            (footer.left(), footer.right()),
+            (sidebar.right(), surface.right()),
+            "the footer should span the content column alone in {section:?}"
         );
         assert_eq!(
             status.right(),
             heading.right(),
             "the save status should end on the content gutter in {section:?}"
         );
-        assert!(
-            reset.left() >= navigation.right(),
-            "Reset All should leave the navigation column in {section:?}"
-        );
-        assert!(reset.top() >= footer.top() && reset.bottom() <= footer.bottom());
-        assert!(
-            status.left() > reset.right(),
-            "the save status should stay clear of the action in {section:?}"
-        );
     }
+    assert!(
+        cx.debug_bounds("settings-sidebar-footer-divider").is_none(),
+        "no rule should cross the sidebar above the window's bottom edge"
+    );
 }
 
 #[gpui::test]
-fn the_footer_strip_meets_the_content_gutter_on_every_settings_page(cx: &mut TestAppContext) {
-    assert_reset_all_leads_the_content_footer(SettingsDocument::default(), cx);
+fn the_footer_closes_only_the_content_column_on_every_settings_page(cx: &mut TestAppContext) {
+    assert_the_footer_closes_only_the_content_column(SettingsDocument::default(), cx);
 }
 
 #[gpui::test]
-fn the_footer_strip_tracks_the_content_gutter_with_comfortable_density(cx: &mut TestAppContext) {
+fn the_footer_tracks_the_content_gutter_with_comfortable_density(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
 
     document.preferences.window.density = ChromeDensity::Comfortable;
-    assert_reset_all_leads_the_content_footer(document, cx);
+    assert_the_footer_closes_only_the_content_column(document, cx);
 }
 
-/// The sidebar's width is the one width in the footer that means anything, and a destructive
-/// action stretched to it reads as the heaviest element in the window.
+/// The footer is a status line. Actions on Settings as a whole live in the Advanced section.
 #[gpui::test]
-fn reset_all_takes_the_width_of_its_label(cx: &mut TestAppContext) {
+fn the_footer_carries_only_the_save_status(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
-    let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
     let footer = cx.debug_bounds("settings-footer").unwrap();
-    let reset = cx.debug_bounds("settings-reset-all").unwrap();
-    assert!(
-        reset.size.width < sidebar.size.width,
-        "Reset All should hug its label, got {:?} against a {:?} sidebar",
-        reset.size.width,
-        sidebar.size.width
-    );
-    assert!(
-        reset.size.width < footer.size.width / 2.0,
-        "Reset All should leave the content footer to the save status, got {:?}",
-        reset.size.width
-    );
-}
 
-/// The strip is a status line, so its one action rests at the status's weight rather than
-/// outranking the settings it would undo. Both sit at the same step of the ramp and the same
-/// muted foreground, and the action lifts to full text only on approach.
-#[gpui::test]
-fn reset_all_rests_at_the_weight_of_the_save_status(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
-    let reset = cx.debug_bounds("settings-reset-all").unwrap();
-    let (muted, full, compact_height) = cx.update(|_, cx| {
-        let appearance = crate::ui::appearance::chrome(cx);
-        let theme = crate::ui::button_theme::theme(&appearance.colors);
-        (
-            appearance.colors.text_muted,
-            appearance.colors.text,
-            theme.icon_button_size(spaceterm_ui::ButtonSize::Compact),
-        )
-    });
-    let style = cx.update(|_, cx| {
-        crate::ui::button_theme::theme(&crate::ui::appearance::chrome(cx).colors)
-            .paints(spaceterm_ui::ButtonVariant::Bare)
-    });
-    assert_eq!(
-        style.normal().foreground(),
-        crate::ui::appearance::gpui_color(muted),
-        "the resting action should take the save status's muted foreground"
-    );
-    assert_eq!(
-        style.normal().background().a,
-        0.0,
-        "the resting action should paint no surface on the strip"
-    );
-    assert_eq!(
-        style.hovered().foreground(),
-        crate::ui::appearance::gpui_color(full),
-        "approach should lift the action to full text"
-    );
-    assert_eq!(
-        reset.size.height, compact_height,
-        "the action should sit at the compact step, not a form control's height"
-    );
+    for selector in ["settings-reset-all", "settings-document-export", "settings-import"] {
+        assert!(
+            cx.debug_bounds(selector)
+                .is_none_or(|bounds| !footer.intersects(&bounds)),
+            "{selector} should not sit in the footer"
+        );
+    }
 }
 
 fn assert_client_chrome_geometry(document: SettingsDocument, cx: &mut TestAppContext) {
@@ -3164,4 +3116,391 @@ fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
 
     click("settings-theme-store-retry", cx);
     assert_eq!(transport.requests().len(), 2);
+}
+
+// Advanced ------------------------------------------------------------------------------------
+
+fn settings_file_text(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+    window.read_with(cx, |window, cx| {
+        window.settings_file.area.read(cx).value().to_owned()
+    })
+}
+
+fn install_settings_file(
+    harness: &Harness,
+    cx: &mut VisualTestContext,
+) -> Rc<crate::platform::settings_file::testing::RecordingSettingsFile> {
+    let file = crate::platform::settings_file::testing::RecordingSettingsFile::watchable();
+    let access: Rc<dyn crate::platform::settings_file::SettingsFileAccess> = file.clone();
+    let settings = harness.settings.clone();
+    cx.update(|_, cx| crate::ui::settings_file::SettingsFile::install(settings, access, cx));
+    cx.run_until_parked();
+    file
+}
+
+/// Lets a save made in another program reach the window.
+fn follow_outside_save(
+    file: &crate::platform::settings_file::testing::RecordingSettingsFile,
+    cx: &mut VisualTestContext,
+) {
+    file.announce_change();
+    cx.executor()
+        .advance_clock(crate::ui::settings_file::SETTLE_DELAY);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext) {
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+            .expect("fixture Zed family"),
+        ..SettingsDocument::default()
+    };
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Advanced, cx);
+    assert_eq!(
+        settings_file_text(&window, cx),
+        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
+    );
+
+    cx.update(|_, cx| {
+        window.update(cx, |window, cx| {
+            window.edit(
+                |document| document.preferences.window.density = ChromeDensity::Comfortable,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    let text = settings_file_text(&window, cx);
+    assert_eq!(
+        text,
+        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
+    );
+    assert!(text.contains("comfortable"), "the text should follow the change");
+}
+
+/// A compact settings file within the storage limit can print past the text view's limit.
+#[gpui::test]
+fn a_settings_file_too_large_to_show_says_so_instead_of_showing_an_earlier_one(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    assert!(!settings_file_text(&window, cx).is_empty());
+
+    let family = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture");
+    let wide = "\u{1F600}";
+    let themes = (0..512)
+        .map(|index| {
+            let mut theme = family[0].clone();
+            theme.id = crate::appearance::ThemeId::new(format!("large.{index}")).unwrap();
+            theme.name = format!("{}{index}", wide.repeat(125));
+            theme.metadata.author = Some(wide.repeat(256));
+            theme.metadata.license = Some(wide.repeat(256));
+            theme.metadata.description = Some(wide.repeat(1024));
+            theme
+        })
+        .collect();
+    let document = SettingsDocument {
+        terminal_themes: themes,
+        ..SettingsDocument::default()
+    };
+    let compact = serde_json::to_vec(&document).unwrap();
+    assert!(compact.len() <= 4 * 1024 * 1024);
+    assert!(crate::appearance::export_settings(&document).unwrap().len() > 4 * 1024 * 1024);
+    harness.storage.save_bytes_elsewhere(compact);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(document_of(&window, cx).terminal_themes.len(), 512);
+    // The empty view shows its placeholder, which says why.
+    assert_eq!(settings_file_text(&window, cx), "");
+}
+
+/// A full-width row holds a block rather than one centered line, so the block sits the same
+/// distance from every edge of its row.
+#[gpui::test]
+fn the_settings_file_is_inset_equally_on_every_side(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let row = cx.debug_bounds("settings-row-settings-file").unwrap();
+    let frame = cx.debug_bounds("settings-file-frame").unwrap();
+    let edit = cx.debug_bounds("settings-file-edit").unwrap();
+
+    let left = frame.left() - row.left();
+    assert_eq!(frame.top() - row.top(), left);
+    assert_eq!(row.right() - frame.right(), left);
+    assert_eq!(row.bottom() - edit.bottom(), left);
+}
+
+#[gpui::test]
+fn the_settings_file_accepts_no_typing(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let before = settings_file_text(&window, cx);
+
+    click("settings-file-text", cx);
+    cx.simulate_input("x");
+
+    assert_eq!(settings_file_text(&window, cx), before);
+}
+
+#[gpui::test]
+fn edit_json_opens_the_settings_file_and_shows_where_it_lives(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    assert!(cx.debug_bounds("settings-file-location").is_some());
+    let writes = harness.storage.writes();
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(file.opened.get(), 1);
+    assert_eq!(harness.storage.writes(), writes, "an existing file is opened as it is");
+}
+
+#[gpui::test]
+fn edit_json_writes_a_missing_settings_file_before_opening_it(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings_with(cx, Arc::new(MemoryStorage::default()));
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(
+        harness.storage.document().map(|document| document.preferences),
+        Some(SettingsDocument::default().preferences)
+    );
+    assert_eq!(file.opened.get(), 1);
+}
+
+#[gpui::test]
+fn edit_json_saves_pending_changes_before_opening_the_file(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |window, cx| {
+            window.edit(
+                |document| document.preferences.window.density = ChromeDensity::Comfortable,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(
+        harness.storage.document().unwrap().preferences.window.density,
+        ChromeDensity::Comfortable,
+        "the editor opens what the window shows"
+    );
+    assert_eq!(file.opened.get(), 1);
+}
+
+#[gpui::test]
+fn edit_json_is_unavailable_without_a_settings_file(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let writes = harness.storage.writes();
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(harness.storage.writes(), writes);
+}
+
+#[gpui::test]
+fn a_save_in_another_editor_reaches_the_window(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let mut saved = SettingsDocument::default();
+    saved.preferences.window.density = ChromeDensity::Comfortable;
+
+    harness.storage.save_elsewhere(&saved);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert!(settings_file_text(&window, cx).contains("comfortable"));
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+}
+
+#[gpui::test]
+fn a_malformed_save_pauses_editing_until_a_valid_save(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    let before = document_of(&window, cx);
+
+    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    follow_outside_save(&file, cx);
+
+    assert_eq!(document_of(&window, cx), before, "the last valid settings stay in effect");
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+    assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+
+    let mut fixed = SettingsDocument::default();
+    fixed.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&fixed);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+}
+
+#[gpui::test]
+fn reload_reads_a_save_the_watch_did_not_report(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let mut saved = SettingsDocument::default();
+    saved.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&saved);
+
+    click("settings-file-reload", cx);
+
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert!(settings_file_text(&window, cx).contains("comfortable"));
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+}
+
+#[gpui::test]
+fn reload_writes_a_pending_change_before_reading_the_file(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |window, cx| {
+            window.edit(
+                |document| document.preferences.window.density = ChromeDensity::Comfortable,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    click("settings-file-reload", cx);
+
+    assert_eq!(
+        harness.storage.document().unwrap().preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+}
+
+#[gpui::test]
+fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let before = document_of(&window, cx);
+
+    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    click("settings-file-reload", cx);
+
+    assert_eq!(document_of(&window, cx), before);
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+
+    let mut fixed = SettingsDocument::default();
+    fixed.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&fixed);
+    click("settings-file-reload", cx);
+
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+}
+
+fn exported_document_with_a_theme() -> Vec<u8> {
+    let mut document = SettingsDocument::default();
+    document.preferences.window.density = ChromeDensity::Comfortable;
+    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+        .expect("fixture Zed family");
+    crate::appearance::export_settings(&document)
+        .unwrap()
+        .into_bytes()
+}
+
+fn finish_import(
+    window: &Entity<SettingsWindow>,
+    read: Result<Vec<u8>, super::import::ImportError>,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.finish_settings_import(read, native, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+
+    finish_import(&window, Ok(exported_document_with_a_theme()), cx);
+    assert!(
+        cx.update(|native, cx| spaceterm_ui::window_modal_is_open(native, cx)),
+        "the import should ask before replacing anything"
+    );
+    click("modal-action-settings-import-confirm", cx);
+    settle(cx);
+
+    let retained = harness.storage.document().unwrap();
+    assert_eq!(retained.preferences.window.density, ChromeDensity::Comfortable);
+    assert_eq!(retained.terminal_themes.len(), 1);
+}
+
+#[gpui::test]
+fn cancelling_an_import_changes_nothing(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let before = document_of(&window, cx);
+    let writes = harness.storage.writes();
+
+    finish_import(&window, Ok(exported_document_with_a_theme()), cx);
+    click("modal-action-settings-import-cancel", cx);
+    settle(cx);
+
+    assert_eq!(document_of(&window, cx), before);
+    assert_eq!(harness.storage.writes(), writes);
+}
+
+#[gpui::test]
+fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let before = document_of(&window, cx);
+    let writes = harness.storage.writes();
+
+    for read in [
+        Ok(b"{\"preferences\": {}}".to_vec()),
+        Ok(IMPORTABLE_FAMILY.to_vec()),
+        Err(super::import::ImportError::TooLarge),
+        Err(super::import::ImportError::Unreadable),
+    ] {
+        finish_import(&window, read, cx);
+        assert!(cx.debug_bounds("modal-action-settings-import-failed-ok").is_some());
+        assert!(cx.debug_bounds("modal-action-settings-import-confirm").is_none());
+        click("modal-action-settings-import-failed-ok", cx);
+    }
+    settle(cx);
+
+    assert_eq!(document_of(&window, cx), before);
+    assert_eq!(harness.storage.writes(), writes);
 }
