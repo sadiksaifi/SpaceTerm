@@ -194,6 +194,18 @@ impl SettingsEditor {
         }
     }
 
+    /// Reads the settings file again, as another program left it.
+    ///
+    /// A change this window can still write is written first, so reloading loses nothing the
+    /// person made here. A change that cannot be written because the file changed underneath it
+    /// is discarded, as the explicit reload after a conflict discards it.
+    pub(super) fn reload_file(&mut self, cx: &mut Context<SettingsWindow>) {
+        if self.draft.editable() && !self.flush(cx) {
+            return;
+        }
+        self.reload(cx);
+    }
+
     pub(super) fn is_writing(&self) -> bool {
         self.in_flight.is_some()
     }

@@ -476,7 +476,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "Settings file",
         keywords: &[
             "json", "edit", "editor", "source", "raw", "text", "file", "path", "location",
-            "advanced",
+            "reload", "refresh", "advanced",
         ],
         selector: "settings-row-settings-file",
     },

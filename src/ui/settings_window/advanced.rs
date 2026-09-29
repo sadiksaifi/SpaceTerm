@@ -49,7 +49,8 @@ impl SettingsFileView {
 }
 
 impl SettingsWindow {
-    /// The settings file, where it lives, and the action that opens it in the person's editor.
+    /// The settings file, where it lives, and the actions that reload it and open it in the
+    /// person's editor.
     pub(super) fn render_settings_file(
         &mut self,
         appearance: &ChromeAppearance,
@@ -75,6 +76,15 @@ impl SettingsWindow {
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .font_family(crate::bundled_font::FAMILY)
         .child(area);
+        let owner = cx.weak_entity();
+        let reload = action_button(
+            "settings-file-reload",
+            "Reload",
+            !self.editor.is_writing(),
+            move |_, cx| {
+                let _ = owner.update(cx, |settings, cx| settings.editor.reload_file(cx));
+            },
+        );
         let owner = cx.weak_entity();
         let edit = action_button(
             "settings-file-edit",
@@ -108,7 +118,15 @@ impl SettingsWindow {
                             .truncate()
                             .children(location),
                     )
-                    .child(edit),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .gap(appearance.spacing(6.0))
+                            .child(reload)
+                            .child(edit),
+                    ),
             )
             .into_any_element()
     }

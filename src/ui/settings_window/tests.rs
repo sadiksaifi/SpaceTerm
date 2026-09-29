@@ -3260,6 +3260,75 @@ fn a_malformed_save_pauses_editing_until_a_valid_save(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn reload_reads_a_save_the_watch_did_not_report(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let mut saved = SettingsDocument::default();
+    saved.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&saved);
+
+    click("settings-file-reload", cx);
+
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert!(settings_file_text(&window, cx).contains("comfortable"));
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+}
+
+#[gpui::test]
+fn reload_writes_a_pending_change_before_reading_the_file(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |window, cx| {
+            window.edit(
+                |document| document.preferences.window.density = ChromeDensity::Comfortable,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    click("settings-file-reload", cx);
+
+    assert_eq!(
+        harness.storage.document().unwrap().preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+}
+
+#[gpui::test]
+fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let before = document_of(&window, cx);
+
+    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    click("settings-file-reload", cx);
+
+    assert_eq!(document_of(&window, cx), before);
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+
+    let mut fixed = SettingsDocument::default();
+    fixed.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&fixed);
+    click("settings-file-reload", cx);
+
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
+}
+
 fn exported_document_with_a_theme() -> Vec<u8> {
     let mut document = SettingsDocument::default();
     document.preferences.window.density = ChromeDensity::Comfortable;
