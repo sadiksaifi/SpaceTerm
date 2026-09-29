@@ -152,6 +152,7 @@ pub(crate) enum PickerPathError {
     BareTilde,
     UnsupportedTilde,
     InvalidControlCharacter,
+    DotSegment,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -196,6 +197,12 @@ impl ParsedPickerPath {
     pub(super) fn reveals_hidden_directories(&self) -> bool {
         self.leaf_filter.starts_with('.')
     }
+
+    /// Whether the exact path names a directory by its own name. A `.` or `..` leaf only filters
+    /// hidden directories, since opening it would pin a relative spelling.
+    pub(super) fn names_openable_directory(&self) -> bool {
+        !matches!(self.leaf_filter.as_str(), "." | "..")
+    }
 }
 
 pub(super) fn parse_picker_path(input: &str) -> Result<ParsedPickerPath, PickerPathError> {
@@ -228,6 +235,12 @@ pub(super) fn parse_picker_path(input: &str) -> Result<ParsedPickerPath, PickerP
             input[separator + 1..].to_owned(),
         )
     };
+    if descend_prefix
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(PickerPathError::DotSegment);
+    }
     let enumeration_directory = PickerPath::new(enumeration_spelling.to_owned())?;
 
     Ok(ParsedPickerPath {
@@ -949,7 +962,7 @@ impl DirectoryPicker {
     }
 
     fn confirm_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        if !self.can_confirm() {
             return;
         }
         let Some(parsed) = self.parsed.clone() else {
@@ -1130,6 +1143,10 @@ impl DirectoryPicker {
                 self.status,
                 DirectoryPickerStatus::Readable | DirectoryPickerStatus::Missing
             )
+            && self
+                .parsed
+                .as_ref()
+                .is_some_and(ParsedPickerPath::names_openable_directory)
     }
 
     /// Returns the search line's action that opens the exact path, creating it when missing, with
@@ -1308,6 +1325,7 @@ impl PickerPathError {
             Self::BareTilde => "Use ~/ to open your home directory.",
             Self::UnsupportedTilde => "Only ~/ is supported for home-relative paths.",
             Self::InvalidControlCharacter => "Paths cannot contain control characters.",
+            Self::DotSegment => "Use Go Back to open an enclosing directory.",
         }
     }
 }
@@ -2580,6 +2598,26 @@ mod tests {
         assert_eq!(
             parse_picker_path("~other/Projects"),
             Err(PickerPathError::UnsupportedTilde)
+        );
+    }
+
+    #[test]
+    fn dot_segments_should_be_rejected_before_the_leaf_and_never_opened() {
+        for input in ["~/Projects/../", "~/../SpaceTerm", "/usr/./local", "~/./"] {
+            assert_eq!(
+                parse_picker_path(input),
+                Err(PickerPathError::DotSegment),
+                "{input} was accepted"
+            );
+        }
+        for leaf in ["~/Projects/.", "~/Projects/.."] {
+            let parsed = parse_picker_path(leaf).unwrap();
+            assert!(!parsed.names_openable_directory(), "{leaf} could be opened");
+        }
+        assert!(
+            parse_picker_path("~/Projects/.config")
+                .unwrap()
+                .names_openable_directory()
         );
     }
 
