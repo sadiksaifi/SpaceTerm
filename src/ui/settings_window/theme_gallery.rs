@@ -1,7 +1,9 @@
-//! The Themes section: a preview of the Terminal Theme in use and a gallery of installed themes.
+//! The Themes section: a preview of the Terminal Theme in use and a list of installed themes.
 //!
-//! Activating a tile applies its theme to the appearance the gallery is showing. Under Auto the preview shows the Light and Dark slots side by
-//! side, and selecting one points the gallery at it. A tile's context menu applies or removes it.
+//! Activating a row applies its theme to the appearance the list is showing. Under Auto the
+//! preview shows the Light and Dark slots side by side, and selecting one points the list at it.
+//! A row's Remove button removes every theme installed with it: its extension's themes, or the
+//! themes of the family imported from its file.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +13,7 @@ use gpui::{
     div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ContextMenu, MenuEntry, ModalAction, ModalActionEmphasis,
+    Alert, AlertIntent, AlertOutcome, Icon, IconName, ModalAction, ModalActionEmphasis,
     ModalActionIntent, ModalActionRole, ModalId, SearchField, TextInput, TextInputEscapeBehavior,
     TextInputEvent, TextInputReturnBehavior, TextInputVariant, fuzzy_filter,
 };
@@ -22,7 +24,9 @@ use crate::appearance::{
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color, prepared_font};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 use super::SettingsWindow;
 use super::controls::action_button;
@@ -33,23 +37,17 @@ const PREVIEW_ASPECT: f32 = 1.6;
 const CURRENT_PREVIEW_WIDTH: f32 = 272.0;
 /// The width of each slot's preview under Auto, small enough that the gallery stays in view.
 const SLOT_PREVIEW_WIDTH: f32 = 216.0;
-const GALLERY_COLUMNS: u16 = 4;
-/// A gallery shorter than this is scanned by eye, so it offers no search field.
-const SEARCHABLE_GALLERY: usize = 8;
+/// The width of the preview leading each row of the installed themes.
+const ROW_PREVIEW_WIDTH: f32 = 64.0;
+/// The air between a row's hover fill and its content. The list gives it back at its edges, so
+/// row content lines up with the search field above it.
+const ROW_INSET: f32 = 8.0;
 /// The space between a selected preview and the ring around it.
 const RING_GAP: f32 = 3.0;
 const RING_WIDTH: f32 = 2.0;
 
 pub(super) const GALLERY_SEARCH_SELECTOR: &str = "settings-theme-gallery-search";
 pub(super) const GET_MORE_SELECTOR: &str = "settings-get-more-themes";
-
-/// What a tile's context menu offers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TileCommand {
-    Use,
-    Remove,
-    RemoveExtension,
-}
 
 /// The choice a removal confirmation returns.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,7 +63,7 @@ pub(super) struct ThemeGallery {
     /// The slot the gallery edits under Auto. Unset, it follows the appearance on screen.
     auto_slot: Option<Appearance>,
     slot_focus: [FocusHandle; 2],
-    tile_focus: BTreeMap<ThemeId, FocusHandle>,
+    row_focus: BTreeMap<ThemeId, FocusHandle>,
 }
 
 impl ThemeGallery {
@@ -78,7 +76,7 @@ impl ThemeGallery {
                 window,
                 cx,
             )
-            .placeholder("Search")
+            .placeholder("Search themes")
             .variant(TextInputVariant::Bare)
             .return_behavior(TextInputReturnBehavior::Propagate)
             .escape_behavior(TextInputEscapeBehavior::Propagate)
@@ -98,7 +96,7 @@ impl ThemeGallery {
             query: SharedString::default(),
             auto_slot: None,
             slot_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
-            tile_focus: BTreeMap::new(),
+            row_focus: BTreeMap::new(),
         }
     }
 }
@@ -309,7 +307,8 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Every installed theme for the chosen slot, as tiles that apply their theme when activated.
+    /// Every installed theme for the chosen slot, as rows that apply their theme when activated,
+    /// under a search field and the way to get more themes.
     pub(super) fn render_installed_themes(
         &mut self,
         appearance: &ChromeAppearance,
@@ -317,7 +316,14 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let slot = self.theme_slot(cx);
-        let selected = self.editor.document().preferences.terminal.themes.get(slot).clone();
+        let selected = self
+            .editor
+            .document()
+            .preferences
+            .terminal
+            .themes
+            .get(slot)
+            .clone();
         let summaries = self
             .editor
             .theme_summaries()
@@ -325,15 +331,10 @@ impl SettingsWindow {
             .into_iter()
             .filter(|summary| summary.appearance == slot)
             .collect::<Vec<_>>();
-        let searchable = summaries.len() > SEARCHABLE_GALLERY;
         self.theme_gallery
-            .tile_focus
+            .row_focus
             .retain(|id, _| summaries.iter().any(|theme| &theme.id == id));
-        let query = if searchable {
-            self.theme_gallery.query.clone()
-        } else {
-            SharedString::default()
-        };
+        let query = self.theme_gallery.query.clone();
         let matches = fuzzy_filter(&summaries, &query, |summary| {
             let target = spaceterm_ui::FuzzyTarget::new(&summary.name);
             match &summary.family {
@@ -341,69 +342,90 @@ impl SettingsWindow {
                 None => target,
             }
         });
-        let tiles = matches
+        let rows = matches
             .iter()
             .map(|matched| {
                 let summary = &summaries[matched.item_index()];
-                self.render_theme_tile(summary, slot, summary.id == selected, appearance, window, cx)
+                self.render_theme_row(
+                    summary,
+                    slot,
+                    summary.id == selected,
+                    appearance,
+                    window,
+                    cx,
+                )
             })
             .collect::<Vec<_>>();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+        let separator = gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
+        let inset = appearance.spacing(ROW_INSET);
+        let empty = rows.is_empty();
+        // Separators run between rows, inset to the content the hover fill surrounds.
+        let rows = rows.into_iter().enumerate().flat_map(|(index, row)| {
+            let divider = (index > 0).then(|| {
+                div()
+                    .mx(inset)
+                    .h(px(HAIRLINE))
+                    .bg(separator)
+                    .into_any_element()
+            });
+            divider.into_iter().chain([row])
+        });
         let owner = cx.weak_entity();
-        let secondary = |text: SharedString| {
-            div()
-                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(colors.text_secondary))
-                .whitespace_normal()
-                .child(text)
-        };
         div()
             .debug_selector(|| "settings-installed-themes".to_owned())
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(14.0))
+            .gap(appearance.spacing(10.0))
             .py(appearance.spacing(6.0))
-            .when(searchable, |gallery| {
-                gallery.child(
-                    SearchField::new(
-                        "settings-theme-gallery-search-frame",
-                        self.theme_gallery.search.clone(),
-                    )
-                    .debug_selectors(
-                        "settings-theme-gallery-search-frame",
-                        "settings-theme-gallery-search-clear",
-                    ),
-                )
-            })
-            .when(tiles.is_empty(), |gallery| {
-                gallery.child(secondary(SharedString::from(format!(
-                    "No themes match “{query}”."
-                ))))
-            })
+            // The header matches Get More Themes, which offers importing where this offers more.
             .child(
                 div()
-                    .grid()
-                    .grid_cols(GALLERY_COLUMNS)
-                    .gap_x(appearance.spacing(16.0))
-                    .gap_y(appearance.spacing(14.0))
-                    .children(tiles),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(appearance.spacing(10.0))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            SearchField::new(
+                                "settings-theme-gallery-search-frame",
+                                self.theme_gallery.search.clone(),
+                            )
+                            .debug_selectors(
+                                "settings-theme-gallery-search-frame",
+                                "settings-theme-gallery-search-clear",
+                            ),
+                        ),
+                    )
+                    .child(div().flex_none().child(action_button(
+                        GET_MORE_SELECTOR,
+                        "Get More Themes…",
+                        self.editor.editable(),
+                        move |window, cx| {
+                            let _ = owner.update(cx, |settings, cx| {
+                                settings.open_theme_store(window, cx);
+                            });
+                        },
+                    ))),
             )
-            // Getting more themes follows the themes it adds to, the way a list's add button does.
-            .child(div().flex().justify_end().child(action_button(
-                GET_MORE_SELECTOR,
-                "Get More Themes…",
-                self.editor.editable(),
-                move |window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.open_theme_store(window, cx);
-                    });
-                },
-            )))
+            .when(empty, |list| {
+                list.child(
+                    div()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.text_secondary))
+                        .whitespace_normal()
+                        .child(SharedString::from(format!("No themes match “{query}”."))),
+                )
+            })
+            // The list gives the rows' inset back, so row content lines up with the header.
+            .child(div().flex().flex_col().mx(-inset).children(rows))
             .into_any_element()
     }
 
-    fn render_theme_tile(
+    /// One installed theme: its preview, its name, where it came from, and whether it is in use.
+    /// A theme SpaceTerm did not ship also offers Remove.
+    fn render_theme_row(
         &mut self,
         summary: &ThemeSummary,
         slot: Appearance,
@@ -416,162 +438,210 @@ impl SettingsWindow {
         let editable = self.editor.editable();
         let focus = self
             .theme_gallery
-            .tile_focus
+            .row_focus
             .entry(summary.id.clone())
             .or_insert_with(|| cx.focus_handle())
             .clone()
             .tab_stop(editable);
+        let selector = format!("settings-theme-row-{}", summary.id.as_str());
+        let group = format!("{selector}-group");
+        let radius = RadiusRole::Control.pixels();
+        // A row that cannot be chosen does not light under the pointer.
+        let hover = ChipPaint {
+            fill: None,
+            rim: None,
+            hover_fill: editable.then_some(colors.row_hover_background),
+            hover_rim: None,
+        }
+        .raised_on(
+            appearance,
+            appearance.control_host_background(spaceterm_ui::ControlHost::Card),
+        );
+        let in_use = selected.then(|| {
+            div()
+                .debug_selector({
+                    let selector = format!("{selector}-in-use");
+                    move || selector
+                })
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(appearance.spacing(4.0))
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(colors.text_secondary))
+                .child(Icon::new(
+                    IconName::Check,
+                    appearance.icons.metrics(IconRole::Caption).glyph_size,
+                    gpui_color(colors.text_secondary),
+                ))
+                .child("In Use")
+        });
+        let remove = (!summary.builtin).then(|| {
+            let owner = cx.weak_entity();
+            let target = summary.clone();
+            let remove_selector = format!("{selector}-remove");
+            spaceterm_ui::Button::new(SharedString::from(remove_selector.clone()), "Remove")
+                .variant(spaceterm_ui::ButtonVariant::Outline)
+                .size(spaceterm_ui::ButtonSize::Small)
+                .disabled(!editable)
+                .tab_stop(true)
+                .debug_selector(remove_selector)
+                .on_activate(move |_, window, cx| {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.confirm_removal(&target, window, cx);
+                    });
+                })
+        });
         let id = summary.id.clone();
         let keyboard_id = id.clone();
-        let selector = format!("settings-theme-tile-{}", summary.id.as_str());
-        let tile = div()
+        let row = div()
             .id(SharedString::from(selector.clone()))
             .debug_selector({
                 let selector = selector.clone();
                 move || selector
             })
+            .group(SharedString::from(group.clone()))
+            .track_focus(&focus)
+            .relative()
             .flex()
-            .flex_col()
-            .min_w_0()
-            .gap(appearance.spacing(6.0))
-            .child(selection_ring(
-                theme_miniature(&summary.colors, appearance).w_full(),
-                selected,
-                RadiusRole::Control,
-                appearance,
-                focus.is_focused(window) && window.last_input_was_keyboard(),
-            ))
+            .flex_row()
+            .items_center()
+            .gap(appearance.spacing(12.0))
+            .px(appearance.spacing(ROW_INSET))
+            .py(appearance.spacing(8.0))
+            .rounded(radius)
+            .child(
+                SelectionChip::new(ChipShape::symmetric(px(0.0), px(0.0), radius), hover)
+                    .render(format!("{selector}-hover"), &group),
+            )
+            .child(
+                theme_miniature(&summary.colors, appearance)
+                    .flex_none()
+                    .w(appearance.spacing(ROW_PREVIEW_WIDTH))
+                    .rounded(RadiusRole::Control.pixels()),
+            )
             .child(
                 div()
-                    .w_full()
                     .flex()
-                    .justify_center()
+                    .flex_col()
+                    .min_w_0()
+                    .flex_1()
+                    .gap(appearance.spacing(1.0))
                     .child(
                         div()
-                            .max_w_full()
                             .truncate()
-                            .chrome_text(appearance.typography.style(if selected {
-                                TextRole::BodyEmphasis
-                            } else {
-                                TextRole::Secondary
-                            }))
-                            .text_color(gpui_color(if selected {
-                                colors.text
-                            } else {
-                                colors.text_secondary
-                            }))
+                            .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
+                            .text_color(gpui_color(colors.text))
                             .child(SharedString::from(summary.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .chrome_text(appearance.typography.style(TextRole::Secondary))
+                            .text_color(gpui_color(colors.text_secondary))
+                            .child(theme_origin(summary)),
                     ),
             )
-            .when(editable, |tile| {
-                tile.on_click(cx.listener(move |settings, _, _, cx| {
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(appearance.spacing(10.0))
+                    .children(in_use)
+                    .children(remove),
+            )
+            .when(editable, |row| {
+                row.on_click(cx.listener(move |settings, _, _, cx| {
                     settings.set_theme(slot, id.clone(), cx);
                 }))
+                .on_key_down(cx.listener(
+                    move |settings, event: &KeyDownEvent, window, cx| {
+                        if keyboard_activation(event) {
+                            settings.set_theme(slot, keyboard_id.clone(), cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }
+                    },
+                ))
             });
-        let mut entries = vec![
-            MenuEntry::action("Use Theme", TileCommand::Use)
-                .disabled(selected)
-                .debug_selector(format!("{selector}-use")),
-        ];
-        if !summary.builtin {
-            entries.push(MenuEntry::separator());
-            entries.push(
-                MenuEntry::action("Remove Theme", TileCommand::Remove)
-                    .destructive(true)
-                    .debug_selector(format!("{selector}-remove")),
-            );
-            if summary.package.is_some() {
-                let label = match &summary.family {
-                    Some(family) => format!("Remove All {family} Themes"),
-                    None => String::from("Remove All Themes from This Extension"),
-                };
-                entries.push(
-                    MenuEntry::action(label, TileCommand::RemoveExtension)
-                        .destructive(true)
-                        .debug_selector(format!("{selector}-remove-extension")),
-                );
-            }
-        }
-        let owner = cx.weak_entity();
-        let target = summary.clone();
-        let menu = ContextMenu::new(
-            SharedString::from(format!("{selector}-menu")),
-            SharedString::from(format!("{} options", summary.name)),
-            tile,
-            entries,
-        )
-        .keyboard_trigger(&focus)
-        .disabled(!editable)
-        .debug_selector(format!("{selector}-menu"))
-        .on_activate(move |activation, window, cx| {
-            let command = *activation.action();
-            let target = target.clone();
-            let _ = owner.update(cx, |settings, cx| match command {
-                TileCommand::Use => settings.set_theme(slot, target.id.clone(), cx),
-                TileCommand::Remove | TileCommand::RemoveExtension => {
-                    settings.confirm_removal(&target, command, window, cx);
-                }
+        let focus_ring =
+            (focus.is_focused(window) && window.last_input_was_keyboard()).then(|| {
+                spaceterm_ui::focus_ring(
+                    "focus-ring",
+                    gpui_color(appearance.colors.focus_ring),
+                    radius,
+                    px(0.0),
+                )
             });
-        });
-        div()
-            .on_key_down(
-                cx.listener(move |settings, event: &KeyDownEvent, window, cx| {
-                    if editable && keyboard_activation(event) {
-                        settings.set_theme(slot, keyboard_id.clone(), cx);
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .child(menu)
-            .into_any_element()
+        spaceterm_ui::Ringed::new(row, focus_ring).into_any_element()
     }
 
-    /// Asks before removing a theme, or every theme its extension installed, then removes them
-    /// together. A slot that used a removed theme returns to its built-in theme.
+    /// Asks before removing a theme and every theme installed with it, then removes them together.
+    /// A slot that used a removed theme returns to its built-in theme.
     fn confirm_removal(
         &mut self,
         theme: &ThemeSummary,
-        command: TileCommand,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let summaries = self.editor.theme_summaries().unwrap_or_default();
-        let ids = match (command, &theme.package) {
-            (TileCommand::RemoveExtension, Some(package)) => summaries
-                .iter()
-                .filter(|summary| {
-                    summary
-                        .package
-                        .as_ref()
-                        .is_some_and(|installed| installed.id == package.id)
-                })
-                .map(|summary| summary.id.clone())
-                .collect::<Vec<_>>(),
-            _ => vec![theme.id.clone()],
-        };
+        let removed = self
+            .editor
+            .theme_summaries()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|summary| installed_together(summary, theme))
+            .collect::<Vec<_>>();
+        let ids = removed
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<Vec<_>>();
         let slots = self.editor.document().preferences.terminal.themes.clone();
         let in_use = [Appearance::Light, Appearance::Dark]
             .into_iter()
             .filter(|slot| ids.contains(slots.get(*slot)))
             .collect::<Vec<_>>();
-        let (title, message) = match ids.len() {
-            1 => ("Remove Theme", format!("Remove “{}”?", theme.name)),
-            count => (
+        let one = ids.len() == 1;
+        let family = removed
+            .iter()
+            .all(|summary| summary.family == theme.family)
+            .then_some(theme.family.as_ref())
+            .flatten();
+        let (title, message) = match (one, family) {
+            (true, _) => ("Remove Theme", format!("Remove “{}”?", theme.name)),
+            (false, Some(family)) => (
                 "Remove Themes",
-                match &theme.family {
-                    Some(family) => format!("Remove all {count} {family} themes?"),
-                    None => format!("Remove all {count} themes from this extension?"),
-                },
+                format!("Remove all {} {family} themes?", ids.len()),
+            ),
+            (false, None) => (
+                "Remove Themes",
+                format!("Remove all {} themes from this extension?", ids.len()),
             ),
         };
-        let one = ids.len() == 1;
-        let detail = match (in_use.is_empty(), &theme.package) {
+        // The list shows one appearance, so name the themes of the other that go with it.
+        let hidden = removed
+            .iter()
+            .filter(|summary| summary.appearance != theme.appearance)
+            .count();
+        let hidden = match (hidden, theme.appearance) {
+            (0, _) => None,
+            (1, Appearance::Light) => Some(String::from("This includes 1 dark theme.")),
+            (1, Appearance::Dark) => Some(String::from("This includes 1 light theme.")),
+            (count, Appearance::Light) => Some(format!("This includes {count} dark themes.")),
+            (count, Appearance::Dark) => Some(format!("This includes {count} light themes.")),
+        };
+        let consequence = match (in_use.is_empty(), &theme.package) {
             (false, _) if one => "Terminal panes using it will switch to the built-in theme.",
             (false, _) => "Terminal panes using one of them will switch to the built-in theme.",
             (true, Some(_)) if one => "You can get it again from Get More Themes.",
             (true, Some(_)) => "You can get them again from Get More Themes.",
-            (true, None) => "You can import it again from its file.",
+            (true, None) if one => "You can import it again from its file.",
+            (true, None) => "You can import them again from their file.",
+        };
+        let detail = match hidden {
+            Some(hidden) => format!("{hidden} {consequence}"),
+            None => consequence.to_owned(),
         };
         let owner = cx.weak_entity();
         let result = Alert::new(
@@ -621,6 +691,22 @@ impl SettingsWindow {
         if result.is_err() {
             eprintln!("failed to present the SpaceTerm theme removal confirmation");
         }
+    }
+}
+
+/// Whether two installed themes arrived together, so removing one removes both: themes from the
+/// same extension, or themes of the same family imported from a file.
+fn installed_together(theme: &ThemeSummary, other: &ThemeSummary) -> bool {
+    if theme.id == other.id {
+        return true;
+    }
+    if theme.builtin || other.builtin {
+        return false;
+    }
+    match (&theme.package, &other.package) {
+        (Some(theme), Some(other)) => theme.id == other.id,
+        (None, None) => theme.family.is_some() && theme.family == other.family,
+        _ => false,
     }
 }
 
@@ -687,12 +773,17 @@ fn preview_name(preview: &SlotPreview) -> SharedString {
 
 /// Where the theme came from, in the words a person would use.
 fn preview_origin(preview: &SlotPreview) -> SharedString {
-    let Some(summary) = &preview.summary else {
-        return SharedString::from(format!(
+    match &preview.summary {
+        Some(summary) => theme_origin(summary),
+        None => SharedString::from(format!(
             "Not installed. Terminal panes use {}.",
             preview.effective_name
-        ));
-    };
+        )),
+    }
+}
+
+/// Where an installed theme came from, in the words a person would use.
+fn theme_origin(summary: &ThemeSummary) -> SharedString {
     match (&summary.family, &summary.package) {
         _ if summary.builtin => SharedString::from("Built into SpaceTerm"),
         (Some(family), Some(_)) => SharedString::from(format!("{family} · Zed extension")),
@@ -826,24 +917,24 @@ fn terminal_preview(
         )
 }
 
-/// A tile-sized preview: the same session drawn as lines of color, legible at a glance.
+/// A row-sized preview: the same session drawn as lines of color, legible at a glance.
 fn theme_miniature(colors: &TerminalColors, appearance: &ChromeAppearance) -> gpui::Div {
     let edge = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
     let bar = |width: f32, color: Color| {
         div()
-            .h(px(3.0))
+            .h(px(2.0))
             .w(relative(width))
-            .rounded(px(1.5))
+            .rounded(px(1.0))
             .bg(gpui_color(color))
     };
-    let row = |bars: Vec<gpui::Div>| div().flex().flex_row().gap(px(3.0)).children(bars);
+    let row = |bars: Vec<gpui::Div>| div().flex().flex_row().gap(px(2.0)).children(bars);
     div()
         .flex()
         .flex_col()
         .justify_between()
         .aspect_ratio(PREVIEW_ASPECT)
         .overflow_hidden()
-        .p(px(9.0))
+        .p(px(6.0))
         .border(px(HAIRLINE))
         .border_color(gpui_color(edge))
         .bg(gpui_color(colors.background))
@@ -851,7 +942,7 @@ fn theme_miniature(colors: &TerminalColors, appearance: &ChromeAppearance) -> gp
             div()
                 .flex()
                 .flex_col()
-                .gap(px(5.0))
+                .gap(px(3.0))
                 .child(row(vec![
                     bar(0.28, colors.normal[4]),
                     bar(0.14, colors.normal[5]),
@@ -866,7 +957,7 @@ fn theme_miniature(colors: &TerminalColors, appearance: &ChromeAppearance) -> gp
             div().flex().flex_row().gap(px(2.0)).children(
                 colors.normal[1..7]
                     .iter()
-                    .map(|color| div().flex_1().h(px(4.0)).rounded(px(1.0)).bg(gpui_color(*color))),
+                    .map(|color| div().flex_1().h(px(3.0)).rounded(px(1.0)).bg(gpui_color(*color))),
             ),
         )
 }

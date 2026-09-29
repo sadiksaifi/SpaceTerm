@@ -528,7 +528,7 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 }
 
 /// A theme that is no longer installed stays the choice: the page names it, and nothing in the
-/// gallery claims to be selected in its place.
+/// list claims to be selected in its place.
 #[gpui::test]
 fn unavailable_theme_ids_remain_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
@@ -539,7 +539,7 @@ fn unavailable_theme_ids_remain_selected(cx: &mut TestAppContext) {
     click("settings-navigation-settings-section-themes", cx);
     assert!(cx.debug_bounds("settings-current-theme-name").is_some());
     assert!(
-        cx.debug_bounds("settings-theme-tile-user.missing-terminal")
+        cx.debug_bounds("settings-theme-row-user.missing-terminal")
             .is_none()
     );
 

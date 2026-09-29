@@ -3,7 +3,7 @@
 //!
 //! SpaceTerm contacts the registry only when the sheet opens, and only once per window: the
 //! listing is small, searched locally, and discarded with the window. Installing downloads one
-//! extension, translates its themes, and adds them to the gallery without applying any.
+//! extension, translates its themes, and adds them to the installed themes without applying any.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -450,8 +450,8 @@ impl SettingsWindow {
             DialogInitialFocus::Body(focus),
         )
         .description(
-            "Themes from the Zed extension registry. Installed themes appear in your gallery, \
-             ready to choose.",
+            "Themes from the Zed extension registry. Installed themes appear in your list, ready \
+             to choose.",
         )
         .size(DialogSize::Wide)
         .body(store);
