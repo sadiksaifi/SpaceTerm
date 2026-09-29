@@ -24,7 +24,7 @@ mod pane_host;
 pub(crate) mod pane_lifecycle;
 mod progress_theme;
 mod remote_child_launch;
-pub(crate) mod remote_directory_picker;
+pub(crate) mod directory_picker;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 mod resize_handle_theme;

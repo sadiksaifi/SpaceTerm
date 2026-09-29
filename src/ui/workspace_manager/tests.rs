@@ -494,8 +494,8 @@ use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{SessionEvent, SessionExit};
-use crate::ui::remote_directory_picker::{
-    RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
+use crate::ui::directory_picker::{
+    ExactPathState, DirectoryListing, RemoteDirectoryProvider,
     RemoteDirectoryProviderError,
 };
 use crate::ui::remote_workspace_flow::{
@@ -660,15 +660,15 @@ impl RemoteDirectoryProvider for TestRemoteProvider {
     fn list_directories(
         &self,
         _: RemoteDirectory,
-    ) -> gpui::Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Ok(RemoteDirectoryListing::new(Vec::new())))
+    ) -> gpui::Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Ok(DirectoryListing::new(Vec::new())))
     }
 
     fn probe_exact_path(
         &self,
         _: RemoteDirectory,
-    ) -> gpui::Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Ok(RemoteDirectoryExactPathState::ReadableDirectory))
+    ) -> gpui::Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
+        gpui::Task::ready(Ok(ExactPathState::ReadableDirectory))
     }
 
     fn create_directory_recursively(
@@ -716,14 +716,14 @@ impl RemoteDirectoryProvider for BlockingRemoteProvider {
     fn list_directories(
         &self,
         _: RemoteDirectory,
-    ) -> gpui::Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+    ) -> gpui::Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
         gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
     fn probe_exact_path(
         &self,
         _: RemoteDirectory,
-    ) -> gpui::Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+    ) -> gpui::Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
         gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
     }
 
@@ -7906,7 +7906,7 @@ fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
 }
 
 #[gpui::test]
-fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestAppContext) {
+fn directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let provider = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
@@ -7930,7 +7930,7 @@ fn remote_directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mu
     cx.simulate_keystrokes("cmd-shift-n");
     cx.run_until_parked();
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    click("remote-directory-picker-confirm", cx);
+    click("directory-picker-confirm", cx);
     assert!(manager.read_with(cx, |manager, _| {
         manager
             .workspaces

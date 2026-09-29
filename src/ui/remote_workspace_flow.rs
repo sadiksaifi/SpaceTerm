@@ -11,8 +11,8 @@ use spaceterm_ui::{
 };
 use thiserror::Error;
 
-use super::remote_directory_picker::RemoteDirectoryProvider;
-use super::remote_directory_picker::RemoteDirectoryProviderError;
+use super::directory_picker::RemoteDirectoryProvider;
+use super::directory_picker::RemoteDirectoryProviderError;
 use super::ssh_host_form::{
     ManagedHostFormBackend, ManagedHostFormBackendError, SshHostForm, SshHostFormEvent,
 };
@@ -1502,8 +1502,8 @@ mod tests {
 
     use super::*;
     use crate::ssh::destination::SshHostAlias;
-    use crate::ui::remote_directory_picker::{
-        RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProviderError,
+    use crate::ui::directory_picker::{
+        ExactPathState, DirectoryListing, RemoteDirectoryProviderError,
     };
 
     #[derive(Default)]
@@ -1519,15 +1519,15 @@ mod tests {
         fn list_directories(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
-            Task::ready(Ok(RemoteDirectoryListing::new(Vec::new())))
+        ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
+            Task::ready(Ok(DirectoryListing::new(Vec::new())))
         }
 
         fn probe_exact_path(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
-            Task::ready(Ok(RemoteDirectoryExactPathState::ReadableDirectory))
+        ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
+            Task::ready(Ok(ExactPathState::ReadableDirectory))
         }
 
         fn create_directory_recursively(

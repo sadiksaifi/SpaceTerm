@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, fmt, sync::Arc};
+//! The Directory Picker: one machine's directories browsed and pinned through the Command
+//! Palette, with the machine reached through a [`DirectorySource`].
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::{cmp::Ordering, fmt};
 
 use gpui::prelude::*;
 use gpui::{Action, App, SharedString};
@@ -22,20 +27,25 @@ use super::{
     ToggleSidebarFocus,
 };
 
-use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceValueError};
-use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::domain::PinnedDirectory;
+
+mod remote_source;
+
+pub(crate) use remote_source::{
+    RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
+};
 
 const HOME_DISPLAY: &str = "~/";
-const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
+const CREATE_ALERT_ID: &str = "directory-picker-create-directory";
 /// Identifies the search line's Pin or Create action.
-const CONFIRM_ACTION: &str = "remote-directory-picker-confirm";
+const CONFIRM_ACTION: &str = "directory-picker-confirm";
 /// Identifies the row that opens the enclosing directory.
-const ENCLOSING_ROW: &str = "remote-directory-picker-enclosing";
+const ENCLOSING_ROW: &str = "directory-picker-enclosing";
 const TRUNCATED_LISTING_NOTE: &str =
     "Showing the first 1024 directories. Type a path to open others.";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
-pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
+pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
     EmptyNotice::new(IconName::TriangleAlert, "SSH connection lost");
 const UNSUPPORTED_LOGIN_SHELL_NOTICE: EmptyNotice =
@@ -65,46 +75,72 @@ impl EmptyNotice {
     }
 }
 
+/// Why a [`DirectorySource`] could not read or change a directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteDirectoryProviderError {
+pub(crate) enum DirectorySourceError {
     ConnectionLost,
     Missing,
     NotDirectory,
     PermissionDenied,
     UnsupportedLoginShell,
-    InvalidResponse,
     Other,
 }
 
-/// The connected-SSH boundary used by the picker. Every path crossing it is a remote string type.
-pub(crate) trait RemoteDirectoryProvider: Send + Sync {
-    fn discover_account(
-        &self,
-    ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>;
+pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, DirectorySourceError>>>>;
 
-    fn list_directories(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>>;
+/// The boundary through which the Directory Picker reads and changes one machine's directories.
+///
+/// Each source converts [`PickerPath`] spellings into its own machine's path type.
+pub(crate) trait DirectorySource {
+    /// Names the machine when it is not the local one.
+    fn machine_name(&self) -> Option<&str>;
 
-    fn probe_exact_path(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>>;
+    /// Resolves the absolute home directory that `~/` names.
+    fn discover_home(&self) -> SourceFuture<PickerPath>;
 
-    fn create_directory_recursively(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Task<Result<(), RemoteDirectoryProviderError>>;
+    fn list_directories(&self, directory: PickerPath) -> SourceFuture<DirectoryListing>;
 
-    fn validate_physical_identity(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>>;
+    fn probe_exact_path(&self, directory: PickerPath) -> SourceFuture<ExactPathState>;
+
+    fn create_directory_recursively(&self, directory: PickerPath) -> SourceFuture<()>;
+
+    /// Validates the directory's physical identity as a Pinned Directory.
+    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
+}
+
+/// A directory path as spelled in the Directory Picker: absolute, or relative to the home
+/// directory through `~`.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) struct PickerPath(String);
+
+impl fmt::Debug for PickerPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PickerPath(<redacted>)")
+    }
+}
+
+impl PickerPath {
+    pub(crate) fn new(value: String) -> Result<Self, PickerPathError> {
+        if !value.starts_with('/') && value != "~" && !value.starts_with("~/") {
+            return Err(PickerPathError::Relative);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(PickerPathError::InvalidControlCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteDirectoryFormatError {
+pub(crate) enum PickerPathError {
     Relative,
     BareTilde,
     UnsupportedTilde,
@@ -112,31 +148,31 @@ pub(super) enum RemoteDirectoryFormatError {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(super) struct ParsedRemoteDirectory {
+pub(super) struct ParsedPickerPath {
     display: String,
-    exact_directory: RemoteDirectory,
-    enumeration_directory: RemoteDirectory,
+    exact_directory: PickerPath,
+    enumeration_directory: PickerPath,
     descend_prefix: String,
     leaf_filter: String,
     trailing_separator: bool,
 }
 
-impl fmt::Debug for ParsedRemoteDirectory {
+impl fmt::Debug for ParsedPickerPath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ParsedRemoteDirectory(<redacted>)")
+        formatter.write_str("ParsedPickerPath(<redacted>)")
     }
 }
 
-impl ParsedRemoteDirectory {
+impl ParsedPickerPath {
     pub(super) fn display(&self) -> &str {
         &self.display
     }
 
-    pub(super) const fn exact_directory(&self) -> &RemoteDirectory {
+    pub(super) const fn exact_directory(&self) -> &PickerPath {
         &self.exact_directory
     }
 
-    pub(super) const fn enumeration_directory(&self) -> &RemoteDirectory {
+    pub(super) const fn enumeration_directory(&self) -> &PickerPath {
         &self.enumeration_directory
     }
 
@@ -155,28 +191,27 @@ impl ParsedRemoteDirectory {
     }
 }
 
-pub(super) fn parse_remote_directory(
+pub(super) fn parse_picker_path(
     input: &str,
-) -> Result<ParsedRemoteDirectory, RemoteDirectoryFormatError> {
+) -> Result<ParsedPickerPath, PickerPathError> {
     if input == "~" {
-        return Err(RemoteDirectoryFormatError::BareTilde);
+        return Err(PickerPathError::BareTilde);
     }
     if input.starts_with('~') && !input.starts_with("~/") {
-        return Err(RemoteDirectoryFormatError::UnsupportedTilde);
+        return Err(PickerPathError::UnsupportedTilde);
     }
     if !input.starts_with('/') && !input.starts_with("~/") {
-        return Err(RemoteDirectoryFormatError::Relative);
+        return Err(PickerPathError::Relative);
     }
 
-    let exact_directory = RemoteDirectory::new(input.to_owned())
-        .map_err(|_| RemoteDirectoryFormatError::InvalidControlCharacter)?;
+    let exact_directory = PickerPath::new(input.to_owned())?;
     let trailing_separator = input.ends_with('/');
     let (enumeration_spelling, descend_prefix, leaf_filter) = if trailing_separator {
         (input, input.to_owned(), String::new())
     } else {
         let separator = input
             .rfind('/')
-            .ok_or(RemoteDirectoryFormatError::Relative)?;
+            .ok_or(PickerPathError::Relative)?;
         let directory_with_separator = &input[..=separator];
         let enumeration_spelling =
             if directory_with_separator == "/" || directory_with_separator == "~/" {
@@ -190,10 +225,9 @@ pub(super) fn parse_remote_directory(
             input[separator + 1..].to_owned(),
         )
     };
-    let enumeration_directory = RemoteDirectory::new(enumeration_spelling.to_owned())
-        .map_err(|_| RemoteDirectoryFormatError::InvalidControlCharacter)?;
+    let enumeration_directory = PickerPath::new(enumeration_spelling.to_owned())?;
 
-    Ok(ParsedRemoteDirectory {
+    Ok(ParsedPickerPath {
         display: input.to_owned(),
         exact_directory,
         enumeration_directory,
@@ -204,47 +238,47 @@ pub(super) fn parse_remote_directory(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteDirectoryRowError {
+pub(crate) enum DirectoryRowError {
     InvalidName,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct RemoteDirectoryRow {
+pub(crate) struct DirectoryRow {
     name: String,
 }
 
-/// A defensively bounded one-level directory result from a remote provider.
-impl fmt::Debug for RemoteDirectoryRow {
+/// A defensively bounded one-level directory result from a source.
+impl fmt::Debug for DirectoryRow {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteDirectoryRow(<redacted>)")
+        formatter.write_str("DirectoryRow(<redacted>)")
     }
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct RemoteDirectoryListing {
-    rows: Vec<RemoteDirectoryRow>,
+pub(crate) struct DirectoryListing {
+    rows: Vec<DirectoryRow>,
     truncated: bool,
 }
 
-impl fmt::Debug for RemoteDirectoryListing {
+impl fmt::Debug for DirectoryListing {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteDirectoryListing(<redacted>)")
+        formatter.write_str("DirectoryListing(<redacted>)")
     }
 }
 
-impl RemoteDirectoryListing {
+impl DirectoryListing {
     #[cfg(test)]
-    pub(crate) fn new(rows: Vec<RemoteDirectoryRow>) -> Self {
-        Self::from_remote(rows, false)
+    pub(crate) fn new(rows: Vec<DirectoryRow>) -> Self {
+        Self::bounded(rows, false)
     }
 
-    pub(crate) fn from_remote(mut rows: Vec<RemoteDirectoryRow>, remotely_truncated: bool) -> Self {
-        let truncated = remotely_truncated || rows.len() > MAXIMUM_REMOTE_DIRECTORY_ROWS;
-        rows.truncate(MAXIMUM_REMOTE_DIRECTORY_ROWS);
+    pub(crate) fn bounded(mut rows: Vec<DirectoryRow>, source_truncated: bool) -> Self {
+        let truncated = source_truncated || rows.len() > MAXIMUM_DIRECTORY_ROWS;
+        rows.truncate(MAXIMUM_DIRECTORY_ROWS);
         Self { rows, truncated }
     }
 
-    pub(crate) fn rows(&self) -> &[RemoteDirectoryRow] {
+    pub(crate) fn rows(&self) -> &[DirectoryRow] {
         &self.rows
     }
 
@@ -253,15 +287,15 @@ impl RemoteDirectoryListing {
     }
 }
 
-impl RemoteDirectoryRow {
-    pub(crate) fn new(name: String) -> Result<Self, RemoteDirectoryRowError> {
+impl DirectoryRow {
+    pub(crate) fn new(name: String) -> Result<Self, DirectoryRowError> {
         if name.is_empty()
             || name == "."
             || name == ".."
             || name.contains('/')
             || name.chars().any(char::is_control)
         {
-            return Err(RemoteDirectoryRowError::InvalidName);
+            return Err(DirectoryRowError::InvalidName);
         }
         Ok(Self { name })
     }
@@ -272,26 +306,26 @@ impl RemoteDirectoryRow {
 }
 
 #[cfg(test)]
-pub(super) fn filter_remote_workspace_rows(
-    parsed: &ParsedRemoteDirectory,
-    entries: &[RemoteDirectoryRow],
-) -> Vec<RemoteDirectoryRow> {
-    match_remote_workspace_rows(parsed, entries)
+pub(super) fn filter_directory_rows(
+    parsed: &ParsedPickerPath,
+    entries: &[DirectoryRow],
+) -> Vec<DirectoryRow> {
+    match_directory_rows(parsed, entries)
         .into_iter()
         .map(|matched| matched.row)
         .collect()
 }
 
 #[derive(Clone)]
-struct RemoteDirectoryRowMatch {
-    row: RemoteDirectoryRow,
+struct DirectoryRowMatch {
+    row: DirectoryRow,
     matched_indices: Vec<usize>,
 }
 
-fn match_remote_workspace_rows(
-    parsed: &ParsedRemoteDirectory,
-    entries: &[RemoteDirectoryRow],
-) -> Vec<RemoteDirectoryRowMatch> {
+fn match_directory_rows(
+    parsed: &ParsedPickerPath,
+    entries: &[DirectoryRow],
+) -> Vec<DirectoryRowMatch> {
     let reveal_hidden = parsed.reveals_hidden_directories();
     let mut visible = entries
         .iter()
@@ -309,27 +343,27 @@ fn match_remote_workspace_rows(
         FuzzyTarget::new(entry.name())
     })
     .into_iter()
-    .map(|matched| RemoteDirectoryRowMatch {
+    .map(|matched| DirectoryRowMatch {
         row: visible[matched.item_index()].clone(),
         matched_indices: matched.field_highlight_indices(0),
     })
     .collect()
 }
 
-pub(super) fn descend_remote_workspace_query(
-    parsed: &ParsedRemoteDirectory,
-    row: &RemoteDirectoryRow,
-) -> Result<RemoteDirectory, RemoteWorkspaceValueError> {
-    RemoteDirectory::new(format!("{}{}/", parsed.descend_prefix, row.name()))
+pub(super) fn descend_query(
+    parsed: &ParsedPickerPath,
+    row: &DirectoryRow,
+) -> Result<PickerPath, PickerPathError> {
+    PickerPath::new(format!("{}{}/", parsed.descend_prefix, row.name()))
 }
 
 /// Returns the path that lists the directory enclosing the one `parsed` lists.
 ///
-/// The remote home spells its enclosing directory from the account's physical home, so `~/`
-/// leads to the absolute directory that contains it.
+/// The home spells its enclosing directory from the physical home, so `~/` leads to the absolute
+/// directory that contains it.
 fn enclosing_directory_query(
-    parsed: &ParsedRemoteDirectory,
-    home: &RemoteDirectoryIdentity,
+    parsed: &ParsedPickerPath,
+    home: &PickerPath,
 ) -> Option<String> {
     let listed = parsed
         .enumeration_directory()
@@ -345,53 +379,20 @@ fn enclosing_directory_query(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteDirectoryExactPathState {
+pub(crate) enum ExactPathState {
     ReadableDirectory,
     Missing,
 }
 
-#[derive(Clone, Eq, PartialEq)]
-pub(super) struct RemoteDirectorySelection {
-    directory: RemoteDirectory,
-    physical_directory: RemoteDirectoryIdentity,
-}
-
-impl fmt::Debug for RemoteDirectorySelection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteDirectorySelection(<redacted>)")
-    }
-}
-
-impl RemoteDirectorySelection {
-    #[cfg(test)]
-    pub(super) fn new(
-        directory: RemoteDirectory,
-        physical_directory: RemoteDirectoryIdentity,
-    ) -> Self {
-        Self {
-            directory,
-            physical_directory,
-        }
-    }
-
-    pub(super) const fn directory(&self) -> &RemoteDirectory {
-        &self.directory
-    }
-
-    pub(super) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
-        &self.physical_directory
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum RemoteDirectoryPickerEvent {
+pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
-    Confirmed(RemoteDirectorySelection),
+    Confirmed(PinnedDirectory),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RemoteDirectoryPickerStatus {
+enum DirectoryPickerStatus {
     DiscoveringAccount,
     Loading,
     Readable,
@@ -401,11 +402,11 @@ enum RemoteDirectoryPickerStatus {
     ConnectionLost,
     UnsupportedLoginShell,
     Other,
-    Invalid(RemoteDirectoryFormatError),
+    Invalid(PickerPathError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RemoteDirectoryPickerBusy {
+enum DirectoryPickerBusy {
     CreationAlert,
     Creating,
     Validating,
@@ -414,33 +415,33 @@ enum RemoteDirectoryPickerBusy {
 
 /// Identifies one presented row within one operation generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum RemoteDirectoryPickerItemId {
+enum DirectoryPickerItemId {
     /// The row that opens the directory enclosing the listed one.
     Enclosing { operation_generation: u64 },
     /// One listed child directory.
     Child {
-        row: RemoteDirectoryRow,
-        directory: RemoteDirectory,
+        row: DirectoryRow,
+        directory: PickerPath,
         operation_generation: u64,
     },
 }
 
 #[derive(Clone)]
-struct LoadedRemoteDirectorySnapshot {
-    directory: RemoteDirectory,
-    listing: RemoteDirectoryListing,
+struct LoadedDirectorySnapshot {
+    directory: PickerPath,
+    listing: DirectoryListing,
 }
 
 struct RefreshCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
-    parsed: ParsedRemoteDirectory,
-    listing: Option<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>>,
-    probe: Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>,
+    parsed: ParsedPickerPath,
+    listing: Option<Result<DirectoryListing, DirectorySourceError>>,
+    probe: Result<ExactPathState, DirectorySourceError>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RemoteDirectoryValidationKind {
+enum DirectoryValidationKind {
     Existing,
     Creation,
 }
@@ -448,47 +449,49 @@ enum RemoteDirectoryValidationKind {
 struct ValidationCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
-    directory: RemoteDirectory,
-    result: Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
+    directory: PickerPath,
+    result: Result<PinnedDirectory, DirectorySourceError>,
 }
 
-/// One connected-destination directory chooser built on the reusable Command Palette.
-pub(super) struct RemoteDirectoryPicker {
-    provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
-    palette: Entity<CommandPalette<RemoteDirectoryPickerItemId>>,
+/// One machine's directory chooser built on the reusable Command Palette.
+pub(super) struct DirectoryPicker {
+    source: Rc<dyn DirectorySource>,
+    palette: Entity<CommandPalette<DirectoryPickerItemId>>,
     opening: bool,
     open: bool,
     lifecycle_generation: u64,
     operation_generation: u64,
-    account: Option<RemoteWorkspaceAccount>,
-    parsed: Option<ParsedRemoteDirectory>,
-    snapshot: Option<LoadedRemoteDirectorySnapshot>,
-    rows: Vec<RemoteDirectoryRowMatch>,
-    rows_directory: Option<RemoteDirectory>,
-    listing_error: Option<RemoteDirectoryProviderError>,
+    home: Option<PickerPath>,
+    parsed: Option<ParsedPickerPath>,
+    snapshot: Option<LoadedDirectorySnapshot>,
+    rows: Vec<DirectoryRowMatch>,
+    rows_directory: Option<PickerPath>,
+    listing_error: Option<DirectorySourceError>,
     listing_truncated: bool,
-    status: RemoteDirectoryPickerStatus,
-    busy: Option<RemoteDirectoryPickerBusy>,
+    status: DirectoryPickerStatus,
+    busy: Option<DirectoryPickerBusy>,
     creation_alert: Option<ModalPresentationHandle>,
-    account_task: Option<Task<()>>,
+    home_task: Option<Task<()>>,
     refresh_task: Option<Task<()>>,
     validation_task: Option<Task<()>>,
 }
 
-impl EventEmitter<RemoteDirectoryPickerEvent> for RemoteDirectoryPicker {}
+impl EventEmitter<DirectoryPickerEvent> for DirectoryPicker {}
 
-impl RemoteDirectoryPicker {
-    /// Creates a closed picker for the machine `host` names.
+impl DirectoryPicker {
+    /// Creates a closed picker for the machine `source` reaches.
     pub(super) fn new(
-        provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
-        host: &str,
+        source: Rc<dyn DirectorySource>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prefix = SharedString::from(format!("{host}:"));
+        // A remote machine leads the path in scp form, so paths on two machines never look alike.
+        let prefix = source
+            .machine_name()
+            .map(|machine| SharedString::from(format!("{machine}:")));
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
-            palette.set_query_prefix(Some(prefix), cx);
+            palette.set_query_prefix(prefix, cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
@@ -496,29 +499,29 @@ impl RemoteDirectoryPicker {
         cx.subscribe_in(
             &palette,
             window,
-            |picker, _, event: &CommandPaletteEvent<RemoteDirectoryPickerItemId>, window, cx| {
+            |picker, _, event: &CommandPaletteEvent<DirectoryPickerItemId>, window, cx| {
                 picker.reduce_palette_event(event, window, cx);
             },
         )
         .detach();
         Self {
-            provider,
+            source,
             palette,
             opening: false,
             open: false,
             lifecycle_generation: 0,
             operation_generation: 0,
-            account: None,
+            home: None,
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
             rows_directory: None,
             listing_error: None,
             listing_truncated: false,
-            status: RemoteDirectoryPickerStatus::DiscoveringAccount,
+            status: DirectoryPickerStatus::DiscoveringAccount,
             busy: None,
             creation_alert: None,
-            account_task: None,
+            home_task: None,
             refresh_task: None,
             validation_task: None,
         }
@@ -541,16 +544,16 @@ impl RemoteDirectoryPicker {
         self.opening = true;
         self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
         self.operation_generation = self.operation_generation.wrapping_add(1);
-        self.account = None;
+        self.home = None;
         self.parsed = None;
         self.snapshot = None;
         self.clear_rows();
         self.listing_error = None;
         self.listing_truncated = false;
-        self.status = RemoteDirectoryPickerStatus::DiscoveringAccount;
+        self.status = DirectoryPickerStatus::DiscoveringAccount;
         self.busy = None;
         self.creation_alert = None;
-        self.account_task.take();
+        self.home_task.take();
         self.refresh_task.take();
         self.validation_task.take();
         self.palette.update(cx, |palette, cx| {
@@ -619,7 +622,7 @@ impl RemoteDirectoryPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.open || self.busy != Some(RemoteDirectoryPickerBusy::AwaitingActivation) {
+        if !self.open || self.busy != Some(DirectoryPickerBusy::AwaitingActivation) {
             return false;
         }
         self.busy = None;
@@ -629,9 +632,9 @@ impl RemoteDirectoryPicker {
     }
 
     pub(super) fn activation_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && self.busy == Some(RemoteDirectoryPickerBusy::AwaitingActivation) {
+        if self.open && self.busy == Some(DirectoryPickerBusy::AwaitingActivation) {
             self.busy = None;
-            self.status = RemoteDirectoryPickerStatus::Other;
+            self.status = DirectoryPickerStatus::Other;
             self.publish(cx);
             self.refocus_path(window, cx);
         }
@@ -639,7 +642,7 @@ impl RemoteDirectoryPicker {
 
     fn reduce_palette_event(
         &mut self,
-        event: &CommandPaletteEvent<RemoteDirectoryPickerItemId>,
+        event: &CommandPaletteEvent<DirectoryPickerItemId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -649,7 +652,7 @@ impl RemoteDirectoryPicker {
                 self.open = true;
                 self.palette
                     .update(cx, |palette, cx| palette.set_query(HOME_DISPLAY, cx));
-                self.start_account_discovery(window, cx);
+                self.start_home_discovery(window, cx);
                 self.publish(cx);
             }
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
@@ -659,14 +662,14 @@ impl RemoteDirectoryPicker {
                 self.refresh_for_input(query.text().to_owned(), window, cx);
             }
             CommandPaletteEvent::Activated(activation) => match activation.item_id() {
-                RemoteDirectoryPickerItemId::Enclosing {
+                DirectoryPickerItemId::Enclosing {
                     operation_generation,
                 } => {
                     if *operation_generation == self.operation_generation {
                         self.open_enclosing_directory(window, cx);
                     }
                 }
-                RemoteDirectoryPickerItemId::Child {
+                DirectoryPickerItemId::Child {
                     row,
                     directory,
                     operation_generation,
@@ -687,7 +690,7 @@ impl RemoteDirectoryPicker {
         }
         self.opening = false;
         self.open = false;
-        self.account = None;
+        self.home = None;
         self.parsed = None;
         self.snapshot = None;
         self.clear_rows();
@@ -695,26 +698,26 @@ impl RemoteDirectoryPicker {
         self.listing_truncated = false;
         self.busy = None;
         self.creation_alert = None;
-        self.account_task.take();
+        self.home_task.take();
         self.refresh_task.take();
         self.validation_task.take();
         self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
         self.operation_generation = self.operation_generation.wrapping_add(1);
         match reason {
             CommandPaletteCloseReason::Completed => {}
-            _ => cx.emit(RemoteDirectoryPickerEvent::Dismissed),
+            _ => cx.emit(DirectoryPickerEvent::Dismissed),
         }
-        cx.emit(RemoteDirectoryPickerEvent::StateChanged);
+        cx.emit(DirectoryPickerEvent::StateChanged);
         cx.notify();
     }
 
-    fn start_account_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_home_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
-        let task = self.provider.discover_account();
-        self.account_task.take();
-        self.account_task = Some(cx.spawn_in(window, async move |picker, cx| {
+        let task = self.source.discover_home();
+        self.home_task.take();
+        self.home_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let result = task.await;
             let _ = picker.update_in(cx, |picker, window, cx| {
                 if !picker.open
@@ -724,13 +727,13 @@ impl RemoteDirectoryPicker {
                     return;
                 }
                 match result {
-                    Ok(account) => {
-                        picker.account = Some(account);
+                    Ok(home) => {
+                        picker.home = Some(home);
                         let query = picker.palette.read(cx).query().to_owned();
                         picker.refresh_for_input(query, window, cx);
                     }
                     Err(error) => {
-                        picker.status = status_for_provider_error(error);
+                        picker.status = status_for_source_error(error);
                         picker.clear_rows();
                         picker.publish(cx);
                     }
@@ -740,15 +743,15 @@ impl RemoteDirectoryPicker {
     }
 
     fn refresh_for_input(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.busy.is_some() || self.account.is_none() {
+        if !self.open || self.busy.is_some() || self.home.is_none() {
             return;
         }
-        let parsed = match parse_remote_directory(&value) {
+        let parsed = match parse_picker_path(&value) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.refresh_task.take();
                 self.parsed = None;
-                self.status = RemoteDirectoryPickerStatus::Invalid(error);
+                self.status = DirectoryPickerStatus::Invalid(error);
                 self.listing_error = None;
                 self.listing_truncated = false;
                 self.operation_generation = self.operation_generation.wrapping_add(1);
@@ -762,7 +765,7 @@ impl RemoteDirectoryPicker {
             .as_ref()
             .is_some_and(|snapshot| snapshot.directory == *parsed.enumeration_directory());
         self.parsed = Some(parsed.clone());
-        self.status = RemoteDirectoryPickerStatus::Loading;
+        self.status = DirectoryPickerStatus::Loading;
         self.operation_generation = self.operation_generation.wrapping_add(1);
         if listing_needed {
             self.listing_error = None;
@@ -774,11 +777,11 @@ impl RemoteDirectoryPicker {
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
         let listing = listing_needed.then(|| {
-            self.provider
+            self.source
                 .list_directories(parsed.enumeration_directory().clone())
         });
         let probe = self
-            .provider
+            .source
             .probe_exact_path(parsed.exact_directory().clone());
         self.refresh_task.take();
         self.refresh_task = Some(cx.spawn_in(window, async move |picker, cx| {
@@ -816,7 +819,7 @@ impl RemoteDirectoryPicker {
             Some(Ok(listing)) => {
                 self.listing_error = None;
                 self.listing_truncated = listing.is_truncated();
-                self.snapshot = Some(LoadedRemoteDirectorySnapshot {
+                self.snapshot = Some(LoadedDirectorySnapshot {
                     directory: completion.parsed.enumeration_directory().clone(),
                     listing,
                 });
@@ -831,11 +834,11 @@ impl RemoteDirectoryPicker {
             None => {}
         }
         self.status = match completion.probe {
-            Ok(RemoteDirectoryExactPathState::ReadableDirectory) => {
-                RemoteDirectoryPickerStatus::Readable
+            Ok(ExactPathState::ReadableDirectory) => {
+                DirectoryPickerStatus::Readable
             }
-            Ok(RemoteDirectoryExactPathState::Missing) => RemoteDirectoryPickerStatus::Missing,
-            Err(error) => status_for_provider_error(error),
+            Ok(ExactPathState::Missing) => DirectoryPickerStatus::Missing,
+            Err(error) => status_for_source_error(error),
         };
         self.publish(cx);
     }
@@ -847,7 +850,7 @@ impl RemoteDirectoryPicker {
         if snapshot.directory != *parsed.enumeration_directory() {
             return;
         }
-        self.rows = match_remote_workspace_rows(parsed, snapshot.listing.rows());
+        self.rows = match_directory_rows(parsed, snapshot.listing.rows());
         self.rows_directory = Some(snapshot.directory.clone());
     }
 
@@ -858,8 +861,8 @@ impl RemoteDirectoryPicker {
 
     fn descend_to(
         &mut self,
-        row: &RemoteDirectoryRow,
-        directory: &RemoteDirectory,
+        row: &DirectoryRow,
+        directory: &PickerPath,
         operation_generation: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -869,7 +872,7 @@ impl RemoteDirectoryPicker {
             || self
                 .parsed
                 .as_ref()
-                .map(ParsedRemoteDirectory::enumeration_directory)
+                .map(ParsedPickerPath::enumeration_directory)
                 != Some(directory)
         {
             return;
@@ -877,14 +880,14 @@ impl RemoteDirectoryPicker {
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
-        let Ok(directory) = descend_remote_workspace_query(parsed, row) else {
-            self.status = RemoteDirectoryPickerStatus::Other;
+        let Ok(directory) = descend_query(parsed, row) else {
+            self.status = DirectoryPickerStatus::Other;
             self.publish(cx);
             return;
         };
         let query = directory.as_str().to_owned();
         if !self.palette.read(cx).can_set_query_exactly(&query, cx) {
-            self.status = RemoteDirectoryPickerStatus::Other;
+            self.status = DirectoryPickerStatus::Other;
             self.publish(cx);
             return;
         }
@@ -894,7 +897,7 @@ impl RemoteDirectoryPicker {
     }
 
     fn enclosing_directory(&self) -> Option<String> {
-        enclosing_directory_query(self.parsed.as_ref()?, self.account.as_ref()?.home_identity())
+        enclosing_directory_query(self.parsed.as_ref()?, self.home.as_ref()?)
     }
 
     fn open_enclosing_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -905,7 +908,7 @@ impl RemoteDirectoryPicker {
             return;
         };
         if !self.palette.read(cx).can_set_query_exactly(&query, cx) {
-            self.status = RemoteDirectoryPickerStatus::Other;
+            self.status = DirectoryPickerStatus::Other;
             self.publish(cx);
             return;
         }
@@ -922,26 +925,26 @@ impl RemoteDirectoryPicker {
             return;
         };
         match self.status {
-            RemoteDirectoryPickerStatus::Readable => {
+            DirectoryPickerStatus::Readable => {
                 self.start_validation(
                     parsed.exact_directory().clone(),
-                    RemoteDirectoryValidationKind::Existing,
+                    DirectoryValidationKind::Existing,
                     window,
                     cx,
                 );
             }
-            RemoteDirectoryPickerStatus::Missing => self.present_creation_alert(parsed, window, cx),
+            DirectoryPickerStatus::Missing => self.present_creation_alert(parsed, window, cx),
             _ => {}
         }
     }
 
     fn present_creation_alert(
         &mut self,
-        parsed: ParsedRemoteDirectory,
+        parsed: ParsedPickerPath,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.busy = Some(RemoteDirectoryPickerBusy::CreationAlert);
+        self.busy = Some(DirectoryPickerBusy::CreationAlert);
         self.publish(cx);
         let directory = parsed.exact_directory().clone();
         let expected = directory.clone();
@@ -949,8 +952,8 @@ impl RemoteDirectoryPicker {
         let window_handle = window.window_handle();
         let alert = Alert::new(
             ModalId::new(CREATE_ALERT_ID),
-            "Create remote directory",
-            "Create Remote Directory?",
+            "Create directory",
+            "Create Directory?",
             format!(
                 "Create {}? Missing parent directories will also be created.",
                 parsed.display()
@@ -960,14 +963,14 @@ impl RemoteDirectoryPicker {
                     true,
                     "Create Directory",
                     ModalActionRole::Affirmative,
-                    "remote-workspace-create",
+                    "directory-picker-create",
                 )
                 .default_action(true),
                 ModalAction::new(
                     false,
                     "Cancel",
                     ModalActionRole::Cancel,
-                    "remote-workspace-create-cancel",
+                    "directory-picker-create-cancel",
                 ),
             ],
         )
@@ -976,7 +979,7 @@ impl RemoteDirectoryPicker {
                 let _ = picker.update(cx, |picker, cx| {
                     picker.creation_alert = None;
                     if !picker.open
-                        || picker.busy != Some(RemoteDirectoryPickerBusy::CreationAlert)
+                        || picker.busy != Some(DirectoryPickerBusy::CreationAlert)
                         || picker
                             .parsed
                             .as_ref()
@@ -994,7 +997,7 @@ impl RemoteDirectoryPicker {
                     ) {
                         picker.start_validation(
                             directory,
-                            RemoteDirectoryValidationKind::Creation,
+                            DirectoryValidationKind::Creation,
                             window,
                             cx,
                         );
@@ -1010,7 +1013,7 @@ impl RemoteDirectoryPicker {
             Ok(handle) => self.creation_alert = Some(handle),
             Err(_) => {
                 self.busy = None;
-                self.status = RemoteDirectoryPickerStatus::Other;
+                self.status = DirectoryPickerStatus::Other;
                 self.publish(cx);
                 self.refocus_path(window, cx);
             }
@@ -1019,8 +1022,8 @@ impl RemoteDirectoryPicker {
 
     fn start_validation(
         &mut self,
-        directory: RemoteDirectory,
-        kind: RemoteDirectoryValidationKind,
+        directory: PickerPath,
+        kind: DirectoryValidationKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1028,23 +1031,21 @@ impl RemoteDirectoryPicker {
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
         self.busy = Some(match kind {
-            RemoteDirectoryValidationKind::Existing => RemoteDirectoryPickerBusy::Validating,
-            RemoteDirectoryValidationKind::Creation => RemoteDirectoryPickerBusy::Creating,
+            DirectoryValidationKind::Existing => DirectoryPickerBusy::Validating,
+            DirectoryValidationKind::Creation => DirectoryPickerBusy::Creating,
         });
-        let provider = Arc::clone(&self.provider);
+        let source = Rc::clone(&self.source);
         let request = directory.clone();
         self.validation_task.take();
         self.validation_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let result = match kind {
-                RemoteDirectoryValidationKind::Creation => {
-                    match provider.create_directory_recursively(request.clone()).await {
-                        Ok(()) => provider.validate_physical_identity(request).await,
+                DirectoryValidationKind::Creation => {
+                    match source.create_directory_recursively(request.clone()).await {
+                        Ok(()) => source.pin(request).await,
                         Err(error) => Err(error),
                     }
                 }
-                RemoteDirectoryValidationKind::Existing => {
-                    provider.validate_physical_identity(request).await
-                }
+                DirectoryValidationKind::Existing => source.pin(request).await,
             };
             let completion = ValidationCompletion {
                 lifecycle_generation,
@@ -1074,23 +1075,18 @@ impl RemoteDirectoryPicker {
             return;
         }
         match completion.result {
-            Ok(physical_directory) => {
-                if self.account.is_none() {
+            Ok(pinned) => {
+                if self.home.is_none() {
                     return;
                 }
-                self.busy = Some(RemoteDirectoryPickerBusy::AwaitingActivation);
+                self.busy = Some(DirectoryPickerBusy::AwaitingActivation);
                 self.sync_palette(cx);
-                cx.emit(RemoteDirectoryPickerEvent::Confirmed(
-                    RemoteDirectorySelection {
-                        directory: completion.directory,
-                        physical_directory,
-                    },
-                ));
+                cx.emit(DirectoryPickerEvent::Confirmed(pinned));
                 cx.notify();
             }
             Err(error) => {
                 self.busy = None;
-                self.status = status_for_provider_error(error);
+                self.status = status_for_source_error(error);
                 self.publish(cx);
                 self.refocus_path(window, cx);
             }
@@ -1101,12 +1097,12 @@ impl RemoteDirectoryPicker {
         self.busy.is_none()
             && matches!(
                 self.status,
-                RemoteDirectoryPickerStatus::Readable | RemoteDirectoryPickerStatus::Missing
+                DirectoryPickerStatus::Readable | DirectoryPickerStatus::Missing
             )
     }
 
     fn confirmation_label(&self) -> &'static str {
-        if self.status == RemoteDirectoryPickerStatus::Missing {
+        if self.status == DirectoryPickerStatus::Missing {
             "Create & Pin"
         } else {
             "Pin"
@@ -1124,12 +1120,12 @@ impl RemoteDirectoryPicker {
     ///
     /// The enclosing row accompanies a readable listing, so an unusable or missing path presents
     /// its notice instead.
-    fn palette_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
+    fn palette_items(&self) -> Vec<CommandPaletteItem<DirectoryPickerItemId>> {
         let Some(directory) = self.rows_directory.as_ref() else {
             return Vec::new();
         };
         let enclosing = (self.enclosing_directory().is_some()
-            && (!self.rows.is_empty() || self.status == RemoteDirectoryPickerStatus::Readable))
+            && (!self.rows.is_empty() || self.status == DirectoryPickerStatus::Readable))
             .then(|| enclosing_directory_item(self.operation_generation));
         enclosing
             .into_iter()
@@ -1160,63 +1156,61 @@ impl RemoteDirectoryPicker {
     /// An unusable exact path outranks the listing, and a missing path offers creation.
     fn empty_notice(&self) -> EmptyNotice {
         match self.status {
-            RemoteDirectoryPickerStatus::NotDirectory => {
+            DirectoryPickerStatus::NotDirectory => {
                 return EmptyNotice::new(IconName::File, "Not a directory")
                     .description("Only a directory can be a Pinned Directory.");
             }
-            RemoteDirectoryPickerStatus::PermissionDenied => {
+            DirectoryPickerStatus::PermissionDenied => {
                 return EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("The remote account can\u{2019}t open this directory.");
+                    .description("Your account can\u{2019}t open this directory.");
             }
-            RemoteDirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
-            RemoteDirectoryPickerStatus::UnsupportedLoginShell => {
+            DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
+            DirectoryPickerStatus::UnsupportedLoginShell => {
                 return UNSUPPORTED_LOGIN_SHELL_NOTICE;
             }
-            RemoteDirectoryPickerStatus::Other => {
+            DirectoryPickerStatus::Other => {
                 return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
             }
-            RemoteDirectoryPickerStatus::Invalid(error) => {
+            DirectoryPickerStatus::Invalid(error) => {
                 return EmptyNotice::new(IconName::CircleAlert, "Invalid path")
                     .description(error.message());
             }
-            RemoteDirectoryPickerStatus::Missing => {
+            DirectoryPickerStatus::Missing => {
                 return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
                     .description("Choose Create to make it and pin this Workspace to it.");
             }
-            RemoteDirectoryPickerStatus::DiscoveringAccount
-            | RemoteDirectoryPickerStatus::Loading
-            | RemoteDirectoryPickerStatus::Readable => {}
+            DirectoryPickerStatus::DiscoveringAccount
+            | DirectoryPickerStatus::Loading
+            | DirectoryPickerStatus::Readable => {}
         }
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, "No subdirectories"),
-            Some(RemoteDirectoryProviderError::ConnectionLost) => CONNECTION_LOST_NOTICE,
-            Some(RemoteDirectoryProviderError::UnsupportedLoginShell) => {
+            Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
+            Some(DirectorySourceError::UnsupportedLoginShell) => {
                 UNSUPPORTED_LOGIN_SHELL_NOTICE
             }
-            Some(RemoteDirectoryProviderError::PermissionDenied) => {
+            Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("The remote account can\u{2019}t list this directory.")
+                    .description("Your account can\u{2019}t list this directory.")
             }
-            Some(RemoteDirectoryProviderError::Missing) => {
+            Some(DirectorySourceError::Missing) => {
                 EmptyNotice::new(IconName::CircleAlert, "Enclosing directory doesn\u{2019}t exist")
             }
-            Some(RemoteDirectoryProviderError::NotDirectory) => {
+            Some(DirectorySourceError::NotDirectory) => {
                 EmptyNotice::new(IconName::CircleAlert, "Enclosing path isn\u{2019}t a directory")
             }
-            Some(
-                RemoteDirectoryProviderError::InvalidResponse | RemoteDirectoryProviderError::Other,
-            ) => EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory"),
+            Some(DirectorySourceError::Other) => EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory"),
         }
     }
 
-    /// Results are pending until the account and the exact path settle, unless rows already show.
+    /// Results are pending until the home and the exact path settle, unless rows already show.
     fn awaiting_results(&self) -> bool {
         self.busy.is_some()
             || (self.rows.is_empty()
                 && matches!(
                     self.status,
-                    RemoteDirectoryPickerStatus::DiscoveringAccount
-                        | RemoteDirectoryPickerStatus::Loading
+                    DirectoryPickerStatus::DiscoveringAccount
+                        | DirectoryPickerStatus::Loading
                 ))
     }
 
@@ -1228,7 +1222,7 @@ impl RemoteDirectoryPicker {
         let items = self.palette_items();
         let first_child = items
             .iter()
-            .find(|item| matches!(item.id(), RemoteDirectoryPickerItemId::Child { .. }))
+            .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
             .or(items.first())
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
@@ -1248,7 +1242,7 @@ impl RemoteDirectoryPicker {
             palette.set_query_editable(!busy, cx);
             palette.set_dismissible(!busy, cx);
             palette.set_escape_cancellable(
-                matches!(self.busy, Some(RemoteDirectoryPickerBusy::Validating)),
+                matches!(self.busy, Some(DirectoryPickerBusy::Validating)),
                 cx,
             );
         });
@@ -1256,7 +1250,7 @@ impl RemoteDirectoryPicker {
 
     fn publish(&mut self, cx: &mut Context<Self>) {
         self.sync_palette(cx);
-        cx.emit(RemoteDirectoryPickerEvent::StateChanged);
+        cx.emit(DirectoryPickerEvent::StateChanged);
         cx.notify();
     }
 
@@ -1269,13 +1263,13 @@ impl RemoteDirectoryPicker {
     }
 }
 
-impl RemoteDirectoryFormatError {
+impl PickerPathError {
     const fn message(self) -> &'static str {
         match self {
             Self::Relative => "Enter an absolute path beginning with / or ~/.",
-            Self::BareTilde => "Use ~/ to open your remote home directory.",
-            Self::UnsupportedTilde => "Only ~/ is supported for home-relative remote paths.",
-            Self::InvalidControlCharacter => "Remote paths cannot contain control characters.",
+            Self::BareTilde => "Use ~/ to open your home directory.",
+            Self::UnsupportedTilde => "Only ~/ is supported for home-relative paths.",
+            Self::InvalidControlCharacter => "Paths cannot contain control characters.",
         }
     }
 }
@@ -1288,7 +1282,7 @@ fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 
-impl Render for RemoteDirectoryPicker {
+impl Render for DirectoryPicker {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .when(self.blocks_terminal_input(), |picker| {
@@ -1340,9 +1334,9 @@ impl Render for RemoteDirectoryPicker {
 
 fn enclosing_directory_item(
     operation_generation: u64,
-) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
+) -> CommandPaletteItem<DirectoryPickerItemId> {
     CommandPaletteItem::new(
-        RemoteDirectoryPickerItemId::Enclosing {
+        DirectoryPickerItemId::Enclosing {
             operation_generation,
         },
         "..",
@@ -1355,13 +1349,13 @@ fn enclosing_directory_item(
 }
 
 fn child_directory_item(
-    row: RemoteDirectoryRow,
-    directory: RemoteDirectory,
+    row: DirectoryRow,
+    directory: PickerPath,
     operation_generation: u64,
-) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
-    let selector = format!("remote-directory-picker-row-{}", row.name());
+) -> CommandPaletteItem<DirectoryPickerItemId> {
+    let selector = format!("directory-picker-row-{}", row.name());
     let label = row.name().to_owned();
-    let id = RemoteDirectoryPickerItemId::Child {
+    let id = DirectoryPickerItemId::Child {
         row,
         directory,
         operation_generation,
@@ -1373,20 +1367,14 @@ fn child_directory_item(
         .debug_selector(selector)
 }
 
-fn status_for_provider_error(error: RemoteDirectoryProviderError) -> RemoteDirectoryPickerStatus {
+fn status_for_source_error(error: DirectorySourceError) -> DirectoryPickerStatus {
     match error {
-        RemoteDirectoryProviderError::ConnectionLost => RemoteDirectoryPickerStatus::ConnectionLost,
-        RemoteDirectoryProviderError::Missing => RemoteDirectoryPickerStatus::Missing,
-        RemoteDirectoryProviderError::NotDirectory => RemoteDirectoryPickerStatus::NotDirectory,
-        RemoteDirectoryProviderError::PermissionDenied => {
-            RemoteDirectoryPickerStatus::PermissionDenied
-        }
-        RemoteDirectoryProviderError::UnsupportedLoginShell => {
-            RemoteDirectoryPickerStatus::UnsupportedLoginShell
-        }
-        RemoteDirectoryProviderError::InvalidResponse | RemoteDirectoryProviderError::Other => {
-            RemoteDirectoryPickerStatus::Other
-        }
+        DirectorySourceError::ConnectionLost => DirectoryPickerStatus::ConnectionLost,
+        DirectorySourceError::Missing => DirectoryPickerStatus::Missing,
+        DirectorySourceError::NotDirectory => DirectoryPickerStatus::NotDirectory,
+        DirectorySourceError::PermissionDenied => DirectoryPickerStatus::PermissionDenied,
+        DirectorySourceError::UnsupportedLoginShell => DirectoryPickerStatus::UnsupportedLoginShell,
+        DirectorySourceError::Other => DirectoryPickerStatus::Other,
     }
 }
 
@@ -1404,23 +1392,25 @@ mod tests {
     };
 
     use super::*;
+    use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
+    use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
-        let parsed = parse_remote_directory("/sensitive/project").unwrap();
-        let row = RemoteDirectoryRow::new("sensitive-child".to_owned()).unwrap();
-        let listing = RemoteDirectoryListing::new(vec![row.clone()]);
+        let parsed = parse_picker_path("/sensitive/project").unwrap();
+        let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
+        let listing = DirectoryListing::new(vec![row.clone()]);
         let account = RemoteWorkspaceAccount::new(
             "sensitive-user".to_owned(),
             RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
             "/bin/zsh".to_owned(),
         )
         .unwrap();
-        let selection = RemoteDirectorySelection::new(
-            RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
-            RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
-        );
-        let event = RemoteDirectoryPickerEvent::Confirmed(selection);
+        let pinned = PinnedDirectory::Remote {
+            directory: RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
+            identity: RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
+        };
+        let event = DirectoryPickerEvent::Confirmed(pinned);
 
         for debug in [
             format!("{parsed:?}"),
@@ -1436,8 +1426,8 @@ mod tests {
     #[derive(Default)]
     struct ScriptedRemoteDirectoryProviderState {
         accounts: VecDeque<Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>>,
-        listings: VecDeque<Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>>>,
-        probes: VecDeque<Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>>>,
+        listings: VecDeque<Task<Result<DirectoryListing, RemoteDirectoryProviderError>>>,
+        probes: VecDeque<Task<Result<ExactPathState, RemoteDirectoryProviderError>>>,
         creations: VecDeque<Task<Result<(), RemoteDirectoryProviderError>>>,
         validations: VecDeque<Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>>>,
         listed_directories: Vec<RemoteDirectory>,
@@ -1465,7 +1455,7 @@ mod tests {
         fn list_directories(
             &self,
             directory: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
             let mut state = self.state.lock().unwrap();
             state.listed_directories.push(directory);
             state
@@ -1477,7 +1467,7 @@ mod tests {
         fn probe_exact_path(
             &self,
             _directory: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
             self.state
                 .lock()
                 .unwrap()
@@ -1544,14 +1534,14 @@ mod tests {
         fn list_directories(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
             self.pending()
         }
 
         fn probe_exact_path(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
             self.pending()
         }
 
@@ -1570,11 +1560,11 @@ mod tests {
         }
     }
 
-    struct RemoteDirectoryPickerHarness {
-        picker: gpui::Entity<RemoteDirectoryPicker>,
+    struct DirectoryPickerHarness {
+        picker: gpui::Entity<DirectoryPicker>,
     }
 
-    impl gpui::Render for RemoteDirectoryPickerHarness {
+    impl gpui::Render for DirectoryPickerHarness {
         fn render(
             &mut self,
             _: &mut gpui::Window,
@@ -1595,10 +1585,10 @@ mod tests {
 
     fn scripted_provider(
         listings: impl IntoIterator<
-            Item = Result<Vec<RemoteDirectoryRow>, RemoteDirectoryProviderError>,
+            Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>,
         >,
         probes: impl IntoIterator<
-            Item = Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>,
+            Item = Result<ExactPathState, RemoteDirectoryProviderError>,
         >,
         creations: impl IntoIterator<Item = Result<(), RemoteDirectoryProviderError>>,
         validations: impl IntoIterator<
@@ -1610,7 +1600,7 @@ mod tests {
                 accounts: [Task::ready(Ok(remote_account()))].into(),
                 listings: listings
                     .into_iter()
-                    .map(|result| result.map(RemoteDirectoryListing::new))
+                    .map(|result| result.map(DirectoryListing::new))
                     .map(Task::ready)
                     .collect(),
                 probes: probes.into_iter().map(Task::ready).collect(),
@@ -1621,12 +1611,12 @@ mod tests {
         })
     }
 
-    fn remote_directory_picker(
+    fn directory_picker(
         provider: Arc<ScriptedRemoteDirectoryProvider>,
         cx: &mut TestAppContext,
     ) -> (
-        gpui::Entity<RemoteDirectoryPicker>,
-        Rc<RefCell<Vec<RemoteDirectoryPickerEvent>>>,
+        gpui::Entity<DirectoryPicker>,
+        Rc<RefCell<Vec<DirectoryPickerEvent>>>,
         &mut VisualTestContext,
     ) {
         cx.update(crate::ui::init)
@@ -1635,15 +1625,15 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
+            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
             cx.subscribe(
                 &picker,
-                move |_, _, event: &RemoteDirectoryPickerEvent, _| {
+                move |_, _, event: &DirectoryPickerEvent, _| {
                     recorded_events.borrow_mut().push(event.clone());
                 },
             )
             .detach();
-            RemoteDirectoryPickerHarness { picker }
+            DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
         cx.update(|window, cx| {
@@ -1662,13 +1652,13 @@ mod tests {
                 Ok(remote_rows(["SpaceTerm"])),
             ],
             [
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
             ],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        let (picker, _, cx) = directory_picker(Arc::clone(&provider), cx);
 
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.row_names()),
@@ -1690,11 +1680,11 @@ mod tests {
     fn missing_remote_path_should_turn_the_confirm_action_into_create(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::Missing)],
+            [Ok(ExactPathState::Missing)],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        let (picker, _, cx) = directory_picker(provider, cx);
 
         assert_eq!(
             picker.read_with(cx, |picker, _| (
@@ -1714,7 +1704,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("modal-action-remote-workspace-create")
+            cx.debug_bounds("modal-action-directory-picker-create")
                 .is_some()
         );
     }
@@ -1726,14 +1716,14 @@ mod tests {
         let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
         let provider = scripted_provider(
             [Ok(remote_rows(["Projects"]))],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [Ok(identity.clone())],
         );
-        let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
-            Some(RemoteDirectoryPickerItemId::Child { .. })
+            Some(DirectoryPickerItemId::Child { .. })
         ));
 
         cx.simulate_keystrokes("cmd-enter");
@@ -1745,8 +1735,8 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            RemoteDirectoryPickerEvent::Confirmed(selection)
-                if selection.physical_directory() == &identity
+            DirectoryPickerEvent::Confirmed(PinnedDirectory::Remote { identity: pinned, .. })
+                if pinned == &identity
         )));
     }
 
@@ -1760,7 +1750,7 @@ mod tests {
             [],
             [],
         );
-        let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
         assert!(!picker.read_with(cx, |picker, _| picker.can_confirm()));
 
@@ -1772,7 +1762,7 @@ mod tests {
             !events
                 .borrow()
                 .iter()
-                .any(|event| matches!(event, RemoteDirectoryPickerEvent::Confirmed(_)))
+                .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
     }
 
@@ -1785,13 +1775,13 @@ mod tests {
         let provider = scripted_provider(
             [Ok(Vec::new()), Ok(Vec::new())],
             [
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::Missing),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::Missing),
             ],
             [Ok(())],
             [Ok(identity.clone())],
         );
-        let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
         set_remote_input(&picker, "~/Projects/new", cx);
 
         cx.update(|window, cx| {
@@ -1799,7 +1789,7 @@ mod tests {
         });
         cx.run_until_parked();
         let create = cx
-            .debug_bounds("modal-action-remote-workspace-create")
+            .debug_bounds("modal-action-directory-picker-create")
             .expect("creation Alert should expose its typed affirmative action");
         cx.simulate_click(create.center(), Modifiers::none());
         cx.run_until_parked();
@@ -1809,13 +1799,17 @@ mod tests {
         assert_eq!(records.created_directories, vec![expected.clone()]);
         assert_eq!(records.validated_directories, vec![expected.clone()]);
         drop(records);
-        let selection = events.borrow().iter().find_map(|event| match event {
-            RemoteDirectoryPickerEvent::Confirmed(selection) => Some(selection.clone()),
+        let pinned = events.borrow().iter().find_map(|event| match event {
+            DirectoryPickerEvent::Confirmed(pinned) => Some(pinned.clone()),
             _ => None,
         });
-        let selection = selection.expect("validated selection should be emitted");
-        assert_eq!(selection.directory(), &expected);
-        assert_eq!(selection.physical_directory(), &identity);
+        assert_eq!(
+            pinned,
+            Some(PinnedDirectory::Remote {
+                directory: expected,
+                identity,
+            })
+        );
     }
 
     #[gpui::test]
@@ -1830,30 +1824,30 @@ mod tests {
                 Ok(remote_rows(["tester"])),
             ],
             [
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
             ],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        let (picker, _, cx) = directory_picker(provider, cx);
         set_remote_input(&picker, "~/Projects/", cx);
 
         let enclosing = cx
             .debug_bounds(ENCLOSING_ROW)
             .expect("the enclosing row should be rendered");
         let child = cx
-            .debug_bounds("remote-directory-picker-row-SpaceTerm")
+            .debug_bounds("directory-picker-row-SpaceTerm")
             .expect("the child row should be rendered");
         assert!(enclosing.bottom() <= child.top());
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
-            Some(RemoteDirectoryPickerItemId::Child { .. })
+            Some(DirectoryPickerItemId::Child { .. })
         ));
 
-        let query = |picker: &gpui::Entity<RemoteDirectoryPicker>, cx: &mut VisualTestContext| {
+        let query = |picker: &gpui::Entity<DirectoryPicker>, cx: &mut VisualTestContext| {
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned())
         };
         cx.simulate_click(enclosing.center(), Modifiers::none());
@@ -1869,9 +1863,9 @@ mod tests {
 
     #[test]
     fn the_enclosing_directory_should_contain_the_listed_directory() {
-        let home = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let home = PickerPath::new("/home/tester".to_owned()).unwrap();
         let enclosing = |input: &str| {
-            enclosing_directory_query(&parse_remote_directory(input).unwrap(), &home)
+            enclosing_directory_query(&parse_picker_path(input).unwrap(), &home)
         };
 
         assert_eq!(enclosing("~/Projects/"), Some(HOME_DISPLAY.to_owned()));
@@ -1887,10 +1881,10 @@ mod tests {
 
     #[test]
     fn a_root_home_should_have_no_enclosing_directory() {
-        let home = RemoteDirectoryIdentity::new("/".to_owned()).unwrap();
+        let home = PickerPath::new("/".to_owned()).unwrap();
 
         assert_eq!(
-            enclosing_directory_query(&parse_remote_directory("~/").unwrap(), &home),
+            enclosing_directory_query(&parse_picker_path("~/").unwrap(), &home),
             None
         );
     }
@@ -1898,8 +1892,8 @@ mod tests {
     #[test]
     fn unsupported_login_shell_should_have_an_actionable_account_status() {
         assert_eq!(
-            status_for_provider_error(RemoteDirectoryProviderError::UnsupportedLoginShell),
-            RemoteDirectoryPickerStatus::UnsupportedLoginShell
+            status_for_source_error(DirectorySourceError::UnsupportedLoginShell),
+            DirectoryPickerStatus::UnsupportedLoginShell
         );
         assert_eq!(
             UNSUPPORTED_LOGIN_SHELL_MESSAGE,
@@ -1911,11 +1905,11 @@ mod tests {
     fn stale_remote_refresh_cannot_replace_the_current_readable_state(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        let (picker, _, cx) = directory_picker(provider, cx);
         let (lifecycle_generation, operation_generation, parsed) =
             picker.read_with(cx, |picker, _| {
                 (
@@ -1931,8 +1925,8 @@ mod tests {
                     lifecycle_generation,
                     operation_generation: operation_generation.wrapping_sub(1),
                     parsed,
-                    listing: Some(Err(RemoteDirectoryProviderError::PermissionDenied)),
-                    probe: Err(RemoteDirectoryProviderError::ConnectionLost),
+                    listing: Some(Err(DirectorySourceError::PermissionDenied)),
+                    probe: Err(DirectorySourceError::ConnectionLost),
                 },
                 cx,
             );
@@ -1940,7 +1934,7 @@ mod tests {
 
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.status),
-            RemoteDirectoryPickerStatus::Readable
+            DirectoryPickerStatus::Readable
         );
     }
 
@@ -1948,11 +1942,11 @@ mod tests {
     fn remote_listing_errors_are_specific_and_never_keep_unread_rows(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Err(RemoteDirectoryProviderError::PermissionDenied)],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        let (picker, _, cx) = directory_picker(provider, cx);
 
         assert_eq!(
             picker.read_with(cx, |picker, _| {
@@ -1967,11 +1961,11 @@ mod tests {
                 )
             }),
             (
-                RemoteDirectoryPickerStatus::Readable,
+                DirectoryPickerStatus::Readable,
                 true,
-                Some(RemoteDirectoryProviderError::PermissionDenied),
+                Some(DirectorySourceError::PermissionDenied),
                 "Permission denied".to_owned(),
-                Some("The remote account can\u{2019}t list this directory.".to_owned()),
+                Some("Your account can\u{2019}t list this directory.".to_owned()),
                 Vec::<String>::new(),
             )
         );
@@ -1982,14 +1976,14 @@ mod tests {
         let provider = scripted_provider(
             [Ok(remote_rows(["Projects"])), Ok(remote_rows(["Current"]))],
             [
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
             ],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
-        let Some(RemoteDirectoryPickerItemId::Child {
+        let (picker, _, cx) = directory_picker(provider, cx);
+        let Some(DirectoryPickerItemId::Child {
             row,
             directory,
             operation_generation,
@@ -2032,8 +2026,8 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
-            RemoteDirectoryPickerHarness { picker }
+            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
+            DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
         cx.update(|window, cx| {
@@ -2068,8 +2062,8 @@ mod tests {
             .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
-            RemoteDirectoryPickerHarness { picker }
+            let picker = cx.new(|cx| DirectoryPicker::new(Rc::new(RemoteDirectorySource::new(injected, "orb")), window, cx));
+            DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
         cx.update(|window, cx| {
@@ -2090,23 +2084,23 @@ mod tests {
     fn oversized_remote_listing_is_bounded_and_exposes_exact_path_guidance(
         cx: &mut TestAppContext,
     ) {
-        let rows = (0..MAXIMUM_REMOTE_DIRECTORY_ROWS + 7)
-            .map(|index| RemoteDirectoryRow::new(format!("directory-{index:04}")).unwrap())
+        let rows = (0..MAXIMUM_DIRECTORY_ROWS + 7)
+            .map(|index| DirectoryRow::new(format!("directory-{index:04}")).unwrap())
             .collect::<Vec<_>>();
         let provider = scripted_provider(
             [Ok(rows)],
             [
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
-                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
             ],
             [],
             [],
         );
-        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        let (picker, _, cx) = directory_picker(provider, cx);
 
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.row_names().len()),
-            MAXIMUM_REMOTE_DIRECTORY_ROWS
+            MAXIMUM_DIRECTORY_ROWS
         );
         assert!(picker.read_with(cx, |picker, _| picker.listing_truncated));
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
@@ -2130,11 +2124,11 @@ mod tests {
     ) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
         assert!(
             cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
         );
@@ -2175,7 +2169,7 @@ mod tests {
             events
                 .borrow()
                 .iter()
-                .filter(|event| **event == RemoteDirectoryPickerEvent::Dismissed)
+                .filter(|event| **event == DirectoryPickerEvent::Dismissed)
                 .count(),
             1
         );
@@ -2185,11 +2179,11 @@ mod tests {
     fn escape_dismisses_directory_selection(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
         assert!(picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
         assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
 
@@ -2202,7 +2196,7 @@ mod tests {
         assert!(
             events
                 .borrow()
-                .contains(&RemoteDirectoryPickerEvent::Dismissed)
+                .contains(&DirectoryPickerEvent::Dismissed)
         );
     }
 
@@ -2210,11 +2204,11 @@ mod tests {
     fn programmatic_dismissal_emits_dismissed(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
 
         assert!(
             cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
@@ -2224,7 +2218,7 @@ mod tests {
         assert!(
             events
                 .borrow()
-                .contains(&RemoteDirectoryPickerEvent::Dismissed)
+                .contains(&DirectoryPickerEvent::Dismissed)
         );
     }
 
@@ -2233,11 +2227,11 @@ mod tests {
         let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [Ok(identity)],
         );
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
@@ -2256,11 +2250,11 @@ mod tests {
             events
                 .borrow()
                 .iter()
-                .any(|event| { matches!(event, RemoteDirectoryPickerEvent::Confirmed(_)) })
+                .any(|event| { matches!(event, DirectoryPickerEvent::Confirmed(_)) })
         );
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.busy),
-            Some(RemoteDirectoryPickerBusy::AwaitingActivation)
+            Some(DirectoryPickerBusy::AwaitingActivation)
         );
     }
 
@@ -2270,7 +2264,7 @@ mod tests {
     ) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
         );
@@ -2286,7 +2280,7 @@ mod tests {
             .unwrap()
             .validations
             .push_back(validation);
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm_current(window, cx)));
         cx.run_until_parked();
         assert!(picker.read_with(cx, |picker, _| picker.busy.is_some()));
@@ -2298,13 +2292,13 @@ mod tests {
             !events
                 .borrow()
                 .iter()
-                .any(|event| matches!(event, RemoteDirectoryPickerEvent::Confirmed(_)))
+                .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
         assert_eq!(
             events
                 .borrow()
                 .iter()
-                .filter(|event| **event == RemoteDirectoryPickerEvent::Dismissed)
+                .filter(|event| **event == DirectoryPickerEvent::Dismissed)
                 .count(),
             1
         );
@@ -2315,11 +2309,11 @@ mod tests {
         let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
         let provider = scripted_provider(
             [Ok(Vec::new())],
-            [Ok(RemoteDirectoryExactPathState::ReadableDirectory)],
+            [Ok(ExactPathState::ReadableDirectory)],
             [],
             [Ok(identity)],
         );
-        let (picker, events, cx) = remote_directory_picker(provider, cx);
+        let (picker, events, cx) = directory_picker(provider, cx);
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
@@ -2328,18 +2322,18 @@ mod tests {
         assert!(
             events
                 .borrow()
-                .contains(&RemoteDirectoryPickerEvent::Dismissed)
+                .contains(&DirectoryPickerEvent::Dismissed)
         );
         assert!(
             !events
                 .borrow()
                 .iter()
-                .any(|event| matches!(event, RemoteDirectoryPickerEvent::Confirmed(_)))
+                .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
     }
 
     fn set_remote_input(
-        picker: &gpui::Entity<RemoteDirectoryPicker>,
+        picker: &gpui::Entity<DirectoryPicker>,
         value: &str,
         cx: &mut VisualTestContext,
     ) {
@@ -2359,7 +2353,7 @@ mod tests {
 
     #[test]
     fn remote_path_parser_should_accept_root_without_rewriting_it() {
-        let parsed = parse_remote_directory("/").unwrap();
+        let parsed = parse_picker_path("/").unwrap();
 
         assert_eq!(
             (
@@ -2375,7 +2369,7 @@ mod tests {
 
     #[test]
     fn remote_path_parser_should_preserve_home_relative_spelling() {
-        let parsed = parse_remote_directory("~/Projects/SpaceTerm").unwrap();
+        let parsed = parse_picker_path("~/Projects/SpaceTerm").unwrap();
 
         assert_eq!(
             (
@@ -2395,8 +2389,8 @@ mod tests {
 
     #[test]
     fn remote_path_parser_should_preserve_repeated_separators() {
-        let home_relative = parse_remote_directory("~//Projects//SpaceTerm").unwrap();
-        let absolute = parse_remote_directory("//srv///projects//SpaceTerm").unwrap();
+        let home_relative = parse_picker_path("~//Projects//SpaceTerm").unwrap();
+        let absolute = parse_picker_path("//srv///projects//SpaceTerm").unwrap();
 
         assert_eq!(
             (
@@ -2416,7 +2410,7 @@ mod tests {
 
     #[test]
     fn trailing_separator_should_enumerate_the_exact_remote_directory() {
-        let parsed = parse_remote_directory("~/Projects//SpaceTerm/").unwrap();
+        let parsed = parse_picker_path("~/Projects//SpaceTerm/").unwrap();
 
         assert_eq!(
             (
@@ -2431,52 +2425,52 @@ mod tests {
     #[test]
     fn remote_path_parser_should_reject_relative_and_unsupported_tilde_forms() {
         assert_eq!(
-            parse_remote_directory("Projects"),
-            Err(RemoteDirectoryFormatError::Relative)
+            parse_picker_path("Projects"),
+            Err(PickerPathError::Relative)
         );
         assert_eq!(
-            parse_remote_directory("~"),
-            Err(RemoteDirectoryFormatError::BareTilde)
+            parse_picker_path("~"),
+            Err(PickerPathError::BareTilde)
         );
         assert_eq!(
-            parse_remote_directory("~other/Projects"),
-            Err(RemoteDirectoryFormatError::UnsupportedTilde)
+            parse_picker_path("~other/Projects"),
+            Err(PickerPathError::UnsupportedTilde)
         );
     }
 
     #[test]
     fn hidden_directories_should_be_revealed_only_from_a_dot_leaf() {
-        let ordinary = parse_remote_directory("~/Projects/").unwrap();
-        let dotted = parse_remote_directory("~/Projects/.").unwrap();
+        let ordinary = parse_picker_path("~/Projects/").unwrap();
+        let dotted = parse_picker_path("~/Projects/.").unwrap();
         let entries = remote_rows([".config", "SpaceTerm", ".ssh"]);
 
         assert_eq!(
-            row_names(filter_remote_workspace_rows(&ordinary, &entries)),
+            row_names(filter_directory_rows(&ordinary, &entries)),
             vec!["SpaceTerm"]
         );
         assert_eq!(
-            row_names(filter_remote_workspace_rows(&dotted, &entries)),
+            row_names(filter_directory_rows(&dotted, &entries)),
             vec![".config", ".ssh"]
         );
     }
 
     #[test]
     fn rows_should_fuzzy_match_and_preserve_deterministic_name_order_for_ties() {
-        let parsed = parse_remote_directory("~/Projects/sp").unwrap();
+        let parsed = parse_picker_path("~/Projects/sp").unwrap();
         let entries = remote_rows(["spaceTerm", "Spatial", "SpaceTerm", "tools"]);
 
         assert_eq!(
-            row_names(filter_remote_workspace_rows(&parsed, &entries)),
+            row_names(filter_directory_rows(&parsed, &entries)),
             vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
 
     #[test]
     fn rows_should_rank_contiguous_matches_and_report_indices() {
-        let parsed = parse_remote_directory("~/Projects/ro").unwrap();
+        let parsed = parse_picker_path("~/Projects/ro").unwrap();
         let entries = remote_rows(["random", "projects"]);
 
-        let matches = match_remote_workspace_rows(&parsed, &entries);
+        let matches = match_directory_rows(&parsed, &entries);
 
         assert_eq!(matches[0].row.name(), "projects");
         assert_eq!(matches[0].matched_indices, vec![1, 2]);
@@ -2484,43 +2478,43 @@ mod tests {
 
     #[test]
     fn an_empty_leaf_should_preserve_deterministic_name_order() {
-        let parsed = parse_remote_directory("~/Projects/").unwrap();
+        let parsed = parse_picker_path("~/Projects/").unwrap();
         let entries = remote_rows(["Zulu", "Alpha"]);
 
         assert_eq!(
-            row_names(filter_remote_workspace_rows(&parsed, &entries)),
+            row_names(filter_directory_rows(&parsed, &entries)),
             vec!["Alpha", "Zulu"]
         );
     }
 
     #[test]
     fn directory_rows_should_reject_non_one_level_names() {
-        assert!(RemoteDirectoryRow::new("nested/project".to_owned()).is_err());
-        assert!(RemoteDirectoryRow::new("project\nname".to_owned()).is_err());
-        assert!(RemoteDirectoryRow::new(String::new()).is_err());
+        assert!(DirectoryRow::new("nested/project".to_owned()).is_err());
+        assert!(DirectoryRow::new("project\nname".to_owned()).is_err());
+        assert!(DirectoryRow::new(String::new()).is_err());
     }
 
     #[test]
     fn activating_a_row_should_rewrite_the_query_to_descend() {
-        let parsed = parse_remote_directory("~//Projects//sp").unwrap();
-        let row = RemoteDirectoryRow::new("SpaceTerm".to_owned()).unwrap();
+        let parsed = parse_picker_path("~//Projects//sp").unwrap();
+        let row = DirectoryRow::new("SpaceTerm".to_owned()).unwrap();
 
         assert_eq!(
-            descend_remote_workspace_query(&parsed, &row)
+            descend_query(&parsed, &row)
                 .unwrap()
                 .as_str(),
             "~//Projects//SpaceTerm/"
         );
     }
 
-    fn remote_rows<const N: usize>(names: [&str; N]) -> Vec<RemoteDirectoryRow> {
+    fn remote_rows<const N: usize>(names: [&str; N]) -> Vec<DirectoryRow> {
         names
             .into_iter()
-            .map(|name| RemoteDirectoryRow::new(name.to_owned()).unwrap())
+            .map(|name| DirectoryRow::new(name.to_owned()).unwrap())
             .collect()
     }
 
-    fn row_names(rows: Vec<RemoteDirectoryRow>) -> Vec<String> {
+    fn row_names(rows: Vec<DirectoryRow>) -> Vec<String> {
         rows.into_iter().map(|row| row.name().to_owned()).collect()
     }
 }

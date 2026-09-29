@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::{App, BackgroundExecutor, Task, Window};
 
-use super::remote_directory_picker::RemoteDirectoryProvider;
+use super::directory_picker::RemoteDirectoryProvider;
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
     RemoteWorkspaceConnectedSession, RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlowBackend,
@@ -688,7 +688,7 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
         let grant = Arc::clone(&self.grant);
         self.executor.spawn(async move {
             let observed_identity = validation.await.map_err(|error| match error {
-                super::remote_directory_picker::RemoteDirectoryProviderError::ConnectionLost => {
+                super::directory_picker::RemoteDirectoryProviderError::ConnectionLost => {
                     RemoteChannelRevalidationError::ConnectionUnavailable
                 }
                 _ => RemoteChannelRevalidationError::DirectoryUnavailable,
@@ -820,7 +820,7 @@ mod tests {
             VecDeque<
                 Result<
                     RemoteDirectoryIdentity,
-                    super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                    super::super::directory_picker::RemoteDirectoryProviderError,
                 >,
             >,
         >,
@@ -831,7 +831,7 @@ mod tests {
             results: impl IntoIterator<
                 Item = Result<
                     RemoteDirectoryIdentity,
-                    super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                    super::super::directory_picker::RemoteDirectoryProviderError,
                 >,
             >,
         ) -> Self {
@@ -847,11 +847,11 @@ mod tests {
         ) -> Task<
             Result<
                 crate::ssh::remote_account::RemoteWorkspaceAccount,
-                super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                super::super::directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
+                super::super::directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
@@ -860,12 +860,12 @@ mod tests {
             _: RemoteDirectory,
         ) -> Task<
             Result<
-                super::super::remote_directory_picker::RemoteDirectoryListing,
-                super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                super::super::directory_picker::DirectoryListing,
+                super::super::directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
+                super::super::directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
@@ -874,22 +874,22 @@ mod tests {
             _: RemoteDirectory,
         ) -> Task<
             Result<
-                super::super::remote_directory_picker::RemoteDirectoryExactPathState,
-                super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                super::super::directory_picker::ExactPathState,
+                super::super::directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(Err(
-                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
+                super::super::directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
         fn create_directory_recursively(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<(), super::super::remote_directory_picker::RemoteDirectoryProviderError>>
+        ) -> Task<Result<(), super::super::directory_picker::RemoteDirectoryProviderError>>
         {
             Task::ready(Err(
-                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
+                super::super::directory_picker::RemoteDirectoryProviderError::Other,
             ))
         }
 
@@ -899,11 +899,11 @@ mod tests {
         ) -> Task<
             Result<
                 RemoteDirectoryIdentity,
-                super::super::remote_directory_picker::RemoteDirectoryProviderError,
+                super::super::directory_picker::RemoteDirectoryProviderError,
             >,
         > {
             Task::ready(self.validations.lock().unwrap().pop_front().unwrap_or(Err(
-                super::super::remote_directory_picker::RemoteDirectoryProviderError::Other,
+                super::super::directory_picker::RemoteDirectoryProviderError::Other,
             )))
         }
     }

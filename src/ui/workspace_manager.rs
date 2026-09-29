@@ -25,7 +25,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
+use super::directory_picker::{
+    DirectoryPicker, DirectoryPickerEvent, DirectorySource, RemoteDirectorySource,
+};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
@@ -244,7 +246,7 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
     remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
-    remote_pin_picker: Option<Entity<RemoteDirectoryPicker>>,
+    pin_picker: Option<Entity<DirectoryPicker>>,
     pin_operation: u64,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
@@ -459,7 +461,7 @@ impl WorkspaceManager {
             remote_workspace_backend,
             remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
-            remote_pin_picker: None,
+            pin_picker: None,
             pin_operation: 0,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
@@ -710,7 +712,7 @@ impl WorkspaceManager {
     ) -> Option<TerminalFocusBlocker> {
         TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
             picker: self
-                .remote_pin_picker
+                .pin_picker
                 .as_ref()
                 .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
             remote_flow: self
@@ -758,7 +760,7 @@ impl WorkspaceManager {
         if window_modal_is_open(window, cx) {
             return;
         }
-        if let Some(picker) = self.remote_pin_picker.take() {
+        if let Some(picker) = self.pin_picker.take() {
             picker.update(cx, |picker, cx| picker.cancel(window, cx));
             self.transient.pin_target = None;
         }
@@ -1050,7 +1052,7 @@ impl WorkspaceManager {
         .present(window, cx, |_, _| {});
     }
 
-    fn open_remote_pin_picker(
+    fn open_pin_picker(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
@@ -1074,16 +1076,17 @@ impl WorkspaceManager {
         let operation = self.pin_operation;
         let provider = session.provider();
         let host = key.destination().host().to_owned();
-        let picker = cx.new(|cx| RemoteDirectoryPicker::new(provider, &host, window, cx));
+        let source: Rc<dyn DirectorySource> = Rc::new(RemoteDirectorySource::new(provider, &host));
+        let picker = cx.new(|cx| DirectoryPicker::new(source, window, cx));
         cx.subscribe_in(
             &picker,
             window,
-            move |manager, picker, event: &RemoteDirectoryPickerEvent, window, cx| {
-                if manager.remote_pin_picker.as_ref() != Some(picker) {
+            move |manager, picker, event: &DirectoryPickerEvent, window, cx| {
+                if manager.pin_picker.as_ref() != Some(picker) {
                     return;
                 }
                 match event {
-                    RemoteDirectoryPickerEvent::Confirmed(selection) => {
+                    DirectoryPickerEvent::Confirmed(pinned) => {
                         let current = manager.pin_operation == operation
                             && manager
                                 .remote_workspace_runtimes
@@ -1094,10 +1097,7 @@ impl WorkspaceManager {
                         let applied = current
                             && manager.apply_directory_pin(
                                 workspace_id,
-                                Some(PinnedDirectory::Remote {
-                                    directory: selection.directory().clone(),
-                                    identity: selection.physical_directory().clone(),
-                                }),
+                                Some(pinned.clone()),
                                 window,
                                 cx,
                             );
@@ -1113,7 +1113,7 @@ impl WorkspaceManager {
                             });
                             if applied {
                                 owner.update(cx, |manager, cx| {
-                                    manager.remote_pin_picker = None;
+                                    manager.pin_picker = None;
                                     manager.sync_terminal_focus_blocker(window, cx);
                                     manager.focus(window, cx);
                                     cx.notify();
@@ -1121,18 +1121,18 @@ impl WorkspaceManager {
                             }
                         });
                     }
-                    RemoteDirectoryPickerEvent::Dismissed => {
-                        manager.remote_pin_picker = None;
+                    DirectoryPickerEvent::Dismissed => {
+                        manager.pin_picker = None;
                         manager.transient.pin_target = None;
                     }
-                    RemoteDirectoryPickerEvent::StateChanged => {}
+                    DirectoryPickerEvent::StateChanged => {}
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             },
         )
         .detach();
-        self.remote_pin_picker = Some(picker.clone());
+        self.pin_picker = Some(picker.clone());
         picker.update(cx, |picker, cx| {
             picker.open(window, cx);
         });
@@ -1169,7 +1169,7 @@ impl WorkspaceManager {
                 matches!(workspace.location(), WorkspaceLocation::Remote { .. })
             })
         {
-            self.open_remote_pin_picker(workspace_id, window, cx);
+            self.open_pin_picker(workspace_id, window, cx);
             return;
         }
         self.choose_local_pin_directory(workspace_id, window, cx);
@@ -2533,7 +2533,7 @@ impl WorkspaceManager {
         if self.transient.pin_target == Some(workspace_id) {
             self.pin_operation = self.pin_operation.wrapping_add(1);
             self.transient.pin_target = None;
-            if let Some(picker) = self.remote_pin_picker.take() {
+            if let Some(picker) = self.pin_picker.take() {
                 picker.update(cx, |picker, cx| picker.cancel(window, cx));
             }
         }
@@ -3243,7 +3243,7 @@ impl WorkspaceManager {
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
-            .children(self.remote_pin_picker.iter().cloned());
+            .children(self.pin_picker.iter().cloned());
         ModalLayer::new(content).transient(transients)
     }
 }
