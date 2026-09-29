@@ -1381,10 +1381,10 @@ fn enclosing_directory_item(
         DirectoryPickerItemId::Enclosing {
             operation_generation,
         },
-        "back",
+        "Go Back",
     )
     .leading_icon(|foreground, size| {
-        Icon::new(IconName::Undo2, size, foreground).into_any_element()
+        Icon::new(IconName::FolderOutput, size, foreground).into_any_element()
     })
     .debug_selector(ENCLOSING_ROW)
 }

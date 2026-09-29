@@ -139,6 +139,7 @@ lucide_sources! {
     Eye => "eye",
     File => "file",
     Folder => "folder",
+    FolderOutput => "folder-output",
     FolderPlus => "folder-plus",
     Globe => "globe",
     ImageOff => "image-off",
@@ -167,7 +168,6 @@ lucide_sources! {
     Trash2 => "trash-2",
     TriangleAlert => "triangle-alert",
     Type => "type",
-    Undo2 => "undo-2",
     X => "x",
 }
 
