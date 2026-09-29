@@ -1,13 +1,13 @@
 //! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph slot carries the status: reported work takes the reusable progress ring
-//! when a percentage is known and the frame spinner when it is not, other work states use
-//! distinct shapes and semantic colors, and attention blinks the mark in the warning color. Each
-//! state comes from sanitized Terminal Metadata. The metadata owner observes reported title
-//! animation; loaders drawn inside terminal cells remain terminal content.
+//! here once. The glyph slot carries the status: reported work with a known percentage keeps the
+//! glyph and takes the busy color, work whose completion is unknown takes the frame spinner, other
+//! work states use distinct shapes and semantic colors, and attention blinks the mark in the
+//! warning color. Each state comes from sanitized Terminal Metadata. The metadata owner observes
+//! reported title animation; loaders drawn inside terminal cells remain terminal content.
 //!
-//! The progress mark inherits its color rather than taking the installed progress accent, because the
+//! Every mark inherits its color rather than taking the installed progress accent, because the
 //! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
 //! and a Pane Caption's surface can be colored by the program running in it.
 
@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
     Pixels, Rgba, Task, Window, div, px,
 };
-use spaceterm_ui::{DeterminateProgress, FrameSpinner, Icon, IconName, ProgressRing, ProgressSize};
+use spaceterm_ui::{FrameSpinner, Icon, IconName, ProgressSize};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 #[cfg(test)]
@@ -33,16 +33,9 @@ const BLINK_STEP: Duration = Duration::from_millis(500);
 /// Blinking draws the eye when attention arrives. The settled badge keeps unread state present
 /// without replacing the underlying work-state shape.
 const BLINKS: u32 = 4;
-/// The smallest share of the ring a reported percentage sweeps.
+/// Names the Session's reported work for the frame spinner.
 ///
-/// A Session has one glyph slot, so a report at the bottom of its range still has to leave a mark
-/// that reads as work rather than an empty circle. A twentieth of the circle is the least that
-/// does at this diameter. The floor is this constrained slot's own legibility rule and not the
-/// control's: the reusable ring paints exactly the extent it is handed.
-const MINIMUM_PROGRESS_SWEEP: f64 = 0.05;
-/// Names the Session's reported work for the progress control.
-///
-/// The ring never paints this, and it stays content-free: nothing a program reported reaches it.
+/// The spinner never paints this, and it stays content-free: nothing a program reported reaches it.
 const PROGRESS_NAME: &str = "terminal progress";
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
@@ -193,9 +186,10 @@ impl StatusGlyph {
     /// Draws the glyph in a square of its size.
     ///
     /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
-    /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors,
-    /// with reported work drawn as the reusable ring, which inherits the status color resolved
-    /// here. Attention blinks the mark, then settles as an additive badge so the work shape remains.
+    /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors:
+    /// work with a known percentage keeps the glyph in the busy color, and work whose completion is
+    /// unknown takes the frame spinner. Attention blinks the mark, then settles as an additive badge
+    /// so the work shape remains.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -322,12 +316,12 @@ struct Mark {
     colors: StatusColors,
     /// Keys the progress mark's own animation, so a spinner survives across frames.
     id: ElementId,
-    /// Names the progress ring's parts as `{selector}-track`, `-indicator`, and `-activity`.
+    /// Names the frame spinner as `{selector}` and its frames as `{selector}-frame`.
     selector: String,
 }
 
 impl Mark {
-    /// The mark for this status: a progress ring, a distinct semantic shape, the program's
+    /// The mark for this status: the frame spinner, a distinct semantic shape, the program's
     /// reported glyph, or the Session's own glyph, all within the same slot.
     fn render(self, blinked: bool) -> AnyElement {
         let Self {
@@ -341,19 +335,6 @@ impl Mark {
         } = self;
         let (tint, opacity) = treatment(progress, blinked);
         let mark = match (status_shape(progress), reported) {
-            // Reported work says more than any glyph, so progress takes the slot.
-            (StatusShape::Determinate(progress), _) => {
-                ProgressRing::new(id, PROGRESS_NAME, progress)
-                    // The ring keeps the compact geometry and centers in the slot rather than
-                    // stretching to it, which settles it on the same visual weight as the drawn icons
-                    // it shares the slot with.
-                    .size(ProgressSize::Compact)
-                    // The status color below is resolved for this exact Pane Caption or Tab surface,
-                    // which the installed progress accent cannot know, so the ring takes it instead.
-                    .inherited()
-                    .debug_selector(selector)
-                    .into_any_element()
-            }
             (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
                 .debug_selector(selector)
@@ -377,10 +358,9 @@ impl Mark {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StatusShape {
     Glyph,
-    Determinate(DeterminateProgress),
     Spinner,
     Error,
     Paused,
@@ -388,20 +368,13 @@ enum StatusShape {
 
 fn status_shape(progress: TerminalProgress) -> StatusShape {
     match progress {
-        TerminalProgress::None => StatusShape::Glyph,
-        TerminalProgress::Normal(percent) => StatusShape::Determinate(
-            DeterminateProgress::new(progress_sweep(percent))
-                .expect("a reported percentage is a finite share of the ring"),
-        ),
+        // A percentage says the work is bounded, which the busy color already carries. A ring in
+        // this glyph-sized slot reads as a solid circle rather than as progress, so the glyph stays.
+        TerminalProgress::None | TerminalProgress::Normal(_) => StatusShape::Glyph,
         TerminalProgress::Indeterminate | TerminalProgress::TitleActivity => StatusShape::Spinner,
         TerminalProgress::Error(_) => StatusShape::Error,
         TerminalProgress::Paused(_) => StatusShape::Paused,
     }
-}
-
-/// The share of the ring a reported percentage sweeps, held above this slot's readable minimum.
-fn progress_sweep(percent: u8) -> f64 {
-    (f64::from(percent) / 100.0).max(MINIMUM_PROGRESS_SWEEP)
 }
 
 /// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
@@ -677,30 +650,32 @@ mod tests {
     }
 
     #[test]
-    fn zero_percent_ring_keeps_readable_busy_and_attention_indicator() {
+    fn busy_and_attention_colors_stay_readable_on_the_active_tab() {
         const MINIMUM_STATUS_CONTRAST: f64 = 4.5;
         let colors = crate::appearance::ChromeColors::default();
         let surface = colors.tab_active_background;
         let status = colors.status(surface);
 
-        assert_eq!(progress_sweep(0), MINIMUM_PROGRESS_SWEEP);
-        assert_eq!(progress_sweep(4), MINIMUM_PROGRESS_SWEEP);
-        assert_eq!(progress_sweep(100), 1.0);
         for foreground in [status.busy, status.attention] {
             assert!(foreground.contrast_ratio(surface) >= MINIMUM_STATUS_CONTRAST);
         }
     }
 
     #[test]
-    fn normal_and_indeterminate_work_use_the_reusable_progress_states() {
-        let StatusShape::Determinate(normal) = status_shape(TerminalProgress::Normal(42)) else {
-            panic!("normal work should use determinate progress");
-        };
-        assert!((normal.value() - 0.42).abs() < f32::EPSILON);
-        assert_eq!(
-            status_shape(TerminalProgress::Indeterminate),
-            StatusShape::Spinner
-        );
+    fn known_percentages_keep_the_glyph_and_unknown_work_spins() {
+        for percent in [0, 42, 100] {
+            assert_eq!(
+                status_shape(TerminalProgress::Normal(percent)),
+                StatusShape::Glyph,
+                "{percent}%"
+            );
+        }
+        for progress in [
+            TerminalProgress::Indeterminate,
+            TerminalProgress::TitleActivity,
+        ] {
+            assert_eq!(status_shape(progress), StatusShape::Spinner, "{progress:?}");
+        }
     }
 
     #[test]
