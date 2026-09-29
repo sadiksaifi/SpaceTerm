@@ -87,3 +87,27 @@ fn opening_the_file_starts_a_watch_that_could_not_start_at_launch(cx: &mut TestA
         Some("~/.config/spaceterm/settings.json")
     );
 }
+
+#[gpui::test]
+fn the_first_write_starts_a_watch_that_could_not_start_at_launch(cx: &mut TestAppContext) {
+    let storage = Arc::new(MemoryStorage::default());
+    let file = Rc::new(RecordingSettingsFile::default());
+    let settings = install(&storage, &file, cx);
+    assert!(!file.is_watched());
+
+    // The write creates the file's directory, which makes it watchable.
+    file.watchable.set(true);
+    settings
+        .update_committed(0, document_with_size(17.0))
+        .unwrap()
+        .run()
+        .unwrap();
+    cx.run_until_parked();
+
+    assert!(file.is_watched());
+    storage.save_elsewhere(&document_with_size(19.0));
+    file.announce_change();
+    cx.executor().advance_clock(SETTLE_DELAY);
+    cx.run_until_parked();
+    assert_eq!(base_size(&settings), 19.0);
+}
