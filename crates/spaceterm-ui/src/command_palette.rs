@@ -10,8 +10,8 @@ use gpui::{
 };
 
 use crate::{
-    FloatingRole, FloatingShell, FrameSpinner, Icon, IconName, ProgressSize, TextInput,
-    TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    FloatingRole, FloatingShell, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
+    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
@@ -3554,15 +3554,19 @@ fn status_row(
 /// Renders the status row shown while a caller's results are still arriving.
 ///
 /// The label keeps the content edge the editor, the headings, the rows, and the no-results copy
-/// share, so the spinner follows it at the row gap rather than pushing the words inward. It
+/// share, so the ring follows it at the row gap rather than pushing the words inward. The ring
 /// carries the activity and paints no words of its own, so the copy stays the row's only text.
 fn loading_row(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
     status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
         .gap(metrics.gap)
         .child(
-            FrameSpinner::new("command-palette-loading-progress", "Loading")
-                .size(ProgressSize::Compact)
-                .debug_selector("command-palette-loading-progress"),
+            ProgressRing::new(
+                "command-palette-loading-progress",
+                "Loading",
+                ProgressState::Indeterminate,
+            )
+            .size(ProgressSize::Compact)
+            .debug_selector("command-palette-loading-progress"),
         )
 }
 

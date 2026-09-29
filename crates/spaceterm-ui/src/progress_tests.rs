@@ -1,7 +1,9 @@
 use gpui::prelude::*;
 use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, px, rgba};
 
-use crate::progress::{SPINNER_FRAMES, spinner_dot_bounds, spinner_frame_index};
+use crate::progress::{
+    SPINNER_FRAMES, ring_trail_opacity, ring_trail_strokes, spinner_dot_bounds, spinner_frame_index,
+};
 use crate::{
     ControlMotion, DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressPaint,
     ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
@@ -42,15 +44,10 @@ impl Render for ProgressFixture {
                     .debug_selector("test-progress")
                     .into_any_element()
             }
-            FixtureKind::Ring => {
-                let ProgressState::Determinate(progress) = self.state else {
-                    panic!("ring fixtures require determinate progress")
-                };
-                ProgressRing::new("test-progress", "Copying files", progress)
-                    .size(self.size)
-                    .debug_selector("test-progress")
-                    .into_any_element()
-            }
+            FixtureKind::Ring => ProgressRing::new("test-progress", "Copying files", self.state)
+                .size(self.size)
+                .debug_selector("test-progress")
+                .into_any_element(),
             FixtureKind::Spinner => FrameSpinner::new("test-progress", "Copying files")
                 .size(self.size)
                 .debug_selector("test-progress")
@@ -390,6 +387,86 @@ fn standard_indeterminate_bar_uses_the_animated_activity_structure(cx: &mut Test
 
     assert!(cx.debug_bounds("test-progress-activity").is_some());
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
+}
+
+#[gpui::test]
+fn indeterminate_ring_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
+    let cx = fixture_window(
+        cx,
+        FixtureKind::Ring,
+        ProgressState::Indeterminate,
+        ProgressSize::Regular,
+        ControlMotion::Reduced,
+    );
+
+    assert!(cx.debug_bounds("test-progress-activity").is_some());
+    assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
+}
+
+#[gpui::test]
+fn standard_indeterminate_ring_uses_the_animated_activity_structure(cx: &mut TestAppContext) {
+    let cx = fixture_window(
+        cx,
+        FixtureKind::Ring,
+        ProgressState::Indeterminate,
+        ProgressSize::Compact,
+        ControlMotion::Standard,
+    );
+
+    let track = cx
+        .debug_bounds("test-progress-track")
+        .expect("indeterminate ring should keep its square");
+    let activity = cx
+        .debug_bounds("test-progress-activity")
+        .expect("indeterminate ring should render its trail");
+
+    assert_eq!(track.size, gpui::size(px(20.0), px(20.0)));
+    assert_eq!(activity, track);
+    assert!(cx.debug_bounds("test-progress-indicator").is_none());
+    assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
+}
+
+#[test]
+fn ring_trail_strokes_follow_the_leading_end_and_leave_a_gap() {
+    for head in [0.0, 0.25, 0.9] {
+        let strokes = ring_trail_strokes(head).collect::<Vec<_>>();
+
+        assert!(!strokes.is_empty());
+        for (start, sweep) in &strokes {
+            assert!(*sweep > 0.0);
+            assert!(
+                (start + sweep - head).abs() < f32::EPSILON,
+                "every stroke ends at the leading end {head}"
+            );
+        }
+        let longest = strokes.iter().map(|(_, sweep)| *sweep).fold(0.0, f32::max);
+        assert!(
+            longest < 1.0,
+            "the trail leaves a gap so the ring reads as motion"
+        );
+    }
+}
+
+#[test]
+fn ring_trail_is_nearly_solid_at_its_leading_end_and_fades_toward_its_tail() {
+    let head = ring_trail_opacity(0.0);
+    let tail = ring_trail_opacity(0.7);
+
+    assert!(
+        head >= 0.85,
+        "the leading end keeps the indicator's weight: {head}"
+    );
+    assert!(tail > 0.0, "the tail stays visible: {tail}");
+    assert!(tail < head);
+    assert_eq!(ring_trail_opacity(0.8), 0.0, "the gap paints nothing");
+    for step in 1..8 {
+        let nearer = ring_trail_opacity((step - 1) as f32 * 0.1);
+        let farther = ring_trail_opacity(step as f32 * 0.1);
+        assert!(
+            farther <= nearer,
+            "the trail never brightens toward its tail"
+        );
+    }
 }
 
 #[gpui::test]

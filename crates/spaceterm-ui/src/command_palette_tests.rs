@@ -1769,7 +1769,7 @@ fn loading_state_should_not_activate_a_hidden_stale_selection(cx: &mut TestAppCo
     cx.run_until_parked();
 
     assert!(
-        cx.debug_bounds("command-palette-loading-progress-frame")
+        cx.debug_bounds("command-palette-loading-progress-activity")
             .is_some()
     );
 

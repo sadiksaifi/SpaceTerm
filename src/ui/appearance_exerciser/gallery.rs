@@ -719,26 +719,45 @@ impl Gallery {
                         .child(div().w(px(130.0)).child(label))
                         .children(progress_columns.iter().enumerate().map(
                             |(index, (_, state))| {
-                                let indicator = match state {
-                                    ProgressState::Determinate(progress) => ProgressRing::new(
+                                div().w(px(170.0)).child(
+                                    ProgressRing::new(
                                         ("gallery-progress-ring", row_index * 4 + index),
                                         "Gallery progress fixture",
-                                        *progress,
+                                        *state,
                                     )
-                                    .size(size)
-                                    .into_any_element(),
-                                    ProgressState::Indeterminate => FrameSpinner::new(
-                                        ("gallery-frame-spinner", row_index * 4 + index),
-                                        "Gallery progress fixture",
-                                    )
-                                    .size(size)
-                                    .into_any_element(),
-                                };
-                                div().w(px(170.0)).child(indicator)
+                                    .size(size),
+                                )
                             },
                         )),
                 );
         }
+        // The frame spinner belongs to terminal status slots and has no determinate form, so it
+        // fills only the indeterminate column.
+        content = content.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(div().w(px(130.0)).child("Terminal spinner"))
+                .children(
+                    progress_columns
+                        .iter()
+                        .map(|(_, state)| {
+                            div().w(px(170.0)).when(
+                                *state == ProgressState::Indeterminate,
+                                |cell| {
+                                    cell.child(
+                                        FrameSpinner::new(
+                                            "gallery-frame-spinner",
+                                            "Gallery progress fixture",
+                                        )
+                                        .size(ProgressSize::Compact),
+                                    )
+                                },
+                            )
+                        }),
+                ),
+        );
         let palette = self.palette.clone();
         content = content.child(
             div()

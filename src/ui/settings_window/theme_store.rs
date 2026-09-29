@@ -11,8 +11,9 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FocusHandle, SharedString, WeakEntity, Window, div, px};
 use spaceterm_ui::{
-    Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FrameSpinner, FuzzyTarget, Icon,
-    IconName, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressSize,
+    Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FuzzyTarget, Icon, IconName,
+    ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressBar, ProgressRing,
+    ProgressSize, ProgressState,
     SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
     TextInputVariant, fuzzy_filter,
 };
@@ -31,6 +32,9 @@ use super::import::{ImportError as ThemeReadError, read_selected_document};
 
 /// Results beyond this many ask for a narrower search instead of growing the list.
 const MAX_RESULTS: usize = 40;
+
+/// The unscaled width of the bar shown while the listing loads.
+const LOADING_BAR_WIDTH: f32 = 240.0;
 
 pub(super) const SEARCH_SELECTOR: &str = "settings-theme-store-search";
 pub(super) const IMPORT_SELECTOR: &str = "settings-theme-store-import";
@@ -353,10 +357,19 @@ impl ThemeStore {
                 .into_any_element(),
             Listing::NotRequested | Listing::Loading => placeholder()
                 .child(
-                    FrameSpinner::new("settings-theme-store-loading", "Loading themes")
-                        .size(ProgressSize::Compact),
+                    div().w(appearance.spacing(LOADING_BAR_WIDTH)).child(
+                        ProgressBar::new(
+                            "settings-theme-store-loading",
+                            "Loading themes",
+                            ProgressState::Indeterminate,
+                        )
+                        .size(ProgressSize::Regular),
+                    ),
                 )
-                .child(secondary("Loading themes…".into()))
+                .child(
+                    secondary("Loading themes…".into())
+                        .debug_selector(|| "settings-theme-store-loading-caption".into()),
+                )
                 .into_any_element(),
             Listing::Failed(error) => {
                 let store = cx.weak_entity();
@@ -545,9 +558,10 @@ fn render_extension_row(
     let trailing = match action {
         ExtensionAction::Install => button("Get"),
         ExtensionAction::Update => button("Update"),
-        ExtensionAction::Installing => FrameSpinner::new(
+        ExtensionAction::Installing => ProgressRing::new(
             SharedString::from(format!("{selector}-progress")),
             "Installing",
+            ProgressState::Indeterminate,
         )
         .size(ProgressSize::Compact)
         .into_any_element(),

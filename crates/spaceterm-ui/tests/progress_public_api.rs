@@ -17,7 +17,7 @@ const _: fn() = || {
     let ring = ProgressRing::new(
         "public-progress-ring",
         "Connecting to remote host",
-        determinate,
+        ProgressState::Indeterminate,
     )
     .size(ProgressSize::Regular)
     .inherited()

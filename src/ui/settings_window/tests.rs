@@ -3102,6 +3102,42 @@ fn reinstalling_an_extension_restores_its_removed_themes_without_changing_select
     );
 }
 
+/// While the listing loads, the sheet shows an indeterminate bar with its caption beneath it.
+#[gpui::test]
+fn a_loading_registry_listing_shows_a_bar_above_its_caption(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
+    select_section(SettingsSectionId::Themes, cx);
+
+    // The listing arrives on a background task, so the frame drawn before the executor parks is
+    // the loading state.
+    cx.update(|gpui_window, cx| {
+        window.update(cx, |settings, cx| {
+            settings.open_theme_store(gpui_window, cx)
+        });
+    });
+    assert!(matches!(
+        store_listing(&window, cx),
+        super::theme_store::Listing::Loading
+    ));
+    let bar = cx
+        .debug_bounds("settings-theme-store-loading-track")
+        .expect("the loading listing shows a bar");
+    assert!(
+        cx.debug_bounds("settings-theme-store-loading-activity")
+            .is_some()
+    );
+    let caption = cx
+        .debug_bounds("settings-theme-store-loading-caption")
+        .expect("the loading listing shows its caption");
+    assert!(caption.top() >= bar.bottom(), "the caption sits below the bar");
+
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-theme-store-loading-track")
+            .is_none()
+    );
+}
+
 #[gpui::test]
 fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
     let transport = Arc::new(MemoryTransport::default());
