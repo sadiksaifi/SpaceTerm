@@ -820,7 +820,6 @@ pub struct CommandPaletteItem<I> {
     label: SharedString,
     description: Option<SharedString>,
     section: Option<SharedString>,
-    band: bool,
     keywords: Vec<SharedString>,
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
@@ -858,7 +857,6 @@ impl<I> CommandPaletteItem<I> {
             label: label.into(),
             description: None,
             section: None,
-            band: false,
             keywords: Vec::new(),
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
@@ -881,15 +879,6 @@ impl<I> CommandPaletteItem<I> {
     /// supply that section's items contiguously.
     pub fn section(mut self, value: impl Into<SharedString>) -> Self {
         self.section = Some(value.into());
-        self
-    }
-
-    /// Presents this item as a band when it is the first result: a filled strip fixed flush under
-    /// the search line, four fifths of a single-line row tall, for a navigation row such as one
-    /// that opens an enclosing directory. The results scroll beneath it. A band shows no
-    /// description. Elsewhere the item presents as an ordinary row.
-    pub fn band(mut self) -> Self {
-        self.band = true;
         self
     }
 
@@ -1574,10 +1563,6 @@ struct CommandPalettePanelLayout {
     height: Pixels,
     list_height: Pixels,
     icon_offset: Pixels,
-    /// The match position presented as the band fixed under the search line.
-    band: Option<usize>,
-    /// Whether the list area carries its vertical padding, which an empty list under a band drops.
-    results_padded: bool,
 }
 
 mod presented_results {
@@ -1591,16 +1576,8 @@ mod presented_results {
     pub(super) enum PaletteRow {
         Section(SharedString),
         Separator,
-        Item { position: usize, size: ItemRowSize },
+        Item { position: usize, single_line: bool },
         Note(SharedString),
-    }
-
-    /// How tall one item row is.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum ItemRowSize {
-        SingleLine,
-        /// A label with its description below.
-        TwoLine,
     }
 
     impl PaletteRow {
@@ -1609,14 +1586,10 @@ mod presented_results {
                 Self::Section(_) => metrics.section_height,
                 Self::Separator => metrics.separator_height,
                 Self::Item {
-                    size: ItemRowSize::SingleLine,
-                    ..
+                    single_line: true, ..
                 }
                 | Self::Note(_) => metrics.single_line_row_height,
-                Self::Item {
-                    size: ItemRowSize::TwoLine,
-                    ..
-                } => metrics.row_height,
+                Self::Item { .. } => metrics.row_height,
             }
         }
 
@@ -1628,10 +1601,8 @@ mod presented_results {
         }
     }
 
-    /// The results as presented: an optional band fixed above the list, then the list rows.
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     pub(super) struct PresentedResults {
-        band: Option<usize>,
         rows: Vec<PaletteRow>,
     }
 
@@ -1641,15 +1612,10 @@ mod presented_results {
             matches: &[CommandPaletteMatch],
             note: Option<&SharedString>,
         ) -> Self {
-            let band = matches
-                .first()
-                .and_then(|matched| items.get(matched.item_index))
-                .filter(|item| item.band)
-                .map(|_| 0);
             let mut rows = Vec::with_capacity(matches.len() + 1);
             let mut current_section: Option<SharedString> = None;
             let mut started = false;
-            for (position, matched) in matches.iter().enumerate().skip(band.map_or(0, |_| 1)) {
+            for (position, matched) in matches.iter().enumerate() {
                 let Some(item) = items.get(matched.item_index) else {
                     continue;
                 };
@@ -1665,26 +1631,17 @@ mod presented_results {
                 started = true;
                 rows.push(PaletteRow::Item {
                     position,
-                    size: if item.description.is_none() {
-                        ItemRowSize::SingleLine
-                    } else {
-                        ItemRowSize::TwoLine
-                    },
+                    single_line: item.description.is_none(),
                 });
             }
             if started && let Some(note) = note {
                 rows.push(PaletteRow::Note(note.clone()));
             }
-            Self { band, rows }
+            Self { rows }
         }
 
         pub(super) fn len(&self) -> usize {
             self.rows.len()
-        }
-
-        /// The match position presented as the band fixed above the list rows.
-        pub(super) const fn band(&self) -> Option<usize> {
-            self.band
         }
 
         #[cfg(test)]
@@ -1823,8 +1780,6 @@ mod presented_results {
     }
 }
 
-#[cfg(test)]
-use presented_results::ItemRowSize;
 use presented_results::{PaletteRow, PresentedResults};
 
 impl<I: Clone + Eq + 'static> EventEmitter<CommandPaletteEvent<I>> for CommandPalette<I> {}
@@ -3114,16 +3069,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         } else {
             self.presented_results.total_height(metrics)
         };
-        let band = (!self.loading && !self.matches.is_empty())
-            .then(|| self.presented_results.band())
-            .flatten();
-        let results_padded = band.is_none() || self.presented_results.len() > 0;
-        let chrome_height = chrome_height(metrics) + band.map_or(px(0.0), |_| band_height(metrics))
-            - if results_padded {
-                px(0.0)
-            } else {
-                metrics.panel_padding * 2.0
-            };
+        let chrome_height = chrome_height(metrics);
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
         let panel_height = (chrome_height + content_height)
             .min(metrics.maximum_height)
@@ -3170,8 +3116,6 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 height: panel_height,
                 list_height,
                 icon_offset,
-                band,
-                results_padded,
             },
             theme,
             typography,
@@ -3422,21 +3366,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             height,
             list_height,
             icon_offset,
-            band,
-            results_padded,
         } = layout;
         let paint = theme.paint;
         let metrics = theme.metrics;
-        let band = band.and_then(|position| {
-            self.render_band(
-                position,
-                theme,
-                &typography,
-                icon_offset,
-                collection_focused,
-                cx,
-            )
-        });
         let content = if self.loading {
             loading_row(metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
@@ -3461,12 +3393,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .block_mouse_except_scroll()
             .child(self.render_editor(theme, cx))
             .child(separator_line(theme))
-            .children(band)
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .when(results_padded, |results| results.py(metrics.panel_padding))
+                    .py(metrics.panel_padding)
                     .child(content),
             );
         theme.shell.mount(panel).into_any_element()
@@ -3551,37 +3482,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .into_any_element()
     }
 
-    /// Renders the band fixed under the search line, outside the scrolling list.
-    fn render_band(
-        &self,
-        position: usize,
-        theme: CommandPaletteTheme,
-        typography: &crate::ControlTypography,
-        icon_offset: Pixels,
-        collection_focused: bool,
-        cx: &mut gpui::Context<Self>,
-    ) -> Option<AnyElement> {
-        let matched = self.matches.get(position)?;
-        let item = self.presented_items.get(matched.item_index)?;
-        let hover_suppressed = self.pointer_suppressed || self.hover_suppressed;
-        Some(render_row(
-            cx.entity().downgrade(),
-            position,
-            item,
-            &matched.label_highlights,
-            &matched.description_highlights,
-            self.selected.as_ref() == Some(&item.id),
-            !hover_suppressed && self.hovered_row.as_ref() == Some(&item.id),
-            self.leading_columns,
-            RowStyle::Band,
-            band_height(theme.metrics),
-            theme,
-            typography.regular().clone(),
-            icon_offset,
-            collection_focused,
-        ))
-    }
-
     fn render_results(
         &self,
         list_height: Pixels,
@@ -3637,7 +3537,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         selected.as_ref() == Some(&item.id),
                                         hovered.as_ref() == Some(&item.id),
                                         leading_columns,
-                                        RowStyle::List,
                                         row_height,
                                         theme,
                                         typography.regular().clone(),
@@ -3655,11 +3554,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .child(self.scrollbar.clone())
             .into_any_element()
     }
-}
-
-/// The band's height: four fifths of a single-line row, in whole pixels.
-fn band_height(metrics: CommandPaletteMetrics) -> Pixels {
-    (metrics.single_line_row_height * 0.8).round()
 }
 
 fn chrome_height(metrics: CommandPaletteMetrics) -> Pixels {
@@ -3924,13 +3818,6 @@ fn palette_leading_columns<I>(items: &[CommandPaletteItem<I>]) -> LeadingColumns
     LeadingColumns::new(false, items.iter().any(|item| item.leading_icon.is_some()))
 }
 
-/// Where an item row presents: inset in the scrolling list, or as the band spanning the panel.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RowStyle {
-    List,
-    Band,
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "one row's complete presentation inputs are clearer than an intermediate struct"
@@ -3944,7 +3831,6 @@ fn render_row<I: Clone + Eq + 'static>(
     selected: bool,
     hovered: bool,
     leading_columns: LeadingColumns,
-    style: RowStyle,
     height: Pixels,
     theme: CommandPaletteTheme,
     label_font: gpui::Font,
@@ -3961,35 +3847,22 @@ fn render_row<I: Clone + Eq + 'static>(
     let debug_selector = item.debug_selector.clone();
     let id = item.id.clone();
     let hover_palette = palette.clone();
-    let band = style == RowStyle::Band;
-    // A band spans the panel, so its padding carries the inset that aligns its content.
-    let background = if band && !selected && !hovered {
-        theme.shell.divider()
-    } else {
-        row_paint.background
-    };
     let mut row = div()
         .id(("command-palette-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .w_full()
         .h(height)
-        .px(if band {
-            metrics.content_leading_inset()
-        } else {
-            metrics.horizontal_padding
-        })
+        .px(metrics.horizontal_padding)
         .flex()
         .items_center()
         .gap(metrics.gap)
-        .when(!band, |row| {
-            row.rounded(metrics.row_corner_radius())
-                .border(theme.shell.hairline())
-                .border_color(row_paint.border)
-        })
+        .rounded(metrics.row_corner_radius())
         .text_color(foreground)
         .cursor_default()
-        .bg(background)
+        .bg(row_paint.background)
+        .border(theme.shell.hairline())
+        .border_color(row_paint.border)
         .when(!item.disabled, |row| {
             let id = id.clone();
             let entered_id = id.clone();
@@ -4046,25 +3919,22 @@ fn render_row<I: Clone + Eq + 'static>(
         .justify_center()
         .gap(metrics.row_line_gap)
         .child(label_line)
-        .when_some(
-            item.description.clone().filter(|_| !band),
-            |text, description| {
-                text.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .line_height(metrics.secondary_line_height)
-                        .child(highlighted_text(
-                            description,
-                            description_highlights,
-                            secondary,
-                            match_foreground,
-                            metrics.secondary_size,
-                        )),
-                )
-            },
-        );
+        .when_some(item.description.clone(), |text, description| {
+            text.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .line_height(metrics.secondary_line_height)
+                    .child(highlighted_text(
+                        description,
+                        description_highlights,
+                        secondary,
+                        match_foreground,
+                        metrics.secondary_size,
+                    )),
+            )
+        });
     row = row.child(text);
 
     if !item.disabled {
@@ -4127,7 +3997,7 @@ fn render_row<I: Clone + Eq + 'static>(
     }
     div()
         .w_full()
-        .when(!band, |wrapper| wrapper.px(metrics.panel_padding))
+        .px(metrics.panel_padding)
         .child(row)
         .into_any_element()
 }

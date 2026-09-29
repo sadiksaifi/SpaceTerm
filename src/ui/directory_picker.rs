@@ -1381,9 +1381,8 @@ fn enclosing_directory_item(
         DirectoryPickerItemId::Enclosing {
             operation_generation,
         },
-        "..",
+        "back",
     )
-    .band()
     .leading_icon(|foreground, size| {
         Icon::new(IconName::Undo2, size, foreground).into_any_element()
     })
@@ -1905,14 +1904,10 @@ mod tests {
         let child = cx
             .debug_bounds("directory-picker-row-SpaceTerm")
             .expect("the child row should be rendered");
-        assert!(
-            enclosing.bottom() < child.top(),
-            "the enclosing row should sit above the children"
-        );
         assert_eq!(
-            enclosing.size.height,
-            (child.size.height * 0.8).round(),
-            "the enclosing row should be four fifths of a directory row"
+            (enclosing.bottom(), enclosing.size.height),
+            (child.top(), child.size.height),
+            "the enclosing row should be an ordinary row directly above the children"
         );
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),

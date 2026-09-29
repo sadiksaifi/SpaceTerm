@@ -115,96 +115,6 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
 }
 
 #[test]
-fn only_a_leading_band_item_should_leave_the_list_rows() {
-    let items = vec![
-        CommandPaletteItem::new(1, "..").band(),
-        CommandPaletteItem::new(2, "Documents"),
-        CommandPaletteItem::new(3, "Downloads").band(),
-    ];
-    let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Caller);
-    let results = PresentedResults::new(&items, &matches, None);
-
-    assert_eq!(results.band(), Some(0));
-    assert_eq!(
-        results.rows(),
-        &[
-            PaletteRow::Item {
-                position: 1,
-                size: ItemRowSize::SingleLine
-            },
-            PaletteRow::Item {
-                position: 2,
-                size: ItemRowSize::SingleLine
-            },
-        ]
-    );
-    assert_eq!(results.list_index_for_match(0), None);
-}
-
-#[gpui::test]
-fn a_band_should_span_the_panel_under_the_search_line_and_stay_while_the_list_scrolls(
-    cx: &mut TestAppContext,
-) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_items(
-            std::iter::once(
-                CommandPaletteItem::new(0, "..")
-                    .band()
-                    .debug_selector("band"),
-            )
-            .chain((1..64).map(|index| {
-                CommandPaletteItem::new(index, format!("Folder {index}"))
-                    .debug_selector(format!("folder-{index}"))
-            }))
-            .collect(),
-            cx,
-        );
-    });
-    open_palette(&root, &palette, cx);
-
-    let panel = cx.debug_bounds("command-palette-panel").unwrap();
-    let editor = cx.debug_bounds("command-palette-editor").unwrap();
-    let band = cx.debug_bounds("band").expect("the band was not rendered");
-    let first = cx.debug_bounds("folder-1").unwrap();
-    let padding = cx.update(|_, cx| command_palette_theme(cx).metrics.panel_padding);
-    assert!(
-        band.top() - editor.bottom() <= px(1.0),
-        "the band did not sit flush under the search line"
-    );
-    assert!(band.left() - panel.left() <= px(1.0));
-    assert!(
-        panel.right() - band.right() <= px(1.0),
-        "the band stopped short of the panel edge"
-    );
-    assert_eq!(
-        first.top() - band.bottom(),
-        padding,
-        "the list lost its top padding under the band"
-    );
-    assert!(first.left() > band.left(), "ordinary rows lost their inset");
-
-    cx.simulate_event(ScrollWheelEvent {
-        position: first.center(),
-        delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
-        modifiers: Modifiers::none(),
-        touch_phase: TouchPhase::Moved,
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.debug_bounds("band"),
-        Some(band),
-        "the band scrolled with the list"
-    );
-    assert!(
-        cx.debug_bounds("folder-1")
-            .is_none_or(|scrolled| scrolled.top() < first.top()),
-        "the list did not scroll"
-    );
-}
-
-#[test]
 fn presented_results_should_own_section_order_and_match_mapping() {
     let (results, _) = sectioned_results();
 
@@ -215,25 +125,25 @@ fn presented_results_should_own_section_order_and_match_mapping() {
                 PaletteRow::Section("Recent".into()),
                 PaletteRow::Item {
                     position: 0,
-                    size: ItemRowSize::SingleLine
+                    single_line: true
                 },
                 PaletteRow::Item {
                     position: 1,
-                    size: ItemRowSize::SingleLine
+                    single_line: true
                 },
                 PaletteRow::Separator,
                 PaletteRow::Section("All".into()),
                 PaletteRow::Item {
                     position: 2,
-                    size: ItemRowSize::SingleLine
+                    single_line: true
                 },
                 PaletteRow::Item {
                     position: 3,
-                    size: ItemRowSize::SingleLine
+                    single_line: true
                 },
                 PaletteRow::Item {
                     position: 4,
-                    size: ItemRowSize::SingleLine
+                    single_line: true
                 },
             ][..],
             Some(5),
@@ -257,16 +167,16 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
             PaletteRow::Section("SSH Config Warning".into()),
             PaletteRow::Item {
                 position: 0,
-                size: ItemRowSize::SingleLine,
+                single_line: true,
             },
             PaletteRow::Separator,
             PaletteRow::Item {
                 position: 1,
-                size: ItemRowSize::SingleLine,
+                single_line: true,
             },
             PaletteRow::Item {
                 position: 2,
-                size: ItemRowSize::SingleLine,
+                single_line: true,
             },
         ]
     );
@@ -1688,17 +1598,17 @@ fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
             PaletteRow::Section("Recent".into()),
             PaletteRow::Item {
                 position: 0,
-                size: ItemRowSize::SingleLine
+                single_line: true
             },
             PaletteRow::Item {
                 position: 1,
-                size: ItemRowSize::SingleLine
+                single_line: true
             },
             PaletteRow::Separator,
             PaletteRow::Section("All".into()),
             PaletteRow::Item {
                 position: 2,
-                size: ItemRowSize::SingleLine
+                single_line: true
             },
         ]
     );
