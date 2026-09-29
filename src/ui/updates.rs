@@ -15,9 +15,9 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant,
-    ButtonVariantStyle, DeterminateProgress, FrameSpinner, Icon, IconName, ModalAction,
+    ButtonVariantStyle, DeterminateProgress, Icon, IconName, ModalAction,
     ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
-    Tooltip,
+    ProgressState, Tooltip,
 };
 
 use super::WorkspaceManager;
@@ -907,23 +907,22 @@ impl Render for UpdateControl {
                 ControlGlyph::Warning => {
                     Icon::new(IconName::CircleAlert, glyph_size, foreground).into_any_element()
                 }
-                ControlGlyph::Progress(fraction) => DeterminateProgress::new(f64::from(fraction))
-                    .map_or_else(
-                        |_| {
-                            FrameSpinner::new("update-control-activity", "Update")
-                                .size(ProgressSize::Compact)
-                                .into_any_element()
-                        },
-                        |progress| {
-                            ProgressRing::new("update-control-progress", "Update", progress)
-                                .size(ProgressSize::Compact)
-                                .inherited()
-                                .into_any_element()
-                        },
-                    ),
-                ControlGlyph::Activity => FrameSpinner::new("update-control-activity", "Update")
-                    .size(ProgressSize::Compact)
-                    .into_any_element(),
+                ControlGlyph::Progress(fraction) => {
+                    let state = DeterminateProgress::new(f64::from(fraction))
+                        .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
+                    ProgressRing::new("update-control-progress", "Update", state)
+                        .size(ProgressSize::Compact)
+                        .inherited()
+                        .into_any_element()
+                }
+                ControlGlyph::Activity => ProgressRing::new(
+                    "update-control-progress",
+                    "Update",
+                    ProgressState::Indeterminate,
+                )
+                .size(ProgressSize::Compact)
+                .inherited()
+                .into_any_element(),
             })
             .tooltip(
                 Tooltip::new("update-control-tooltip", tooltip)

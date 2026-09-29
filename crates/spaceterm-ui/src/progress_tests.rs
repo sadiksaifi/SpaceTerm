@@ -42,15 +42,10 @@ impl Render for ProgressFixture {
                     .debug_selector("test-progress")
                     .into_any_element()
             }
-            FixtureKind::Ring => {
-                let ProgressState::Determinate(progress) = self.state else {
-                    panic!("ring fixtures require determinate progress")
-                };
-                ProgressRing::new("test-progress", "Copying files", progress)
-                    .size(self.size)
-                    .debug_selector("test-progress")
-                    .into_any_element()
-            }
+            FixtureKind::Ring => ProgressRing::new("test-progress", "Copying files", self.state)
+                .size(self.size)
+                .debug_selector("test-progress")
+                .into_any_element(),
             FixtureKind::Spinner => FrameSpinner::new("test-progress", "Copying files")
                 .size(self.size)
                 .debug_selector("test-progress")
@@ -389,6 +384,43 @@ fn standard_indeterminate_bar_uses_the_animated_activity_structure(cx: &mut Test
     );
 
     assert!(cx.debug_bounds("test-progress-activity").is_some());
+    assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
+}
+
+#[gpui::test]
+fn indeterminate_ring_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
+    let cx = fixture_window(
+        cx,
+        FixtureKind::Ring,
+        ProgressState::Indeterminate,
+        ProgressSize::Regular,
+        ControlMotion::Reduced,
+    );
+
+    assert!(cx.debug_bounds("test-progress-activity").is_some());
+    assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
+}
+
+#[gpui::test]
+fn standard_indeterminate_ring_uses_the_animated_activity_structure(cx: &mut TestAppContext) {
+    let cx = fixture_window(
+        cx,
+        FixtureKind::Ring,
+        ProgressState::Indeterminate,
+        ProgressSize::Compact,
+        ControlMotion::Standard,
+    );
+
+    let track = cx
+        .debug_bounds("test-progress-track")
+        .expect("indeterminate ring should keep its square");
+    let activity = cx
+        .debug_bounds("test-progress-activity")
+        .expect("indeterminate ring should render its trail");
+
+    assert_eq!(track.size, gpui::size(px(20.0), px(20.0)));
+    assert_eq!(activity, track);
+    assert!(cx.debug_bounds("test-progress-indicator").is_none());
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
 }
 

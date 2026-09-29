@@ -12,9 +12,9 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FocusHandle, SharedString, WeakEntity, Window, div, px};
 use spaceterm_ui::{
     Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FrameSpinner, FuzzyTarget, Icon,
-    IconName, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressSize,
-    SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
-    TextInputVariant, fuzzy_filter,
+    IconName, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressRing,
+    ProgressSize, ProgressState, SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant, fuzzy_filter,
 };
 
 use crate::appearance::{CatalogError, ImportError, ThemePackage, ZedExtension};
@@ -545,9 +545,10 @@ fn render_extension_row(
     let trailing = match action {
         ExtensionAction::Install => button("Get"),
         ExtensionAction::Update => button("Update"),
-        ExtensionAction::Installing => FrameSpinner::new(
+        ExtensionAction::Installing => ProgressRing::new(
             SharedString::from(format!("{selector}-progress")),
             "Installing",
+            ProgressState::Indeterminate,
         )
         .size(ProgressSize::Compact)
         .into_any_element(),
