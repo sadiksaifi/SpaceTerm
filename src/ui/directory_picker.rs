@@ -1905,10 +1905,9 @@ mod tests {
         let child = cx
             .debug_bounds("directory-picker-row-SpaceTerm")
             .expect("the child row should be rendered");
-        assert_eq!(
-            enclosing.bottom(),
-            child.top(),
-            "a divider separated the enclosing row from the children"
+        assert!(
+            enclosing.bottom() < child.top(),
+            "the enclosing row should sit above the children"
         );
         assert_eq!(
             enclosing.size.height,
