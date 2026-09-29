@@ -55,6 +55,11 @@ class Supervisor:
             os.killpg(self.active_pgid, signum)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS refuses to signal a group whose members are all unreaped zombies, which is
+            # what a command that exits during a budget breach leaves. The live-process check
+            # decides whether the group stopped.
+            pass
 
     def _spawn_session(
         self, command: list[str], *, env: dict[str, str] | None = None
