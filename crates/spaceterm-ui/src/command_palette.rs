@@ -1488,6 +1488,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
+    leading_action: Option<CommandPaletteAction>,
     header_actions: Vec<CommandPaletteAction>,
     primary_action: Option<CommandPalettePrimaryAction>,
     matching: CommandPaletteMatching,
@@ -1896,6 +1897,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             presented_results,
             leading_columns,
             input_leading_icon: None,
+            leading_action: None,
             header_actions: Vec::new(),
             primary_action: None,
             matching: CommandPaletteMatching::Semantic,
@@ -1994,6 +1996,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.input_leading_icon = Some(Rc::new(build));
+        cx.notify();
+    }
+
+    /// Replaces the control rendered at the leading edge of the search line.
+    ///
+    /// Activating it emits [`CommandPaletteEvent::HeaderAction`] with the caller's identity.
+    pub fn set_leading_action(
+        &mut self,
+        action: Option<CommandPaletteAction>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.leading_action = action;
         cx.notify();
     }
 
@@ -2684,6 +2698,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
         let maximum_steps = self.header_actions.len()
+            + usize::from(self.leading_action.is_some())
             + usize::from(self.primary_action.is_some())
             + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
@@ -3331,11 +3346,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .w_full()
             .h(metrics.input_height)
             .flex_shrink_0()
-            .pl(if self.input_leading_icon.is_some() {
-                metrics.panel_padding
-            } else {
-                metrics.content_leading_inset()
-            })
+            .pl(
+                if self.leading_action.is_some() || self.input_leading_icon.is_some() {
+                    metrics.panel_padding
+                } else {
+                    metrics.content_leading_inset()
+                },
+            )
             .pr(metrics.panel_padding)
             .flex()
             .flex_row()
@@ -3343,6 +3360,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .gap(metrics.panel_padding)
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
+            .when_some(self.leading_action.as_ref(), |editor, action| {
+                editor.child(
+                    search_line_icon_button(
+                        palette.clone(),
+                        "command-palette-leading-action",
+                        action,
+                        theme,
+                    )
+                    .variant(ButtonVariant::Secondary)
+                    .corner_radius(metrics.header_action_size() / 2.0),
+                )
+            })
             .when_some(self.input_leading_icon.as_ref(), |editor, icon| {
                 editor.child(
                     div()
@@ -3525,21 +3554,37 @@ fn render_empty_action<I: Clone + Eq + 'static>(
     .into_any_element()
 }
 
-/// Renders one search-line control as a ghost icon button from the installed button catalog.
+/// Renders one trailing search-line control as a ghost icon button.
 fn render_header_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     index: usize,
     action: &CommandPaletteAction,
     theme: CommandPaletteTheme,
 ) -> AnyElement {
+    search_line_icon_button(
+        palette,
+        ("command-palette-header-action", index),
+        action,
+        theme,
+    )
+    .variant(ButtonVariant::Ghost)
+    .into_any_element()
+}
+
+/// Builds one search-line control at the shared search-line size from the installed catalog.
+fn search_line_icon_button<I: Clone + Eq + 'static>(
+    palette: WeakEntity<CommandPalette<I>>,
+    element_id: impl Into<gpui::ElementId>,
+    action: &CommandPaletteAction,
+    theme: CommandPaletteTheme,
+) -> IconButton {
     let id = action.id.clone();
     let icon = action.icon.clone();
     let mut button = IconButton::new(
-        ("command-palette-header-action", index),
+        element_id,
         action.accessibility_name.clone(),
         move |foreground| icon(foreground),
     )
-    .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Compact)
     .target_size(theme.metrics.header_action_size())
     .corner_radius(theme.shell.nested_radius())
@@ -3554,7 +3599,7 @@ fn render_header_action<I: Clone + Eq + 'static>(
     if let Some(selector) = action.debug_selector.clone() {
         button = button.debug_selector(selector);
     }
-    button.into_any_element()
+    button
 }
 
 /// Renders the search line's primary command as a prominent capsule at its trailing edge.

@@ -4,7 +4,8 @@ use gpui::prelude::*;
 use gpui::{Action, App};
 use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
+    Alert, AlertOutcome, CommandPalette, CommandPaletteAction, CommandPaletteActivationPolicy,
+    CommandPaletteCloseReason,
     CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
     CommandPaletteMatching, CommandPalettePrimaryAction, CommandPaletteReplacementFocus,
     FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
@@ -22,6 +23,7 @@ use super::{
     ToggleSidebarFocus,
 };
 
+use super::chrome_icons::IconRole;
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceValueError};
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
@@ -29,6 +31,8 @@ const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 /// Identifies the search line's Pin or Create action.
 const CONFIRM_ACTION: &str = "remote-directory-picker-confirm";
+/// Identifies the search line's control that opens the enclosing directory.
+const BACK_ACTION: &str = "remote-directory-picker-back";
 const TRUNCATED_LISTING_NOTICE: &str =
     "First 1024 directories shown; type an exact path for others";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
@@ -291,6 +295,27 @@ pub(super) fn descend_remote_workspace_query(
     row: &RemoteDirectoryRow,
 ) -> Result<RemoteDirectory, RemoteWorkspaceValueError> {
     RemoteDirectory::new(format!("{}{}/", parsed.descend_prefix, row.name()))
+}
+
+/// Returns the path that lists the directory enclosing the one `parsed` lists.
+///
+/// The remote home spells its enclosing directory from the account's physical home, so `~/`
+/// leads to the absolute directory that contains it.
+fn enclosing_directory_query(
+    parsed: &ParsedRemoteDirectory,
+    home: &RemoteDirectoryIdentity,
+) -> Option<String> {
+    let listed = parsed
+        .enumeration_directory()
+        .as_str()
+        .trim_end_matches('/');
+    let listed = if listed == "~" {
+        home.as_str().trim_end_matches('/')
+    } else {
+        listed
+    };
+    let separator = listed.rfind('/')?;
+    Some(format!("{}/", listed[..separator].trim_end_matches('/')))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -609,6 +634,9 @@ impl RemoteDirectoryPicker {
             CommandPaletteEvent::HeaderAction(action) if action == CONFIRM_ACTION => {
                 self.confirm_current(window, cx);
             }
+            CommandPaletteEvent::HeaderAction(action) if action == BACK_ACTION => {
+                self.open_enclosing_directory(window, cx);
+            }
             _ => {}
         }
     }
@@ -815,6 +843,27 @@ impl RemoteDirectoryPicker {
             return;
         };
         let query = directory.as_str().to_owned();
+        if !self.palette.read(cx).can_set_query_exactly(&query, cx) {
+            self.status = RemoteDirectoryPickerStatus::Other;
+            self.publish(cx);
+            return;
+        }
+        self.palette
+            .update(cx, |palette, cx| palette.set_query(query, cx));
+        self.refocus_path(window, cx);
+    }
+
+    fn enclosing_directory(&self) -> Option<String> {
+        enclosing_directory_query(self.parsed.as_ref()?, self.account.as_ref()?.home_identity())
+    }
+
+    fn open_enclosing_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(query) = self.enclosing_directory() else {
+            return;
+        };
         if !self.palette.read(cx).can_set_query_exactly(&query, cx) {
             self.status = RemoteDirectoryPickerStatus::Other;
             self.publish(cx);
@@ -1055,6 +1104,19 @@ impl RemoteDirectoryPicker {
             .debug_selector(CONFIRM_ACTION)
     }
 
+    /// Returns the search line's control that opens the enclosing directory.
+    fn back_action(&self, cx: &App) -> CommandPaletteAction {
+        let icon_size = super::appearance::chrome(cx)
+            .icons
+            .metrics(IconRole::Control)
+            .glyph_size;
+        CommandPaletteAction::new(BACK_ACTION, "Enclosing Directory", move |tint| {
+            Icon::new(IconName::ChevronLeft, icon_size, tint).into_any_element()
+        })
+        .disabled(self.busy.is_some() || self.enclosing_directory().is_none())
+        .debug_selector(BACK_ACTION)
+    }
+
     fn child_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
         let Some(directory) = self.rows_directory.as_ref() else {
             return Vec::new();
@@ -1087,6 +1149,7 @@ impl RemoteDirectoryPicker {
         let items = self.child_items();
         let first_child = items.first().map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
+        let back_action = self.back_action(cx);
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
             // child, and the confirm key pins regardless of selection.
@@ -1096,6 +1159,7 @@ impl RemoteDirectoryPicker {
                 .cloned();
             palette.set_preferred_item(retained.or(first_child), cx);
             palette.set_items(items, cx);
+            palette.set_leading_action(Some(back_action), cx);
             palette.set_primary_action(Some(confirm_action), cx);
             palette.set_empty(CommandPaletteEmpty::new(self.empty_text()), cx);
             palette.set_loading(loading, cx);
@@ -1669,6 +1733,64 @@ mod tests {
         let selection = selection.expect("validated selection should be emitted");
         assert_eq!(selection.directory(), &expected);
         assert_eq!(selection.physical_directory(), &identity);
+    }
+
+    #[gpui::test]
+    fn the_back_button_should_open_the_enclosing_directory(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(remote_rows(["Projects"])), Ok(remote_rows(["SpaceTerm"]))],
+            [
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+            ],
+            [],
+            [],
+        );
+        let (picker, _, cx) = remote_directory_picker(provider, cx);
+        set_remote_input(&picker, "~/Projects/", cx);
+
+        let query = |picker: &gpui::Entity<RemoteDirectoryPicker>, cx: &mut VisualTestContext| {
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned())
+        };
+        let back = cx
+            .debug_bounds(BACK_ACTION)
+            .expect("the back button should be rendered");
+        cx.simulate_click(back.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(query(&picker, cx), HOME_DISPLAY);
+
+        cx.simulate_click(back.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(query(&picker, cx), "/home/");
+        assert!(picker.read_with(cx, |picker, _| picker.is_open()));
+    }
+
+    #[test]
+    fn the_enclosing_directory_should_contain_the_listed_directory() {
+        let home = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let enclosing = |input: &str| {
+            enclosing_directory_query(&parse_remote_directory(input).unwrap(), &home)
+        };
+
+        assert_eq!(enclosing("~/Projects/"), Some(HOME_DISPLAY.to_owned()));
+        assert_eq!(enclosing("~/Projects/Space"), Some(HOME_DISPLAY.to_owned()));
+        assert_eq!(enclosing("~/Projects//SpaceTerm/"), Some("~/Projects/".to_owned()));
+        assert_eq!(enclosing("~/"), Some("/home/".to_owned()));
+        assert_eq!(enclosing("~/Proj"), Some("/home/".to_owned()));
+        assert_eq!(enclosing("/usr/local/"), Some("/usr/".to_owned()));
+        assert_eq!(enclosing("/usr/"), Some("/".to_owned()));
+        assert_eq!(enclosing("/usr"), None);
+        assert_eq!(enclosing("/"), None);
+    }
+
+    #[test]
+    fn a_root_home_should_have_no_enclosing_directory() {
+        let home = RemoteDirectoryIdentity::new("/".to_owned()).unwrap();
+
+        assert_eq!(
+            enclosing_directory_query(&parse_remote_directory("~/").unwrap(), &home),
+            None
+        );
     }
 
     #[test]

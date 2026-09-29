@@ -1334,6 +1334,43 @@ fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn a_leading_action_should_precede_the_query_as_a_round_control(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_leading_action(
+            Some(
+                CommandPaletteAction::new("back", "Enclosing Folder", |_| div().into_any_element())
+                    .debug_selector("leading-back"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    let button = cx
+        .debug_bounds("leading-back")
+        .expect("the leading action was not rendered");
+    assert_eq!(button.size.width, button.size.height);
+    assert!(
+        button.right() <= input.left(),
+        "the control overlapped the query"
+    );
+    assert_eq!(
+        button.left() - editor.left(),
+        button.top() - editor.top(),
+        "the control was not inset like the other search-line controls"
+    );
+
+    cx.simulate_click(button.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("back")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
 fn search_line_icons_should_share_size_and_edge_spacing(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {

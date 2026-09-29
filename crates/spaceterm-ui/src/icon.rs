@@ -126,6 +126,7 @@ lucide_sources! {
     AppWindow => "app-window",
     Check => "check",
     ChevronDown => "chevron-down",
+    ChevronLeft => "chevron-left",
     ChevronRight => "chevron-right",
     ChevronUp => "chevron-up",
     CircleAlert => "circle-alert",
