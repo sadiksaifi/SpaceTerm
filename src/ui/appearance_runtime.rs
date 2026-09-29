@@ -83,7 +83,7 @@ pub(crate) struct AppearanceRuntime {
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
     pending_font_names: Option<Vec<String>>,
-    progress_motion: spaceterm_ui::ProgressMotion,
+    control_motion: spaceterm_ui::ControlMotion,
     #[cfg(feature = "appearance-exerciser")]
     accessibility_preview: AccessibilityPreviewOverride,
     _tasks: Vec<Task<()>>,
@@ -134,7 +134,7 @@ pub(crate) fn install(
         platform,
         fonts,
         pending_font_names,
-        progress_motion: spaceterm_ui::ProgressMotion::Standard,
+        control_motion: spaceterm_ui::ControlMotion::Standard,
         #[cfg(feature = "appearance-exerciser")]
         accessibility_preview: AccessibilityPreviewOverride::default(),
         _tasks: tasks,
@@ -144,12 +144,12 @@ pub(crate) fn install(
 }
 
 pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
-    let (platform, candidate, previous_progress_motion) = {
+    let (platform, candidate, previous_control_motion) = {
         let runtime = cx.global::<AppearanceRuntime>();
         (
             Rc::clone(&runtime.platform),
             runtime.settings.snapshot().candidate,
-            runtime.progress_motion,
+            runtime.control_motion,
         )
     };
     ensure_selected_fonts(&candidate.preferences, cx);
@@ -184,13 +184,13 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             &fonts,
         )
         .map_err(|_| SettingsError::Invalid)?;
-    let progress_motion =
-        resolved_progress_motion(resolved.chrome.composition.capabilities.reduce_motion);
+    let control_motion =
+        resolved_control_motion(resolved.chrome.composition.capabilities.reduce_motion);
     let changes = cx
         .try_global::<InstalledAppearance>()
         .map(|previous| AppearanceChangeSet::between(&previous.0, &resolved));
-    let progress_motion_changed = previous_progress_motion != progress_motion;
-    if !progress_motion_changed
+    let control_motion_changed = previous_control_motion != control_motion;
+    if !control_motion_changed
         && cx
             .try_global::<InstalledAppearance>()
             .is_some_and(|previous| {
@@ -207,24 +207,24 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             || changes.chrome_metrics
             || changes.window_composition
     });
-    if chrome_changed || progress_motion_changed {
+    if chrome_changed || control_motion_changed {
         let (prepared, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings_prepared, settings_inactive) =
             settings::prepare_variants(&resolved.chrome, prepared.clone(), inactive.clone());
         let controls = Box::new(
-            super::control_theme_catalog::catalog(&prepared, progress_motion)
+            super::control_theme_catalog::catalog(&prepared, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&inactive, progress_motion)
+            super::control_theme_catalog::catalog(&inactive, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_prepared.chrome, progress_motion)
+            super::control_theme_catalog::catalog(&settings_prepared.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_inactive.chrome, progress_motion)
+            super::control_theme_catalog::catalog(&settings_inactive.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         if cx.has_global::<InstalledAppearance>() {
@@ -252,23 +252,23 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     if changes.is_none_or(|changes| changes.native_appearance) {
         platform.apply_native_appearance(resolved.chrome.appearance);
     }
-    cx.global_mut::<AppearanceRuntime>().progress_motion = progress_motion;
+    cx.global_mut::<AppearanceRuntime>().control_motion = control_motion;
     cx.set_global(InstalledAppearance(Arc::new(resolved)));
     Ok(())
 }
 
-fn resolved_progress_motion(reduced: bool) -> spaceterm_ui::ProgressMotion {
+fn resolved_control_motion(reduced: bool) -> spaceterm_ui::ControlMotion {
     if reduced {
-        spaceterm_ui::ProgressMotion::Reduced
+        spaceterm_ui::ControlMotion::Reduced
     } else {
-        spaceterm_ui::ProgressMotion::Standard
+        spaceterm_ui::ControlMotion::Standard
     }
 }
 
-pub(crate) fn progress_motion(cx: &App) -> spaceterm_ui::ProgressMotion {
+pub(crate) fn control_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     cx.try_global::<AppearanceRuntime>()
-        .map_or(spaceterm_ui::ProgressMotion::Standard, |runtime| {
-            runtime.progress_motion
+        .map_or(spaceterm_ui::ControlMotion::Standard, |runtime| {
+            runtime.control_motion
         })
 }
 

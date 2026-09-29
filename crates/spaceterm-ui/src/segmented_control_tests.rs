@@ -197,8 +197,9 @@ fn full_width_track_distributes_all_available_width_between_options(cx: &mut Tes
                     });
                     cx.run_until_parked();
                     assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
+                    assert_eq!(cx.debug_bounds("sizing-on").unwrap(), on);
                     let ring = cx.debug_bounds("sizing-control-keyboard-focus").unwrap();
-                    assert_eq!(track.left() - ring.left(), ring.right() - track.right());
+                    assert_eq!(on.left() - ring.left(), ring.right() - on.right());
                 }
             }
         }
@@ -629,23 +630,67 @@ fn a_disabled_control_refuses_pointer_and_keyboard_activation(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn keyboard_focus_draws_one_outset_ring_around_the_whole_control(cx: &mut TestAppContext) {
+fn keyboard_focus_rings_the_selected_segment(cx: &mut TestAppContext) {
     let (_root, _changes, cx) = segmented_window(cx);
 
     focus_control(cx);
 
-    let track = cx
-        .debug_bounds("test-segmented")
-        .expect("the control should render");
+    let selected = cx
+        .debug_bounds("test-segmented-dark")
+        .expect("the selected segment should render");
     let ring = cx
         .debug_bounds("test-segmented-keyboard-focus")
         .expect("keyboard focus should draw a ring");
+    assert_eq!(ring, selected.dilate(px(2.0)));
+}
+
+#[gpui::test]
+fn the_ring_follows_arrow_selection_at_rest_above_every_segment(cx: &mut TestAppContext) {
+    let (root, changes, cx) = segmented_window(cx);
+    focus_control(cx);
+    crate::focus_ring::settle(cx);
+
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    assert_eq!(
+        changes.borrow().last().map(|change| *change.requested()),
+        Some(Mode::Light)
+    );
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.current = Mode::Light;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+
+    let scale = cx.update(|window, _| window.scale_factor());
+    let light = cx.debug_bounds("test-segmented-light").unwrap();
+    let track = cx.debug_bounds("test-segmented").unwrap().scale(scale);
+    let ring = rgba(0x00aaffff);
+    let (bands, others): (Vec<_>, Vec<_>) = cx.update(|window, _| {
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| quad.bounds.intersects(&track))
+            .partition(|quad| {
+                let color = gpui::Rgba::from(quad.border_color);
+                (color.b - ring.b).abs() < 0.01 && (color.g - ring.g).abs() < 0.01
+            })
+    });
+    assert!(!bands.is_empty(), "the focused control keeps its ring");
+    for band in &bands {
+        assert_eq!(
+            band.bounds,
+            light.dilate(px(2.0)).scale(scale),
+            "a selection change moves the band at rest instead of replaying its entrance"
+        );
+    }
+    // GPUI gives quads that do not overlap the same draw order, so only a later order paints over.
+    let band = bands.iter().map(|band| band.order).min().unwrap();
     assert!(
-        ring.left() < track.left()
-            && ring.right() > track.right()
-            && ring.top() < track.top()
-            && ring.bottom() > track.bottom(),
-        "the ring should enclose the track"
+        others.iter().all(|quad| quad.order <= band),
+        "later segments and the track border must not paint over the band"
     );
 }
 

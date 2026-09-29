@@ -774,6 +774,7 @@ fn form_field(
                 spaceterm_ui::FieldState::default()
                     .disabled(!enabled)
                     .invalid(error.is_some()),
+                super::chrome_geometry::RadiusRole::Control.pixels(),
                 cx,
             )
             .h(appearance.height(28.0, 13.0))
@@ -783,7 +784,6 @@ fn form_field(
             .flex()
             .items_center()
             .px(appearance.spacing(8.0))
-            .rounded(super::chrome_geometry::RadiusRole::Control.pixels())
             .chrome_text(appearance.typography.style(TextRole::Body))
             .text_color(gpui_color(colors.text))
             .on_click(move |_, window, cx| {

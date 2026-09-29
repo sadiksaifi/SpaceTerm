@@ -3,11 +3,11 @@
 
 use crate::ui::appearance::gpui_color;
 use gpui::px;
-use spaceterm_ui::{ProgressMetrics, ProgressMotion, ProgressPaint, ProgressSizes, ProgressTheme};
+use spaceterm_ui::{ProgressMetrics, ProgressPaint, ProgressSizes, ProgressTheme};
 
 use crate::appearance::ChromeColors;
 
-pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTheme {
+pub(super) fn theme(colors: &ChromeColors) -> ProgressTheme {
     ProgressTheme::new(
         paint(colors),
         ProgressSizes::new(
@@ -19,7 +19,6 @@ pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTh
             // beside body text rather than a graphic the surface is built around.
             ProgressMetrics::new(px(4.0), px(2.0), px(18.0), px(2.0)),
         ),
-        motion,
     )
 }
 

@@ -712,11 +712,22 @@ fn selection_ring(
 ) -> impl IntoElement {
     let accent = appearance.colors.border_focused;
     let hover = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
-    div()
+    let outer_radius = radius.pixels() + px(RING_GAP + RING_WIDTH);
+    // Keyboard focus surrounds the selection ring so the two states stay distinct: the focus ring
+    // treats the selection ring's outer edge as the control's edge.
+    let focus_ring = focused.then(|| {
+        spaceterm_ui::focus_ring(
+            "focus-ring",
+            gpui_color(appearance.colors.focus_ring),
+            outer_radius,
+            px(0.0),
+        )
+    });
+    let tile = div()
         .relative()
         .w_full()
         .p(px(RING_GAP))
-        .rounded(radius.pixels() + px(RING_GAP + RING_WIDTH))
+        .rounded(outer_radius)
         .border(px(RING_WIDTH))
         .border_color(gpui_color(if selected {
             accent
@@ -726,17 +737,8 @@ fn selection_ring(
         .when(!selected, |ring| {
             ring.hover(move |ring| ring.border_color(gpui_color(hover)))
         })
-        .child(content.rounded(radius.pixels()))
-        // Keyboard focus surrounds the selection ring so the two states stay distinct.
-        .child(
-            div()
-                .absolute()
-                .inset(px(-RING_WIDTH - RING_GAP))
-                .rounded(radius.pixels() + px(2.0 * (RING_GAP + RING_WIDTH)))
-                .border(px(RING_WIDTH))
-                .border_color(gpui::rgba(0))
-                .when(focused, |ring| ring.border_color(gpui_color(appearance.colors.focus_ring))),
-        )
+        .child(content.rounded(radius.pixels()));
+    spaceterm_ui::Ringed::new(tile, focus_ring)
 }
 
 #[derive(Clone, Copy)]

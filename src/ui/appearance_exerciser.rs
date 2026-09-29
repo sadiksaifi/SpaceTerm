@@ -785,7 +785,7 @@ impl AppearanceExerciser {
                 let generation = appearance_runtime::current(cx).generation.get();
                 move || format!("appearance-diagnostics-generation-{generation}")
             }).chrome_text(appearance.typography.style(TextRole::Secondary)).text_color(muted).whitespace_normal().child(self.diagnostics(cx)))
-            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), cx).h(appearance.spacing(32.0)).child(self.editor.clone()))
+            .child(spaceterm_ui::field_frame("appearance-editor-frame", &self.editor.read(cx).focus_handle(), spaceterm_ui::FieldState::default(), crate::ui::chrome_geometry::RadiusRole::Control.pixels(), cx).h(appearance.spacing(32.0)).child(self.editor.clone()))
             .child(div().text_color(muted).child("Synthetic accessibility previews; System Settings remain unchanged"))
             .child(div().flex().flex_wrap().gap(px(8.0))
                 .child(accessibility_action(

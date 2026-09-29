@@ -432,7 +432,7 @@ fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
         .unwrap();
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let catalog =
-        super::control_theme_catalog::catalog(&prepared, spaceterm_ui::ProgressMotion::Standard);
+        super::control_theme_catalog::catalog(&prepared, spaceterm_ui::ControlMotion::Standard);
     cx.update(|cx| spaceterm_ui::init(cx, catalog)).unwrap();
     let paints = cx.update(|cx| {
         cx.global::<spaceterm_ui::ButtonTheme>()

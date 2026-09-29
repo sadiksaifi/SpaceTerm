@@ -322,11 +322,6 @@ impl TextInputTheme {
         self
     }
 
-    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.frame = self.frame.focus_ring_width(width);
-        self
-    }
-
     pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
         Self {
             metrics: self.metrics.scaled(spacing_scale),

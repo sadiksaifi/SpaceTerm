@@ -931,17 +931,6 @@ impl SurfaceControlThemes {
         self
     }
 
-    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.button = self.button.focus_ring_width(width);
-        self.toggle = self.toggle.focus_ring_width(width);
-        self.segmented_control = self.segmented_control.focus_ring_width(width);
-        self.search_field = self.search_field.focus_ring_width(width);
-        self.text_input = self.text_input.focus_ring_width(width);
-        self.menu = self.menu.map(|theme| theme.focus_ring_width(width));
-        self.combo_box = self.combo_box.map(|theme| theme.focus_ring_width(width));
-        self
-    }
-
     pub(crate) fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
         self.button = self.button.scaled_metrics(text_scale, spacing_scale);
         self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
@@ -965,17 +954,6 @@ impl SurfaceControlThemes {
 impl SurfaceControlThemes {
     pub(crate) fn regular_button_extent_for_test(&self) -> Pixels {
         self.button.icon_button_size(crate::ButtonSize::Regular)
-    }
-
-    pub(crate) fn button_focus_ring_width_for_test(&self) -> Pixels {
-        self.button.resolved_focus_ring_width()
-    }
-
-    pub(crate) fn trigger_focus_ring_widths_for_test(&self) -> (Option<Pixels>, Option<Pixels>) {
-        (
-            self.menu.map(MenuTheme::resolved_focus_ring_width),
-            self.combo_box.map(ComboBoxTheme::resolved_focus_ring_width),
-        )
     }
 }
 

@@ -17,6 +17,7 @@ mod field_frame;
 mod floating_surface;
 #[cfg(test)]
 mod floating_surface_tests;
+mod focus_ring;
 mod fuzzy;
 mod icon;
 mod leading_columns;
@@ -44,7 +45,7 @@ use gpui::App;
 pub use anchored_placement::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
 };
-pub use appearance::{ControlShadow, ControlShadowLayer, ControlTypography};
+pub use appearance::{ControlMotion, ControlShadow, ControlShadowLayer, ControlTypography};
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
@@ -74,6 +75,7 @@ pub use floating_surface::{
     FloatingShell, FloatingSurfacePaint, FloatingSurfacePaints, FloatingSurfaceTheme,
     SurfaceControlThemes, floating_surface_theme,
 };
+pub use focus_ring::{FocusRing, Ringed, RingedElement, focus_ring};
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
@@ -106,8 +108,8 @@ pub use overlay_scrollbar::{
     ScrollbarTheme,
 };
 pub use progress::{
-    FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint, ProgressRing,
-    ProgressSize, ProgressSizes, ProgressTheme,
+    FrameSpinner, ProgressBar, ProgressMetrics, ProgressPaint, ProgressRing, ProgressSize,
+    ProgressSizes, ProgressTheme,
 };
 pub use resize_handle::{
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,
@@ -179,6 +181,7 @@ impl ControlPreviewState {
 pub struct ControlThemeCatalog {
     generation: ControlThemeGeneration,
     typography: ControlTypography,
+    motion: ControlMotion,
     button: ButtonTheme,
     toggle: ToggleTheme,
     progress: ProgressTheme,
@@ -389,10 +392,12 @@ impl ControlThemeCatalog {
         text_input: TextInputTheme,
         tooltip: TooltipTheme,
         modal: ModalTheme,
+        motion: ControlMotion,
     ) -> Self {
         Self {
             generation: ControlThemeGeneration::default(),
             typography: ControlTypography::default(),
+            motion,
             button,
             toggle,
             progress,
@@ -477,32 +482,6 @@ impl ControlThemeCatalog {
     /// Sets complete resolved typography shared by every text-bearing control family.
     pub fn typography(mut self, typography: ControlTypography) -> Self {
         self.typography = typography;
-        self
-    }
-
-    /// Sets the shared focus-ring width without changing control borders, gaps, or radii.
-    ///
-    /// The width is a stable logical-point metric and does not participate in density scaling.
-    pub fn focus_ring_width(mut self, width: gpui::Pixels) -> Self {
-        self.button = self.button.focus_ring_width(width);
-        self.toggle = self.toggle.focus_ring_width(width);
-        self.segmented_control = self.segmented_control.focus_ring_width(width);
-        self.search_field = self.search_field.focus_ring_width(width);
-        self.text_input = self.text_input.focus_ring_width(width);
-        self.menu = self.menu.focus_ring_width(width);
-        self.combo_box = self.combo_box.focus_ring_width(width);
-        self.floating_controls = self
-            .floating_controls
-            .map(|themes| themes.focus_ring_width(width));
-        self.title_bar_controls = self
-            .title_bar_controls
-            .map(|themes| themes.focus_ring_width(width));
-        self.panel_controls = self
-            .panel_controls
-            .map(|themes| themes.focus_ring_width(width));
-        self.card_controls = self
-            .card_controls
-            .map(|themes| themes.focus_ring_width(width));
         self
     }
 
@@ -740,6 +719,7 @@ fn install_control_theme_catalogs(
     cx.set_global(active.text_input);
     cx.set_global(active.tooltip);
     cx.set_global(active.modal);
+    cx.set_global(active.motion);
     cx.set_global(active.floating.unwrap_or_default());
     cx.set_global(active.as_ref().clone());
     cx.set_global(InstalledControlThemeCatalogs {
@@ -793,6 +773,14 @@ pub(crate) fn control_theme_catalog(cx: &App) -> Option<&ControlThemeCatalog> {
             catalog.as_ref()
         })
         .or_else(|| cx.try_global::<ControlThemeCatalog>())
+}
+
+/// Whether controls animate, from the installed catalog or, without one, the installed motion.
+pub(crate) fn control_motion(cx: &App) -> ControlMotion {
+    control_theme_catalog(cx)
+        .map(|catalog| catalog.motion)
+        .or_else(|| cx.try_global::<ControlMotion>().copied())
+        .unwrap_or_default()
 }
 
 fn control_typography(cx: &App) -> ControlTypography {

@@ -220,11 +220,6 @@ impl SearchFieldTheme {
         }
     }
 
-    pub(crate) fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.frame = self.frame.focus_ring_width(width);
-        self
-    }
-
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
         Self {
             metrics: self.metrics.scaled(text_scale, spacing_scale),
@@ -384,80 +379,83 @@ impl RenderOnce for SearchField {
         let input = self.input.clone();
         let clear_focus = focus.clone();
         let toggle = self.toggle;
-        crate::field_frame::themed_field_frame(theme.frame, self.id, &focus, FieldState::default())
-            .debug_selector(move || frame_selector.to_string())
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .h(metrics.height)
-            .pl(metrics.horizontal_padding)
-            .pr(if toggle.is_some() {
-                metrics.toggle_inset
-            } else if empty {
-                metrics.horizontal_padding
-            } else {
-                metrics.clear_trailing_inset
-            })
-            .gap(metrics.gap)
-            .rounded(metrics.corner_radius)
-            .text_size(metrics.label_size)
-            .line_height(metrics.line_height)
-            .child(
+        crate::field_frame::themed_field_frame(
+            theme.frame,
+            self.id,
+            &focus,
+            FieldState::default(),
+            metrics.corner_radius,
+        )
+        .debug_selector(move || frame_selector.to_string())
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .h(metrics.height)
+        .pl(metrics.horizontal_padding)
+        .pr(if toggle.is_some() {
+            metrics.toggle_inset
+        } else if empty {
+            metrics.horizontal_padding
+        } else {
+            metrics.clear_trailing_inset
+        })
+        .gap(metrics.gap)
+        .text_size(metrics.label_size)
+        .line_height(metrics.line_height)
+        .child(
+            div()
+                .flex_none()
+                .relative()
+                .top(icon_offset)
+                .child(Icon::new(
+                    IconName::Search,
+                    metrics.icon_size,
+                    theme.paint.icon,
+                )),
+        )
+        .child(div().min_w_0().flex_1().child(self.input))
+        .when(!empty || toggle.is_some(), |field| {
+            // The trailing actions stand together, so the clear mark keeps its own air to the
+            // toggle rather than adding the field's gap to it.
+            field.child(
                 div()
                     .flex_none()
-                    .relative()
-                    .top(icon_offset)
-                    .child(Icon::new(
-                        IconName::Search,
-                        metrics.icon_size,
-                        theme.paint.icon,
-                    )),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .when(!empty, |actions| {
+                        let glyph = theme.paint.clear_glyph;
+                        actions.child(
+                            IconButton::new(clear_id, CLEAR_ACCESSIBILITY_NAME, move |fill| {
+                                clear_mark(metrics, fill, glyph)
+                            })
+                            // Compact keeps the target comfortably larger than the mark it
+                            // centers.
+                            .size(ButtonSize::Compact)
+                            .target_size(metrics.clear_target_size)
+                            // The target itself stays invisible and carries only the pointer
+                            // interaction, so the theme paints every state into the mark
+                            // inside it and the mark never takes a ring of its own.
+                            .contextual_style(theme.paint.clear, rgba(0))
+                            // Clearing belongs to the editor the mark sits in. Keyboard
+                            // readers reach it through the host's own dismissal policy rather
+                            // than a second traversal stop.
+                            .tab_stop(false)
+                            .debug_selector(clear_selector.to_string())
+                            .on_activate(move |_, window, cx| {
+                                input.update(cx, |input, cx| {
+                                    input.clear(cx);
+                                });
+                                clear_focus.focus(window, cx);
+                            }),
+                        )
+                    })
+                    .when_some(toggle, |actions, toggle| {
+                        actions.child(render_toggle(toggle, toggle_id, theme, metrics))
+                    }),
             )
-            .child(div().min_w_0().flex_1().child(self.input))
-            .when(!empty || toggle.is_some(), |field| {
-                // The trailing actions stand together, so the clear mark keeps its own air to the
-                // toggle rather than adding the field's gap to it.
-                field.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .when(!empty, |actions| {
-                            let glyph = theme.paint.clear_glyph;
-                            actions.child(
-                                IconButton::new(clear_id, CLEAR_ACCESSIBILITY_NAME, move |fill| {
-                                    clear_mark(metrics, fill, glyph)
-                                })
-                                // Compact keeps the target comfortably larger than the mark it
-                                // centers.
-                                .size(ButtonSize::Compact)
-                                .target_size(metrics.clear_target_size)
-                                // The target itself stays invisible and carries only the pointer
-                                // interaction, so the theme paints every state into the mark
-                                // inside it and the mark never takes a ring of its own.
-                                .contextual_style(theme.paint.clear, rgba(0))
-                                // Clearing belongs to the editor the mark sits in. Keyboard
-                                // readers reach it through the host's own dismissal policy rather
-                                // than a second traversal stop.
-                                .tab_stop(false)
-                                .debug_selector(clear_selector.to_string())
-                                .on_activate(
-                                    move |_, window, cx| {
-                                        input.update(cx, |input, cx| {
-                                            input.clear(cx);
-                                        });
-                                        clear_focus.focus(window, cx);
-                                    },
-                                ),
-                            )
-                        })
-                        .when_some(toggle, |actions, toggle| {
-                            actions.child(render_toggle(toggle, toggle_id, theme, metrics))
-                        }),
-                )
-            })
+        })
     }
 }
 

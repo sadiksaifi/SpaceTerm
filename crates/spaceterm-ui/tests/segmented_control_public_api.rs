@@ -59,7 +59,6 @@ const _: fn() = || {
         .vertical_padding(px(0.0))
         .radius(px(5.0))
         .border_width(px(1.0))
-        .focus_gap(px(2.0))
         .preview_gap(px(6.0))
         .typography(px(12.0), 1.2);
     let theme = SegmentedControlTheme::new(

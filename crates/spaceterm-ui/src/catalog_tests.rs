@@ -27,6 +27,10 @@ fn segmented_control_theme(
 }
 
 pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
+    catalog_with_motion(generation, ControlMotion::Standard)
+}
+
+pub(super) fn catalog_with_motion(generation: u64, motion: ControlMotion) -> ControlThemeCatalog {
     let clear = rgba(0x00000000);
     let text = rgba(0xffffffff);
     let surface = rgba(0x202024ff);
@@ -84,7 +88,6 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
                 ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
                 ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
             ),
-            ProgressMotion::Standard,
         ),
         ScrollbarTheme::new(muted, text, accent),
         ResizeHandleTheme::new(
@@ -126,6 +129,7 @@ pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
             ModalPaint::new(text, muted, accent, accent, accent),
             ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
         ),
+        motion,
     )
     .generation(ControlThemeGeneration::new(generation));
     let floating_controls = SurfaceControlThemes::new(
@@ -204,7 +208,7 @@ fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCont
     });
 
     let active = catalog(2);
-    let inactive = catalog(2).focus_ring_width(px(2.0));
+    let inactive = catalog_with_motion(2, ControlMotion::Reduced);
     assert_eq!(
         cx.update(|cx| replace_control_theme_catalogs(cx, active.clone(), inactive.clone())),
         Ok(ControlThemeReplacement::Applied)
@@ -214,29 +218,6 @@ fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCont
         assert_eq!(installed.active.as_ref(), &active);
         assert_eq!(installed.inactive.as_ref(), &inactive);
     });
-}
-
-#[test]
-fn focus_ring_width_does_not_scale_with_control_density() {
-    let catalog = catalog(1).focus_ring_width(px(2.0)).scale_metrics(1.5, 1.5);
-
-    assert_eq!(catalog.button.resolved_focus_ring_width(), px(2.0));
-    assert_eq!(catalog.menu.resolved_focus_ring_width(), px(2.0));
-    assert_eq!(catalog.combo_box.resolved_focus_ring_width(), px(2.0));
-    assert_eq!(
-        catalog
-            .hosted_controls(ControlHost::Floating)
-            .expect("catalog should include floating controls")
-            .button_focus_ring_width_for_test(),
-        px(2.0)
-    );
-    assert_eq!(
-        catalog
-            .hosted_controls(ControlHost::Floating)
-            .expect("catalog should include floating controls")
-            .trigger_focus_ring_widths_for_test(),
-        (Some(px(2.0)), Some(px(2.0)))
-    );
 }
 
 #[test]

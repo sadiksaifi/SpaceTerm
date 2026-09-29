@@ -3,20 +3,19 @@ use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, px, 
 
 use crate::progress::{SPINNER_FRAMES, spinner_dot_bounds, spinner_frame_index};
 use crate::{
-    DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ControlMotion, DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressPaint,
     ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
 };
 
 const BAR_WIDTH: f32 = 240.0;
 
-fn test_theme(motion: ProgressMotion) -> ProgressTheme {
+fn test_theme() -> ProgressTheme {
     ProgressTheme::new(
         ProgressPaint::new(rgba(0x303030ff), rgba(0x5599ffff)),
         ProgressSizes::new(
             ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
             ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
         ),
-        motion,
     )
 }
 
@@ -69,9 +68,10 @@ fn fixture_window(
     kind: FixtureKind,
     state: ProgressState,
     size: ProgressSize,
-    motion: ProgressMotion,
+    motion: ControlMotion,
 ) -> &mut VisualTestContext {
-    cx.set_global(test_theme(motion));
+    cx.set_global(test_theme());
+    cx.set_global(motion);
     let (_, cx) = cx.add_window_view(move |_, _| ProgressFixture { kind, state, size });
     cx.run_until_parked();
     cx
@@ -92,7 +92,7 @@ fn determinate_bar_uses_the_normalized_fraction(cx: &mut TestAppContext) {
         },
         determinate(0.25),
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     let track = cx
@@ -114,7 +114,7 @@ fn zero_progress_keeps_the_track_and_zero_width_indicator(cx: &mut TestAppContex
         },
         determinate(0.0),
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     assert!(cx.debug_bounds("test-progress-track").is_some());
@@ -134,7 +134,7 @@ fn maximum_progress_remains_visible_until_its_owner_removes_it(cx: &mut TestAppC
         },
         determinate(1.0),
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     let track = cx
@@ -156,7 +156,7 @@ fn right_to_left_bar_fills_from_the_trailing_physical_edge(cx: &mut TestAppConte
         },
         determinate(0.4),
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     let track = cx
@@ -176,7 +176,7 @@ fn named_sizes_select_their_installed_geometry(cx: &mut TestAppContext) {
         FixtureKind::Ring,
         determinate(0.5),
         ProgressSize::Compact,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     )
     .debug_bounds("test-progress-track")
     .expect("compact progress ring should render")
@@ -187,7 +187,7 @@ fn named_sizes_select_their_installed_geometry(cx: &mut TestAppContext) {
         FixtureKind::Ring,
         determinate(0.5),
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
     let regular = cx
         .debug_bounds("test-progress-track")
@@ -204,7 +204,7 @@ fn frame_spinner_is_square_in_every_size_and_motion_mode(cx: &mut TestAppContext
         (ProgressSize::Compact, px(20.0)),
         (ProgressSize::Regular, px(32.0)),
     ] {
-        for motion in [ProgressMotion::Standard, ProgressMotion::Reduced] {
+        for motion in [ControlMotion::Standard, ControlMotion::Reduced] {
             let cx = fixture_window(
                 cx,
                 FixtureKind::Spinner,
@@ -213,8 +213,8 @@ fn frame_spinner_is_square_in_every_size_and_motion_mode(cx: &mut TestAppContext
                 motion,
             );
             let root_selector = match motion {
-                ProgressMotion::Standard => "test-progress",
-                ProgressMotion::Reduced => "test-progress-reduced-motion",
+                ControlMotion::Standard => "test-progress",
+                ControlMotion::Reduced => "test-progress-reduced-motion",
             };
             let root = cx
                 .debug_bounds(root_selector)
@@ -342,7 +342,7 @@ fn frame_spinner_paints_only_with_the_inherited_foreground(cx: &mut TestAppConte
         FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Compact,
-        ProgressMotion::Reduced,
+        ControlMotion::Reduced,
     );
     let quads = cx.update(|window, _| window.painted_quads());
     let expected = gpui::Background::from(rgba(0x123456ff));
@@ -369,7 +369,7 @@ fn indeterminate_bar_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut 
         },
         ProgressState::Indeterminate,
         ProgressSize::Regular,
-        ProgressMotion::Reduced,
+        ControlMotion::Reduced,
     );
 
     assert!(cx.debug_bounds("test-progress-activity").is_some());
@@ -385,7 +385,7 @@ fn standard_indeterminate_bar_uses_the_animated_activity_structure(cx: &mut Test
         },
         ProgressState::Indeterminate,
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     assert!(cx.debug_bounds("test-progress-activity").is_some());
@@ -399,7 +399,7 @@ fn frame_spinner_keeps_a_static_frame_with_reduced_motion(cx: &mut TestAppContex
         FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Regular,
-        ProgressMotion::Reduced,
+        ControlMotion::Reduced,
     );
 
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
@@ -413,7 +413,7 @@ fn standard_frame_spinner_uses_the_animated_frame_structure(cx: &mut TestAppCont
         FixtureKind::Spinner,
         ProgressState::Indeterminate,
         ProgressSize::Regular,
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     assert!(cx.debug_bounds("test-progress-frame").is_some());

@@ -7,7 +7,7 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::ChromeColors;
-use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
+use crate::ui::chrome_geometry::HAIRLINE;
 
 pub(super) fn theme(colors: &ChromeColors) -> TextInputTheme {
     themed(colors, colors)
@@ -34,15 +34,10 @@ pub(super) fn themed(standard: &ChromeColors, bare: &ChromeColors) -> TextInputT
         FieldFrameTheme::new(
             gpui_color(standard.input_background),
             gpui_color(standard.input_border),
-            gpui_color(standard.input_focused_border),
             gpui_color(standard.input_invalid_border),
             gpui_color(standard.input_disabled_background),
             gpui_color(standard.input_disabled_border),
-        )
-        // The focused frame says where typing goes; the ring says where the keyboard is. An
-        // invalid field shows a red frame and this ring at the same time, so they cannot be one
-        // value.
-        .focus_ring(gpui_color(standard.focus_ring))
-        .corner_radius(RadiusRole::Control.pixels()),
+            gpui_color(standard.focus_ring),
+        ),
     )
 }

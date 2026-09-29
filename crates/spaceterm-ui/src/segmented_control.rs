@@ -223,7 +223,6 @@ pub struct SegmentedMetrics {
     vertical_padding: Pixels,
     radius: Pixels,
     border_width: Pixels,
-    focus_gap: Pixels,
     preview_gap: Pixels,
     font_size: Pixels,
     line_height: f32,
@@ -249,7 +248,6 @@ impl SegmentedMetrics {
             vertical_padding: px(0.0),
             radius: px(5.0),
             border_width: px(1.0),
-            focus_gap: px(2.0),
             preview_gap: px(6.0),
             font_size: px(12.0),
             line_height: 1.2,
@@ -281,12 +279,6 @@ impl SegmentedMetrics {
     /// Sets the stable option border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
-        self
-    }
-
-    /// Sets the space between the control and its keyboard focus outline.
-    pub fn focus_gap(mut self, gap: Pixels) -> Self {
-        self.focus_gap = gap;
         self
     }
 
@@ -324,7 +316,6 @@ impl SegmentedMetrics {
             vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
             radius: self.radius,
             border_width: self.border_width,
-            focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
             preview_gap: crate::appearance::scale_metric(self.preview_gap, spacing_scale),
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
             line_height: self.line_height,
@@ -368,7 +359,6 @@ pub struct SegmentedControlTheme {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
@@ -388,16 +378,9 @@ impl SegmentedControlTheme {
             track_background,
             track_border,
             focus_border,
-            focus_ring_width: px(1.0),
             track_shadow: ControlShadow::none(),
             selected_shadow: ControlShadow::none(),
         }
-    }
-
-    /// Sets the focus-ring width independently of the track border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
     }
 
     /// Adds the application-owned elevation treatment to the track and selected option.
@@ -461,7 +444,6 @@ impl SegmentedControlTheme {
             track_background: self.track_background,
             track_border: self.track_border,
             focus_border: self.focus_border,
-            focus_ring_width: self.focus_ring_width,
             track_shadow: self.track_shadow,
             selected_shadow: self.selected_shadow,
         }
@@ -839,7 +821,42 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         let key_state = state;
         let selected_index = self.selected;
         let right_to_left = self.right_to_left;
+        // Arrow keys move the selection, so the selected segment is the focused one and holds the
+        // ring. The track owns the ring so it paints after every segment and the track border, and
+        // so moving the selection keeps the ring's state instead of restarting its entrance.
+        let ring_target = crate::focus_ring::FocusRingTarget::default();
+        let ring = focused.then(|| {
+            let ring = match selected_index {
+                Some(_) => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    metrics.radius,
+                    metrics.border_width,
+                )
+                .target(ring_target.clone()),
+                // Without a selection the ring surrounds the track.
+                None if card => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    px(0.0),
+                    px(0.0),
+                ),
+                None => crate::focus_ring(
+                    crate::focus_ring::ring_id(&self.id),
+                    style.focus_border,
+                    metrics.radius + metrics.border_width,
+                    metrics.border_width,
+                ),
+            };
+            ring.debug_selector(format!("{selector}-keyboard-focus"))
+        });
         let track = div()
+            .when_some(selected_index, |track, index| {
+                let target = ring_target.clone();
+                track.on_children_prepainted(move |bounds, _, _| {
+                    target.set(bounds.get(index).copied());
+                })
+            })
             .id(self.id)
             .debug_selector({
                 let selector = selector.clone();
@@ -921,15 +938,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     },
                 )
             })
-            .children(segments)
-            .when(focused, |track| {
-                track.child(focus_outline(
-                    metrics,
-                    style.focus_border,
-                    style.focus_ring_width,
-                    format!("{selector}-keyboard-focus"),
-                ))
-            });
+            .children(segments);
+        let track = crate::Ringed::new(track, ring);
 
         let control = if let Some(tooltip) = self.tooltip {
             tooltip
@@ -990,7 +1000,6 @@ struct SegmentedStyle {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
@@ -1015,25 +1024,6 @@ impl SegmentedPaintRefinement {
             self.paint.label,
         )
     }
-}
-
-fn focus_outline(
-    metrics: SegmentedMetrics,
-    color: Rgba,
-    width: Pixels,
-    selector: String,
-) -> impl IntoElement {
-    let offset = metrics.focus_gap + width;
-    div()
-        .debug_selector(move || selector)
-        .absolute()
-        .top(-offset)
-        .right(-offset)
-        .bottom(-offset)
-        .left(-offset)
-        .rounded(metrics.radius + metrics.border_width + metrics.focus_gap)
-        .border(width)
-        .border_color(color)
 }
 
 /// Presentation used before the application installs its catalog, so a control rendered during

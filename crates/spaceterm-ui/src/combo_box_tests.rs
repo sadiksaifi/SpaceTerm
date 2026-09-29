@@ -1010,14 +1010,13 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
             focus,
         ),
         ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
-    )
-    .focus_ring_width(px(2.0));
+    );
     cx.set_global(theme);
     let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     cx.update(|window, cx| window.focus_next(cx));
-    cx.run_until_parked();
+    crate::focus_ring::settle(cx);
 
     let trigger = cx
         .debug_bounds("combo-box-trigger")
@@ -1025,7 +1024,8 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
     let ring = cx
         .debug_bounds("combo-box-trigger-keyboard-focus")
         .expect("focused ComboBox trigger should submit its outline");
-    let outset = px(3.0);
+    // The ring reaches 3pt past the fill, which the trigger's 1pt border insets.
+    let outset = px(2.0);
     assert!(
         ring.left() == trigger.left() - outset
             && ring.top() == trigger.top() - outset
@@ -1482,6 +1482,41 @@ fn down_key_on_the_focused_trigger_should_open_the_popup(cx: &mut TestAppContext
     assert_eq!(
         events.borrow().as_slice(),
         [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Opened)]
+    );
+}
+
+#[gpui::test]
+fn the_trigger_ring_stays_at_rest_through_a_keyboard_opened_popup(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    focus_trigger(cx);
+    crate::focus_ring::settle(cx);
+    let resting = cx
+        .debug_bounds("combo-box-trigger-keyboard-focus")
+        .expect("the focused trigger should draw its ring");
+
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-panel").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("combo-box-panel").is_none());
+
+    let ring = rgba(0x7e98e8ff);
+    let (bands, resting) = cx.update(|window, _| {
+        let bands: Vec<_> = window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                let color = gpui::Rgba::from(quad.border_color);
+                (color.r - ring.r).abs() < 0.01 && (color.b - ring.b).abs() < 0.01
+            })
+            .collect();
+        (bands, resting.scale(window.scale_factor()))
+    });
+    assert!(!bands.is_empty(), "the trigger regains its ring");
+    assert!(
+        bands.iter().all(|band| band.bounds == resting),
+        "closing the popup must not replay the ring's entrance"
     );
 }
 

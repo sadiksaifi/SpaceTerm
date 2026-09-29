@@ -109,7 +109,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
             cx,
             crate::ui::control_theme_catalog::catalog(
                 &appearance,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
         )
         .unwrap()
@@ -279,9 +279,31 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     );
 }
 
-/// Pointer selection stays fill-only; keyboard navigation identifies its current target.
+/// Whether the selected navigation chip paints the accent fill that marks a list with keyboard
+/// focus.
+fn navigation_selection_is_emphasized(chip: &'static str, cx: &mut VisualTestContext) -> bool {
+    let chip = cx
+        .debug_bounds(chip)
+        .expect("the selected section should paint its chip");
+    cx.update(|window, cx| {
+        let settings = crate::ui::appearance::settings::shared(cx);
+        let accent = settings
+            .chrome
+            .host_colors(spaceterm_ui::ControlHost::Panel)
+            .primary_background;
+        let fill = gpui::Background::from(gpui_color(accent));
+        let bounds = chip.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .any(|quad| quad.bounds == bounds && quad.background == fill)
+    })
+}
+
+/// Pointer selection keeps the resting selection; keyboard focus emphasizes it in the accent
+/// color, the way an AppKit source list does, and draws no ring.
 #[gpui::test]
-fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppContext) {
+fn navigation_selection_is_emphasized_only_under_keyboard_navigation(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
     click("settings-navigation-settings-section-font", cx);
@@ -297,9 +319,8 @@ fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppC
         "the selected section should keep its own material"
     );
     assert!(
-        cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_none(),
-        "a pointer selection should not leave a focus ring behind it"
+        !navigation_selection_is_emphasized("settings-navigation-chip-settings-section-font", cx),
+        "a pointer selection should not look keyboard focused"
     );
 
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
@@ -319,21 +340,15 @@ fn navigation_focus_indicator_only_follows_keyboard_navigation(cx: &mut TestAppC
         SettingsSectionId::Themes
     );
     assert!(
-        cx.debug_bounds("settings-navigation-chip-settings-section-themes")
-            .is_some(),
-        "keyboard navigation must retain the selected fill"
-    );
-    assert!(
-        cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_some(),
-        "keyboard navigation must identify the focused section"
+        navigation_selection_is_emphasized("settings-navigation-chip-settings-section-themes", cx),
+        "keyboard navigation must emphasize the selected section"
     );
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_none()
-    );
+    assert!(!navigation_selection_is_emphasized(
+        "settings-navigation-chip-settings-section-themes",
+        cx
+    ));
 }
 
 /// Arrow keys move between the sections a query left something to present, and skip the rest.
@@ -383,10 +398,10 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx.run_until_parked();
     assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
-    assert!(
-        cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_some()
-    );
+    assert!(navigation_selection_is_emphasized(
+        "settings-navigation-chip-settings-section-font",
+        cx
+    ));
 
     click("settings-navigation-settings-section-font", cx);
     redraw(cx);
@@ -405,10 +420,10 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
         SettingsSectionId::Themes
     );
     assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
-    assert!(
-        cx.debug_bounds("settings-navigation-focus-indicator")
-            .is_some()
-    );
+    assert!(navigation_selection_is_emphasized(
+        "settings-navigation-chip-settings-section-themes",
+        cx
+    ));
 }
 
 #[gpui::test]

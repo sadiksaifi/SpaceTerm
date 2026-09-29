@@ -1,5 +1,5 @@
 use crate::ui::appearance::gpui_color;
-use gpui::{px, rgba};
+use gpui::px;
 use spaceterm_ui::{MenuMetrics, MenuPaint, MenuSizes, MenuTheme};
 
 use crate::appearance::ChromeColors;
@@ -75,8 +75,7 @@ pub(super) fn prepared_with_rows(
         gpui_color(colors.ghost_element_hover),
         gpui_color(colors.border_transparent),
     )
-    // Menu and picker triggers use ghost fill feedback for focus and open state.
-    .focus_border(rgba(0));
+    .focus_border(gpui_color(colors.focus_ring));
 
     MenuTheme::new(
         paint,
@@ -150,14 +149,15 @@ mod tests {
     use spaceterm_ui::ListRowPaint;
 
     #[test]
-    fn menu_trigger_feedback_does_not_borrow_the_accent_focus_ring() {
+    fn menu_trigger_focus_follows_the_chrome_focus_ring() {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
+            assert!(colors.focus_ring.a > 0, "menu triggers must draw a focus ring");
             let different_focus = ChromeColors {
                 focus_ring: Color::rgb(0xff00ff),
                 ..colors.clone()
             };
-            assert_eq!(theme(&colors), theme(&different_focus));
+            assert_ne!(theme(&colors), theme(&different_focus));
         }
     }
 

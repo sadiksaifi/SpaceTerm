@@ -958,7 +958,6 @@ pub struct ComboBoxTheme {
     paint: ComboBoxPaint,
     metrics: ComboBoxMetrics,
     shell: FloatingShell,
-    focus_ring_width: Pixels,
 }
 
 impl ComboBoxTheme {
@@ -968,19 +967,7 @@ impl ComboBoxTheme {
             paint,
             metrics,
             shell: crate::FloatingSurfaceTheme::default().shell(COMBO_BOX_ROLE),
-            focus_ring_width: px(1.0),
         }
-    }
-
-    /// Sets the focus-ring width independently of the trigger border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
-        self.focus_ring_width
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -2340,7 +2327,15 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         let enabled = !snapshot.disabled;
         let label = snapshot.trigger_label();
         let focus = snapshot.trigger_focus.clone();
-        let focused = focus.is_focused(window);
+        // A popup opened from the focused trigger returns focus to it on close, so the ring stays
+        // at rest while the popup is open instead of replaying its entrance afterwards.
+        let focused = focus.is_focused(window)
+            || (open
+                && snapshot
+                    .restore_focus
+                    .as_ref()
+                    .and_then(|restore| restore.upgrade())
+                    .is_some_and(|restore| restore == focus));
 
         let bounds_state = state.downgrade();
         let pointer_state = state.downgrade();
@@ -2440,6 +2435,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         } else {
             trigger_border
         };
+        let ring_id = crate::focus_ring::ring_id(&self.id);
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -2490,10 +2486,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                         .shadow(trigger_shadow.layers())
                         .shadow_outside_only()
                         .when(enabled && !open, |trigger| {
+                            // A ringed trigger keeps its resting border, which the ring fades out
+                            // under its band.
+                            let state_borders =
+                                paint.trigger_state_borders.filter(|_| focus_ring.is_none());
                             trigger
                                 .hover(move |style| {
                                     let style = style.bg(paint.trigger_hover_background);
-                                    match paint.trigger_state_borders {
+                                    match state_borders {
                                         Some(borders) => style.border_color(borders.hovered),
                                         None => style,
                                     }
@@ -2502,7 +2502,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                                     let style = style
                                         .bg(paint.trigger_pressed_background)
                                         .shadow(Vec::new());
-                                    match paint.trigger_state_borders {
+                                    match state_borders {
                                         Some(borders) => style.border_color(borders.pressed),
                                         None => style,
                                     }
@@ -2560,22 +2560,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                             )),
                     )
             })
-            .when_some(focus_ring, |trigger, ring_color| {
-                let gap = px(2.0);
-                let position = gap + theme.focus_ring_width;
-                trigger.child(
-                    div()
-                        .debug_selector(move || focus_selector.clone())
-                        .absolute()
-                        .top(-position)
-                        .right(-position)
-                        .bottom(-position)
-                        .left(-position)
-                        .rounded(metrics.trigger_corner_radius + gap)
-                        .border(theme.focus_ring_width)
-                        .border_color(ring_color),
-                )
-            })
             .child(trigger_tracker)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !enabled || key_event_is_modified(event) {
@@ -2598,6 +2582,18 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                 });
                 cx.stop_propagation();
             });
+        let trigger = crate::Ringed::new(
+            trigger,
+            focus_ring.map(|ring_color| {
+                crate::focus_ring(
+                    ring_id,
+                    ring_color,
+                    metrics.trigger_corner_radius,
+                    metrics.border_width,
+                )
+                .debug_selector(focus_selector)
+            }),
+        );
         let trigger = if let Some(tooltip) = self.tooltip {
             tooltip
                 .attach(trigger, TooltipTargetVisibility::Visible)

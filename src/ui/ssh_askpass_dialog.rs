@@ -452,6 +452,7 @@ impl Render for AskPassSecretBody {
                             "ssh-askpass-secret-input-frame",
                             &input_focus,
                             spaceterm_ui::FieldState::default().invalid(self.required_error),
+                            super::chrome_geometry::RadiusRole::Control.pixels(),
                             cx,
                         )
                         .debug_selector(|| "ssh-askpass-secret-input-frame".to_owned())
@@ -462,7 +463,6 @@ impl Render for AskPassSecretBody {
                         .flex()
                         .items_center()
                         .px(appearance.spacing(8.0))
-                        .rounded(super::chrome_geometry::RadiusRole::Control.pixels())
                         .chrome_text(appearance.typography.style(TextRole::Body))
                         .text_color(gpui_color(colors.text))
                         .on_click(move |_, window, cx| {
