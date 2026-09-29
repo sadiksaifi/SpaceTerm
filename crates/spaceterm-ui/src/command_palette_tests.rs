@@ -1436,6 +1436,19 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
     assert_eq!(menu.left(), button.right(), "the segments did not join");
     assert_eq!(menu.top(), button.top());
     assert_eq!(menu.bottom(), button.bottom());
+    let divider = cx
+        .debug_bounds("combo-button-divider")
+        .expect("the segment divider was not rendered");
+    assert_eq!(
+        divider.left(),
+        menu.left(),
+        "the divider did not mark the seam"
+    );
+    assert_eq!(
+        (divider.size.height, divider.center().y),
+        (menu.size.height / 2.0, menu.center().y),
+        "the divider was not half the control height and centered"
+    );
 
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
@@ -1473,6 +1486,31 @@ fn a_query_prefix_should_lead_the_query_without_joining_it(cx: &mut TestAppConte
         palette.read_with(cx, |palette, _| palette.query().to_owned()),
         "ab"
     );
+}
+
+#[gpui::test]
+fn a_query_note_should_trail_the_query_before_the_primary_action(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("open", "Open").debug_selector("primary-open")),
+            cx,
+        );
+        palette.set_query_note(Some("New directory".into()), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    let note = cx
+        .debug_bounds("command-palette-query-note")
+        .expect("the query note was not rendered");
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    let action = cx.debug_bounds("primary-open").unwrap();
+    assert!(input.right() <= note.left());
+    assert!(note.right() <= action.left());
+
+    palette.update(cx, |palette, cx| palette.set_query_note(None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-query-note").is_none());
 }
 
 #[gpui::test]

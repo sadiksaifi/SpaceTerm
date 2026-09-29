@@ -1393,16 +1393,16 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             style.disabled
         };
         let icon_size = menu_style(self.menu.size, cx).metrics.trigger_icon_size;
-        let divider_inset = style.height / 4.0;
+        // The divider starts the segment, so it marks the seam between the two segments.
         let content = div()
+            .h_full()
             .flex()
             .items_center()
+            .gap(style.horizontal_padding * 0.6)
             .child(
                 div()
-                    .absolute()
-                    .left_0()
-                    .top(divider_inset)
-                    .bottom(divider_inset)
+                    .debug_selector(|| "combo-button-divider".to_owned())
+                    .h(style.height / 2.0)
                     .w(style.border_width.max(px(1.0)))
                     .bg(Rgba {
                         a: paint.foreground().a * 0.35,
@@ -1778,7 +1778,6 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .flex()
                 .items_center()
                 .h(style.height)
-                .pl(style.horizontal_padding * 0.6)
                 .pr(style.horizontal_padding * 0.8)
                 .rounded_tr(corner_radii.top_right)
                 .rounded_br(corner_radii.bottom_right)

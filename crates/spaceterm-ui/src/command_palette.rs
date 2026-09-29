@@ -13,7 +13,7 @@ use crate::{
     ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
     MenuPlacement, MenuPlacementConfig, ProgressRing, ProgressSize, ProgressState, TextInput,
     TextInputEvent, TextInputTabBehavior, TextInputVariant,
-    button::{Button, ButtonShape, ButtonSize, ButtonVariant, IconButton},
+    button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -1522,6 +1522,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
     query_prefix: Option<SharedString>,
+    query_note: Option<SharedString>,
     header_actions: Vec<CommandPaletteAction>,
     primary_action: Option<CommandPalettePrimaryAction>,
     results_note: Option<SharedString>,
@@ -1939,6 +1940,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             leading_columns,
             input_leading_icon: None,
             query_prefix: None,
+            query_note: None,
             header_actions: Vec::new(),
             primary_action: None,
             results_note: None,
@@ -2058,6 +2060,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     /// The prefix is not part of the editable query, so editing never changes or removes it.
     pub fn set_query_prefix(&mut self, prefix: Option<SharedString>, cx: &mut gpui::Context<Self>) {
         self.query_prefix = prefix;
+        cx.notify();
+    }
+
+    /// Replaces the quiet text that trails the query, such as what the primary action will do.
+    pub fn set_query_note(&mut self, note: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        self.query_note = note;
         cx.notify();
     }
 
@@ -3459,6 +3467,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     })
                     .child(div().min_w_0().flex_1().child(self.input.clone())),
             )
+            .when_some(self.query_note.clone(), |editor, note| {
+                editor.child(
+                    div()
+                        .debug_selector(|| "command-palette-query-note".to_owned())
+                        .flex_shrink_0()
+                        .max_w(gpui::relative(0.4))
+                        .truncate()
+                        .text_color(theme.paint.muted)
+                        .child(note),
+                )
+            })
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
                     div()
@@ -3689,7 +3708,6 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     )
     .variant(ButtonVariant::Primary)
     .size(ButtonSize::Small)
-    .shape(ButtonShape::Capsule)
     .disabled(action.disabled)
     .tab_stop(true)
     .placement(MenuPlacementConfig::new(

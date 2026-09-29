@@ -39,8 +39,10 @@ pub(crate) use remote_source::{
 
 const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "directory-picker-create-directory";
-/// Identifies the search line's Pin or Create action.
+/// Identifies the search line's action that opens the exact path, creating it when missing.
 const CONFIRM_ACTION: &str = "directory-picker-confirm";
+/// Trails a missing exact path in the search line, since opening it creates it.
+const NEW_DIRECTORY_NOTE: &str = "New directory";
 /// Identifies the confirm action's menu item that hands off to System Directory Selection.
 const SYSTEM_SELECTION_ACTION: &str = "directory-picker-system-selection";
 /// Identifies the row that opens the enclosing directory.
@@ -1138,18 +1140,10 @@ impl DirectoryPicker {
             )
     }
 
-    fn confirmation_label(&self) -> &'static str {
-        if self.status == DirectoryPickerStatus::Missing {
-            "Create & Pin"
-        } else {
-            "Pin"
-        }
-    }
-
-    /// Returns the search line's action that pins to or creates the exact path, with System
-    /// Directory Selection in its menu when offered.
+    /// Returns the search line's action that opens the exact path, creating it when missing, with
+    /// System Directory Selection in its menu when offered.
     fn confirm_action(&self) -> CommandPalettePrimaryAction {
-        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.confirmation_label())
+        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open")
             .disabled(!self.can_confirm())
             .debug_selector(CONFIRM_ACTION);
         match &self.system_selection {
@@ -1219,7 +1213,7 @@ impl DirectoryPicker {
             }
             DirectoryPickerStatus::Missing => {
                 return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
-                    .description("Choose Create to make it and pin this Workspace to it.");
+                    .description("Open creates it and pins this Workspace to it.");
             }
             DirectoryPickerStatus::DiscoveringAccount
             | DirectoryPickerStatus::Loading
@@ -1268,6 +1262,8 @@ impl DirectoryPicker {
             .or(items.first())
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
+        let query_note = (self.status == DirectoryPickerStatus::Missing)
+            .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
             // child rather than leaving, and the confirm key pins regardless of selection.
@@ -1278,6 +1274,7 @@ impl DirectoryPicker {
             palette.set_preferred_item(retained.or(first_child), cx);
             palette.set_items(items, cx);
             palette.set_primary_action(Some(confirm_action), cx);
+            palette.set_query_note(query_note, cx);
             palette.set_empty(empty, cx);
             palette.set_results_note(results_note, cx);
             palette.set_loading(awaiting_results, cx);
@@ -1740,7 +1737,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn missing_remote_path_should_turn_the_confirm_action_into_create(cx: &mut TestAppContext) {
+    fn missing_remote_path_should_note_that_open_creates_it(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::Missing)],
@@ -1749,14 +1746,12 @@ mod tests {
         );
         let (picker, _, cx) = directory_picker(provider, cx);
 
-        assert_eq!(
-            picker.read_with(cx, |picker, _| (
-                picker.confirmation_label(),
-                picker.can_confirm()
-            )),
-            ("Create & Pin", true)
-        );
+        assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
+        assert!(
+            cx.debug_bounds("command-palette-query-note").is_some(),
+            "the search line did not note that Open creates the directory"
+        );
         assert!(cx.debug_bounds(ENCLOSING_ROW).is_none());
         assert!(cx.debug_bounds("command-palette-empty").is_some());
         assert_eq!(
