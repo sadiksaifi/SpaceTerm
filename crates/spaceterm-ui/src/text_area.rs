@@ -630,8 +630,11 @@ impl TextArea {
     }
 
     /// Inserts one indent unit, or indents every selected line.
-    fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// Read-only text has nothing to indent, so Tab moves focus on as it does past other controls.
+    fn indent(&mut self, _: &Indent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_edit() {
+            window.focus_next(cx);
             return;
         }
         if !self.selection_spans_lines() {
@@ -642,8 +645,11 @@ impl TextArea {
     }
 
     /// Removes up to one indent unit from the start of every line the selection touches.
-    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// Read-only text has nothing to outdent, so Shift-Tab moves focus back.
+    fn outdent(&mut self, _: &Outdent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_edit() {
+            window.focus_prev(cx);
             return;
         }
         self.edit_selected_lines(cx, |line| {

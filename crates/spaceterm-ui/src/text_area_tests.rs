@@ -170,7 +170,7 @@ fn read_only_content_rejects_edits_and_still_copies(cx: &mut TestAppContext) {
     let (area, cx) = area(cx, "{\"a\": 1}", |area| area.editable(false));
     cx.write_to_clipboard(ClipboardItem::new_string("pasted".into()));
 
-    cx.simulate_keystrokes("x enter tab backspace cmd-v cmd-a cmd-x cmd-c");
+    cx.simulate_keystrokes("x enter backspace cmd-v cmd-a cmd-x cmd-c");
 
     assert_eq!(value(&area, cx), "{\"a\": 1}");
     let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(bounded_clipboard_text));
@@ -271,4 +271,39 @@ fn values_up_to_four_mebibytes_are_retained(cx: &mut TestAppContext) {
     assert!(area.update(cx, |area, cx| area.set_value(largest.clone(), cx)));
     assert_eq!(value(&area, cx).len(), 4 * 1024 * 1024);
     assert!(!area.update(cx, |area, cx| area.set_value(format!("{largest}x"), cx)));
+}
+
+/// Two text areas side by side, so focus has somewhere to move.
+struct Pair {
+    first: Entity<TextArea>,
+    second: Entity<TextArea>,
+}
+
+impl Render for Pair {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.first.clone()).child(self.second.clone())
+    }
+}
+
+#[gpui::test]
+fn tab_in_read_only_text_moves_focus_instead_of_indenting(cx: &mut TestAppContext) {
+    install_theme(cx);
+    let (pair, cx) = cx.add_window_view(|window, cx| Pair {
+        first: cx.new(|cx| TextArea::new("first", "First", "a", window, cx).editable(false)),
+        second: cx.new(|cx| TextArea::new("second", "Second", "b", window, cx).editable(false)),
+    });
+    let (first, second) = pair.read_with(cx, |pair, _| (pair.first.clone(), pair.second.clone()));
+    cx.update(|window, cx| {
+        window.activate_window();
+        first.read(cx).focus_handle().focus(window, cx);
+    });
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("tab");
+    assert!(cx.update(|window, cx| second.read(cx).focus_handle().is_focused(window)));
+
+    cx.simulate_keystrokes("shift-tab");
+    assert!(cx.update(|window, cx| first.read(cx).focus_handle().is_focused(window)));
+    assert_eq!(value(&first, cx), "a");
+    assert_eq!(value(&second, cx), "b");
 }
