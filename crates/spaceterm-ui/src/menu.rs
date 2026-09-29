@@ -19,8 +19,12 @@ pub use crate::anchored_placement::{
     AnchoredPlacementConfig as MenuPlacementConfig,
 };
 use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_anchored};
+use crate::button::{ButtonStyle, JoinedEdge, resolve_button_style};
 use crate::leading_columns::{LeadingColumnMetrics, LeadingColumns};
-use crate::{FloatingRole, FloatingShell, Icon, IconName};
+use crate::{
+    Button, ButtonActivation, ButtonShape, ButtonSize, ButtonVariant, FloatingRole, FloatingShell,
+    Icon, IconName,
+};
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
@@ -1273,6 +1277,155 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
     }
 }
 
+/// A button whose trailing segment opens a menu of related commands, as AppKit's combo button.
+///
+/// The leading segment performs the primary command. The menu segment appears only while the menu
+/// has entries; without them the control is an ordinary button.
+#[derive(IntoElement)]
+pub struct ComboButton<A: Clone + 'static> {
+    button: Button,
+    menu: MenuControl<A>,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    shape: ButtonShape,
+}
+
+impl<A: Clone + 'static> ComboButton<A> {
+    /// Creates a combo button. The label names the primary command and, with "Options", the menu.
+    pub fn new(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        entries: Vec<MenuEntry<A>>,
+    ) -> Self {
+        let id = id.into();
+        let label = label.into();
+        let menu_id = ElementId::NamedChild(std::sync::Arc::new(id.clone()), "menu".into());
+        Self {
+            menu: MenuControl::new(
+                menu_id,
+                format!("{label} Options").into(),
+                entries,
+                TriggerKind::Menu,
+            ),
+            button: Button::new(id, label),
+            variant: ButtonVariant::default(),
+            size: ButtonSize::default(),
+            shape: ButtonShape::default(),
+        }
+    }
+
+    /// Selects a bounded visual treatment from the installed button theme.
+    pub fn variant(mut self, variant: ButtonVariant) -> Self {
+        self.variant = variant;
+        self.button = self.button.variant(variant);
+        self
+    }
+
+    /// Selects a standard native control size.
+    pub fn size(mut self, size: ButtonSize) -> Self {
+        self.size = size;
+        self.button = self.button.size(size);
+        self
+    }
+
+    /// Selects the outer silhouette the two segments share.
+    pub fn shape(mut self, shape: ButtonShape) -> Self {
+        self.shape = shape;
+        self.button = self.button.shape(shape);
+        self
+    }
+
+    /// Controls whether the primary command can activate. The menu stays available.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.button = self.button.disabled(disabled);
+        self
+    }
+
+    /// Controls whether keyboard traversal may stop on the primary segment.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.button = self.button.tab_stop(tab_stop);
+        self
+    }
+
+    /// Selects where the menu opens relative to its segment.
+    pub fn placement(mut self, placement: MenuPlacementConfig) -> Self {
+        self.menu.placement = placement;
+        self
+    }
+
+    /// Adds stable selectors used by GPUI interaction tests: `selector` names the primary
+    /// segment and `{selector}-menu` names the menu segment.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        let selector = selector.into();
+        self.menu.debug_selector = Some(format!("{selector}-menu"));
+        self.button = self.button.debug_selector(selector);
+        self
+    }
+
+    /// Handles the primary command.
+    pub fn on_activate(
+        mut self,
+        handler: impl Fn(&ButtonActivation, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.button = self.button.on_activate(handler);
+        self
+    }
+
+    /// Handles a typed menu selection.
+    pub fn on_menu_activate(
+        mut self,
+        handler: impl Fn(&MenuActivation<A>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.menu.on_activate = Some(Rc::new(handler));
+        self
+    }
+}
+
+impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if self.menu.entries.is_empty() {
+            return self.button.into_any_element();
+        }
+        let style = resolve_button_style(self.variant, self.size, self.shape, cx);
+        let paint = if self.menu.is_enabled() {
+            style.normal
+        } else {
+            style.disabled
+        };
+        let icon_size = menu_style(self.menu.size, cx).metrics.trigger_icon_size;
+        let divider_inset = style.height / 4.0;
+        let content = div()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(divider_inset)
+                    .bottom(divider_inset)
+                    .w(style.border_width.max(px(1.0)))
+                    .bg(Rgba {
+                        a: paint.foreground().a * 0.35,
+                        ..paint.foreground()
+                    }),
+            )
+            .child(Icon::new(
+                IconName::ChevronDown,
+                icon_size,
+                paint.icon_color(),
+            ))
+            .into_any_element();
+        self.menu.button_segment = Some(style);
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .child(self.button.joined_edge(JoinedEdge::Trailing))
+            .child(self.menu.render(content, window, cx))
+            .into_any_element()
+    }
+}
+
 macro_rules! lifecycle_builders {
     () => {
         /// Handles exact open and closed lifecycle transitions.
@@ -1348,6 +1501,8 @@ struct MenuControl<A> {
     fill_parent_width: bool,
     preserve_trigger_cursor: bool,
     debug_selector: Option<String>,
+    /// Paints the trigger as the menu segment of a combo button instead of a menu trigger.
+    button_segment: Option<ButtonStyle>,
     on_activate: Option<TypedActivationHandler<A>>,
     on_lifecycle: Option<MenuLifecycleHandler>,
     on_context_open: Option<ContextOpenHandler>,
@@ -1373,6 +1528,7 @@ impl<A> MenuControl<A> {
             fill_parent_width: false,
             preserve_trigger_cursor: false,
             debug_selector: None,
+            button_segment: None,
             on_activate: None,
             on_lifecycle: None,
             on_context_open: None,
@@ -1599,7 +1755,45 @@ impl<A: Clone + 'static> MenuControl<A> {
             });
 
         let mut ring = None;
-        if self.kind != TriggerKind::Context {
+        if let Some(style) = self.button_segment {
+            let corner_radii = JoinedEdge::Leading.corner_radii(style.corner_radius);
+            ring = (enabled && focused).then(|| {
+                crate::focus_ring(
+                    ring_id,
+                    style.focus_border,
+                    style.corner_radius,
+                    style.border_width,
+                )
+                .corner_radii(corner_radii)
+                .debug_selector(focus_selector)
+            });
+            let paint = if !enabled {
+                style.disabled
+            } else if open {
+                style.pressed
+            } else {
+                style.normal
+            };
+            trigger = trigger
+                .flex()
+                .items_center()
+                .h(style.height)
+                .pl(style.horizontal_padding * 0.6)
+                .pr(style.horizontal_padding * 0.8)
+                .rounded_tr(corner_radii.top_right)
+                .rounded_br(corner_radii.bottom_right)
+                .border(style.border_width)
+                .border_l(px(0.0))
+                .border_color(paint.border())
+                .bg(paint.background())
+                .when(enabled && !open, |trigger| {
+                    trigger.hover(move |hovered| {
+                        hovered
+                            .bg(style.hovered.background())
+                            .border_color(style.hovered.border())
+                    })
+                });
+        } else if self.kind != TriggerKind::Context {
             let paint = menu_trigger_paint(cx);
             let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
             ring = focus_ring.map(|ring_color| {

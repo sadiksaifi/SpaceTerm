@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, FocusHandle, GlobalElementId,
-    InspectorElementId, Interactivity, LayoutId, Pixels, Rgba, StyleRefinement, Window, div, px,
+    AnyElement, App, AvailableSpace, Bounds, Corners, Element, ElementId, FocusHandle,
+    GlobalElementId, InspectorElementId, Interactivity, LayoutId, Pixels, Rgba, StyleRefinement,
+    Window, div, px,
 };
 
 use crate::ControlMotion;
@@ -42,7 +43,7 @@ pub fn focus_ring(
     FocusRing {
         id: id.into(),
         color,
-        corner_radius,
+        corner_radii: Corners::all(corner_radius),
         border_width,
         visibility: Visibility::Shown,
         target: None,
@@ -59,7 +60,7 @@ pub(crate) fn ring_id(control: &ElementId) -> ElementId {
 pub struct FocusRing {
     id: ElementId,
     color: Rgba,
-    corner_radius: Pixels,
+    corner_radii: Corners<Pixels>,
     border_width: Pixels,
     visibility: Visibility,
     target: Option<FocusRingTarget>,
@@ -99,6 +100,13 @@ impl FocusRing {
         self
     }
 
+    /// Gives each corner its own outer radius, for a control whose corners differ, such as a
+    /// segment joined to its neighbor.
+    pub(crate) fn corner_radii(mut self, radii: Corners<Pixels>) -> Self {
+        self.corner_radii = radii;
+        self
+    }
+
     /// Names the ring's resting bounds for layout tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
@@ -110,11 +118,13 @@ impl FocusRing {
         Ringed::new(host, Some(self))
     }
 
-    /// The band's resting bounds and outer corner radius around a control's border box.
-    fn resting(&self, control: Bounds<Pixels>) -> (Bounds<Pixels>, Pixels) {
+    /// The band's resting bounds and outer corner radii around a control's border box.
+    fn resting(&self, control: Bounds<Pixels>) -> (Bounds<Pixels>, Corners<Pixels>) {
         let reach = px(REACH) - self.border_width;
-        let inner_radius = (self.corner_radius - self.border_width).max(px(0.0));
-        (control.dilate(reach), inner_radius + px(REACH))
+        let radii = self
+            .corner_radii
+            .map(|radius| (*radius - self.border_width).max(px(0.0)) + px(REACH));
+        (control.dilate(reach), radii)
     }
 }
 
@@ -355,11 +365,11 @@ impl FocusRing {
         if color.a <= 0.0 {
             return;
         }
-        let (resting, radius) = self.resting(self.control_bounds(host));
+        let (resting, radii) = self.resting(self.control_bounds(host));
         let spread = px(band.spread);
         window.paint_quad(gpui::quad(
             resting.dilate(spread),
-            radius + spread,
+            radii.map(|radius| *radius + spread),
             gpui::transparent_black(),
             px(WIDTH) + spread,
             color,

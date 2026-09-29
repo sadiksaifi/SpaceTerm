@@ -1437,6 +1437,45 @@ fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppCon
 
     assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(
+        cx.debug_bounds("primary-pin-menu").is_none(),
+        "an action without menu items showed a menu segment"
+    );
+}
+
+#[gpui::test]
+fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("pin", "Pin")
+                    .debug_selector("primary-pin")
+                    .menu_item("choose", "Choose in Finder…"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let button = cx.debug_bounds("primary-pin").unwrap();
+    let menu = cx
+        .debug_bounds("primary-pin-menu")
+        .expect("the menu segment was not rendered");
+    assert_eq!(menu.left(), button.right(), "the segments did not join");
+    assert_eq!(menu.top(), button.top());
+    assert_eq!(menu.bottom(), button.bottom());
+
+    cx.simulate_click(menu.center(), Modifiers::default());
+    cx.run_until_parked();
+    let item = cx
+        .debug_bounds("command-palette-primary-menu-choose")
+        .expect("the menu did not open");
+    cx.simulate_click(item.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("choose")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 }
 
 #[gpui::test]

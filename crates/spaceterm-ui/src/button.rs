@@ -5,12 +5,12 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TextRun, WeakFocusHandle, Window, actions, canvas, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, Corners, ElementId, Entity, EntityId, FocusHandle, Global,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, actions,
+    canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -109,6 +109,38 @@ pub enum ButtonShape {
     Square,
     /// Round both ends fully, forming a pill at the selected control height.
     Capsule,
+}
+
+/// The edge where a button segment meets its neighbor in one control, such as the two halves of
+/// a combo button. The joined corners are square so the segments read as one silhouette.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum JoinedEdge {
+    #[default]
+    None,
+    Leading,
+    Trailing,
+}
+
+impl JoinedEdge {
+    /// The segment's corner radii for the control's outer radius.
+    pub(crate) fn corner_radii(self, radius: Pixels) -> Corners<Pixels> {
+        let square = px(0.0);
+        match self {
+            Self::None => Corners::all(radius),
+            Self::Leading => Corners {
+                top_left: square,
+                top_right: radius,
+                bottom_right: radius,
+                bottom_left: square,
+            },
+            Self::Trailing => Corners {
+                top_left: radius,
+                top_right: square,
+                bottom_right: square,
+                bottom_left: radius,
+            },
+        }
+    }
 }
 
 /// Paint values for one visual button state.
@@ -519,6 +551,17 @@ impl ButtonTheme {
 
 impl Global for ButtonTheme {}
 
+/// Resolves a button treatment from the theme of the surface the control rests on, for another
+/// control that paints itself as part of a button, such as a combo button's menu segment.
+pub(crate) fn resolve_button_style(
+    variant: ButtonVariant,
+    size: ButtonSize,
+    shape: ButtonShape,
+    cx: &App,
+) -> ButtonStyle {
+    crate::floating_surface::hosted_button_theme(cx).resolve(variant, size, shape)
+}
+
 pub(crate) fn measure_button_intrinsic_width(
     theme: &ButtonTheme,
     label: &SharedString,
@@ -546,19 +589,19 @@ pub(crate) fn measure_button_intrinsic_width(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ButtonStyle {
-    normal: ButtonPaint,
-    hovered: ButtonPaint,
-    pressed: ButtonPaint,
-    disabled: ButtonPaint,
-    focus_border: Rgba,
-    height: Pixels,
+pub(crate) struct ButtonStyle {
+    pub(crate) normal: ButtonPaint,
+    pub(crate) hovered: ButtonPaint,
+    pub(crate) pressed: ButtonPaint,
+    pub(crate) disabled: ButtonPaint,
+    pub(crate) focus_border: Rgba,
+    pub(crate) height: Pixels,
     icon_button_size: Pixels,
     icon_baseline_center: Option<Pixels>,
-    horizontal_padding: Pixels,
+    pub(crate) horizontal_padding: Pixels,
     gap: Pixels,
-    corner_radius: Pixels,
-    border_width: Pixels,
+    pub(crate) corner_radius: Pixels,
+    pub(crate) border_width: Pixels,
     font_size: Pixels,
     single_line_height: f32,
     multiline_line_height: f32,
@@ -892,6 +935,12 @@ impl Button {
         self
     }
 
+    /// Squares the corners on `edge`, where a neighboring segment of the same control joins.
+    pub(crate) fn joined_edge(mut self, edge: JoinedEdge) -> Self {
+        self.core.joined_edge = edge;
+        self
+    }
+
     /// Adds leading noninteractive content rendered with the resolved foreground color.
     pub fn leading(mut self, build: impl FnOnce(Rgba) -> AnyElement + 'static) -> Self {
         self.leading = Some(Box::new(build));
@@ -1212,6 +1261,7 @@ struct ButtonCore {
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     icon_button_size: Option<Pixels>,
     corner_radius: Option<Pixels>,
+    joined_edge: JoinedEdge,
     #[cfg(feature = "appearance-exerciser")]
     preview_state: Option<crate::ControlPreviewState>,
 }
@@ -1238,6 +1288,7 @@ impl ButtonCore {
             contextual_style: None,
             icon_button_size: None,
             corner_radius: None,
+            joined_edge: JoinedEdge::None,
             #[cfg(feature = "appearance-exerciser")]
             preview_state: None,
         }
@@ -1413,6 +1464,7 @@ impl ButtonCore {
         let preserve_ancestor_hover = self.preserve_ancestor_hover;
 
         let ring_id = crate::focus_ring::ring_id(&self.id);
+        let corner_radii = self.joined_edge.corner_radii(style.corner_radius);
         let button = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1434,8 +1486,17 @@ impl ButtonCore {
                 button.px(style.horizontal_padding)
             })
             .when(layout.full_width, |button| button.w_full())
-            .rounded(style.corner_radius)
+            .rounded_tl(corner_radii.top_left)
+            .rounded_tr(corner_radii.top_right)
+            .rounded_br(corner_radii.bottom_right)
+            .rounded_bl(corner_radii.bottom_left)
             .border(style.border_width)
+            .when(self.joined_edge == JoinedEdge::Trailing, |button| {
+                button.border_r(px(0.0))
+            })
+            .when(self.joined_edge == JoinedEdge::Leading, |button| {
+                button.border_l(px(0.0))
+            })
             .border_color(border_color)
             .bg(paint.background)
             .shadow(paint.shadow.layers())
@@ -1497,6 +1558,7 @@ impl ButtonCore {
             button,
             focus_ring.map(|ring_color| {
                 crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
+                    .corner_radii(corner_radii)
                     .debug_selector(focus_selector)
             }),
         );

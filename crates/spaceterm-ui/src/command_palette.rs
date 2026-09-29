@@ -10,8 +10,9 @@ use gpui::{
 };
 
 use crate::{
-    FloatingRole, FloatingShell, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
-    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
+    MenuPlacement, MenuPlacementConfig, ProgressRing, ProgressSize, ProgressState, TextInput,
+    TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonShape, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
@@ -623,13 +624,16 @@ impl CommandPaletteAction {
 /// The search line's primary command, presented as a labeled button at its trailing edge.
 ///
 /// The confirm key activates it while it is enabled, and so does Return while no result is
-/// presented. Activation emits [`CommandPaletteEvent::HeaderAction`] with the caller's identity
-/// and leaves the palette open; the caller decides what follows.
+/// presented. Related commands join the button as a menu segment, which stays available while the
+/// action is disabled. Activating the action or a menu item emits
+/// [`CommandPaletteEvent::HeaderAction`] with the caller's identity and leaves the palette open;
+/// the caller decides what follows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
     label: SharedString,
     disabled: bool,
+    menu_items: Vec<(SharedString, SharedString)>,
     debug_selector: Option<String>,
 }
 
@@ -640,6 +644,7 @@ impl CommandPalettePrimaryAction {
             id: id.into(),
             label: label.into(),
             disabled: false,
+            menu_items: Vec::new(),
             debug_selector: None,
         }
     }
@@ -647,6 +652,16 @@ impl CommandPalettePrimaryAction {
     /// Controls whether the action can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Appends a related command to the action's menu, in presentation order.
+    pub fn menu_item(
+        mut self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        self.menu_items.push((id.into(), label.into()));
         self
     }
 
@@ -2754,7 +2769,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
         let maximum_steps = self.header_actions.len()
-            + usize::from(self.primary_action.is_some())
+            + self
+                .primary_action
+                .as_ref()
+                .map_or(0, |action| 1 + usize::from(!action.menu_items.is_empty()))
             + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
             window.focus_next(cx);
@@ -3662,28 +3680,52 @@ fn render_header_action<I: Clone + Eq + 'static>(
     button.into_any_element()
 }
 
-/// Renders the search line's primary command as a prominent capsule at its trailing edge.
+/// Renders the search line's primary command as a prominent capsule at its trailing edge, joined
+/// by a menu segment when it has related commands.
 fn render_primary_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     action: &CommandPalettePrimaryAction,
 ) -> AnyElement {
     let id = action.id.clone();
-    Button::new("command-palette-primary-action", action.label.clone())
-        .variant(ButtonVariant::Primary)
-        .size(ButtonSize::Small)
-        .shape(ButtonShape::Capsule)
-        .disabled(action.disabled)
-        .tab_stop(true)
-        .when_some(action.debug_selector.clone(), |button, selector| {
-            button.debug_selector(selector)
+    let menu_palette = palette.clone();
+    let entries = action
+        .menu_items
+        .iter()
+        .map(|(id, label)| {
+            MenuEntry::action(label.clone(), id.clone())
+                .debug_selector(format!("command-palette-primary-menu-{id}"))
         })
-        .on_activate(move |_, _, cx| {
-            let id = id.clone();
-            let _ = palette.update(cx, |_, cx| {
-                cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
-            });
-        })
-        .into_any_element()
+        .collect();
+    ComboButton::new(
+        "command-palette-primary-action",
+        action.label.clone(),
+        entries,
+    )
+    .variant(ButtonVariant::Primary)
+    .size(ButtonSize::Small)
+    .shape(ButtonShape::Capsule)
+    .disabled(action.disabled)
+    .tab_stop(true)
+    .placement(MenuPlacementConfig::new(
+        MenuPlacement::Bottom,
+        MenuAlignment::End,
+    ))
+    .when_some(action.debug_selector.clone(), |button, selector| {
+        button.debug_selector(selector)
+    })
+    .on_activate(move |_, _, cx| {
+        let id = id.clone();
+        let _ = palette.update(cx, |_, cx| {
+            cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+        });
+    })
+    .on_menu_activate(move |activation, _, cx| {
+        let id = activation.action().clone();
+        let _ = menu_palette.update(cx, |_, cx| {
+            cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+        });
+    })
+    .into_any_element()
 }
 
 fn render_section(

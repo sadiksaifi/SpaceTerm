@@ -82,11 +82,11 @@ pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{
-    ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
-    MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent, MenuMetrics, MenuPaint,
-    MenuPlacement, MenuPlacementConfig, MenuRadioOption, MenuSize, MenuSizes, MenuTheme, Picker,
-    PickerBuildError, PickerChange, PickerOption, dismiss_active_menu, install_menu_keybindings,
-    window_menu_is_open,
+    ComboButton, ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource,
+    MenuAlignment, MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent,
+    MenuMetrics, MenuPaint, MenuPlacement, MenuPlacementConfig, MenuRadioOption, MenuSize,
+    MenuSizes, MenuTheme, Picker, PickerBuildError, PickerChange, PickerOption,
+    dismiss_active_menu, install_menu_keybindings, window_menu_is_open,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
 pub use modal::{
