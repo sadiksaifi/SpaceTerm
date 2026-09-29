@@ -3139,6 +3139,44 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
     assert!(text.contains("comfortable"), "the text should follow the change");
 }
 
+/// A compact settings file within the storage limit can print past the text view's limit.
+#[gpui::test]
+fn a_settings_file_too_large_to_show_says_so_instead_of_showing_an_earlier_one(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    assert!(!settings_file_text(&window, cx).is_empty());
+
+    let family = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture");
+    let wide = "\u{1F600}";
+    let themes = (0..512)
+        .map(|index| {
+            let mut theme = family[0].clone();
+            theme.id = crate::appearance::ThemeId::new(format!("large.{index}")).unwrap();
+            theme.name = format!("{}{index}", wide.repeat(125));
+            theme.metadata.author = Some(wide.repeat(256));
+            theme.metadata.license = Some(wide.repeat(256));
+            theme.metadata.description = Some(wide.repeat(1024));
+            theme
+        })
+        .collect();
+    let document = SettingsDocument {
+        terminal_themes: themes,
+        ..SettingsDocument::default()
+    };
+    let compact = serde_json::to_vec(&document).unwrap();
+    assert!(compact.len() <= 4 * 1024 * 1024);
+    assert!(crate::appearance::export_settings(&document).unwrap().len() > 4 * 1024 * 1024);
+    harness.storage.save_bytes_elsewhere(compact);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(document_of(&window, cx).terminal_themes.len(), 512);
+    // The empty view shows its placeholder, which says why.
+    assert_eq!(settings_file_text(&window, cx), "");
+}
+
 /// A full-width row holds a block rather than one centered line, so the block sits the same
 /// distance from every edge of its row.
 #[gpui::test]

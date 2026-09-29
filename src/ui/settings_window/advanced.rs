@@ -42,6 +42,9 @@ impl SettingsFileView {
                 .line_numbers(true)
                 .rows(SETTINGS_FILE_ROWS)
                 .input_length_limit(None)
+                // Every Settings Document prints as text, so the view is empty only when that
+                // text exceeds what a text area holds.
+                .placeholder("The settings file is too large to show here. Edit JSON opens it.")
                 .debug_selector("settings-file-text")
         });
         Self { area, shown: None }
@@ -142,13 +145,11 @@ impl SettingsWindow {
         {
             return;
         }
-        let Ok(text) = export_settings(&document) else {
-            return;
-        };
+        // A document that cannot show must not leave an earlier document on show, which would
+        // read as the settings in effect.
+        let text = export_settings(&document).unwrap_or_default();
         self.settings_file.shown = Some(document);
         self.settings_file.area.update(cx, |area, cx| {
-            // A document the text area cannot hold must not leave an earlier document on show,
-            // which would read as the settings in effect.
             if area.value() != text && !area.set_value(text, cx) {
                 area.set_value(String::new(), cx);
             }
