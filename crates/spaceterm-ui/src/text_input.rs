@@ -191,13 +191,13 @@ pub enum TextInputContentMode {
 /// Text-input colors supplied by the application theme.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextInputPaint {
-    text: Rgba,
-    placeholder: Rgba,
-    selection: Rgba,
-    selection_foreground: Rgba,
-    caret: Rgba,
-    disabled_text: Rgba,
-    disabled_placeholder: Rgba,
+    pub(crate) text: Rgba,
+    pub(crate) placeholder: Rgba,
+    pub(crate) selection: Rgba,
+    pub(crate) selection_foreground: Rgba,
+    pub(crate) caret: Rgba,
+    pub(crate) disabled_text: Rgba,
+    pub(crate) disabled_placeholder: Rgba,
 }
 
 impl TextInputPaint {
@@ -261,10 +261,10 @@ impl TextInputVariants {
 /// Bounded geometry and deterministic autoscroll timing for text inputs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextInputMetrics {
-    caret_width: Pixels,
-    scroll_padding: Pixels,
-    autoscroll_interval: Duration,
-    autoscroll_max_step: Pixels,
+    pub(crate) caret_width: Pixels,
+    pub(crate) scroll_padding: Pixels,
+    pub(crate) autoscroll_interval: Duration,
+    pub(crate) autoscroll_max_step: Pixels,
 }
 
 impl TextInputMetrics {
@@ -299,7 +299,7 @@ impl TextInputMetrics {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextInputTheme {
     variants: TextInputVariants,
-    metrics: TextInputMetrics,
+    pub(crate) metrics: TextInputMetrics,
     pub(crate) frame: FieldFrameTheme,
 }
 
@@ -2410,7 +2410,11 @@ impl Element for TextElement {
     }
 }
 
-fn marked_text_runs(display: &str, marked: Option<Range<usize>>, base: TextRun) -> Vec<TextRun> {
+pub(crate) fn marked_text_runs(
+    display: &str,
+    marked: Option<Range<usize>>,
+    base: TextRun,
+) -> Vec<TextRun> {
     let Some(marked) = marked else {
         return vec![base];
     };
@@ -2440,7 +2444,7 @@ fn marked_text_runs(display: &str, marked: Option<Range<usize>>, base: TextRun) 
     .collect()
 }
 
-fn recolored_text_runs(runs: &[TextRun], color: gpui::Hsla) -> Vec<TextRun> {
+pub(crate) fn recolored_text_runs(runs: &[TextRun], color: gpui::Hsla) -> Vec<TextRun> {
     runs.iter()
         .map(|run| TextRun {
             color,

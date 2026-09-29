@@ -35,6 +35,7 @@ mod segmented_control;
 mod shortcut_recorder;
 #[cfg(test)]
 mod shortcut_recorder_tests;
+mod text_area;
 mod text_editing;
 mod text_input;
 mod toggle;
@@ -128,6 +129,7 @@ pub use segmented_control::{
 pub use shortcut_recorder::{
     ShortcutModifierFormatter, ShortcutRecorder, ShortcutRecorderEvent, ShortcutValidator,
 };
+pub use text_area::{TextArea, TextAreaEvent, install_text_area_keybindings};
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
     SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
