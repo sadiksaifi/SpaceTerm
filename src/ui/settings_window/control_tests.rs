@@ -268,7 +268,7 @@ fn navigation_arrows_stop_at_both_ends_of_the_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Updates
+        SettingsSectionId::Advanced
     );
 
     cx.simulate_keystrokes("home");
@@ -427,23 +427,17 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
 }
 
 #[gpui::test]
-fn unmatched_search_skips_navigation_and_reaches_the_footer(cx: &mut TestAppContext) {
+fn unmatched_search_skips_navigation(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
     cx.dispatch_action(super::FocusSettingsSearch);
     cx.simulate_input("no matching setting");
     cx.run_until_parked();
 
     // The in-field clear mark follows the native search-field convention and is not a separate
-    // traversal stop, so the footer action follows the empty detail pane directly.
+    // traversal stop, and a query that empties every section leaves navigation nothing to offer.
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
-    cx.simulate_keystrokes("enter");
-    cx.simulate_event(gpui::KeyUpEvent {
-        keystroke: gpui::Keystroke::parse("enter").unwrap(),
-    });
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
 }
 
 #[gpui::test]

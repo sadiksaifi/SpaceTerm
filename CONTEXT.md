@@ -76,6 +76,11 @@ One named group of Settings presented as one navigation entry and one content re
 **Settings Row**:
 One labeled Setting control within a Settings Section.
 
+**Settings JSON**:
+The JSON text of every Setting in the Settings Document, without the installed Terminal Themes and
+without the document's schema version and revision. The Advanced Settings Section presents it and
+applies an edit to it only on request.
+
 **Settings Search**:
 Fuzzy search over Settings Row labels and keywords that reveals a matching Settings Row.
 

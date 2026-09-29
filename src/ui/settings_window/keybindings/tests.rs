@@ -356,6 +356,7 @@ fn reset_all_restores_every_keybinding(cx: &mut TestAppContext) {
         with_keybindings(r#"{"new_workspace":"cmd-shift-y","close_tab":null}"#),
         cx,
     );
+    click("settings-navigation-settings-section-advanced", cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
 

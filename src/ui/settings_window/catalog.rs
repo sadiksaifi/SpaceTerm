@@ -24,17 +24,20 @@ pub(super) enum SettingsSectionId {
     Privacy,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
+    /// Settings as a whole: Settings JSON, export and import, and Reset All.
+    Advanced,
 }
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Interface,
         Self::Font,
         Self::Themes,
         Self::Keybindings,
         Self::Privacy,
         Self::Updates,
+        Self::Advanced,
     ];
 
     pub(super) const fn title(self) -> &'static str {
@@ -45,6 +48,7 @@ impl SettingsSectionId {
             Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
             Self::Updates => "Updates",
+            Self::Advanced => "Advanced",
         }
     }
 
@@ -64,6 +68,9 @@ impl SettingsSectionId {
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
+            Self::Advanced => {
+                "Every setting at once: edit them as JSON, export or import them, or start over."
+            }
         }
     }
 
@@ -75,6 +82,7 @@ impl SettingsSectionId {
             Self::Keybindings => "settings-section-keybindings",
             Self::Privacy => "settings-section-privacy",
             Self::Updates => "settings-section-updates",
+            Self::Advanced => "settings-section-advanced",
         }
     }
 }
@@ -108,6 +116,14 @@ pub(super) enum SettingsRowId {
     UpdateReminderInterval,
     /// The Keybinding of one Command.
     Shortcut(Command),
+    /// Every Setting as Settings JSON, read-only until the person chooses to edit it.
+    SettingsJson,
+    /// Writes the Settings Document to a file the person chooses.
+    ExportSettings,
+    /// Replaces the Settings Document with one read from a file the person chooses.
+    ImportSettings,
+    /// Returns every Setting to its default and removes the installed Terminal Themes.
+    ResetAllSettings,
 }
 
 impl SettingsRowId {
@@ -145,7 +161,12 @@ impl SettingsRowId {
             | Self::UpdateReminderInterval
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
-            | Self::Shortcut(_) => {
+            | Self::Shortcut(_)
+            // The Advanced rows act on Settings as a whole and hold no preference of their own.
+            | Self::SettingsJson
+            | Self::ExportSettings
+            | Self::ImportSettings
+            | Self::ResetAllSettings => {
                 return None;
             }
         })
@@ -448,6 +469,38 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         ],
         selector: "settings-row-update-reminder-interval",
     },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SettingsJson,
+        section: SettingsSectionId::Advanced,
+        group: "Settings JSON",
+        label: "Settings JSON",
+        keywords: &["json", "edit", "source", "raw", "text", "file", "advanced"],
+        selector: "settings-row-settings-json",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ExportSettings,
+        section: SettingsSectionId::Advanced,
+        group: "Transfer",
+        label: "Export settings",
+        keywords: &["export", "backup", "save", "copy", "file", "transfer", "migrate"],
+        selector: "settings-row-export-settings",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ImportSettings,
+        section: SettingsSectionId::Advanced,
+        group: "Transfer",
+        label: "Import settings",
+        keywords: &["import", "restore", "backup", "load", "file", "transfer", "migrate"],
+        selector: "settings-row-import-settings",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ResetAllSettings,
+        section: SettingsSectionId::Advanced,
+        group: "Reset",
+        label: "Reset all settings",
+        keywords: &["reset", "defaults", "factory", "clear", "start over", "restore"],
+        selector: "settings-row-reset-all-settings",
+    },
 ];
 
 /// The titled box each Command's row shares with the other Commands of its group.
@@ -534,7 +587,7 @@ mod tests {
     use super::*;
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 18] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 22] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -553,6 +606,10 @@ mod tests {
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
         SettingsRowId::UpdateReminderInterval,
+        SettingsRowId::SettingsJson,
+        SettingsRowId::ExportSettings,
+        SettingsRowId::ImportSettings,
+        SettingsRowId::ResetAllSettings,
     ];
 
     fn every_row() -> Vec<SettingsRowId> {
@@ -811,12 +868,34 @@ mod tests {
                     | SettingsRowId::UpdateCheckInterval
                     | SettingsRowId::UpdateReminderInterval
                     | SettingsRowId::Shortcut(_)
+                    | SettingsRowId::SettingsJson
+                    | SettingsRowId::ExportSettings
+                    | SettingsRowId::ImportSettings
+                    | SettingsRowId::ResetAllSettings
             );
             assert_eq!(
                 row.id.reset_target(Appearance::Light).is_some(),
                 resettable,
                 "{:?} reset mapping disagrees with its kind",
                 row.id
+            );
+        }
+    }
+
+    /// The Advanced rows answer what a person looking to act on all of Settings types.
+    #[test]
+    fn a_whole_settings_query_reaches_the_advanced_rows() {
+        for (query, row) in [
+            ("json", SettingsRowId::SettingsJson),
+            ("export", SettingsRowId::ExportSettings),
+            ("backup", SettingsRowId::ExportSettings),
+            ("restore", SettingsRowId::ImportSettings),
+            ("reset all", SettingsRowId::ResetAllSettings),
+            ("factory", SettingsRowId::ResetAllSettings),
+        ] {
+            assert!(
+                matching_rows(query).contains(&row),
+                "{query:?} should reach {row:?}"
             );
         }
     }

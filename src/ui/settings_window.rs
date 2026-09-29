@@ -5,6 +5,7 @@
 //! the desktop convention for a settings window while remaining entirely GPUI-rendered, so nothing
 //! here depends on a host settings surface and the layout stays portable.
 
+mod advanced;
 mod catalog;
 mod controls;
 mod editor;
@@ -97,7 +98,7 @@ const WINDOW_WIDTH: f32 = 880.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
 const SIDEBAR_INSET: f32 = 10.0;
-/// The strip under the window carrying the save status and the one application-wide action.
+/// The strip under the content column carrying the save status.
 const FOOTER_HEIGHT: f32 = 40.0;
 /// The height of one navigation entry and of the search field above it, so the sidebar runs on one
 /// rhythm from its first row to its last.
@@ -333,6 +334,8 @@ pub(crate) struct SettingsWindow {
     theme_store: Entity<ThemeStore>,
     /// One shortcut recorder per Command, kept so a recording survives re-rendering.
     shortcuts: ShortcutRows,
+    /// The Settings JSON editor in the Advanced section.
+    settings_json: advanced::SettingsJsonEditor,
 }
 
 /// How one row returns to its default.
@@ -495,6 +498,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
+        let settings_json = advanced::SettingsJsonEditor::new(window, cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -515,6 +519,7 @@ impl SettingsWindow {
             theme_gallery,
             theme_store,
             shortcuts,
+            settings_json,
         }
     }
 
@@ -804,20 +809,22 @@ impl SettingsWindow {
             })
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
             .text_color(gpui_color(appearance.colors.text))
             .chrome_text(appearance.typography.style(TextRole::Body))
-            // Both columns run to the window's top edge beneath the transparent native titlebar.
+            // Both columns run to the window's top edge beneath the transparent native titlebar,
+            // and the sidebar runs on to the bottom edge: the footer belongs to the content column.
+            .child(self.render_sidebar(&settings, window, cx))
             .child(
                 div()
                     .flex()
-                    .flex_row()
+                    .flex_col()
                     .flex_1()
-                    .min_h_0()
-                    .child(self.render_sidebar(&settings, window, cx))
-                    .child(self.render_detail(&settings, window, cx)),
-            )
-            .child(self.render_footer(&settings, cx));
+                    .min_w_0()
+                    .h_full()
+                    .child(self.render_detail(&settings, window, cx))
+                    .child(self.render_footer(&settings)),
+            );
         ModalLayer::new(content).into_any_element()
     }
 }
@@ -1136,6 +1143,7 @@ impl SettingsWindow {
                                     SettingsSectionId::Keybindings => IconName::Keyboard,
                                     SettingsSectionId::Privacy => IconName::Shield,
                                     SettingsSectionId::Updates => IconName::Download,
+                                    SettingsSectionId::Advanced => IconName::Cog,
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
                             )),
@@ -1247,8 +1255,8 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .flex_1()
-            .min_w_0()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
@@ -1488,6 +1496,44 @@ impl SettingsWindow {
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
+            SettingsRowId::SettingsJson => self.render_settings_json(appearance, cx),
+            SettingsRowId::ExportSettings => {
+                let owner = cx.weak_entity();
+                action_button("settings-document-export", "Export…", true, move |window, cx| {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.begin_document_export(window, cx);
+                    });
+                })
+                .into_any_element()
+            }
+            SettingsRowId::ImportSettings => {
+                let owner = cx.weak_entity();
+                action_button(
+                    "settings-import",
+                    "Import…",
+                    self.editor.editable(),
+                    move |window, cx| {
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.begin_settings_import(window, cx);
+                        });
+                    },
+                )
+                .into_any_element()
+            }
+            SettingsRowId::ResetAllSettings => {
+                let owner = cx.weak_entity();
+                action_button(
+                    "settings-reset-all",
+                    "Reset All…",
+                    self.editor.editable(),
+                    move |window, cx| {
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.confirm_reset_all(window, cx);
+                        });
+                    },
+                )
+                .into_any_element()
+            }
         }
     }
 
@@ -2007,134 +2053,40 @@ impl SettingsWindow {
         )
     }
 
-    /// The window's own strip: what the last edit did, and the one action that undoes all of them.
+    /// The content column's closing strip: what the last edit did.
     ///
-    /// Reset All acts on the content column, not on navigation, so it sits in the content column
-    /// opposite the save status. It takes the width of its label: the sidebar is the only column
-    /// whose width means anything here, and a destructive action stretched to it reads as the
-    /// heaviest thing in the window. One rule runs the full width, and the sidebar surface
-    /// continues beneath it to the window's bottom edge.
-    ///
-    /// The strip is a status line rather than a form, and the only other thing on it is the save
-    /// status, so the action rests at that status's weight: Bare paints no surface and carries the
-    /// muted foreground, and the compact size sets it at the same step of the ramp the status
-    /// takes. Pointer and keyboard lift it to full text, so the affordance arrives on approach
-    /// rather than competing at rest with the settings it would undo.
-    ///
-    /// Both ends align to the content gutter, which is the line the title, the group headings, and
-    /// every row label already sit on. A card's edge stands outside that line by the inset its rows
-    /// carry, but a card is a container rather than something to read: the column a reader tracks
-    /// down the page is the text, so the strip that closes the column joins the text.
-    ///
-    /// On the leading end that alignment is carried by the action's label, not its edge. A button
-    /// insets its label by the padding it paints and by the border it reserves whether or not the
-    /// variant paints one, and only the padding follows the density scale, so the strip removes
-    /// each in its own scale. Bare paints no edge for the eye to align to, so the label is the only
-    /// thing left on that line. The save status is plain text and needs no such correction.
-    fn render_footer(
-        &mut self,
-        settings: &SettingsAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The strip belongs to the content column alone, so the sidebar runs unbroken to the window's
+    /// bottom edge. The status ends on the content gutter, the line the title, the group headings,
+    /// and every row label already sit on, because the column a reader tracks down the page is the
+    /// text and the strip that closes the column joins it.
+    fn render_footer(&self, settings: &SettingsAppearance) -> AnyElement {
         let appearance = &settings.chrome;
         let status = self.editor.status();
-        let owner = cx.weak_entity();
-        let exporter = cx.weak_entity();
         div()
             .debug_selector(|| "settings-footer".to_owned())
             .flex()
             .flex_row()
-            .w_full()
             .flex_none()
+            .w_full()
             .h(appearance.typography.style(TextRole::Secondary).line_height
                 + appearance.spacing(FOOTER_HEIGHT - 15.0))
+            .border_t_1()
+            .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Canvas)))
+            .bg(gpui_color(
+                settings.surface(SettingsSurfaceRole::Canvas).paint,
+            ))
+            .items_center()
+            .justify_end()
+            .px(appearance.spacing(CONTENT_GUTTER))
             .child(
                 div()
-                    .relative()
-                    .flex_none()
-                    .h_full()
-                    .w(appearance.spacing(SIDEBAR_WIDTH))
-                    .border_t_1()
-                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Sidebar)))
-                    .bg(gpui_color(
-                        settings.surface(SettingsSurfaceRole::Sidebar).paint,
-                    ))
-                    .when_some(settings.sidebar_edge(), |footer, edge| {
-                        footer.child(
-                            div()
-                                .debug_selector(|| "settings-sidebar-footer-divider".to_owned())
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .right_0()
-                                .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
-                                .bg(gpui_color(edge)),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
+                    .debug_selector(|| "settings-save-status".to_owned())
                     .min_w_0()
-                    .h_full()
-                    .border_t_1()
-                    .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Canvas)))
-                    .bg(gpui_color(
-                        settings.surface(SettingsSurfaceRole::Canvas).paint,
-                    ))
-                    .items_center()
-                    .justify_between()
-                    .gap(appearance.spacing(CONTENT_GUTTER))
-                    .pl(appearance
-                        .spacing(CONTENT_GUTTER - super::button_theme::COMPACT_HORIZONTAL_PADDING)
-                        - px(super::button_theme::CONTROL_BORDER_WIDTH))
-                    .pr(appearance.spacing(CONTENT_GUTTER))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_none()
-                            .gap(appearance.spacing(4.0))
-                            .child(
-                                action_button(
-                                    "settings-reset-all",
-                                    "Reset All…",
-                                    self.editor.editable(),
-                                    move |window, cx| {
-                                        let _ = owner.update(cx, |settings, cx| {
-                                            settings.confirm_reset_all(window, cx);
-                                        });
-                                    },
-                                )
-                                .variant(spaceterm_ui::ButtonVariant::Bare)
-                                .size(spaceterm_ui::ButtonSize::Compact),
-                            )
-                            .child(
-                                action_button(
-                                    "settings-document-export",
-                                    "Export All Settings…",
-                                    true,
-                                    move |window, cx| {
-                                        let _ = exporter.update(cx, |settings, cx| {
-                                            settings.begin_document_export(window, cx);
-                                        });
-                                    },
-                                )
-                                .variant(spaceterm_ui::ButtonVariant::Bare)
-                                .size(spaceterm_ui::ButtonSize::Compact),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "settings-save-status".to_owned())
-                            .min_w_0()
-                            .truncate()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            // The recovery banner owns semantic emphasis on its paired surface.
-                            .text_color(gpui_color(appearance.colors.text_muted))
-                            .child(status.message()),
-                    ),
+                    .truncate()
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    // The recovery banner owns semantic emphasis on its paired surface.
+                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .child(status.message()),
             )
             .into_any_element()
     }
@@ -2212,6 +2164,7 @@ impl SettingsWindow {
             }
             let _ = owner.update(cx, |settings, cx| {
                 settings.shortcuts.dismiss_notice();
+                settings.end_settings_json_edit(cx);
                 settings.editor.reset_all(cx);
                 cx.notify();
             });
@@ -2373,10 +2326,13 @@ fn control_selector(row: SettingsRowId) -> String {
 
 /// Where a row's label sits.
 ///
-/// The theme preview and gallery present themselves, so they span the row without a label.
+/// The theme preview, the gallery, and Settings JSON present themselves under their group's title,
+/// so they span the row without a label.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
-        SettingsRowId::TerminalTheme | SettingsRowId::InstalledThemes => SettingsRowLayout::Full,
+        SettingsRowId::TerminalTheme
+        | SettingsRowId::InstalledThemes
+        | SettingsRowId::SettingsJson => SettingsRowLayout::Full,
         _ => SettingsRowLayout::Beside,
     }
 }
@@ -2432,6 +2388,15 @@ impl SettingsWindow {
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }
+            SettingsRowId::ExportSettings => {
+                Some("Save every setting, keyboard shortcut, and installed theme to a file.")
+            }
+            SettingsRowId::ImportSettings => {
+                Some("Replace every setting, keyboard shortcut, and installed theme with an exported file.")
+            }
+            SettingsRowId::ResetAllSettings => Some(
+                "Return every setting and keyboard shortcut to its default and remove installed themes.",
+            ),
             _ => None,
         }
     }
