@@ -166,6 +166,8 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             mark_indicator_strong: 0xc5c5c5,
             scrollbar_thumb: 0x858585,
             accent: 0x5ea8ff,
+            // AppKit's keyboardFocusIndicatorColor for the default blue accent in Dark Aqua.
+            focus_ring: Color::rgba(0x1aa9ff7f),
             accent_hover: 0x80baff,
             accent_pressed: 0xa6cfff,
             emphasis: 0x1f66d1,
@@ -237,6 +239,8 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             mark_indicator_strong: 0x474747,
             scrollbar_thumb: 0x808080,
             accent: 0x1259b0,
+            // AppKit's keyboardFocusIndicatorColor for the default blue accent in Aqua.
+            focus_ring: Color::rgba(0x0067f47f),
             accent_hover: 0x0e4c98,
             accent_pressed: 0x0b3f7e,
             emphasis: 0x1a66c8,
@@ -344,6 +348,8 @@ struct ChromePalette {
     scrollbar_thumb: u32,
     /// Links, focus, and small active indicators.
     accent: u32,
+    /// The translucent band a focused control draws around itself.
+    focus_ring: Color,
     accent_hover: u32,
     accent_pressed: u32,
     /// Filled emphasis: Primary actions and switched-on controls.
@@ -375,6 +381,7 @@ pub(super) struct ChromeDefinition {
     pub(super) text_placeholder: Color,
     pub(super) text_disabled: Color,
     pub(super) text_accent: Color,
+    pub(super) focus_ring: Color,
     pub(super) link_text_hover: Color,
     pub(super) link_text_pressed: Color,
     pub(super) border: Color,
@@ -469,6 +476,7 @@ impl ChromePalette {
             text_placeholder: opaque(self.text_placeholder),
             text_disabled: opaque(self.text_disabled),
             text_accent: opaque(self.accent),
+            focus_ring: self.focus_ring,
             link_text_hover: opaque(self.accent_hover),
             link_text_pressed: opaque(self.accent_pressed),
 
@@ -935,11 +943,6 @@ mod tests {
             }
             for (role, border, surface) in [
                 ("focus", colors.border_focused, colors.background),
-                (
-                    "field focus",
-                    colors.input_focused_border,
-                    colors.input_background,
-                ),
                 (
                     "invalid field",
                     colors.input_invalid_border,

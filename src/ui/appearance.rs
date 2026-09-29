@@ -598,19 +598,12 @@ fn resolve_floating_field_colors_detailed(
         reference.focus_ring = focus_ring;
         paint.focus_ring = focus_ring;
     }
-    let input_focused_border = resolve_host_endpoint_color(
-        paint.input_focused_border,
-        host_backgrounds,
-        floors.boundary,
-    );
     let input_invalid_border = resolve_host_endpoint_color(
         paint.input_invalid_border,
         host_backgrounds,
         floors.boundary,
     );
-    reference.input_focused_border = input_focused_border;
     reference.input_invalid_border = input_invalid_border;
-    paint.input_focused_border = input_focused_border;
     paint.input_invalid_border = input_invalid_border;
     let input_states = rehost_floating_states(
         [
@@ -2475,11 +2468,6 @@ fn resolve_material_control_colors(
         [selection_background; 2],
         floors.primary,
     );
-    paint.input_focused_border = if floors.interactive {
-        resolve_host_endpoint_color(reference.input_focused_border, hosts, floors.boundary)
-    } else {
-        paint.input_border
-    };
     paint.input_invalid_border =
         resolve_host_endpoint_color(reference.input_invalid_border, hosts, floors.boundary);
 
@@ -4628,7 +4616,6 @@ mod typography_tests {
             background: host,
             focus_ring: Color::rgba(0),
             input_border: Color::rgba(0x10101080),
-            input_focused_border: Color::rgba(0),
             input_invalid_border: Color::rgb(0xaa0000),
             ..ChromeColors::default()
         };
@@ -4644,7 +4631,6 @@ mod typography_tests {
         );
 
         assert_eq!(resolved.focus_ring.a, 0);
-        assert_eq!(resolved.input_focused_border, resolved.input_border);
         assert_ne!(
             resolved.input_invalid_border.a, 0,
             "invalid state remains independently visible while inactive"
@@ -4659,7 +4645,6 @@ mod typography_tests {
         let reference = ChromeColors {
             background: host,
             focus_ring: absent,
-            input_focused_border: absent,
             input_invalid_border: absent,
             ..ChromeColors::default()
         };
@@ -4678,7 +4663,6 @@ mod typography_tests {
             );
 
             assert_eq!(resolved.focus_ring, absent);
-            assert_eq!(resolved.input_focused_border, absent);
             assert_eq!(resolved.input_invalid_border, absent);
         }
     }

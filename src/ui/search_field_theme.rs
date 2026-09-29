@@ -35,13 +35,11 @@ pub(super) fn prepared(
         FieldFrameTheme::new(
             gpui_color(colors.input_background),
             gpui_color(colors.input_border),
-            gpui_color(colors.input_focused_border),
             gpui_color(colors.input_invalid_border),
             gpui_color(colors.input_disabled_background),
             gpui_color(colors.input_disabled_border),
-        )
-        .focus_ring(gpui_color(colors.focus_ring))
-        .corner_radius(px(FIELD_RADIUS)),
+            gpui_color(colors.focus_ring),
+        ),
         SearchFieldPaint::new(
             // The glyph reads as part of the prompt the placeholder states, not as a control.
             gpui_color(colors.input_placeholder),

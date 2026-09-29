@@ -1010,14 +1010,13 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
             focus,
         ),
         ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
-    )
-    .focus_ring_width(px(2.0));
+    );
     cx.set_global(theme);
     let (_, cx) = cx.add_window_view(|_, _| InsetTrigger);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     cx.update(|window, cx| window.focus_next(cx));
-    cx.run_until_parked();
+    crate::focus_ring::settle(cx);
 
     let trigger = cx
         .debug_bounds("combo-box-trigger")
@@ -1025,7 +1024,7 @@ fn bare_focused_trigger_keeps_only_the_unclipped_outset_ring(cx: &mut TestAppCon
     let ring = cx
         .debug_bounds("combo-box-trigger-keyboard-focus")
         .expect("focused ComboBox trigger should submit its outline");
-    let outset = px(3.0);
+    let outset = px(2.0);
     assert!(
         ring.left() == trigger.left() - outset
             && ring.top() == trigger.top() - outset

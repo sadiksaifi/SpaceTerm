@@ -958,7 +958,6 @@ pub struct ComboBoxTheme {
     paint: ComboBoxPaint,
     metrics: ComboBoxMetrics,
     shell: FloatingShell,
-    focus_ring_width: Pixels,
 }
 
 impl ComboBoxTheme {
@@ -968,19 +967,7 @@ impl ComboBoxTheme {
             paint,
             metrics,
             shell: crate::FloatingSurfaceTheme::default().shell(COMBO_BOX_ROLE),
-            focus_ring_width: px(1.0),
         }
-    }
-
-    /// Sets the focus-ring width independently of the trigger border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
-        self.focus_ring_width
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -2561,19 +2548,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                     )
             })
             .when_some(focus_ring, |trigger, ring_color| {
-                let gap = px(2.0);
-                let position = gap + theme.focus_ring_width;
                 trigger.child(
-                    div()
-                        .debug_selector(move || focus_selector.clone())
-                        .absolute()
-                        .top(-position)
-                        .right(-position)
-                        .bottom(-position)
-                        .left(-position)
-                        .rounded(metrics.trigger_corner_radius + gap)
-                        .border(theme.focus_ring_width)
-                        .border_color(ring_color),
+                    crate::focus_ring(
+                        "focus-ring",
+                        ring_color,
+                        metrics.trigger_corner_radius,
+                        metrics.border_width,
+                    )
+                    .debug_selector(focus_selector),
                 )
             })
             .child(trigger_tracker)

@@ -728,15 +728,14 @@ fn selection_ring(
         })
         .child(content.rounded(radius.pixels()))
         // Keyboard focus surrounds the selection ring so the two states stay distinct.
-        .child(
-            div()
-                .absolute()
-                .inset(px(-RING_WIDTH - RING_GAP))
-                .rounded(radius.pixels() + px(2.0 * (RING_GAP + RING_WIDTH)))
-                .border(px(RING_WIDTH))
-                .border_color(gpui::rgba(0))
-                .when(focused, |ring| ring.border_color(gpui_color(appearance.colors.focus_ring))),
-        )
+        .when(focused, |ring| {
+            ring.child(spaceterm_ui::focus_ring(
+                "focus-ring",
+                gpui_color(appearance.colors.focus_ring),
+                radius.pixels() + px(RING_GAP + RING_WIDTH),
+                px(RING_WIDTH),
+            ))
+        })
 }
 
 #[derive(Clone, Copy)]

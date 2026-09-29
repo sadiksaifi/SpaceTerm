@@ -3,11 +3,11 @@
 
 use crate::ui::appearance::gpui_color;
 use gpui::px;
-use spaceterm_ui::{ProgressMetrics, ProgressMotion, ProgressPaint, ProgressSizes, ProgressTheme};
+use spaceterm_ui::{ProgressMetrics, ControlMotion, ProgressPaint, ProgressSizes, ProgressTheme};
 
 use crate::appearance::ChromeColors;
 
-pub(super) fn theme(colors: &ChromeColors, motion: ProgressMotion) -> ProgressTheme {
+pub(super) fn theme(colors: &ChromeColors, motion: ControlMotion) -> ProgressTheme {
     ProgressTheme::new(
         paint(colors),
         ProgressSizes::new(

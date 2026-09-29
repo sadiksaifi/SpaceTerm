@@ -1047,7 +1047,9 @@ fn render_alert_suppression(
             selected,
             enabled,
             pressed,
+            focused,
             "modal-alert-suppression-indicator".to_owned(),
+            "modal-alert-suppression-keyboard-focus".to_owned(),
         ))
         .child(
             div()
@@ -1080,20 +1082,6 @@ fn render_alert_suppression(
                         })
                 }),
         )
-        .when(focused, |control| {
-            control.child(
-                div()
-                    .debug_selector(|| "modal-alert-suppression-keyboard-focus".to_owned())
-                    .absolute()
-                    .top(-shell.hairline() * 3.0)
-                    .right(-shell.hairline() * 3.0)
-                    .bottom(-shell.hairline() * 3.0)
-                    .left(-shell.hairline() * 3.0)
-                    .rounded(metrics.control_radius + shell.hairline() * 2.0)
-                    .border(shell.hairline())
-                    .border_color(toggle_theme.focus_border()),
-            )
-        })
         .child(pointer_tracker)
         .child(focus_anchor.bounds_tracker(shell.hairline()));
 

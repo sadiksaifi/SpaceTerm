@@ -1,6 +1,6 @@
 use gpui::{ElementId, px, rgba};
 use spaceterm_ui::{
-    DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ControlMotion, DeterminateProgress, FrameSpinner, ProgressBar, ProgressMetrics, ProgressPaint,
     ProgressRing, ProgressSize, ProgressSizes, ProgressState, ProgressTheme,
 };
 
@@ -31,7 +31,7 @@ const _: fn() = || {
     let theme = ProgressTheme::new(
         ProgressPaint::new(rgba(0x303030ff), rgba(0x5599ffff)),
         ProgressSizes::new(compact, regular),
-        ProgressMotion::Standard,
+        ControlMotion::Standard,
     );
 
     let _ = (bar, ring, spinner, theme);

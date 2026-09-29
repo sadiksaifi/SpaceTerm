@@ -140,6 +140,7 @@ impl Render for RetainedField {
             self.id,
             &self.input.read(cx).focus_handle(),
             FieldState::default(),
+            px(6.0),
             cx,
         );
         self.observations
@@ -179,7 +180,6 @@ struct ActivityPhaseObservation {
     button_hovered: gpui::Rgba,
     button_disabled: gpui::Rgba,
     focus_border: gpui::Rgba,
-    focus_ring_width: Pixels,
     activity: ControlWindowActivity,
 }
 
@@ -204,7 +204,6 @@ impl ActivityProbe {
                 button_hovered: paints.hovered().background(),
                 button_disabled: paints.disabled().background(),
                 focus_border: button.focus_border(),
-                focus_ring_width: button.resolved_focus_ring_width(),
                 activity: ControlWindowActivity::current(),
             });
     }
@@ -334,12 +333,10 @@ fn activity_catalog(
     hovered: gpui::Rgba,
     disabled: gpui::Rgba,
     focus: gpui::Rgba,
-    focus_ring_width: Pixels,
 ) -> ControlThemeCatalog {
     let mut catalog = test_catalog(false, generation, field_fill);
     catalog.text_input = input_theme(field_fill, px(1.0));
-    catalog.button =
-        activity_button_theme(normal, hovered, disabled, focus).focus_ring_width(focus_ring_width);
+    catalog.button = activity_button_theme(normal, hovered, disabled, focus);
     catalog
 }
 
@@ -607,13 +604,7 @@ fn settings_catalog_scope_is_isolated_and_retained_in_every_rendering_phase(
     cx: &mut TestAppContext,
 ) {
     let application = activity_catalog(
-        1,
-        ROOT_FIELD,
-        ROOT_FIELD,
-        ROOT_FIELD,
-        ROOT_FIELD,
-        ROOT_FIELD,
-        px(1.0),
+        1, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD,
     );
     let settings = activity_catalog(
         1,
@@ -622,7 +613,6 @@ fn settings_catalog_scope_is_isolated_and_retained_in_every_rendering_phase(
         SETTINGS_FIELD,
         SETTINGS_FIELD,
         SETTINGS_FIELD,
-        px(1.0),
     );
     cx.update(|cx| init(cx, application.clone())).unwrap();
     cx.update(|cx| {
@@ -685,7 +675,6 @@ fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut
         active_hovered,
         disabled,
         active_focus,
-        px(1.0),
     );
     let inactive = activity_catalog(
         1,
@@ -694,7 +683,6 @@ fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut
         inactive_normal,
         disabled,
         no_focus,
-        px(2.0),
     );
     cx.update(|cx| init(cx, active.clone()))
         .expect("catalog should initialize");
@@ -750,7 +738,6 @@ fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut
                 && observation.button_hovered == active_hovered
                 && observation.button_disabled == disabled
                 && observation.focus_border == active_focus
-                && observation.focus_ring_width == px(1.0)
         }));
         assert!(inactive_observations.borrow().iter().any(|observation| {
             observation.phase == phase
@@ -760,7 +747,6 @@ fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut
                 && observation.button_hovered == inactive_normal
                 && observation.button_disabled == disabled
                 && observation.focus_border == no_focus
-                && observation.focus_ring_width == px(2.0)
         }));
     }
 }

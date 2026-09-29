@@ -223,7 +223,6 @@ pub struct SegmentedMetrics {
     vertical_padding: Pixels,
     radius: Pixels,
     border_width: Pixels,
-    focus_gap: Pixels,
     preview_gap: Pixels,
     font_size: Pixels,
     line_height: f32,
@@ -249,7 +248,6 @@ impl SegmentedMetrics {
             vertical_padding: px(0.0),
             radius: px(5.0),
             border_width: px(1.0),
-            focus_gap: px(2.0),
             preview_gap: px(6.0),
             font_size: px(12.0),
             line_height: 1.2,
@@ -281,12 +279,6 @@ impl SegmentedMetrics {
     /// Sets the stable option border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
-        self
-    }
-
-    /// Sets the space between the control and its keyboard focus outline.
-    pub fn focus_gap(mut self, gap: Pixels) -> Self {
-        self.focus_gap = gap;
         self
     }
 
@@ -324,7 +316,6 @@ impl SegmentedMetrics {
             vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
             radius: self.radius,
             border_width: self.border_width,
-            focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
             preview_gap: crate::appearance::scale_metric(self.preview_gap, spacing_scale),
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
             line_height: self.line_height,
@@ -368,7 +359,6 @@ pub struct SegmentedControlTheme {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
@@ -388,16 +378,9 @@ impl SegmentedControlTheme {
             track_background,
             track_border,
             focus_border,
-            focus_ring_width: px(1.0),
             track_shadow: ControlShadow::none(),
             selected_shadow: ControlShadow::none(),
         }
-    }
-
-    /// Sets the focus-ring width independently of the track border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
     }
 
     /// Adds the application-owned elevation treatment to the track and selected option.
@@ -461,7 +444,6 @@ impl SegmentedControlTheme {
             track_background: self.track_background,
             track_border: self.track_border,
             focus_border: self.focus_border,
-            focus_ring_width: self.focus_ring_width,
             track_shadow: self.track_shadow,
             selected_shadow: self.selected_shadow,
         }
@@ -831,6 +813,18 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                             .flex_none()
                             .child(option.label.clone()),
                     )
+                    // Arrow keys move the selection, so the selected segment is the focused one.
+                    .when(focused && selected, |segment| {
+                        segment.child(
+                            crate::focus_ring(
+                                "focus-ring",
+                                style.focus_border,
+                                metrics.radius,
+                                metrics.border_width,
+                            )
+                            .debug_selector(format!("{selector}-keyboard-focus")),
+                        )
+                    })
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -922,13 +916,21 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 )
             })
             .children(segments)
-            .when(focused, |track| {
-                track.child(focus_outline(
-                    metrics,
-                    style.focus_border,
-                    style.focus_ring_width,
-                    format!("{selector}-keyboard-focus"),
-                ))
+            // Without a selection there is no segment to hold the ring, so it surrounds the track.
+            .when(focused && self.selected.is_none(), |track| {
+                track.child(
+                    crate::focus_ring(
+                        "focus-ring",
+                        style.focus_border,
+                        if card {
+                            px(0.0)
+                        } else {
+                            metrics.radius + metrics.border_width
+                        },
+                        if card { px(0.0) } else { metrics.border_width },
+                    )
+                    .debug_selector(format!("{selector}-keyboard-focus")),
+                )
             });
 
         let control = if let Some(tooltip) = self.tooltip {
@@ -990,7 +992,6 @@ struct SegmentedStyle {
     track_background: Rgba,
     track_border: Rgba,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
 }
@@ -1015,25 +1016,6 @@ impl SegmentedPaintRefinement {
             self.paint.label,
         )
     }
-}
-
-fn focus_outline(
-    metrics: SegmentedMetrics,
-    color: Rgba,
-    width: Pixels,
-    selector: String,
-) -> impl IntoElement {
-    let offset = metrics.focus_gap + width;
-    div()
-        .debug_selector(move || selector)
-        .absolute()
-        .top(-offset)
-        .right(-offset)
-        .bottom(-offset)
-        .left(-offset)
-        .rounded(metrics.radius + metrics.border_width + metrics.focus_gap)
-        .border(width)
-        .border_color(color)
 }
 
 /// Presentation used before the application installs its catalog, so a control rendered during

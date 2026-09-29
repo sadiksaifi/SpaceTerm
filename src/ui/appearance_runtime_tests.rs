@@ -600,7 +600,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
             cx.global::<spaceterm_ui::ProgressTheme>(),
             &crate::ui::progress_theme::theme(
                 &crate::ui::appearance::chrome(cx).colors,
-                spaceterm_ui::ProgressMotion::Reduced,
+                spaceterm_ui::ControlMotion::Reduced,
             )
         );
         assert!(current(cx).chrome.composition.capabilities.reduce_motion);
@@ -614,7 +614,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
             cx.global::<spaceterm_ui::ProgressTheme>(),
             &crate::ui::progress_theme::theme(
                 &crate::ui::appearance::chrome(cx).colors,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             )
         );
         assert!(!current(cx).chrome.composition.capabilities.reduce_motion);

@@ -197,8 +197,9 @@ fn full_width_track_distributes_all_available_width_between_options(cx: &mut Tes
                     });
                     cx.run_until_parked();
                     assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
+                    assert_eq!(cx.debug_bounds("sizing-on").unwrap(), on);
                     let ring = cx.debug_bounds("sizing-control-keyboard-focus").unwrap();
-                    assert_eq!(track.left() - ring.left(), ring.right() - track.right());
+                    assert_eq!(on.left() - ring.left(), ring.right() - on.right());
                 }
             }
         }
@@ -629,24 +630,18 @@ fn a_disabled_control_refuses_pointer_and_keyboard_activation(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn keyboard_focus_draws_one_outset_ring_around_the_whole_control(cx: &mut TestAppContext) {
+fn keyboard_focus_rings_the_selected_segment(cx: &mut TestAppContext) {
     let (_root, _changes, cx) = segmented_window(cx);
 
     focus_control(cx);
 
-    let track = cx
-        .debug_bounds("test-segmented")
-        .expect("the control should render");
+    let selected = cx
+        .debug_bounds("test-segmented-dark")
+        .expect("the selected segment should render");
     let ring = cx
         .debug_bounds("test-segmented-keyboard-focus")
         .expect("keyboard focus should draw a ring");
-    assert!(
-        ring.left() < track.left()
-            && ring.right() > track.right()
-            && ring.top() < track.top()
-            && ring.bottom() > track.bottom(),
-        "the ring should enclose the track"
-    );
+    assert_eq!(ring, selected.dilate(px(2.0)));
 }
 
 #[gpui::test]

@@ -511,6 +511,7 @@ impl Render for TooltipDialogBody {
                     "fixture-dialog-field",
                     &self.input.read(cx).focus_handle(),
                     spaceterm_ui::FieldState::default(),
+                    crate::ui::chrome_geometry::RadiusRole::Control.pixels(),
                     cx,
                 )
                 .h(appearance.spacing(32.0))

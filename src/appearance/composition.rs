@@ -815,7 +815,6 @@ mod tests {
             element_background: Color::rgb(0x383838),
             element_border: Color::rgba(0x12345600),
             border_focused: Color::rgb(0x4080ff),
-            input_focused_border: Color::rgb(0x5090ff),
             input_invalid_border: Color::rgb(0xff4050),
             primary_border: Color::rgb(0x3060c0),
             destructive_border: Color::rgb(0xc03030),
@@ -856,7 +855,7 @@ mod tests {
         assert!(paint.resize_idle.a < 255 && paint.resize_disabled.a < 255);
         for (actual, semantic) in [
             (paint.border_focused, colors.border_focused),
-            (paint.input_focused_border, colors.input_focused_border),
+            (paint.focus_ring, colors.focus_ring),
             (paint.input_invalid_border, colors.input_invalid_border),
             (paint.primary_border, colors.primary_border),
             (paint.destructive_border, colors.destructive_border),
@@ -883,7 +882,6 @@ mod tests {
                 presentation.toggle_off_background
             );
             assert_eq!(presentation.progress_indicator, presentation.text_accent);
-            assert_eq!(presentation.focus_ring, presentation.border_focused);
             assert_eq!(
                 presentation.navigation_selected_background,
                 presentation.row_selected_background

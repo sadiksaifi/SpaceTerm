@@ -29,7 +29,7 @@ macro_rules! chrome_color_fields {
             warning, warning_background, warning_border, error, error_background, error_border,
             input_text, input_placeholder, input_disabled_text, input_caret,
             input_selection_background, input_selection_foreground, input_background, input_disabled_background,
-            input_border, input_focused_border, input_invalid_border,
+            input_border, input_invalid_border,
             modal_scrim,
             scrollbar_track, scrollbar_track_border, scrollbar_thumb_background,
             scrollbar_thumb_border, scrollbar_thumb_hover_background,

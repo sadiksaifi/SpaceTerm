@@ -151,7 +151,7 @@ pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
     let installed = cx.global::<appearance::InstalledChrome>();
-    let motion = appearance_runtime::progress_motion(cx);
+    let motion = appearance_runtime::control_motion(cx);
     let active = Box::new(control_theme_catalog::catalog(&installed.active, motion));
     let inactive = Box::new(control_theme_catalog::catalog(&installed.inactive, motion));
     let settings = cx.global::<appearance::settings::InstalledSettingsChrome>();
@@ -229,7 +229,7 @@ mod tests {
                 && *cx.global::<spaceterm_ui::ProgressTheme>()
                     == progress_theme::theme(
                         &appearance::chrome(cx).colors,
-                        spaceterm_ui::ProgressMotion::Standard,
+                        spaceterm_ui::ControlMotion::Standard,
                     )
                 && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme(floating)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()

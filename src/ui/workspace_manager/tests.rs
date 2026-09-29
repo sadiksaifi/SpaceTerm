@@ -7409,7 +7409,7 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     assert_ne!(window_background, panel_background);
     let catalog = crate::ui::control_theme_catalog::catalog(
         &appearance,
-        spaceterm_ui::ProgressMotion::Standard,
+        spaceterm_ui::ControlMotion::Standard,
     )
     .generation(spaceterm_ui::ControlThemeGeneration::new(u64::MAX));
     cx.update(|window, cx| {

@@ -31,7 +31,7 @@ pub(super) fn popup_unfocused_rows(
 
 pub(super) fn catalog(
     appearance: &super::appearance::ChromeAppearance,
-    progress_motion: spaceterm_ui::ProgressMotion,
+    motion: spaceterm_ui::ControlMotion,
 ) -> ControlThemeCatalog {
     // Controls paint the window's material. Floating controls use the same semantic colors as
     // their host, with fills compiled into overlays so the shell remains visible beneath them.
@@ -56,21 +56,21 @@ pub(super) fn catalog(
         &appearance.title_bar_controls,
         &row_reference,
         &popup,
-        progress_motion,
+        motion,
         appearance,
     );
     let panel_controls = surface_control_themes(
         &appearance.panel_controls,
         &row_reference,
         &popup,
-        progress_motion,
+        motion,
         appearance,
     );
     let card_controls = surface_control_themes(
         &appearance.card_controls,
         &row_reference,
         &popup,
-        progress_motion,
+        motion,
         appearance,
     );
     let catalog = ControlThemeCatalog::new(
@@ -81,7 +81,7 @@ pub(super) fn catalog(
             appearance.capabilities.show_borders,
         ),
         toggle_theme::prepared(colors, &appearance.typography),
-        progress_theme::theme(colors, progress_motion),
+        progress_theme::theme(colors, motion),
         scrollbar_theme::theme(colors),
         resize_handle_theme::theme(colors),
         segmented_control_theme::prepared(
@@ -132,7 +132,7 @@ pub(super) fn catalog(
                 appearance.capabilities.show_borders,
             ),
             toggle_theme::prepared(floating_controls, &appearance.typography),
-            progress_theme::theme(floating_controls, progress_motion),
+            progress_theme::theme(floating_controls, motion),
             segmented_control_theme::prepared(
                 floating_segmented,
                 &appearance.typography,
@@ -172,11 +172,7 @@ pub(super) fn catalog(
     // spacing still uses the legacy scaling seam while the reusable catalog migrates family by
     // family.
     .scale_metrics(1.0, appearance.spacing_scale)
-    .focus_ring_width(px(if appearance.capabilities.increase_contrast {
-        2.0
-    } else {
-        1.0
-    }));
+    .motion(motion);
 
     let shadow_opacity = if appearance.active { 89 } else { 53 };
     let shadow = ControlShadow::single(ControlShadowLayer::new(
@@ -241,7 +237,7 @@ pub(super) fn surface_control_themes(
     host: &super::appearance::PreparedControlHost,
     row_reference: &crate::appearance::ChromeColors,
     popup: &crate::appearance::ChromeColors,
-    progress_motion: spaceterm_ui::ProgressMotion,
+    motion: spaceterm_ui::ControlMotion,
     appearance: &super::appearance::ChromeAppearance,
 ) -> spaceterm_ui::SurfaceControlThemes {
     let typography = &appearance.typography;
@@ -252,7 +248,7 @@ pub(super) fn surface_control_themes(
     spaceterm_ui::SurfaceControlThemes::new(
         button_theme::prepared(&host.colors, typography, icons, show_borders),
         toggle_theme::prepared(&host.colors, typography),
-        progress_theme::theme(&host.colors, progress_motion),
+        progress_theme::theme(&host.colors, motion),
         segmented_control_theme::prepared(&host.segmented, typography, show_borders),
         search_field_theme::prepared(&host.reference, &host.colors, typography, icons),
         text_input_theme::theme(&host.colors),
@@ -865,7 +861,7 @@ mod tests {
             CompositionCapabilities, ThemeCatalog, SystemAppearance,
         };
         use crate::ui::appearance::ChromeAppearance;
-        use spaceterm_ui::{ControlHost, ProgressMotion, replace_control_theme_catalog};
+        use spaceterm_ui::{ControlHost, ControlMotion, replace_control_theme_catalog};
 
         cx.update(crate::ui::init).unwrap();
         let mut violations = Vec::new();
@@ -897,7 +893,7 @@ mod tests {
                     cx.update(|cx| {
                         replace_control_theme_catalog(
                             cx,
-                            catalog(&prepared, ProgressMotion::Standard),
+                            catalog(&prepared, ControlMotion::Standard),
                         )
                         .unwrap()
                     });

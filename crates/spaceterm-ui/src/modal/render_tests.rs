@@ -14,13 +14,13 @@ use gpui::{
 use super::*;
 use crate::{
     Alert, AlertOutcome, AlertSuppression, ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme,
-    ButtonVariantStyle, ButtonVariants, DeterminateProgress, Dialog, DialogCloseDecision,
-    DialogInitialFocus, DialogOutcome, DialogPendingCompletion, MAX_PROGRESS_STATUS_CHARACTERS,
-    Menu, MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuSize,
-    MenuSizes, MenuTheme, ModalAction, ModalActionIntent, ModalCloseReason, ModalDismissalError,
-    ModalId, ModalLifecycleEvent, ModalTerminalOutcomeError, ModalUpdateError,
-    ProgressCancelDecision, ProgressCancellation, ProgressCancellationCompletion, ProgressDialog,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressMetrics, ProgressMotion, ProgressPaint,
+    ButtonVariantStyle, ButtonVariants, ControlMotion, DeterminateProgress, Dialog,
+    DialogCloseDecision, DialogInitialFocus, DialogOutcome, DialogPendingCompletion,
+    MAX_PROGRESS_STATUS_CHARACTERS, Menu, MenuCloseReason, MenuEntry, MenuLifecycleEvent,
+    MenuMetrics, MenuPaint, MenuSize, MenuSizes, MenuTheme, ModalAction, ModalActionIntent,
+    ModalCloseReason, ModalDismissalError, ModalId, ModalLifecycleEvent, ModalTerminalOutcomeError,
+    ModalUpdateError, ProgressCancelDecision, ProgressCancellation, ProgressCancellationCompletion,
+    ProgressDialog, ProgressDialogOutcome, ProgressDialogUpdate, ProgressMetrics, ProgressPaint,
     ProgressSizes, ProgressState, ProgressTheme, TextInput, TextInputEscapeBehavior,
     TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputReturnBehavior,
     TextInputTheme, TextInputVariants, TooltipLayer, install_modal_keybindings,
@@ -265,7 +265,7 @@ fn test_progress_theme() -> ProgressTheme {
             ProgressMetrics::new(px(4.0), px(2.0), px(20.0), px(2.0)),
             ProgressMetrics::new(px(8.0), px(4.0), px(32.0), px(4.0)),
         ),
-        ProgressMotion::Reduced,
+        ControlMotion::Reduced,
     )
 }
 
@@ -968,8 +968,8 @@ fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
         .debug_bounds("modal-action-default-emphasis-equal-focus-save")
         .expect("default designation should remain independently represented");
     let suppression = cx
-        .debug_bounds("modal-alert-suppression")
-        .expect("suppression should render");
+        .debug_bounds("modal-alert-suppression-indicator")
+        .expect("suppression checkbox should render");
     let suppression_was_unfocused = cx
         .debug_bounds("modal-alert-suppression-keyboard-focus")
         .is_none();
@@ -978,7 +978,7 @@ fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
     cx.run_until_parked();
     let suppression_focus = cx
         .debug_bounds("modal-alert-suppression-keyboard-focus")
-        .expect("focused suppression should add inner geometry");
+        .expect("focused suppression should ring its checkbox");
 
     let retained_default_emphasis =
         cx.debug_bounds("modal-action-default-emphasis-equal-focus-save");

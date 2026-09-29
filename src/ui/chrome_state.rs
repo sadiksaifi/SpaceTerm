@@ -40,7 +40,6 @@ impl ChromeStatePolicy {
             colors.focus_ring = Color::rgba(0);
             colors.sidebar_focus = Color::rgba(0);
             colors.border_focused = colors.border;
-            colors.input_focused_border = colors.input_border;
             colors.resize_focused = colors.resize_idle;
         }
         colors
@@ -428,7 +427,6 @@ fn increased_contrast(c: &mut ChromeColors, host: Color) {
         c.input_background.source_over(host),
         4.5,
     );
-    c.input_focused_border = readable(c.input_focused_border, host, 3.0);
     c.input_invalid_border = readable(c.input_invalid_border, host, 3.0);
     for label in [
         &mut c.toggle_off_label,
@@ -477,7 +475,6 @@ mod tests {
                 >= 1.12
         );
         assert_eq!(prepared.focus_ring.a, 0);
-        assert_eq!(prepared.input_focused_border, prepared.input_border);
         assert_eq!(prepared.input_invalid_border, source.input_invalid_border);
     }
 

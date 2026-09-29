@@ -109,7 +109,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
             cx,
             crate::ui::control_theme_catalog::catalog(
                 &appearance,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
         )
         .unwrap()

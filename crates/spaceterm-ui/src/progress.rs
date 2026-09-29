@@ -25,6 +25,8 @@ use gpui::{
     relative,
 };
 
+use crate::ControlMotion;
+
 /// Error constructing a normalized determinate progress value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgressValueError {
@@ -92,16 +94,6 @@ pub enum ProgressSize {
     /// Ordinary indicators in panels, sheets, and modal content.
     #[default]
     Regular,
-}
-
-/// Whether indeterminate activity animates.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ProgressMotion {
-    /// Indeterminate activity travels across the bar and advances through spinner frames.
-    #[default]
-    Standard,
-    /// Indeterminate activity holds one static mark, so nothing on screen moves.
-    Reduced,
 }
 
 /// Application-owned colors shared by every progress indicator.
@@ -196,13 +188,13 @@ impl ProgressSizes {
 pub struct ProgressTheme {
     paint: ProgressPaint,
     sizes: ProgressSizes,
-    motion: ProgressMotion,
+    motion: ControlMotion,
 }
 
 impl ProgressTheme {
     /// Creates a complete progress theme from resolved paint, the named geometries, and the
     /// application's resolved motion preference.
-    pub const fn new(paint: ProgressPaint, sizes: ProgressSizes, motion: ProgressMotion) -> Self {
+    pub const fn new(paint: ProgressPaint, sizes: ProgressSizes, motion: ControlMotion) -> Self {
         Self {
             paint,
             sizes,
@@ -444,13 +436,13 @@ impl RenderOnce for FrameSpinner {
             .flex_none()
             .size(extent);
         match theme.motion {
-            ProgressMotion::Reduced => {
+            ControlMotion::Reduced => {
                 let reduced_selector = selector.clone();
                 root.debug_selector(move || format!("{reduced_selector}-reduced-motion"))
                     .child(spinner_frame(selector, extent, 0))
                     .into_any_element()
             }
-            ProgressMotion::Standard => {
+            ControlMotion::Standard => {
                 let frame_selector = selector.clone();
                 root.with_animation(
                     ElementId::NamedChild(std::sync::Arc::new(self.id), "frames".into()),
@@ -563,7 +555,7 @@ fn bar_fill(
                 .rounded(metrics.bar_corner_radius)
                 .bg(shaded(theme.paint.indicator, BAR_RESTING_OPACITY));
             match theme.motion {
-                ProgressMotion::Reduced => {
+                ControlMotion::Reduced => {
                     let reduced_selector = selector.clone();
                     activity
                         .flex()
@@ -577,7 +569,7 @@ fn bar_fill(
                         )
                         .into_any_element()
                 }
-                ProgressMotion::Standard => activity
+                ControlMotion::Standard => activity
                     .child(
                         bar_crest(metrics, theme.paint.indicator)
                             .absolute()

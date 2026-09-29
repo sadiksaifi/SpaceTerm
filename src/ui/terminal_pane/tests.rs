@@ -40,11 +40,11 @@ fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppConte
             cx,
             super::super::control_theme_catalog::catalog(
                 &active,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
             super::super::control_theme_catalog::catalog(
                 &inactive,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
         )
         .expect("paired control catalogs should replace atomically");
@@ -2565,7 +2565,7 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type
             cx,
             super::super::control_theme_catalog::catalog(
                 &chrome,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
         )
         .unwrap();
@@ -2633,7 +2633,7 @@ fn terminal_find_field_contains_fixed_chrome_line_height_in_both_densities(
                 cx,
                 super::super::control_theme_catalog::catalog(
                     &chrome,
-                    spaceterm_ui::ProgressMotion::Standard,
+                    spaceterm_ui::ControlMotion::Standard,
                 ),
             )
             .unwrap();
@@ -4266,7 +4266,7 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
             cx,
             super::super::control_theme_catalog::catalog(
                 &appearance,
-                spaceterm_ui::ProgressMotion::Standard,
+                spaceterm_ui::ControlMotion::Standard,
             ),
         )
         .unwrap();

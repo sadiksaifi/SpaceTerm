@@ -28,7 +28,7 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
     let border = authored.border;
     let border_variant = authored.border_variant;
     let border_focused = contrast(text_accent, background, 3.0);
-    let focus_ring = border_focused;
+    let focus_ring = authored.focus_ring;
     // Selection remains independent of the keyboard-focus color.
     let border_selected = border.mix(text, 0.35);
     let border_disabled = authored.border_disabled;
@@ -83,7 +83,6 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         4.5,
     );
     let input_border = authored.input_border;
-    let input_focused_border = contrast(border_focused, input_surface, 3.0);
     let input_invalid_border = contrast(error, input_surface, 3.0);
     let input_disabled_border = border_disabled;
     let modal_scrim = background.multiply_opacity(0x99);
@@ -375,7 +374,6 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         input_background,
         input_disabled_background,
         input_border,
-        input_focused_border,
         input_invalid_border,
         modal_scrim,
         scrollbar_track,
@@ -715,7 +713,6 @@ mod tests {
             for (indicator, surface) in [
                 (c.border_focused, c.background),
                 (c.border_focused, c.elevated_surface_background),
-                (c.input_focused_border, c.input_background),
                 (c.scrollbar_thumb_background, c.panel_background),
                 (c.scrollbar_thumb_hover_background, c.panel_background),
                 (c.scrollbar_thumb_active_background, c.panel_background),

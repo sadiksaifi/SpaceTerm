@@ -207,7 +207,7 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
     };
     let controls = crate::ui::control_theme_catalog::catalog(
         &appearance,
-        spaceterm_ui::ProgressMotion::Standard,
+        spaceterm_ui::ControlMotion::Standard,
     )
     .generation(spaceterm_ui::ControlThemeGeneration::new(generation));
     cx.update(|window, cx| {

@@ -100,6 +100,7 @@ impl gpui::RenderOnce for WorkspaceRenameField {
             ("workspace-rename-input", self.workspace_id.get()),
             &self.focus_handle,
             spaceterm_ui::FieldState::default(),
+            RadiusRole::ControlSmall.pixels(),
             cx,
         )
         .debug_selector(move || format!("workspace-rename-input-{}", self.workspace_id.get()))
@@ -108,7 +109,6 @@ impl gpui::RenderOnce for WorkspaceRenameField {
         .px(self.appearance.spacing(5.0))
         .flex()
         .items_center()
-        .rounded(RadiusRole::ControlSmall.pixels())
         .chrome_text(text_style)
         .text_color(gpui_color(self.appearance.colors.text))
         .on_click(move |_, window, cx| {

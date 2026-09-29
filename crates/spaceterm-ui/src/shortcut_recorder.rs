@@ -330,6 +330,7 @@ impl Render for ShortcutRecorder {
             self.id.clone(),
             &self.focus_handle,
             state,
+            field.corner_radius,
         )
         .when_some(selector, |frame, selector| {
             frame.debug_selector(move || selector.to_string())
@@ -341,7 +342,6 @@ impl Render for ShortcutRecorder {
         .w(field.height * WIDTH_IN_HEIGHTS)
         .h(field.height)
         .px(field.horizontal_padding)
-        .rounded(field.corner_radius)
         .text_size(field.label_size)
         .line_height(field.line_height)
         .font(font)

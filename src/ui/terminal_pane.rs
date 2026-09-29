@@ -3439,6 +3439,7 @@ impl gpui::RenderOnce for TerminalFindField {
             "terminal-find-field",
             &self.input.read(cx).focus_handle(),
             spaceterm_ui::FieldState::default(),
+            self.corner_radius,
             cx,
         )
         .debug_selector(|| "terminal-find-field".to_owned())
@@ -3451,7 +3452,6 @@ impl gpui::RenderOnce for TerminalFindField {
         .flex()
         .items_center()
         .px(appearance.spacing(5.0))
-        .rounded(self.corner_radius)
         .chrome_text(text_style)
         .text_color(gpui_color(
             appearance

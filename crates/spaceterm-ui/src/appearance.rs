@@ -94,6 +94,16 @@ impl Default for ControlTypography {
     }
 }
 
+/// Whether controls animate, resolved once from the Operating System's Reduce Motion preference.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ControlMotion {
+    /// Indeterminate progress travels and spinners advance; a focus ring contracts into place.
+    #[default]
+    Standard,
+    /// Nothing on screen moves: progress holds one static mark and a focus ring appears at rest.
+    Reduced,
+}
+
 /// One bounded layer of a semantic chrome shadow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlShadowLayer {

@@ -118,7 +118,6 @@ mod tests {
             input_text: Color::rgb(0x003300),
             input_placeholder: Color::rgb(0x005500),
             input_border: Color::rgb(0x00ff00),
-            input_focused_border: Color::rgb(0xffff00),
             input_disabled_background: Color::rgb(0x55ffff),
             ..popup.clone()
         };

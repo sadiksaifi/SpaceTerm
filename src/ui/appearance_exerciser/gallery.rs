@@ -604,9 +604,9 @@ impl Gallery {
                                     .disabled(index == 3)
                                     .invalid(index == 2 || index == 4)
                                     .preview_focus(index == 1 || index == 4),
+                                RadiusRole::Control.pixels(),
                                 cx,
                             )
-                            .rounded(RadiusRole::Control.pixels())
                             .px(px(8.0))
                             .h(px(30.0))
                             .child(input.clone()),
@@ -1122,6 +1122,12 @@ mod tests {
                     })
                 })
             };
+        // Test windows have no frame loop, so the ring's entrance is finished by hand.
+        let settle_focus_rings = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        };
         let paints_focus_ring = |expected: gpui::Rgba, cx: &mut gpui::VisualTestContext| {
             let bounds = cx
                 .debug_bounds("gallery-button-0-4-keyboard-focus")
@@ -1137,6 +1143,7 @@ mod tests {
             })
         };
 
+        settle_focus_rings(cx);
         assert!(paints_button_background(
             "gallery-button-0-1",
             active_hover,
@@ -1167,6 +1174,7 @@ mod tests {
         cx.simulate_click(reset.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
+        settle_focus_rings(cx);
         assert!(paints_button_background(
             "gallery-button-0-1",
             active_hover,

@@ -210,7 +210,6 @@ pub struct ToggleMetrics {
     checkbox_radius: Pixels,
     switch_inset: Pixels,
     border_width: Pixels,
-    focus_gap: Pixels,
     font_size: Pixels,
     line_height: f32,
 }
@@ -232,7 +231,6 @@ impl ToggleMetrics {
             checkbox_radius: px(3.0),
             switch_inset: px(2.0),
             border_width: px(1.0),
-            focus_gap: px(2.0),
             font_size: px(12.0),
             line_height: 1.2,
         }
@@ -262,12 +260,6 @@ impl ToggleMetrics {
         self
     }
 
-    /// Sets the space between an indicator and its keyboard focus outline.
-    pub fn focus_gap(mut self, gap: Pixels) -> Self {
-        self.focus_gap = gap;
-        self
-    }
-
     /// Sets visible-label typography.
     pub fn typography(mut self, font_size: Pixels, line_height: f32) -> Self {
         self.font_size = font_size;
@@ -290,7 +282,6 @@ impl ToggleMetrics {
             checkbox_radius: self.checkbox_radius,
             switch_inset: crate::appearance::scale_metric(self.switch_inset, spacing_scale),
             border_width: self.border_width,
-            focus_gap: crate::appearance::scale_metric(self.focus_gap, spacing_scale),
             font_size: crate::appearance::scale_metric(self.font_size, text_scale),
             line_height: self.line_height,
         }
@@ -331,7 +322,6 @@ pub struct ToggleTheme {
     paints: TogglePaints,
     sizes: ToggleSizes,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
 }
 
 impl ToggleTheme {
@@ -341,14 +331,7 @@ impl ToggleTheme {
             paints,
             sizes,
             focus_border,
-            focus_ring_width: px(1.0),
         }
-    }
-
-    /// Sets the focus-ring width independently of toggle borders and geometry.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
     }
 
     /// Adds the application-owned elevation treatment to toggle subparts.
@@ -422,7 +405,6 @@ impl ToggleTheme {
             disabled: self.paints.disabled.resolve(on),
             metrics: self.sizes.resolve(size),
             focus_border: self.focus_border,
-            focus_ring_width: self.focus_ring_width,
         }
     }
 }
@@ -879,7 +861,6 @@ struct ToggleStyle {
     disabled: TogglePaint,
     metrics: ToggleMetrics,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
 }
 
 #[derive(Clone, Copy)]
@@ -939,7 +920,9 @@ pub(crate) fn modal_checkbox_indicator(
     selected: bool,
     enabled: bool,
     pressed: bool,
+    focused: bool,
     selector: String,
+    focus_selector: String,
 ) -> gpui::AnyElement {
     let style = theme.resolve(ToggleSize::Regular, selected);
     checkbox_indicator(
@@ -952,9 +935,9 @@ pub(crate) fn modal_checkbox_indicator(
         theme.paint(selected, enabled, false, pressed),
         enabled,
         pressed,
-        false,
+        focused,
         selector,
-        String::new(),
+        focus_selector,
     )
 }
 
@@ -1037,13 +1020,15 @@ fn checkbox_indicator(
             )
         })
         .when(focused, |indicator| {
-            indicator.child(focus_outline(
-                metrics.checkbox_radius,
-                metrics,
-                style.focus_border,
-                style.focus_ring_width,
-                focus_selector,
-            ))
+            indicator.child(
+                crate::focus_ring(
+                    "focus-ring",
+                    style.focus_border,
+                    metrics.checkbox_radius,
+                    metrics.border_width,
+                )
+                .debug_selector(focus_selector),
+            )
         });
     indicator.into_any_element()
 }
@@ -1121,35 +1106,17 @@ fn switch_indicator(
                 }),
         )
         .when(focused, |indicator| {
-            indicator.child(focus_outline(
-                radius,
-                metrics,
-                style.focus_border,
-                style.focus_ring_width,
-                focus_selector,
-            ))
+            indicator.child(
+                crate::focus_ring(
+                    "focus-ring",
+                    style.focus_border,
+                    radius,
+                    metrics.border_width,
+                )
+                .debug_selector(focus_selector),
+            )
         });
     indicator.into_any_element()
-}
-
-fn focus_outline(
-    radius: Pixels,
-    metrics: ToggleMetrics,
-    color: Rgba,
-    width: Pixels,
-    selector: String,
-) -> impl IntoElement {
-    let offset = metrics.focus_gap + width;
-    div()
-        .debug_selector(move || selector)
-        .absolute()
-        .top(-offset)
-        .right(-offset)
-        .bottom(-offset)
-        .left(-offset)
-        .rounded(radius + metrics.focus_gap)
-        .border(width)
-        .border_color(color)
 }
 
 struct ToggleControlState {

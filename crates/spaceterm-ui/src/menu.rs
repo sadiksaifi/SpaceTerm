@@ -590,28 +590,12 @@ impl MenuSizes {
 pub struct MenuTheme {
     paint: MenuPaint,
     sizes: MenuSizes,
-    focus_ring_width: Pixels,
 }
 
 impl MenuTheme {
     /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
-        Self {
-            paint,
-            sizes,
-            focus_ring_width: px(1.0),
-        }
-    }
-
-    /// Sets the focus-ring width independently of the trigger border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
-        self.focus_ring_width
+        Self { paint, sizes }
     }
 
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
@@ -630,7 +614,6 @@ impl MenuTheme {
             paint: self.paint,
             metrics,
             shell,
-            focus_ring_width: self.focus_ring_width,
         }
     }
 }
@@ -678,7 +661,6 @@ struct MenuStyle {
     paint: MenuPaint,
     metrics: MenuMetrics,
     shell: FloatingShell,
-    focus_ring_width: Pixels,
 }
 
 type RowIconBuilder = Rc<dyn Fn(Rgba, Pixels) -> AnyElement>;
@@ -1648,19 +1630,14 @@ impl<A: Clone + 'static> MenuControl<A> {
                     trigger.hover(move |style| style.bg(paint.trigger_hover_background))
                 })
                 .when_some(focus_ring, |trigger, ring_color| {
-                    let gap = px(2.0);
-                    let position = gap + style.focus_ring_width;
                     trigger.child(
-                        div()
-                            .debug_selector(move || focus_selector.clone())
-                            .absolute()
-                            .top(-position)
-                            .right(-position)
-                            .bottom(-position)
-                            .left(-position)
-                            .rounded(style.metrics.trigger_corner_radius + gap)
-                            .border(style.focus_ring_width)
-                            .border_color(ring_color),
+                        crate::focus_ring(
+                            "focus-ring",
+                            ring_color,
+                            style.metrics.trigger_corner_radius,
+                            style.metrics.border_width,
+                        )
+                        .debug_selector(focus_selector),
                     )
                 });
         }
@@ -2101,7 +2078,6 @@ impl MenuState {
                 ),
                 metrics: MenuMetrics::new(px(0.0), px(0.0)),
                 shell: crate::FloatingSurfaceTheme::default().shell(MENU_ROLE),
-                focus_ring_width: px(1.0),
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
@@ -3750,7 +3726,7 @@ mod tests {
         cx.update(super::init);
         let ordinary = rgba(0x123456ff);
         let focus = rgba(0xabcdefef);
-        let mut theme = test_theme().focus_ring_width(px(2.0));
+        let mut theme = test_theme();
         theme.paint = theme
             .paint
             .trigger(rgba(0), rgba(0), ordinary)
@@ -3760,7 +3736,7 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.update(|window, cx| window.focus_next(cx));
-        cx.run_until_parked();
+        crate::focus_ring::settle(cx);
 
         let trigger = cx
             .debug_bounds("menu-trigger")
@@ -3768,7 +3744,7 @@ mod tests {
         let ring = cx
             .debug_bounds("menu-trigger-keyboard-focus")
             .expect("focused menu trigger should submit its outline");
-        let outset = px(3.0);
+        let outset = px(2.0);
         assert!(
             ring.left() == trigger.left() - outset
                 && ring.top() == trigger.top() - outset

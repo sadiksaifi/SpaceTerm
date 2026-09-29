@@ -417,7 +417,6 @@ pub struct ButtonTheme {
     variants: ButtonVariants,
     sizes: ButtonSizes,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
 }
 
 impl ButtonTheme {
@@ -427,14 +426,7 @@ impl ButtonTheme {
             variants,
             sizes,
             focus_border,
-            focus_ring_width: px(1.0),
         }
-    }
-
-    /// Sets the focus-ring width independently of every button border and radius.
-    pub fn focus_ring_width(mut self, width: Pixels) -> Self {
-        self.focus_ring_width = width.max(px(0.0));
-        self
     }
 
     /// Returns the resolved state paints for a semantic variant.
@@ -491,12 +483,6 @@ impl ButtonTheme {
         self.focus_border
     }
 
-    /// Returns the keyboard focus-ring width in stable logical points.
-    #[cfg(test)]
-    pub(crate) fn resolved_focus_ring_width(self) -> Pixels {
-        self.focus_ring_width
-    }
-
     pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
         Self {
             sizes: self.sizes.scaled(text_scale, spacing_scale),
@@ -513,7 +499,6 @@ impl ButtonTheme {
             pressed: variant.pressed,
             disabled: variant.disabled,
             focus_border: self.focus_border,
-            focus_ring_width: self.focus_ring_width,
             height: metrics.height,
             icon_button_size: metrics.icon_button_size.unwrap_or(metrics.height),
             icon_baseline_center: metrics.icon_baseline_center,
@@ -567,7 +552,6 @@ struct ButtonStyle {
     pressed: ButtonPaint,
     disabled: ButtonPaint,
     focus_border: Rgba,
-    focus_ring_width: Pixels,
     height: Pixels,
     icon_button_size: Pixels,
     icon_baseline_center: Option<Pixels>,
@@ -1329,8 +1313,6 @@ impl ButtonCore {
             .unwrap_or((pressed, hovered, focused));
         let paint = resolve_paint(style, enabled, pressed, hovered);
         let focus_ring = focused.then_some(style.focus_border);
-        let focus_ring_gap = px(2.0);
-        let focus_ring_position = focus_ring_gap + style.focus_ring_width;
         let border_color = if self.modal_borderless {
             paint.background
         } else {
@@ -1508,16 +1490,13 @@ impl ButtonCore {
             .child(content)
             .when_some(focus_ring, move |button, ring_color| {
                 button.child(
-                    div()
-                        .debug_selector(move || focus_selector.clone())
-                        .absolute()
-                        .top(-focus_ring_position)
-                        .right(-focus_ring_position)
-                        .bottom(-focus_ring_position)
-                        .left(-focus_ring_position)
-                        .rounded(style.corner_radius + focus_ring_gap)
-                        .border(style.focus_ring_width)
-                        .border_color(ring_color),
+                    crate::focus_ring(
+                        "focus-ring",
+                        ring_color,
+                        style.corner_radius,
+                        style.border_width,
+                    )
+                    .debug_selector(focus_selector),
                 )
             })
             .child(pointer_tracker)
