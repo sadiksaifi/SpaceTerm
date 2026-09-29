@@ -726,7 +726,7 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "7", "/");
     let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
-    let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
+    let prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
     assert_eq!(prefs.validate(), Ok(()));
     let resolved = profile.resolve(&prefs);
     assert_eq!(
@@ -739,21 +739,25 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
             by: Command::NewWorkspace
         }
     );
-    assert_eq!(
-        profile
-            .assign(&mut prefs, Command::CreateTab, Some(shortcut("cmd-/")))
+    for target in [Command::CloseTab, Command::NewWorkspace, Command::CreateTab] {
+        let mut assigned = prefs.clone();
+        let displaced = profile
+            .assign(&mut assigned, target, Some(shortcut("cmd-/")))
             .unwrap()
-            .displaced,
-        Some(Command::NewWorkspace)
-    );
-    assert_eq!(
-        profile.resolve(&prefs).shortcut(Command::NewWorkspace),
-        None
-    );
-    assert_eq!(
-        profile.resolve(&prefs).owner(&shortcut("cmd-/")),
-        Some(Command::CreateTab)
-    );
+            .displaced;
+        assert_eq!(
+            displaced,
+            (target != Command::NewWorkspace).then_some(Command::NewWorkspace)
+        );
+        assert_eq!(assigned.validate(), Ok(()));
+        let resolved = profile.resolve(&assigned);
+        assert_eq!(resolved.owner(&shortcut("cmd-/")), Some(target));
+        for previous in [Command::NewWorkspace, Command::CreateTab] {
+            if previous != target {
+                assert_eq!(resolved.shortcut(previous), None);
+            }
+        }
+    }
 }
 
 #[test]
@@ -773,5 +777,26 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
             Some(shortcut("ctrl-shift-7"))
         ),
         Err(Reservation::Terminal(TerminalConvention::ControlCharacter))
+    );
+}
+
+#[test]
+fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
+    let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
+    layout.insert(true, "7", "/");
+    let profile = KeymapProfile::new(
+        std::rc::Rc::new(layout),
+        [(Command::CloseTab, Some(DefaultBinding::new("cmd-/", &[])))],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
+    profile.reset(&mut prefs, Command::CloseTab);
+    assert_eq!(prefs.validate(), Ok(()));
+    assert_eq!(
+        profile.resolve(&prefs).owner(&shortcut("cmd-/")),
+        Some(Command::CloseTab)
     );
 }

@@ -316,13 +316,26 @@ impl KeymapProfile {
     ) -> Option<Command> {
         let shortcut = shortcut.resolve(&self.layout);
         let resolved = self.resolve(preferences);
-        let owner = resolved
-            .owner(&shortcut)
-            .filter(|&owner| owner != command)?;
-        let primary = resolved.shortcut(owner);
-        let kept = primary.filter(|&primary| primary != &shortcut).cloned();
-        self.retain(preferences, owner, kept);
-        Some(owner)
+        let owner = resolved.owner(&shortcut).filter(|&owner| owner != command);
+        // Displaced overrides still retain their spellings. Clear every competing override
+        // before installing a new owner so none can reappear or invalidate Settings.
+        let conflicts = preferences
+            .iter()
+            .filter_map(|(other, retained)| {
+                (other != command
+                    && retained.is_some_and(|retained| retained.resolve(&self.layout) == shortcut))
+                .then_some(other)
+            })
+            .collect::<Vec<_>>();
+        for other in conflicts {
+            self.retain(preferences, other, None);
+        }
+        if let Some(owner) = owner {
+            let primary = resolved.shortcut(owner);
+            let kept = primary.filter(|&primary| primary != &shortcut).cloned();
+            self.retain(preferences, owner, kept);
+        }
+        owner
     }
 
     /// Records one Keybinding. An override equal to an alias-free default, or Unassigned for a
