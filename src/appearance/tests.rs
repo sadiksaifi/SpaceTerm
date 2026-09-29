@@ -1098,7 +1098,7 @@ fn reset_fixture() -> SettingsDocument {
     document.preferences.window.density = ChromeDensity::Comfortable;
     document.preferences.window.transparency = 0.8;
     document.preferences.window.blur = false;
-    document.preferences.terminal.themes.light = ThemeId::new("missing.reset.terminal").unwrap();
+    document.preferences.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
     document.preferences.terminal.typography.family = TerminalFontFamily::Named {
         family: String::from("Menlo"),
     };
@@ -1117,6 +1117,13 @@ fn reset_fixture() -> SettingsDocument {
         id: ThemeId::new("custom.reset-fixture").unwrap(),
         name: String::from("Reset Fixture"),
         appearance: Appearance::Dark,
+        metadata: ThemeMetadata::default(),
+        colors: TerminalColorOverrides::default(),
+    });
+    document.terminal_themes.push(TerminalTheme {
+        id: ThemeId::new("custom.reset-light").unwrap(),
+        name: String::from("Reset Light"),
+        appearance: Appearance::Light,
         metadata: ThemeMetadata::default(),
         colors: TerminalColorOverrides::default(),
     });
@@ -1279,7 +1286,7 @@ fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
     let schema_version = document.schema_version;
     assert!(
         !document.terminal_themes.is_empty(),
-        "the fixture should install one theme"
+        "the fixture should install themes"
     );
 
     document.reset_all();
@@ -1403,12 +1410,50 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
     );
 }
 
+/// A Settings file that selects an uninstalled theme reads with that slot on the built-in theme
+/// for its appearance, and the other slot keeps its choice.
+#[test]
+fn reading_a_missing_theme_selection_returns_the_slot_to_the_builtin_theme() {
+    let mut document = SettingsDocument::default();
+    document.terminal_themes.push(TerminalTheme {
+        id: ThemeId::new("custom.kept-dark").unwrap(),
+        name: String::from("Kept Dark"),
+        appearance: Appearance::Dark,
+        metadata: ThemeMetadata::default(),
+        colors: TerminalColorOverrides::default(),
+    });
+    document.preferences.terminal.themes.dark = ThemeId::new("custom.kept-dark").unwrap();
+    let encoded = export_settings(&document)
+        .unwrap()
+        .replace("builtin.spaceterm.light", "custom.removed-light");
+
+    let read = parse_settings(encoded.as_bytes()).unwrap();
+
+    assert_eq!(
+        read.preferences.terminal.themes.light,
+        ThemeId::builtin("builtin.spaceterm.light")
+    );
+    assert_eq!(
+        read.preferences.terminal.themes.dark,
+        ThemeId::new("custom.kept-dark").unwrap()
+    );
+}
+
 #[test]
 fn native_settings_are_canonical_strict_and_round_trip() {
     let mut document = SettingsDocument::default();
     document.preferences.mode = AppearanceMode::Auto;
+    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.dark");
+    assert!(
+        export_settings(&document).is_err(),
+        "a slot should name a theme of its own appearance"
+    );
     document.preferences.terminal.themes.light = ThemeId::new("missing.terminal.light").unwrap();
-    document.preferences.terminal.themes.dark = ThemeId::new("missing.terminal.dark").unwrap();
+    assert!(
+        export_settings(&document).is_err(),
+        "a slot should name an installed theme"
+    );
+    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(encoded_value["schema_version"], 3);

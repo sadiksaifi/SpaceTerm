@@ -22,6 +22,11 @@ and appearance. Reinstalling or updating therefore replaces a theme in place, an
 that names it survives. Installing an extension also removes the themes its earlier versions
 installed, so the catalog holds what the extension currently ships.
 
+A selection always names an installed theme. When a selected theme leaves the catalog, through
+removal, an update that no longer ships it, or a Settings file naming a theme SpaceTerm does not
+have, its slot returns to the built-in theme for its appearance. Terminal panes then never draw
+colors the Settings window cannot name, and reinstalling a removed theme does not select it again.
+
 The registry is reached through the `RegistryTransport` Seam and only on an explicit request. The
 production transport is HTTPS-only and verifies certificates against the Operating System's trust
 store. Archives are read in memory within fixed bounds, and nothing in them reaches the

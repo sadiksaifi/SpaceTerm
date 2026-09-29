@@ -2526,6 +2526,8 @@ fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
 
 // Helpers --------------------------------------------------------------------------------------
 
+/// A family with one light and one dark theme, in that order.
+const PAIRED_FAMILY: &[u8] = br##"{"name":"Paired","themes":[{"name":"Paired Light","appearance":"light","style":{}},{"name":"Paired Dark","appearance":"dark","style":{}}]}"##;
 const IMPORTABLE_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
 fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> SettingsDocument {
@@ -2758,16 +2760,18 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
 
 #[gpui::test]
 fn resetting_theme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestAppContext) {
-    let mut document = SettingsDocument::default();
-    document.preferences.terminal.themes.dark =
-        crate::appearance::ThemeId::new("custom.previous.terminal").unwrap();
-    document.preferences.terminal.themes.dark =
-        crate::appearance::ThemeId::new("custom.previous.terminal").unwrap();
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(PAIRED_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    document.preferences.terminal.themes.light = document.terminal_themes[0].id.clone();
+    document.preferences.terminal.themes.dark = document.terminal_themes[1].id.clone();
     let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.editor.reset(
-                crate::appearance::ResetTarget::TerminalTheme(Appearance::Dark),
+                crate::appearance::ResetTarget::TerminalTheme(Appearance::Light),
                 cx,
             );
             settings.editor.reset(
@@ -2782,25 +2786,25 @@ fn resetting_theme_choices_survives_an_appearance_mode_round_trip(cx: &mut TestA
     let preferences = document_of(&window, cx).preferences;
     let defaults = SettingsDocument::default().preferences;
     assert_eq!(preferences.terminal.themes, defaults.terminal.themes);
-    assert_eq!(preferences.terminal.themes, defaults.terminal.themes);
 }
 
 #[gpui::test]
 fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(PAIRED_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    let themes = [
+        document.terminal_themes[0].id.clone(),
+        document.terminal_themes[1].id.clone(),
+    ];
+    let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            for slot in [Appearance::Light, Appearance::Dark] {
-                settings.set_theme(
-                    slot,
-                    crate::appearance::ThemeId::new(
-                        format!("user.saved.{slot:?}").to_ascii_lowercase(),
-                    )
-                    .unwrap(),
-                    cx,
-                );
-            }
+            settings.set_theme(Appearance::Light, themes[0].clone(), cx);
+            settings.set_theme(Appearance::Dark, themes[1].clone(), cx);
         })
     });
     cx.run_until_parked();

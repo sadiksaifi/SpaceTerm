@@ -17,7 +17,7 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, Color, ResetTarget,
+    Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, Color,
     SystemAppearance, TerminalColors, ThemeCatalog, ThemeId, ThemeSummary,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color, prepared_font};
@@ -98,14 +98,10 @@ impl ThemeGallery {
 /// What the preview of one slot shows: the theme chosen for it and the colors panes paint.
 struct SlotPreview {
     slot: Appearance,
-    /// The chosen theme, absent when it is no longer installed.
+    /// The chosen theme, absent only when the catalog cannot be read.
     summary: Option<ThemeSummary>,
-    requested: ThemeId,
-    /// The colors terminal panes use for this slot, including the person's overrides and any
-    /// fallback.
+    /// The colors terminal panes use for this slot, including the person's overrides.
     colors: TerminalColors,
-    /// The theme panes fall back to when the chosen one is missing.
-    effective_name: String,
 }
 
 impl SettingsWindow {
@@ -151,26 +147,14 @@ impl SettingsWindow {
             .iter()
             .find(|summary| summary.id == requested)
             .cloned();
-        let (colors, effective) = match resolved {
-            Some(resolved) => (
-                resolved.terminal.colors.clone(),
-                resolved.terminal.effective_theme.clone(),
-            ),
-            None => (
-                crate::appearance::builtin_terminal_base(slot),
-                crate::appearance::builtin_fallback_theme(slot),
-            ),
-        };
-        let effective_name = summaries
-            .iter()
-            .find(|summary| summary.id == effective)
-            .map_or_else(|| effective.to_string(), |summary| summary.name.clone());
+        let colors = resolved.map_or_else(
+            || crate::appearance::builtin_terminal_base(slot),
+            |resolved| resolved.terminal.colors.clone(),
+        );
         SlotPreview {
             slot,
             summary,
-            requested,
             colors,
-            effective_name,
         }
     }
 
@@ -643,22 +627,14 @@ impl SettingsWindow {
         }
     }
 
-    /// Removes themes together, then returns each slot that used one of them to its built-in
-    /// theme. Returns whether the themes were removed.
+    /// Removes themes together; a slot that used one of them returns to its built-in theme.
+    /// Returns whether the themes were removed.
     pub(super) fn remove_installed_themes(
         &mut self,
         ids: &[ThemeId],
         cx: &mut Context<Self>,
     ) -> bool {
-        let slots = self.editor.document().preferences.terminal.themes.clone();
         let removed = self.editor.remove_themes(ids, cx).is_ok();
-        if removed {
-            for slot in [Appearance::Light, Appearance::Dark] {
-                if ids.contains(slots.get(slot)) {
-                    self.editor.reset(ResetTarget::TerminalTheme(slot), cx);
-                }
-            }
-        }
         cx.notify();
         removed
     }
@@ -735,21 +711,13 @@ fn current_theme_details(
 }
 
 fn preview_name(preview: &SlotPreview) -> SharedString {
-    match &preview.summary {
-        Some(summary) => SharedString::from(summary.name.clone()),
-        None => SharedString::from(preview.requested.to_string()),
-    }
+    let name = preview.summary.as_ref().map(|summary| summary.name.clone());
+    SharedString::from(name.unwrap_or_default())
 }
 
 /// Where the theme came from, in the words a person would use.
 fn preview_origin(preview: &SlotPreview) -> SharedString {
-    match &preview.summary {
-        Some(summary) => theme_origin(summary),
-        None => SharedString::from(format!(
-            "Not installed. Terminal panes use {}.",
-            preview.effective_name
-        )),
-    }
+    preview.summary.as_ref().map(theme_origin).unwrap_or_default()
 }
 
 /// Where an installed theme came from, in the words a person would use.
