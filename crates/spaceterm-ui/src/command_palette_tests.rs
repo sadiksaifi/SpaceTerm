@@ -115,7 +115,7 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
 }
 
 #[test]
-fn a_band_item_should_take_half_a_single_line_row() {
+fn a_band_item_should_take_a_single_line_row() {
     let items = vec![
         CommandPaletteItem::new(1, "..").band(),
         CommandPaletteItem::new(2, "Documents"),
@@ -137,7 +137,7 @@ fn a_band_item_should_take_half_a_single_line_row() {
             },
         ]
     );
-    assert_eq!(results.rows()[0].height(metrics), px(14.0));
+    assert_eq!(results.rows()[0].height(metrics), px(28.0));
 }
 
 #[gpui::test]
