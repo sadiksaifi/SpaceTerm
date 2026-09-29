@@ -222,6 +222,20 @@ impl MacosKeyboardBridge {
             action: event.action,
             native_key_code: Some(event.native_key_code),
         };
+        // Let AppKit process its Help key equivalent after GPUI's responder declines it.
+        // Matching the character preserves Command-? on non-US keyboard layouts.
+        if event.modifiers.platform
+            && !event.modifiers.control
+            && !event.modifiers.alt
+            && !event.modifiers.function
+            && event
+                .characters_ignoring_modifiers
+                .as_deref()
+                .or(event.characters.as_deref())
+                == Some("?")
+        {
+            return KeyTranslation::Unhandled(unhandled);
+        }
         let physical_key = physical_key(event.native_key_code);
         let logical_key = event
             .characters_ignoring_modifiers
@@ -511,6 +525,56 @@ mod tests {
             unmodified_characters: Some(text.to_owned()),
             characters_without_option: Some(text.to_owned()),
             modifiers: NativeModifiers::default(),
+        }
+    }
+
+    #[test]
+    fn help_shortcut_reaches_appkit_without_entering_terminal_input() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        for action in [KeyAction::Press, KeyAction::Repeat, KeyAction::Release] {
+            // The question mark is layout-derived; the physical slash key is not required.
+            for (key_code, shift) in [(44, true), (25, false)] {
+                let mut event = native(key_code, "?");
+                event.action = action;
+                event.modifiers.platform = true;
+                event.modifiers.shift = shift;
+                assert_eq!(
+                    bridge.translate(event),
+                    KeyTranslation::Unhandled(UnhandledKeyEvent {
+                        kind: if action == KeyAction::Release {
+                            TerminalKeyInputEventKind::KeyUp
+                        } else {
+                            TerminalKeyInputEventKind::KeyDown
+                        },
+                        action,
+                        native_key_code: Some(key_code),
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_routing_preserves_other_terminal_question_mark_chords() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        for (platform, control, alt) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let mut event = native(44, "?");
+            event.modifiers = NativeModifiers {
+                shift: true,
+                platform,
+                control,
+                alt,
+                ..NativeModifiers::default()
+            };
+            let input = encoded(bridge.translate(event));
+            assert_eq!(input.physical_key, PhysicalKey::Slash);
+            assert_eq!(input.modifiers.platform, platform);
+            assert_eq!(input.modifiers.control, control);
+            assert_eq!(input.modifiers.alt, alt);
         }
     }
 

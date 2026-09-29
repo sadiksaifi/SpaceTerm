@@ -484,11 +484,11 @@ fn native_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<NativeKeyEquiv
 #[cfg(not(test))]
 mod native {
     use objc2::runtime::AnyObject;
-    use objc2::{AnyThread, MainThreadMarker, msg_send};
+    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, msg_send};
     use objc2_app_kit::{
         NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
         NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSApplication,
-        NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSWorkspace,
+        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSWorkspace,
     };
     use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
 
@@ -572,6 +572,14 @@ mod native {
         let main_menu = application
             .mainMenu()
             .ok_or(ApplicationMenuError::Unavailable)?;
+        let help_menu = main_menu
+            .itemWithTitle(&NSString::from_str("Help"))
+            .and_then(|item| item.submenu())
+            .ok_or(ApplicationMenuError::Unavailable)?;
+        // GPUI creates its menus without a nib. Initialize AppKit's Help support so
+        // it installs native menu search and handles the system Help shortcut.
+        let _ = NSHelpManager::sharedHelpManager(application.mtm());
+        application.setHelpMenu(Some(&help_menu));
         for (item_title, symbol) in super::application_menu_item_icons(application_name) {
             let decoration = MenuItemIcon {
                 menu: application_name,
