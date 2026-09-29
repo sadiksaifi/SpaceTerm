@@ -1493,6 +1493,49 @@ fn a_query_prefix_should_lead_the_query_without_joining_it(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn return_should_open_the_primary_action_when_only_items_outside_default_selection_remain(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![CommandPaletteItem::new(1, "Go Back").outside_default_selection()],
+            cx,
+        );
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("open", "Open")), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        None
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(header_actions(&events), vec![SharedString::from("open")]);
+
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Go Back").outside_default_selection(),
+                CommandPaletteItem::new(2, "Documents"),
+            ],
+            cx,
+        );
+    });
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(2)
+    );
+    cx.simulate_keystrokes("up");
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1),
+        "the item could not be selected on request"
+    );
+}
+
+#[gpui::test]
 fn a_query_note_should_trail_the_query_before_the_primary_action(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {

@@ -824,6 +824,7 @@ pub struct CommandPaletteItem<I> {
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
     disabled: bool,
+    default_selectable: bool,
     leading_icon: Option<IconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
@@ -861,6 +862,7 @@ impl<I> CommandPaletteItem<I> {
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
             disabled: false,
+            default_selectable: true,
             leading_icon: None,
             trailing: None,
             debug_selector: None,
@@ -903,6 +905,14 @@ impl<I> CommandPaletteItem<I> {
     /// Controls whether navigation and activation may reach this item.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Keeps the palette from selecting this item on its own, such as a row that leaves the
+    /// current context. Navigation and the pointer still reach it. When no other item is
+    /// selectable, Return activates the primary action.
+    pub fn outside_default_selection(mut self) -> Self {
+        self.default_selectable = false;
         self
     }
 
@@ -2333,6 +2343,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.selected.as_ref()
     }
 
+    /// Returns the caption presented after the last result, if any.
+    pub fn results_note(&self) -> Option<&SharedString> {
+        self.results_note.as_ref()
+    }
+
     /// Replaces items immediately.
     ///
     /// Semantic matching preserves selection by stable identity. Caller-ranked results treat the
@@ -2799,6 +2814,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         }
         let Some(item_id) = self.selected.clone() else {
+            self.activate_primary_action(cx);
             return;
         };
         self.activate_item(item_id, source, window, cx);
@@ -3018,7 +3034,7 @@ fn first_enabled_id<I: Clone>(
     matches.iter().find_map(|matched| {
         items
             .get(matched.item_index)
-            .filter(|item| !item.disabled)
+            .filter(|item| !item.disabled && item.default_selectable)
             .map(|item| item.id.clone())
     })
 }

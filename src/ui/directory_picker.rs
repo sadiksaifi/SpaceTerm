@@ -47,6 +47,7 @@ const NEW_DIRECTORY_NOTE: &str = "New directory";
 const SYSTEM_SELECTION_ACTION: &str = "directory-picker-system-selection";
 /// Identifies the row that opens the enclosing directory.
 const ENCLOSING_ROW: &str = "directory-picker-enclosing";
+const NO_SUBDIRECTORIES: &str = "No subdirectories";
 const TRUNCATED_LISTING_NOTE: &str =
     "Showing the first 1024 directories. Type a path to open others.";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
@@ -1163,9 +1164,16 @@ impl DirectoryPicker {
             .collect()
     }
 
-    /// Returns the caption after the last row when the listing omits directories.
+    /// Returns the caption after the last row: the listing omits directories, or a readable
+    /// directory has none beneath the Go Back row.
     fn results_note(&self) -> Option<&'static str> {
-        self.listing_truncated.then_some(TRUNCATED_LISTING_NOTE)
+        if self.listing_truncated {
+            Some(TRUNCATED_LISTING_NOTE)
+        } else if self.rows.is_empty() && self.status == DirectoryPickerStatus::Readable {
+            Some(NO_SUBDIRECTORIES)
+        } else {
+            None
+        }
     }
 
     /// Explains the list area whenever it presents no child directory.
@@ -1211,7 +1219,7 @@ impl DirectoryPicker {
             | DirectoryPickerStatus::Readable => {}
         }
         match self.listing_error {
-            None => EmptyNotice::new(IconName::Folder, "No subdirectories"),
+            None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
             Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
@@ -1251,7 +1259,6 @@ impl DirectoryPicker {
         let first_child = items
             .iter()
             .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
-            .or(items.first())
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
         let query_note = (self.status == DirectoryPickerStatus::Missing)
@@ -1372,6 +1379,7 @@ fn enclosing_directory_item(
         },
         "Go Back",
     )
+    .outside_default_selection()
     .leading_icon(|foreground, size| {
         Icon::new(IconName::FolderOutput, size, foreground).into_any_element()
     })
@@ -1783,6 +1791,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn return_in_an_empty_directory_should_open_it_rather_than_go_back(cx: &mut TestAppContext) {
+        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(ExactPathState::ReadableDirectory)],
+            [],
+            [Ok(identity)],
+        );
+        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
+        assert!(cx.debug_bounds(ENCLOSING_ROW).is_some());
+        assert!(
+            cx.debug_bounds("command-palette-results-note").is_some(),
+            "an empty directory did not say it has no subdirectories"
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| picker
+                .palette
+                .read(cx)
+                .selected_item_id()
+                .cloned()),
+            None
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            provider.state.lock().unwrap().validated_directories,
+            vec![remote_directory(HOME_DISPLAY)]
+        );
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
+        );
+    }
+
+    #[gpui::test]
     fn an_unusable_path_should_disable_the_confirm_action_and_ignore_the_confirm_key(
         cx: &mut TestAppContext,
     ) {
@@ -2176,19 +2223,14 @@ mod tests {
         assert!(picker.read_with(cx, |picker, _| picker.listing_truncated));
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
         assert_eq!(
-            picker.read_with(cx, |picker, _| {
-                (
-                    picker
-                        .palette_items()
-                        .first()
-                        .map(|item| item.section_text().is_none()),
-                    picker.results_note(),
-                )
-            }),
-            (
-                Some(true),
-                Some("Showing the first 1024 directories. Type a path to open others.")
-            )
+            picker.read_with(cx, |picker, cx| picker
+                .palette
+                .read(cx)
+                .results_note()
+                .cloned()),
+            Some(SharedString::from(
+                "Showing the first 1024 directories. Type a path to open others."
+            ))
         );
     }
 
