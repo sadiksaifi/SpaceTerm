@@ -1383,11 +1383,21 @@ fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
 // Content --------------------------------------------------------------------------------------
 
 #[test]
-fn the_terminal_font_list_offers_only_monospace_families() {
+fn the_terminal_font_list_hides_the_private_default_and_keeps_system_choices() {
     use crate::appearance::{AvailableFont, AvailableFonts, FontClass};
 
     let fonts = AvailableFonts {
         installed: vec![
+            AvailableFont {
+                family: "SpaceTerm Default".into(),
+                class: FontClass::Monospace,
+                resolution_identity: "bundled".into(),
+            },
+            AvailableFont {
+                family: "JetBrainsMono Nerd Font".into(),
+                class: FontClass::Monospace,
+                resolution_identity: "system-installed".into(),
+            },
             AvailableFont {
                 family: "Menlo".into(),
                 class: FontClass::Monospace,
@@ -1404,7 +1414,10 @@ fn the_terminal_font_list_offers_only_monospace_families() {
 
     assert_eq!(
         super::terminal_font_families(&fonts),
-        vec![String::from("Menlo")]
+        vec![
+            String::from("JetBrainsMono Nerd Font"),
+            String::from("Menlo")
+        ]
     );
 }
 

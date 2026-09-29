@@ -1570,3 +1570,55 @@ fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
         Err(SettingsDocumentError::InvalidJson)
     );
 }
+
+#[test]
+fn bundled_default_preserves_a_named_system_font_choice() {
+    let fonts = AvailableFonts {
+        installed: vec![
+            AvailableFont {
+                family: "SpaceTerm Default".into(),
+                class: FontClass::Monospace,
+                resolution_identity: "bundled".into(),
+            },
+            AvailableFont {
+                family: "JetBrainsMono Nerd Font".into(),
+                class: FontClass::Monospace,
+                resolution_identity: "system-installed".into(),
+            },
+        ],
+        ..AvailableFonts::default()
+    };
+    let catalog = ThemeCatalog::default();
+    let mut preferences = AppearancePreferences::default();
+    let resolved = catalog
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &fonts,
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.terminal.typography.regular.primary_family,
+        "SpaceTerm Default"
+    );
+    preferences.terminal.typography.family = TerminalFontFamily::Named {
+        family: "JetBrainsMono Nerd Font".into(),
+    };
+    let resolved = catalog
+        .resolve(
+            AppearanceGeneration::INITIAL,
+            &preferences,
+            SystemAppearance::unavailable(),
+            &fonts,
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.terminal.typography.regular.primary_family,
+        "JetBrainsMono Nerd Font"
+    );
+    assert_eq!(
+        resolved.terminal.typography.regular.resolution_identity,
+        "system-installed"
+    );
+}

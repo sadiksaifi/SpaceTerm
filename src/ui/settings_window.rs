@@ -1624,7 +1624,7 @@ impl SettingsWindow {
             TerminalFontFamily::Named { family } => Some(family.clone()),
         };
         let mut items = vec![
-            ComboBoxItem::new(None, "Default monospace")
+            ComboBoxItem::new(None, crate::bundled_font::LABEL)
                 .debug_selector("settings-terminal-font-default"),
         ];
         items.extend(
@@ -2320,6 +2320,7 @@ fn terminal_font_families(fonts: &crate::appearance::AvailableFonts) -> Vec<Stri
         .installed
         .iter()
         .filter(|font| font.class == FontClass::Monospace)
+        .filter(|font| font.family != crate::bundled_font::FAMILY)
         .map(|font| font.family.clone())
         .collect()
 }

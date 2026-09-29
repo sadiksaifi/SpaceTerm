@@ -349,7 +349,8 @@ fn resolve_chrome_typography(fonts: &AvailableFonts) -> ResolvedChromeTypography
 }
 
 /// Ordered fallback families used when Terminal typography requests the default.
-pub(crate) const DEFAULT_TERMINAL_FAMILIES: [&str; 4] = [
+pub(crate) const DEFAULT_TERMINAL_FAMILIES: [&str; 5] = [
+    crate::bundled_font::FAMILY,
     "JetBrainsMono Nerd Font",
     "JetBrainsMono Nerd Font Mono",
     "JetBrains Mono",

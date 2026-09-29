@@ -4,7 +4,10 @@
 #[path = "appearance_runtime_tests.rs"]
 mod tests;
 
-use std::{rc::Rc, sync::Arc};
+#[cfg(test)]
+pub(crate) use tests::font_catalog_test_app;
+
+use std::{borrow::Cow, rc::Rc, sync::Arc};
 
 use gpui::{App, Global, Task, font, px};
 
@@ -87,6 +90,16 @@ pub(crate) struct AppearanceRuntime {
     _observation: Option<Box<dyn SystemAppearanceSubscription>>,
 }
 impl Global for AppearanceRuntime {}
+
+/// Register the embedded terminal faces before capturing the font catalog.
+pub(crate) fn register_terminal_fonts(cx: &App) -> gpui::Result<()> {
+    cx.text_system().add_fonts(
+        crate::bundled_font::FACES
+            .iter()
+            .map(|bytes| Cow::Borrowed(*bytes))
+            .collect(),
+    )
+}
 
 pub(crate) fn install(
     settings: UserSettings,

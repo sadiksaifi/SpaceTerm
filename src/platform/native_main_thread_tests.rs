@@ -32,6 +32,8 @@ pub(crate) fn run() {
         };
     }
 
+    native_test!(super::macos_accessibility::tests::bundled_font_metadata_does_not_require_system_installation);
+
     gpui_test!(
         macos_appearance::tests::forcing_native_chrome_does_not_change_the_system_preference
     );
@@ -80,5 +82,5 @@ pub(crate) fn run() {
     native_test!(
         macos_pasteboard::tests::native_write_declares_every_representation_before_publishing_data
     );
-    println!("28 native main-thread tests passed");
+    println!("29 native main-thread tests passed");
 }

@@ -163,8 +163,7 @@ mod native {
     use objc2_app_kit::{
         NSAccessibilityElement, NSAccessibilityFontFamilyKey, NSAccessibilityFontNameKey,
         NSAccessibilityFontSizeKey, NSAccessibilityFontTextAttribute,
-        NSAccessibilityPostNotification, NSAccessibilityVisibleNameKey, NSFont, NSFontManager,
-        NSFontTraitMask, NSView,
+        NSAccessibilityPostNotification, NSAccessibilityVisibleNameKey, NSView,
     };
     use objc2_foundation::{
         NSArray, NSAttributedString, NSDictionary, NSInteger, NSNumber, NSObjectProtocol, NSPoint,
@@ -173,10 +172,10 @@ mod native {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        AccessibilityAttributedText, AccessibilityElementState, AccessibilityFontMetadata,
-        AccessibilityNotification, AccessibilityNotifications, ScreenRect, TEXT_AREA_ROLE,
-        TerminalAccessibilityModel, TerminalAccessibilityUpdate, normalized_font_family,
-        normalized_font_point_size, notification_name,
+        AccessibilityAttributedText, AccessibilityElementState, AccessibilityNotification,
+        AccessibilityNotifications, ScreenRect, TEXT_AREA_ROLE, TerminalAccessibilityModel,
+        TerminalAccessibilityUpdate, normalized_font_family, notification_name,
+        resolve_font_metadata,
     };
 
     const LAYOUT_CHANGED: &str = "AXLayoutChanged";
@@ -759,59 +758,79 @@ mod native {
             )
         }
     }
+}
+#[cfg(any(not(test), feature = "macos-native-tests"))]
+fn resolve_font_metadata(
+    descriptor: &crate::appearance::ResolvedFontDescriptor,
+    point_size: f32,
+) -> Option<AccessibilityFontMetadata> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSFont, NSFontManager, NSFontTraitMask};
+    use objc2_foundation::NSString;
 
-    fn resolve_font_metadata(
-        descriptor: &crate::appearance::ResolvedFontDescriptor,
-        point_size: f32,
-    ) -> Option<AccessibilityFontMetadata> {
-        let requested_family = normalized_font_family(&descriptor.primary_family);
-        let point_size = normalized_font_point_size(point_size);
-        let mtm = MainThreadMarker::new()?;
-        let requested = NSString::from_str(requested_family);
-        let manager = NSFontManager::sharedFontManager(mtm);
-        let traits = match descriptor.style {
-            crate::appearance::FontStyle::Normal => NSFontTraitMask::UnitalicFontMask,
-            crate::appearance::FontStyle::Italic => NSFontTraitMask::ItalicFontMask,
-        };
-        let weight = match descriptor.weight {
-            100..=199 => 1,
-            200..=299 => 2,
-            300..=399 => 3,
-            400..=499 => 5,
-            500..=599 => 6,
-            600..=699 => 8,
-            700..=799 => 9,
-            800..=899 => 10,
-            _ => 12,
-        };
-        let font = manager
-            .fontWithFamily_traits_weight_size(&requested, traits, weight, f64::from(point_size))
-            .or_else(|| NSFont::fontWithName_size(&requested, f64::from(point_size)))
-            .or_else(|| {
-                manager.fontWithFamily_traits_weight_size(
-                    &NSString::from_str("Menlo"),
-                    traits,
-                    weight,
-                    f64::from(point_size),
-                )
-            })
-            .or_else(|| {
-                Some(NSFont::monospacedSystemFontOfSize_weight(
-                    f64::from(point_size),
-                    0.0,
-                ))
-            })?;
-        Some(AccessibilityFontMetadata {
+    let requested_family = normalized_font_family(&descriptor.primary_family);
+    let point_size = normalized_font_point_size(point_size);
+    if requested_family == crate::bundled_font::FAMILY {
+        let (name, display_name) = crate::bundled_font::face_metadata(
+            descriptor.weight,
+            descriptor.style == crate::appearance::FontStyle::Italic,
+        );
+        return Some(AccessibilityFontMetadata {
             requested_descriptor: descriptor.clone(),
             requested_family: requested_family.to_owned(),
             requested_point_size: point_size,
-            name: font.fontName().to_string(),
-            family: font.familyName().map(|name| name.to_string()),
-            visible_name: font.displayName().map(|name| name.to_string()),
-            point_size: font.pointSize() as f32,
-        })
+            name: name.to_owned(),
+            family: Some(requested_family.to_owned()),
+            visible_name: Some(display_name.to_owned()),
+            point_size,
+        });
     }
+    let mtm = MainThreadMarker::new()?;
+    let requested = NSString::from_str(requested_family);
+    let manager = NSFontManager::sharedFontManager(mtm);
+    let traits = match descriptor.style {
+        crate::appearance::FontStyle::Normal => NSFontTraitMask::UnitalicFontMask,
+        crate::appearance::FontStyle::Italic => NSFontTraitMask::ItalicFontMask,
+    };
+    let weight = match descriptor.weight {
+        100..=199 => 1,
+        200..=299 => 2,
+        300..=399 => 3,
+        400..=499 => 5,
+        500..=599 => 6,
+        600..=699 => 8,
+        700..=799 => 9,
+        800..=899 => 10,
+        _ => 12,
+    };
+    let font = manager
+        .fontWithFamily_traits_weight_size(&requested, traits, weight, f64::from(point_size))
+        .or_else(|| NSFont::fontWithName_size(&requested, f64::from(point_size)))
+        .or_else(|| {
+            manager.fontWithFamily_traits_weight_size(
+                &NSString::from_str("Menlo"),
+                traits,
+                weight,
+                f64::from(point_size),
+            )
+        })
+        .or_else(|| {
+            Some(NSFont::monospacedSystemFontOfSize_weight(
+                f64::from(point_size),
+                0.0,
+            ))
+        })?;
+    Some(AccessibilityFontMetadata {
+        requested_descriptor: descriptor.clone(),
+        requested_family: requested_family.to_owned(),
+        requested_point_size: point_size,
+        name: font.fontName().to_string(),
+        family: font.familyName().map(|name| name.to_string()),
+        visible_name: font.displayName().map(|name| name.to_string()),
+        point_size: font.pointSize() as f32,
+    })
 }
+
 #[cfg(any(not(test), feature = "macos-native-tests"))]
 fn normalized_font_family(family: &str) -> &str {
     if family.trim().is_empty() {
@@ -865,9 +884,54 @@ impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::terminal::{AccessibilityCell, AccessibilityLine};
+
+    pub(crate) fn bundled_font_metadata_does_not_require_system_installation() {
+        use objc2_app_kit::NSFont;
+        use objc2_foundation::NSString;
+
+        assert!(
+            NSFont::fontWithName_size(&NSString::from_str("SpaceTermDefault-Regular"), 18.0)
+                .is_none()
+        );
+        let mut descriptor = crate::terminal::test_terminal_appearance_update()
+            .appearance
+            .typography
+            .regular
+            .clone();
+        descriptor.primary_family = "SpaceTerm Default".to_owned();
+        for (weight, style, name) in [
+            (
+                400,
+                crate::appearance::FontStyle::Normal,
+                "SpaceTermDefault-Regular",
+            ),
+            (
+                700,
+                crate::appearance::FontStyle::Normal,
+                "SpaceTermDefault-Bold",
+            ),
+            (
+                400,
+                crate::appearance::FontStyle::Italic,
+                "SpaceTermDefault-Italic",
+            ),
+            (
+                700,
+                crate::appearance::FontStyle::Italic,
+                "SpaceTermDefault-BoldItalic",
+            ),
+        ] {
+            descriptor.weight = weight;
+            descriptor.style = style;
+            let metadata = resolve_font_metadata(&descriptor, 18.0).unwrap();
+            assert_eq!(metadata.name, name);
+            assert_eq!(metadata.family.as_deref(), Some("SpaceTerm Default"));
+            assert_eq!(metadata.point_size, 18.0);
+        }
+    }
 
     fn state() -> AccessibilityElementState {
         AccessibilityElementState {
