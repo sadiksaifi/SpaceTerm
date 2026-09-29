@@ -115,10 +115,9 @@ const fn source_error(error: LocalFilesystemError) -> DirectorySourceError {
     match error {
         LocalFilesystemError::Missing => DirectorySourceError::Missing,
         LocalFilesystemError::NotDirectory => DirectorySourceError::NotDirectory,
-        LocalFilesystemError::PermissionDenied | LocalFilesystemError::Unreadable => {
-            DirectorySourceError::PermissionDenied
-        }
-        LocalFilesystemError::NotAbsolute
+        LocalFilesystemError::PermissionDenied => DirectorySourceError::PermissionDenied,
+        LocalFilesystemError::Unreadable
+        | LocalFilesystemError::NotAbsolute
         | LocalFilesystemError::Malformed
         | LocalFilesystemError::NotFile
         | LocalFilesystemError::IdentityChanged
@@ -158,6 +157,18 @@ mod tests {
             home.0.clone(),
             cx.executor(),
         )
+    }
+
+    #[test]
+    fn only_a_denied_permission_should_read_as_permission_denied() {
+        assert_eq!(
+            source_error(LocalFilesystemError::PermissionDenied),
+            DirectorySourceError::PermissionDenied
+        );
+        assert_eq!(
+            source_error(LocalFilesystemError::Unreadable),
+            DirectorySourceError::Other
+        );
     }
 
     fn path(value: &str) -> PickerPath {
