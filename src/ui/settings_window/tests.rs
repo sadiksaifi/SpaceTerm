@@ -3139,6 +3139,22 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
     assert!(text.contains("comfortable"), "the text should follow the change");
 }
 
+/// A full-width row holds a block rather than one centered line, so the block sits the same
+/// distance from every edge of its row.
+#[gpui::test]
+fn the_settings_file_is_inset_equally_on_every_side(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let row = cx.debug_bounds("settings-row-settings-file").unwrap();
+    let frame = cx.debug_bounds("settings-file-frame").unwrap();
+    let edit = cx.debug_bounds("settings-file-edit").unwrap();
+
+    let left = frame.left() - row.left();
+    assert_eq!(frame.top() - row.top(), left);
+    assert_eq!(row.right() - frame.right(), left);
+    assert_eq!(row.bottom() - edit.bottom(), left);
+}
+
 #[gpui::test]
 fn the_settings_file_accepts_no_typing(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
