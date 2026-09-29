@@ -65,8 +65,8 @@ impl gpui::PlatformTextSystem for CatalogTextSystem {
         // family after receiving its font data, even when the host already has it installed.
         if fonts.iter().any(|bytes| {
             bytes
-                .windows(b"JetBrainsMono".len())
-                .any(|name| name == b"JetBrainsMono")
+                .windows(b"SpaceTermDefault".len())
+                .any(|name| name == b"SpaceTermDefault")
         }) {
             self.terminal_fonts_registered
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -80,7 +80,7 @@ impl gpui::PlatformTextSystem for CatalogTextSystem {
             .terminal_fonts_registered
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            names.push("JetBrainsMono Nerd Font".to_owned());
+            names.push("SpaceTerm Default".to_owned());
         }
         names
     }

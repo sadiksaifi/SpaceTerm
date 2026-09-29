@@ -1,6 +1,7 @@
 mod app;
 mod appearance;
 mod application_identity;
+mod bundled_font;
 mod close_confirmation;
 mod domain;
 mod keybindings;

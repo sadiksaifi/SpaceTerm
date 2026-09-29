@@ -1321,7 +1321,7 @@ mod runtime_tests {
                     .typography
                     .regular
                     .primary_family,
-                "JetBrainsMono Nerd Font"
+                "SpaceTerm Default"
             );
         });
     }

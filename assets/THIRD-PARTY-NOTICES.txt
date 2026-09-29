@@ -356,7 +356,9 @@ JetBrainsMono Nerd Font
 Source: https://github.com/ryanoasis/nerd-fonts/tree/v3.5.1/patched-fonts/JetBrainsMono/Ligatures
 Nerd Fonts: 3.5.1, commit b894ea7803af6aade63d60a4381e006098ec9c4d
 JetBrains Mono: 2.304
-SpaceTerm embeds the unmodified Regular, Bold, Italic, and Bold Italic faces.
+SpaceTerm embeds the Regular, Bold, Italic, and Bold Italic faces.
+Their family and face names are changed to SpaceTerm Default to avoid collisions
+with system fonts. Glyphs, metrics, and layout tables are unchanged.
 
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 

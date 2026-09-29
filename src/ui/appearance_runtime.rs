@@ -93,20 +93,12 @@ impl Global for AppearanceRuntime {}
 
 /// Register the embedded terminal faces before capturing the font catalog.
 pub(crate) fn register_terminal_fonts(cx: &App) -> gpui::Result<()> {
-    cx.text_system().add_fonts(vec![
-        Cow::Borrowed(include_bytes!(
-            "../../assets/fonts/jetbrains-mono/JetBrainsMonoNerdFont-Regular.ttf"
-        )),
-        Cow::Borrowed(include_bytes!(
-            "../../assets/fonts/jetbrains-mono/JetBrainsMonoNerdFont-Bold.ttf"
-        )),
-        Cow::Borrowed(include_bytes!(
-            "../../assets/fonts/jetbrains-mono/JetBrainsMonoNerdFont-Italic.ttf"
-        )),
-        Cow::Borrowed(include_bytes!(
-            "../../assets/fonts/jetbrains-mono/JetBrainsMonoNerdFont-BoldItalic.ttf"
-        )),
-    ])
+    cx.text_system().add_fonts(
+        crate::bundled_font::FACES
+            .iter()
+            .map(|bytes| Cow::Borrowed(*bytes))
+            .collect(),
+    )
 }
 
 pub(crate) fn install(
