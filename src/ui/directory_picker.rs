@@ -1912,8 +1912,8 @@ mod tests {
         );
         assert_eq!(
             enclosing.size.height,
-            child.size.height,
-            "the enclosing row should be as tall as a directory row"
+            (child.size.height * 0.8).round(),
+            "the enclosing row should be four fifths of a directory row"
         );
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),

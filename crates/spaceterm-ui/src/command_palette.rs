@@ -884,8 +884,8 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Presents this item as a band: a single-line row filled edge to edge, for a navigation row
-    /// such as one that opens an enclosing directory. A leading band sits flush under the search
+    /// Presents this item as a band: four fifths of a single-line row, filled edge to edge, for a
+    /// navigation row such as one that opens an enclosing directory. A leading band sits flush under the search
     /// line. A band shows no description.
     pub fn band(mut self) -> Self {
         self.band = true;
@@ -1595,7 +1595,7 @@ mod presented_results {
     /// How tall one item row is.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum ItemRowSize {
-        /// A single-line row filled edge to edge.
+        /// Four fifths of a single-line row in whole pixels, filled edge to edge.
         Band,
         SingleLine,
         /// A label with its description below.
@@ -1608,7 +1608,11 @@ mod presented_results {
                 Self::Section(_) => metrics.section_height,
                 Self::Separator => metrics.separator_height,
                 Self::Item {
-                    size: ItemRowSize::Band | ItemRowSize::SingleLine,
+                    size: ItemRowSize::Band,
+                    ..
+                } => (metrics.single_line_row_height * 0.8).round(),
+                Self::Item {
+                    size: ItemRowSize::SingleLine,
                     ..
                 }
                 | Self::Note(_) => metrics.single_line_row_height,
