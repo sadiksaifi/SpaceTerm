@@ -1432,13 +1432,18 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             ))
             .into_any_element();
         self.menu.button_segment = Some(style);
-        div()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .child(self.button.joined_edge(JoinedEdge::Trailing))
-            .child(self.menu.render(content, window, cx))
-            .into_any_element()
+        let primary_focused = self.button.is_focused(window, cx);
+        let button = self.button.joined_edge(JoinedEdge::Trailing);
+        let menu = self.menu.render(content, window, cx);
+        // A focus ring reaches past its segment's edge, so the focused segment paints last to keep
+        // its ring above the neighboring segment. Reversing the row keeps the visual order.
+        let row = div().flex().flex_shrink_0().items_center();
+        if primary_focused {
+            row.flex_row_reverse().child(menu).child(button)
+        } else {
+            row.child(button).child(menu)
+        }
+        .into_any_element()
     }
 }
 

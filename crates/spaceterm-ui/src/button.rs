@@ -941,6 +941,19 @@ impl Button {
         self
     }
 
+    /// Whether the button holds keyboard focus, read from the state it keeps under its id, so a
+    /// control composing the button can paint the focused part last.
+    pub(crate) fn is_focused(&self, window: &mut Window, cx: &mut App) -> bool {
+        let modal_focus_handle = self.core.modal_focus_handle.clone();
+        window
+            .use_keyed_state(self.core.id.clone(), cx, move |window, cx| {
+                ButtonState::new(modal_focus_handle, window, cx)
+            })
+            .read(cx)
+            .focus_handle
+            .is_focused(window)
+    }
+
     /// Adds leading noninteractive content rendered with the resolved foreground color.
     pub fn leading(mut self, build: impl FnOnce(Rgba) -> AnyElement + 'static) -> Self {
         self.leading = Some(Box::new(build));

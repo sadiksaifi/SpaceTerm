@@ -1454,6 +1454,21 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
         "the divider was not half the control height and centered"
     );
 
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-pin-keyboard-focus").is_some(),
+        "the primary segment did not take focus"
+    );
+    assert_eq!(
+        (
+            cx.debug_bounds("primary-pin"),
+            cx.debug_bounds("primary-pin-menu")
+        ),
+        (Some(button), Some(menu)),
+        "painting the focused segment last moved the segments"
+    );
+
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
     let item = cx
