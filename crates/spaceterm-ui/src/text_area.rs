@@ -37,6 +37,8 @@ use crate::text_input::{
 const KEY_CONTEXT: &str = "SpaceTermTextArea";
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const DEFAULT_VALUE_LIMIT: usize = 256 * 1024;
+/// The greatest value a text area retains, enough for a whole configuration document.
+const AREA_VALUE_LIMIT: usize = 4 * 1024 * 1024;
 const DEFAULT_ROWS: usize = 8;
 /// What Tab inserts and Shift-Tab removes, and what Return carries to the next line.
 const INDENT: &str = "  ";
@@ -301,10 +303,10 @@ impl TextArea {
         self.rows = rows.max(1);
         self
     }
-    /// Sets the optional product limit. `Some` is clamped to 1 MiB; `None` keeps only the hard
-    /// 1 MiB limit. A current value above the resulting limit is truncated at a grapheme boundary.
+    /// Sets the optional product limit. `Some` is clamped to 4 MiB; `None` keeps only the hard
+    /// 4 MiB limit. A current value above the resulting limit is truncated at a grapheme boundary.
     pub fn input_length_limit(mut self, limit: Option<usize>) -> Self {
-        self.input_length_limit = limit.unwrap_or(HARD_VALUE_LIMIT).min(HARD_VALUE_LIMIT);
+        self.input_length_limit = limit.unwrap_or(AREA_VALUE_LIMIT).min(AREA_VALUE_LIMIT);
         let value = truncate_grapheme(&self.buffer.text, self.input_length_limit).to_owned();
         if value != *self.buffer.text {
             self.buffer = TextBuffer::new(value);
@@ -362,7 +364,7 @@ impl TextArea {
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) -> bool {
         let value = Zeroizing::new(value.into());
         let normalized = normalize_multiline(&value);
-        if normalized.len() > self.input_length_limit || normalized.len() > HARD_VALUE_LIMIT {
+        if normalized.len() > self.input_length_limit {
             return false;
         }
         self.composition = None;

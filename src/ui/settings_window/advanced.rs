@@ -147,8 +147,10 @@ impl SettingsWindow {
         };
         self.settings_file.shown = Some(document);
         self.settings_file.area.update(cx, |area, cx| {
-            if area.value() != text {
-                area.set_value(text, cx);
+            // A document the text area cannot hold must not leave an earlier document on show,
+            // which would read as the settings in effect.
+            if area.value() != text && !area.set_value(text, cx) {
+                area.set_value(String::new(), cx);
             }
         });
     }

@@ -261,3 +261,14 @@ fn caret_positions_count_characters_and_clamp_to_the_line(cx: &mut TestAppContex
     place_caret(&area, 9, 1, cx);
     assert_eq!(caret(&area, cx), "é1\n".len());
 }
+
+#[gpui::test]
+fn values_up_to_four_mebibytes_are_retained(cx: &mut TestAppContext) {
+    let (area, cx) = area(cx, "", |area| area.editable(false).input_length_limit(None));
+    let line = format!("{}\n", "x".repeat(1023));
+    let largest = line.repeat(4 * 1024);
+
+    assert!(area.update(cx, |area, cx| area.set_value(largest.clone(), cx)));
+    assert_eq!(value(&area, cx).len(), 4 * 1024 * 1024);
+    assert!(!area.update(cx, |area, cx| area.set_value(format!("{largest}x"), cx)));
+}

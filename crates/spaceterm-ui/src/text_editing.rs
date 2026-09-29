@@ -10,7 +10,7 @@ use gpui::{ClipboardEntry, ClipboardItem};
 use unicode_segmentation::UnicodeSegmentation as _;
 use zeroize::Zeroizing;
 
-/// The greatest value any text control retains.
+/// The greatest value a single-line text input retains.
 pub(crate) const HARD_VALUE_LIMIT: usize = 1024 * 1024;
 /// The greatest clipboard text any text control reads.
 pub(crate) const CLIPBOARD_INSERTION_LIMIT: usize = 1024 * 1024;
@@ -211,7 +211,7 @@ impl TextBuffer {
         let replacement = Zeroizing::new(replacement);
         let range = normalize_byte_range(&self.text, range);
         let final_len = self.text.len() - range.len() + replacement.len();
-        if final_len > limit || final_len > HARD_VALUE_LIMIT {
+        if final_len > limit {
             return false;
         }
         if self.text[range.clone()] == *replacement {
@@ -247,7 +247,7 @@ impl TextBuffer {
     ) -> bool {
         let range = normalize_byte_range(&self.text, range.clone());
         let final_len = self.text.len() - range.len() + replacement_len;
-        final_len <= limit && final_len <= HARD_VALUE_LIMIT
+        final_len <= limit
     }
 
     pub(crate) fn replace_without_history(
@@ -258,7 +258,7 @@ impl TextBuffer {
     ) -> bool {
         let range = normalize_byte_range(&self.text, range);
         let final_len = self.text.len() - range.len() + replacement.len();
-        if final_len > limit || final_len > HARD_VALUE_LIMIT {
+        if final_len > limit {
             return false;
         }
         if self.text[range.clone()] == *replacement {
