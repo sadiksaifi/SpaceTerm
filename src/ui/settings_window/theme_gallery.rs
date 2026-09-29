@@ -522,7 +522,7 @@ impl SettingsWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(appearance.spacing(6.0))
+                    .gap(appearance.spacing(2.0))
                     .child(action)
                     .children(remove),
             )
