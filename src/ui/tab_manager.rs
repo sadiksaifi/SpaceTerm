@@ -113,10 +113,12 @@ const TAB_TRAILING_GAP: f32 = 4.0;
 /// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
 /// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
 const TAB_ACTIVITY_MAXIMUM_SHARE: f32 = 0.6;
-/// The Compact-density length of the quiet mark between two neighbouring inactive Tabs.
+/// The Compact-density length of the quiet mark at a Tab-strip boundary that no chip touches.
 ///
 /// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
-/// ends. The Active Tab's chip already has an edge, so no mark touches it. Like the chip insets,
+/// ends: between two inactive Tabs, after an inactive last Tab, and before an inactive first Tab
+/// beside the sidebar's edge. The Active Tab's chip and the collapsed Workspace Switcher's chip
+/// already have an edge, so no mark touches either of them. Like the chip insets,
 /// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
 /// keeps its proportion to a Tab that grows with density.
 const TAB_SEPARATOR_LENGTH: f32 = 18.0;
@@ -1489,15 +1491,26 @@ impl TabManager {
             .flex_row()
             .overflow_x_scroll()
             .track_scroll(&self.tab_bar_scroll_handle);
+        let last_index = self.tabs.len() - 1;
         let mut previous_inactive_tab = None;
-        for (tab_id, pane_host) in self.tabs.iter() {
+        for (index, (tab_id, pane_host)) in self.tabs.iter().enumerate() {
             let active = tab_id == active_tab_id;
-            let leading_separator =
+            // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
+            // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
+            // the bare Create Tab glyph.
+            let leading_boundary = if index == 0 {
+                (self.sidebar_visible && !active).then_some(TabBoundary::StripStart(tab_id))
+            } else {
                 previous_inactive_tab
                     .filter(|_| !active)
-                    .map(|leading_tab_id| {
-                        render_tab_separator(leading_tab_id, tab_id, presentation, appearance)
-                    });
+                    .map(|leading_tab_id| TabBoundary::Between(leading_tab_id, tab_id))
+            };
+            let trailing_boundary =
+                (index == last_index && !active).then_some(TabBoundary::StripEnd(tab_id));
+            let separators = leading_boundary
+                .into_iter()
+                .chain(trailing_boundary)
+                .map(|boundary| render_tab_separator(boundary, presentation, appearance));
             previous_inactive_tab = (!active).then_some(tab_id);
             items = items.child(
                 self.render_tab_item(
@@ -1510,7 +1523,7 @@ impl TabManager {
                     window,
                     cx,
                 )
-                .children(leading_separator),
+                .children(separators),
             );
         }
 
@@ -1733,19 +1746,42 @@ impl Render for TabManager {
 impl EventEmitter<TabManagerEvent> for TabManager {}
 impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
 
-/// The quiet mark at the boundary between two neighbouring inactive Tabs.
+/// A boundary of the Tab strip that a quiet mark can separate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabBoundary {
+    /// Between the strip's leading neighbour and its first Tab.
+    StripStart(TabId),
+    /// Between two neighbouring Tabs, in strip order.
+    Between(TabId, TabId),
+    /// Between the strip's last Tab and the Create Tab control.
+    StripEnd(TabId),
+}
+
+impl TabBoundary {
+    fn debug_selector(self) -> String {
+        match self {
+            Self::StripStart(tab_id) => format!("tab-separator-start-{}", tab_id.get()),
+            Self::Between(leading, trailing) => {
+                format!("tab-separator-{}-{}", leading.get(), trailing.get())
+            }
+            Self::StripEnd(tab_id) => format!("tab-separator-{}-end", tab_id.get()),
+        }
+    }
+}
+
+/// The quiet mark at one boundary of the Tab strip whose Tabs are all inactive.
 ///
-/// The trailing Tab carries the mark as paint just inside its own edge on the shared boundary, so
-/// the row keeps one scroll child per Tab and both Tabs keep their spacing, hit targets, and hover
-/// regions. Staying inside the Tab's bounds and on whole points leaves layout rounding nothing to
-/// move, and the chip inset keeps hover paint clear of it.
+/// The Tab after the boundary carries the mark as paint just inside its own leading edge; at the
+/// strip's end the last Tab carries it just inside its trailing edge. The row keeps one scroll
+/// child per Tab and every Tab keeps its spacing, hit target, and hover region. Staying inside the
+/// Tab's bounds and on whole points leaves layout rounding nothing to move, and the chip inset
+/// keeps hover paint clear of it.
 ///
 /// The mark paints its own `tab_separator` role. `border` describes full-length structure and is
 /// too close to the bar to show on a mark this short, and an outlined control's ring is a separate
 /// decision a scheme must be able to retune without moving the Tab strip.
 fn render_tab_separator(
-    leading_tab_id: TabId,
-    trailing_tab_id: TabId,
+    boundary: TabBoundary,
     presentation: &TabChromePresentation,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
@@ -1753,19 +1789,16 @@ fn render_tab_separator(
         .absolute()
         .top_0()
         .bottom_0()
-        .left_0()
+        .map(|mark| match boundary {
+            TabBoundary::StripStart(_) | TabBoundary::Between(..) => mark.left_0(),
+            TabBoundary::StripEnd(_) => mark.right_0(),
+        })
         .w(px(TAB_SEPARATOR_WIDTH))
         .flex()
         .items_center()
         .child(
             div()
-                .debug_selector(move || {
-                    format!(
-                        "tab-separator-{}-{}",
-                        leading_tab_id.get(),
-                        trailing_tab_id.get()
-                    )
-                })
+                .debug_selector(move || boundary.debug_selector())
                 .w_full()
                 .h(appearance.spacing(TAB_SEPARATOR_LENGTH))
                 .bg(gpui_color(
@@ -3135,19 +3168,21 @@ mod tests {
         Box::leak(selector.into_boxed_str())
     }
 
-    /// Opens a fresh four-Tab row for each density and selected position and checks every
-    /// boundary.
+    /// Opens a fresh four-Tab row for each density, sidebar visibility, and selected position, and
+    /// checks every boundary of the strip.
     ///
     /// Each position gets its own window because rendered debug bounds outlive the frame that drew
     /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
     ///
-    /// A boundary is marked only while both of its Tabs are inactive. The mark is a hairline one
-    /// logical point wide at every density, whose length scales with density from its 18-point
-    /// Compact baseline to 22.5 points at Comfortable. It is laid out on whole device pixels, painted entirely inside one of
-    /// the two Tabs against their shared edge and clear of both chips, so neither layout rounding,
-    /// an ancestor's clip, nor a neighbour's paint can take it away. It carries no hit target of its
-    /// own. The shared edge is found from the rendered items rather than assumed to run left to
-    /// right.
+    /// A boundary between two Tabs is marked only while both Tabs are inactive. The strip's start
+    /// is marked only while the sidebar is visible and the first Tab is inactive, because the
+    /// collapsed Workspace Switcher is a chip. The strip's end is marked while the last Tab is
+    /// inactive. The mark is a hairline one logical point wide at every density, whose length
+    /// scales with density from its 18-point Compact baseline to 22.5 points at Comfortable. It is
+    /// laid out on whole device pixels, painted entirely inside a Tab against the boundary's edge
+    /// and clear of the chips beside it, so neither layout rounding, an ancestor's clip, nor a
+    /// neighbour's paint can take it away. It carries no hit target of its own. Every edge is found
+    /// from the rendered items rather than assumed to run left to right.
     fn assert_separators_mark_only_inactive_neighbours(
         cx: &mut TestAppContext,
         direction: spaceterm_ui::TextDirection,
@@ -3181,10 +3216,24 @@ mod tests {
                     appearance,
                 )));
             });
-            for selected in 1..=4_u64 {
+            let positions = [true, false].into_iter().flat_map(|sidebar_visible| {
+                (1..=4_u64).map(move |selected| (sidebar_visible, selected))
+            });
+            for (sidebar_visible, selected) in positions {
                 let (manager, _records, cx) = open_tab_manager(cx);
                 cx.update(|window, cx| {
                     manager.update(cx, |manager, cx| {
+                        let top_chrome_width = if sidebar_visible {
+                            WORKSPACE_SIDEBAR_DEFAULT_WIDTH
+                        } else {
+                            WORKSPACE_SIDEBAR_MINIMUM_WIDTH
+                        };
+                        manager.set_sidebar_layout(
+                            sidebar_visible,
+                            px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                            px(top_chrome_width),
+                            cx,
+                        );
                         for _ in 1..4 {
                             manager.create_tab(window, cx);
                         }
@@ -3215,78 +3264,98 @@ mod tests {
                         .unwrap_or_else(|| panic!("Tab {tab} chip was not rendered"))
                 };
 
+                let items = (1..=4_u64).map(|tab| item(tab, cx)).collect::<Vec<_>>();
+                let item_bounds = |tab: u64| items[tab as usize - 1];
+                let forward = item_bounds(1).right() == item_bounds(2).left();
+                let leading_edge = |bounds: gpui::Bounds<Pixels>| {
+                    if forward { bounds.left() } else { bounds.right() }
+                };
+                let trailing_edge = |bounds: gpui::Bounds<Pixels>| {
+                    if forward { bounds.right() } else { bounds.left() }
+                };
+                let mut boundaries = vec![(
+                    "tab-separator-start-1".to_owned(),
+                    vec![1_u64],
+                    leading_edge(item_bounds(1)),
+                    sidebar_visible && selected != 1,
+                )];
                 for leading in 1..4_u64 {
                     let trailing = leading + 1;
-                    let separator = cx.debug_bounds(leaked_selector(format!(
-                        "tab-separator-{leading}-{trailing}"
-                    )));
-                    let leading_item = item(leading, cx);
-                    let trailing_item = item(trailing, cx);
-                    let shared_edge = if leading_item.right() == trailing_item.left() {
-                        leading_item.right()
-                    } else {
-                        assert_eq!(
-                            trailing_item.right(),
-                            leading_item.left(),
-                            "neighbouring Tabs {leading} and {trailing} should keep contiguous hit \
+                    let shared_edge = trailing_edge(item_bounds(leading));
+                    assert_eq!(
+                        shared_edge,
+                        leading_edge(item_bounds(trailing)),
+                        "neighbouring Tabs {leading} and {trailing} should keep contiguous hit \
                          targets with Tab {selected} selected"
-                        );
-                        leading_item.left()
-                    };
+                    );
+                    boundaries.push((
+                        format!("tab-separator-{leading}-{trailing}"),
+                        vec![leading, trailing],
+                        shared_edge,
+                        leading != selected && trailing != selected,
+                    ));
+                }
+                boundaries.push((
+                    "tab-separator-4-end".to_owned(),
+                    vec![4],
+                    trailing_edge(item_bounds(4)),
+                    selected != 4,
+                ));
 
-                    let touches_selected = leading == selected || trailing == selected;
-                    match (separator, touches_selected) {
-                        (Some(separator), false) => {
+                for (selector, tabs, edge, expected) in boundaries {
+                    let separator = cx.debug_bounds(leaked_selector(selector.clone()));
+                    match (separator, expected) {
+                        (Some(separator), true) => {
                             assert_eq!(
                                 separator.size.width,
                                 px(TAB_SEPARATOR_WIDTH),
-                                "the separator should stay a one-point hairline at {density:?} \
-                             density, got {separator:?}"
+                                "{selector} should stay a one-point hairline at {density:?} \
+                                 density, got {separator:?}"
                             );
                             assert!(
                                 on_device_pixels(separator.left())
                                     && on_device_pixels(separator.size.width),
-                                "the separator should be laid out on whole device pixels at scale \
-                             {scale_factor}, got {separator:?}"
+                                "{selector} should be laid out on whole device pixels at scale \
+                                 {scale_factor}, got {separator:?}"
                             );
+                            let owner = item_bounds(tabs[0]);
                             assert!(
                                 separator.size.height == expected_length
-                                    && separator.size.height < leading_item.size.height,
-                                "the separator should scale to {expected_length:?} at {density:?} \
-                             density and stay shorter than the Tab, got {separator:?}"
+                                    && separator.size.height < owner.size.height,
+                                "{selector} should scale to {expected_length:?} at {density:?} \
+                                 density and stay shorter than the Tab, got {separator:?}"
                             );
                             assert!(
-                                (separator.center().y - leading_item.center().y).abs() <= px(0.5),
-                                "the separator should be centred on the bar, got {separator:?}"
+                                (separator.center().y - owner.center().y).abs() <= px(0.5),
+                                "{selector} should be centred on the bar, got {separator:?}"
                             );
                             assert!(
-                                within(separator, leading_item) || within(separator, trailing_item),
-                                "the separator should paint inside one of Tabs {leading} and \
-                             {trailing} rather than across their edge, got {separator:?} between \
-                             {leading_item:?} and {trailing_item:?}"
+                                tabs.iter().any(|&tab| within(separator, item_bounds(tab))),
+                                "{selector} should paint inside one of Tabs {tabs:?} rather than \
+                                 across their edge, got {separator:?}"
                             );
                             assert!(
-                                separator.left() == shared_edge || separator.right() == shared_edge,
-                                "the separator should rest against the shared edge of Tabs {leading} \
-                             and {trailing}, got {separator:?} at {shared_edge:?}"
+                                separator.left() == edge || separator.right() == edge,
+                                "{selector} should rest against its boundary at {edge:?}, got \
+                                 {separator:?}"
                             );
-                            for tab in [leading, trailing] {
+                            for &tab in &tabs {
                                 let chip = chip(tab, cx);
                                 assert!(
                                     !overlaps(separator, chip),
-                                    "the separator should stay clear of Tab {tab}'s chip, got \
-                                 {separator:?} and {chip:?}"
+                                    "{selector} should stay clear of Tab {tab}'s chip, got \
+                                     {separator:?} and {chip:?}"
                                 );
                             }
                         }
-                        (None, true) => {}
-                        (Some(_), true) => panic!(
-                            "no separator should touch selected Tab {selected} at boundary \
-                         {leading}-{trailing}"
+                        (None, false) => {}
+                        (Some(_), false) => panic!(
+                            "{selector} should not be drawn with Tab {selected} selected and \
+                             sidebar_visible={sidebar_visible}"
                         ),
-                        (None, false) => panic!(
-                            "inactive Tabs {leading} and {trailing} should be separated with Tab \
-                         {selected} selected"
+                        (None, true) => panic!(
+                            "{selector} should be drawn with Tab {selected} selected and \
+                             sidebar_visible={sidebar_visible}"
                         ),
                     }
                 }
