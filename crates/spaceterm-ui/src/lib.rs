@@ -35,6 +35,7 @@ mod segmented_control;
 mod shortcut_recorder;
 #[cfg(test)]
 mod shortcut_recorder_tests;
+mod text_editing;
 mod text_input;
 mod toggle;
 mod tooltip;
