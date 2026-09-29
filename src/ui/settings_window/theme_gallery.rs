@@ -1,11 +1,9 @@
 //! The Themes section: a preview of the Terminal Theme in use and a list of installed themes.
 //!
-//! Activating a row applies its theme to the appearance the list is showing. Under Auto the
+//! A row's Use button applies its theme to the appearance the list is showing. Under Auto the
 //! preview shows the Light and Dark slots side by side, and selecting one points the list at it.
-//! A row's Remove button removes every theme installed with it: its extension's themes, or the
+//! A row's removal button removes every theme installed with it: its extension's themes, or the
 //! themes of the family imported from its file.
-
-use std::collections::BTreeMap;
 
 use gpui::prelude::*;
 use gpui::{
@@ -26,7 +24,6 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color, prepared_font};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 use super::SettingsWindow;
 use super::controls::action_button;
@@ -39,9 +36,6 @@ const CURRENT_PREVIEW_WIDTH: f32 = 272.0;
 const SLOT_PREVIEW_WIDTH: f32 = 216.0;
 /// The width of the preview leading each row of the installed themes.
 const ROW_PREVIEW_WIDTH: f32 = 64.0;
-/// The air between a row's hover fill and its content. The list gives it back at its edges, so
-/// row content lines up with the search field above it.
-const ROW_INSET: f32 = 8.0;
 /// The space between a selected preview and the ring around it.
 const RING_GAP: f32 = 3.0;
 const RING_WIDTH: f32 = 2.0;
@@ -63,7 +57,6 @@ pub(super) struct ThemeGallery {
     /// The slot the gallery edits under Auto. Unset, it follows the appearance on screen.
     auto_slot: Option<Appearance>,
     slot_focus: [FocusHandle; 2],
-    row_focus: BTreeMap<ThemeId, FocusHandle>,
 }
 
 impl ThemeGallery {
@@ -96,7 +89,6 @@ impl ThemeGallery {
             query: SharedString::default(),
             auto_slot: None,
             slot_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
-            row_focus: BTreeMap::new(),
         }
     }
 }
@@ -307,12 +299,11 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Every installed theme for the chosen slot, as rows that apply their theme when activated,
-    /// under a search field and the way to get more themes.
+    /// Every installed theme for the chosen slot, as rows offering to use or remove it, under a
+    /// search field and the way to get more themes.
     pub(super) fn render_installed_themes(
-        &mut self,
+        &self,
         appearance: &ChromeAppearance,
-        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let slot = self.theme_slot(cx);
@@ -331,9 +322,6 @@ impl SettingsWindow {
             .into_iter()
             .filter(|summary| summary.appearance == slot)
             .collect::<Vec<_>>();
-        self.theme_gallery
-            .row_focus
-            .retain(|id, _| summaries.iter().any(|theme| &theme.id == id));
         let query = self.theme_gallery.query.clone();
         let matches = fuzzy_filter(&summaries, &query, |summary| {
             let target = spaceterm_ui::FuzzyTarget::new(&summary.name);
@@ -346,29 +334,15 @@ impl SettingsWindow {
             .iter()
             .map(|matched| {
                 let summary = &summaries[matched.item_index()];
-                self.render_theme_row(
-                    summary,
-                    slot,
-                    summary.id == selected,
-                    appearance,
-                    window,
-                    cx,
-                )
+                self.render_theme_row(summary, slot, summary.id == selected, appearance, cx)
             })
             .collect::<Vec<_>>();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let separator = gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
-        let inset = appearance.spacing(ROW_INSET);
         let empty = rows.is_empty();
-        // Separators run between rows, inset to the content the hover fill surrounds.
         let rows = rows.into_iter().enumerate().flat_map(|(index, row)| {
-            let divider = (index > 0).then(|| {
-                div()
-                    .mx(inset)
-                    .h(px(HAIRLINE))
-                    .bg(separator)
-                    .into_any_element()
-            });
+            let divider =
+                (index > 0).then(|| div().h(px(HAIRLINE)).bg(separator).into_any_element());
             divider.into_iter().chain([row])
         });
         let owner = cx.weak_entity();
@@ -418,46 +392,25 @@ impl SettingsWindow {
                         .child(SharedString::from(format!("No themes match “{query}”."))),
                 )
             })
-            // The list gives the rows' inset back, so row content lines up with the header.
-            .child(div().flex().flex_col().mx(-inset).children(rows))
+            .child(div().flex().flex_col().children(rows))
             .into_any_element()
     }
 
-    /// One installed theme: its preview, its name, where it came from, and whether it is in use.
-    /// A theme SpaceTerm did not ship also offers Remove.
+    /// One installed theme: its preview, its name, and where it came from, then its actions. The
+    /// theme in use says so where the others offer Use, and a theme SpaceTerm did not ship offers
+    /// removal at the row's end.
     fn render_theme_row(
-        &mut self,
+        &self,
         summary: &ThemeSummary,
         slot: Appearance,
         selected: bool,
         appearance: &ChromeAppearance,
-        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let editable = self.editor.editable();
-        let focus = self
-            .theme_gallery
-            .row_focus
-            .entry(summary.id.clone())
-            .or_insert_with(|| cx.focus_handle())
-            .clone()
-            .tab_stop(editable);
         let selector = format!("settings-theme-row-{}", summary.id.as_str());
-        let group = format!("{selector}-group");
-        let radius = RadiusRole::Control.pixels();
-        // A row that cannot be chosen does not light under the pointer.
-        let hover = ChipPaint {
-            fill: None,
-            rim: None,
-            hover_fill: editable.then_some(colors.row_hover_background),
-            hover_rim: None,
-        }
-        .raised_on(
-            appearance,
-            appearance.control_host_background(spaceterm_ui::ControlHost::Card),
-        );
-        let in_use = selected.then(|| {
+        let action = if selected {
             div()
                 .debug_selector({
                     let selector = format!("{selector}-in-use");
@@ -475,45 +428,62 @@ impl SettingsWindow {
                     gpui_color(colors.text_secondary),
                 ))
                 .child("In Use")
-        });
-        let remove = (!summary.builtin).then(|| {
+                .into_any_element()
+        } else {
             let owner = cx.weak_entity();
-            let target = summary.clone();
-            let remove_selector = format!("{selector}-remove");
-            spaceterm_ui::Button::new(SharedString::from(remove_selector.clone()), "Remove")
+            let id = summary.id.clone();
+            let use_selector = format!("{selector}-use");
+            spaceterm_ui::Button::new(SharedString::from(use_selector.clone()), "Use")
                 .variant(spaceterm_ui::ButtonVariant::Outline)
                 .size(spaceterm_ui::ButtonSize::Small)
                 .disabled(!editable)
                 .tab_stop(true)
-                .debug_selector(remove_selector)
-                .on_activate(move |_, window, cx| {
+                .debug_selector(use_selector)
+                .on_activate(move |_, _, cx| {
                     let _ = owner.update(cx, |settings, cx| {
-                        settings.confirm_removal(&target, window, cx);
+                        settings.set_theme(slot, id.clone(), cx);
                     });
                 })
+                .into_any_element()
+        };
+        let removal_width = cx
+            .global::<spaceterm_ui::ButtonTheme>()
+            .icon_button_size(spaceterm_ui::ButtonSize::Small);
+        let remove = (!summary.builtin).then(|| {
+            let owner = cx.weak_entity();
+            let target = summary.clone();
+            let remove_selector = format!("{selector}-remove");
+            let glyph = appearance.icons.metrics(IconRole::Control).glyph_size;
+            spaceterm_ui::IconButton::new(
+                SharedString::from(remove_selector.clone()),
+                SharedString::from(format!("Remove {}", summary.name)),
+                move |foreground| Icon::new(IconName::Trash2, glyph, foreground).into_any_element(),
+            )
+            .variant(spaceterm_ui::ButtonVariant::Ghost)
+            .size(spaceterm_ui::ButtonSize::Small)
+            .disabled(!editable)
+            .tab_stop(true)
+            .debug_selector(remove_selector.clone())
+            .tooltip(spaceterm_ui::Tooltip::new(
+                SharedString::from(format!("{remove_selector}-tooltip")),
+                "Remove",
+            ))
+            .on_activate(move |_, window, cx| {
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.confirm_removal(&target, window, cx);
+                });
+            })
         });
-        let id = summary.id.clone();
-        let keyboard_id = id.clone();
-        let row = div()
-            .id(SharedString::from(selector.clone()))
+        div()
             .debug_selector({
                 let selector = selector.clone();
                 move || selector
             })
-            .group(SharedString::from(group.clone()))
-            .track_focus(&focus)
-            .relative()
             .flex()
             .flex_row()
             .items_center()
             .gap(appearance.spacing(12.0))
-            .px(appearance.spacing(ROW_INSET))
             .py(appearance.spacing(8.0))
-            .rounded(radius)
-            .child(
-                SelectionChip::new(ChipShape::symmetric(px(0.0), px(0.0), radius), hover)
-                    .render(format!("{selector}-hover"), &group),
-            )
             .child(
                 theme_miniature(&summary.colors, appearance)
                     .flex_none()
@@ -548,34 +518,20 @@ impl SettingsWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(appearance.spacing(10.0))
-                    .children(in_use)
-                    .children(remove),
+                    .gap(appearance.spacing(6.0))
+                    .child(action)
+                    // A built-in theme keeps the removal's place empty, so Use and In Use end on
+                    // one edge down the list.
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .w(removal_width)
+                            .children(remove),
+                    ),
             )
-            .when(editable, |row| {
-                row.on_click(cx.listener(move |settings, _, _, cx| {
-                    settings.set_theme(slot, id.clone(), cx);
-                }))
-                .on_key_down(cx.listener(
-                    move |settings, event: &KeyDownEvent, window, cx| {
-                        if keyboard_activation(event) {
-                            settings.set_theme(slot, keyboard_id.clone(), cx);
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }
-                    },
-                ))
-            });
-        let focus_ring =
-            (focus.is_focused(window) && window.last_input_was_keyboard()).then(|| {
-                spaceterm_ui::focus_ring(
-                    "focus-ring",
-                    gpui_color(appearance.colors.focus_ring),
-                    radius,
-                    px(0.0),
-                )
-            });
-        spaceterm_ui::Ringed::new(row, focus_ring).into_any_element()
+            .into_any_element()
     }
 
     /// Asks before removing a theme and every theme installed with it, then removes them together.
@@ -680,17 +636,32 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
-                if settings.editor.remove_themes(&ids, cx).is_ok() {
-                    for slot in &in_use {
-                        settings.editor.reset(ResetTarget::TerminalTheme(*slot), cx);
-                    }
-                }
-                cx.notify();
+                settings.remove_installed_themes(&ids, cx);
             });
         });
         if result.is_err() {
             eprintln!("failed to present the SpaceTerm theme removal confirmation");
         }
+    }
+
+    /// Removes themes together, then returns each slot that used one of them to its built-in
+    /// theme. Returns whether the themes were removed.
+    pub(super) fn remove_installed_themes(
+        &mut self,
+        ids: &[ThemeId],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let slots = self.editor.document().preferences.terminal.themes.clone();
+        let removed = self.editor.remove_themes(ids, cx).is_ok();
+        if removed {
+            for slot in [Appearance::Light, Appearance::Dark] {
+                if ids.contains(slots.get(slot)) {
+                    self.editor.reset(ResetTarget::TerminalTheme(slot), cx);
+                }
+            }
+        }
+        cx.notify();
+        removed
     }
 }
 

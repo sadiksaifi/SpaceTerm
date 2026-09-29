@@ -95,6 +95,15 @@ fn open_settings_with_capabilities(
     )
 }
 
+/// Presses and releases Return, since a focused button activates on release.
+fn press_return(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    cx.run_until_parked();
+}
+
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
@@ -485,10 +494,10 @@ fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext
     assert_eq!(document_of(&window, cx).preferences, expected);
 }
 
-/// A row applies its theme to the slot the list shows: the fixed mode's slot, or the slot
-/// selected under Auto. The other slot and the mode stay as they were.
+/// A row's Use button applies its theme to the slot the list shows: the fixed mode's slot, or the
+/// slot selected under Auto. The other slot and the mode stay as they were.
 #[gpui::test]
-fn a_theme_row_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
+fn use_applies_a_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
     for (mode, slot) in [
@@ -521,8 +530,15 @@ fn a_theme_row_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContext) 
         let before = document_of(&window, cx).preferences;
         let chosen = builtin_fallback_theme(slot);
         click(
-            leaked_owned(format!("settings-theme-row-{}", chosen.as_str())),
+            leaked_owned(format!("settings-theme-row-{}-use", chosen.as_str())),
             cx,
+        );
+        assert!(
+            cx.debug_bounds(leaked_owned(format!(
+                "settings-theme-row-{}-in-use",
+                chosen.as_str()
+            )))
+            .is_some()
         );
         let mut expected = before;
         expected.terminal.themes.set(slot, chosen);
@@ -530,7 +546,7 @@ fn a_theme_row_applies_its_theme_to_the_displayed_slot(cx: &mut TestAppContext) 
     }
 }
 
-/// The same selection and removal operations remain reachable without a pointer.
+/// The same slot selection, Use, and removal operations remain reachable without a pointer.
 #[gpui::test]
 fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut TestAppContext) {
     let family = br##"{"themes":[{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
@@ -558,10 +574,19 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
         Appearance::Dark
     );
 
-    // The list's search and Get More Themes lead its rows. The built-in theme leads the rows,
-    // followed by the imported theme.
-    cx.simulate_keystrokes("tab tab tab tab enter");
+    // The list's search and Get More Themes lead its rows. The built-in theme is in use, so the
+    // imported theme's Use and removal buttons follow.
+    cx.simulate_keystrokes("tab tab tab tab");
+    press_return(cx);
+    assert!(
+        cx.debug_bounds("modal-action-settings-remove-theme-confirm")
+            .is_some()
+    );
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+
+    cx.simulate_keystrokes("shift-tab");
+    press_return(cx);
     assert_eq!(
         document_of(&settings, cx).preferences.terminal.themes.dark,
         imported
@@ -570,32 +595,6 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
         document_of(&settings, cx).preferences.mode,
         AppearanceMode::Auto
     );
-
-    cx.simulate_keystrokes("shift-tab space");
-    cx.run_until_parked();
-    assert_eq!(
-        document_of(&settings, cx).preferences.terminal.themes.dark,
-        builtin_fallback_theme(Appearance::Dark)
-    );
-    cx.simulate_keystrokes("tab enter");
-    cx.run_until_parked();
-    assert_eq!(
-        document_of(&settings, cx).preferences.terminal.themes.dark,
-        imported
-    );
-
-    // The imported row's Remove button follows it, and activates when Return is released.
-    cx.simulate_keystrokes("tab enter");
-    cx.simulate_event(gpui::KeyUpEvent {
-        keystroke: gpui::Keystroke::parse("enter").unwrap(),
-    });
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("modal-action-settings-remove-theme-confirm")
-            .is_some()
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
     assert_eq!(installed_count(&settings, cx), 1);
 }
 
