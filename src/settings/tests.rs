@@ -986,3 +986,93 @@ fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
     assert_eq!(state.snapshot.as_ref().unwrap().0, b"broken");
     assert!(!settings.snapshot().status.unwrap().is_malformed());
 }
+
+#[test]
+fn following_the_file_adopts_an_outside_change_once() {
+    let (settings, storage) = setup();
+    settings
+        .update_committed(0, SettingsDocument::default())
+        .unwrap()
+        .run()
+        .unwrap();
+    assert_eq!(settings.follow_file(), Ok(false));
+    let before = settings.snapshot();
+
+    let mut outside = SettingsDocument::default();
+    outside.preferences.terminal.typography.base_size = 21.0;
+    storage.0.lock().unwrap().snapshot =
+        Some((export_settings(&outside).unwrap().into_bytes(), 40));
+
+    assert_eq!(settings.follow_file(), Ok(true));
+    let after = settings.snapshot();
+    assert_eq!(after.committed.preferences, outside.preferences);
+    assert!(after.committed.revision > before.committed.revision);
+    assert!(after.catalog_revision > before.catalog_revision);
+    assert_eq!(settings.follow_file(), Ok(false));
+    assert_eq!(storage.0.lock().unwrap().writes, 1);
+}
+
+#[test]
+fn following_a_malformed_file_keeps_the_settings_until_a_valid_one_arrives() {
+    let (settings, storage) = setup();
+    settings
+        .update_committed(0, SettingsDocument::default())
+        .unwrap()
+        .run()
+        .unwrap();
+    let committed = settings.snapshot().committed;
+    storage.0.lock().unwrap().snapshot = Some((b"{ half typed".to_vec(), 40));
+
+    assert_eq!(settings.follow_file(), Err(SettingsError::Invalid));
+    assert_eq!(*settings.snapshot().committed, *committed);
+    assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
+    assert!(
+        settings
+            .update_committed(committed.revision, (*committed).clone())
+            .is_err()
+    );
+
+    let mut fixed = SettingsDocument::default();
+    fixed.preferences.terminal.typography.base_size = 19.0;
+    storage.0.lock().unwrap().snapshot = Some((export_settings(&fixed).unwrap().into_bytes(), 41));
+    assert_eq!(settings.follow_file(), Ok(true));
+    assert_eq!(settings.snapshot().status, None);
+    assert_eq!(settings.snapshot().committed.preferences, fixed.preferences);
+}
+
+#[test]
+fn following_the_file_waits_for_a_live_preview() {
+    let (settings, storage) = setup();
+    let token = settings.begin_preview(0).unwrap();
+    storage.0.lock().unwrap().snapshot =
+        Some((export_settings(&SettingsDocument::default()).unwrap().into_bytes(), 40));
+
+    assert_eq!(settings.follow_file(), Err(SettingsError::Busy));
+    drop(token);
+    assert_eq!(settings.follow_file(), Ok(true));
+}
+
+#[test]
+fn ensuring_the_file_writes_only_a_document_no_file_holds() {
+    let (settings, storage) = setup();
+
+    settings.ensure_file().unwrap().expect("no file yet").run().unwrap();
+    let written = storage.0.lock().unwrap().snapshot.clone().expect("the file");
+    assert_eq!(
+        crate::appearance::parse_settings(&written.0).unwrap().preferences,
+        SettingsDocument::default().preferences
+    );
+
+    assert!(settings.ensure_file().unwrap().is_none());
+    assert_eq!(storage.0.lock().unwrap().writes, 1);
+}
+
+#[test]
+fn ensuring_the_file_leaves_an_unreadable_file_alone() {
+    let storage = Arc::new(MemoryStorage::default());
+    storage.0.lock().unwrap().snapshot = Some((b"{ broken".to_vec(), 7));
+    let settings = UserSettings::load(storage.clone());
+
+    assert!(settings.ensure_file().unwrap().is_none());
+    assert_eq!(storage.0.lock().unwrap().snapshot.as_ref().unwrap().0, b"{ broken");
+}

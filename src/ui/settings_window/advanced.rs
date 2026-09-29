@@ -1,88 +1,73 @@
-//! The Advanced section: Settings JSON, export and import of the Settings Document, and Reset All.
+//! The Advanced section: the settings file, export and import of the Settings Document, and Reset
+//! All.
 //!
-//! Settings JSON is the one exception to instant apply (ADR 0005). A half-typed document is not a
-//! setting, so the editor rests read-only and following the Settings Document, and an edit takes
-//! effect only when the person applies it. Apply checks the text with the rules a Settings Document
-//! meets at load time and changes nothing when the text fails them.
+//! The settings file shows read-only. A person edits it in their own editor, and SpaceTerm follows
+//! each save (ADR 0005), so every change still reaches SpaceTerm through the Settings Document.
 
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Entity, SharedString, Window, div};
+use gpui::{AnyElement, Entity, Window, div};
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonVariant, FieldState, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, TextArea, TextAreaEvent,
+    Alert, AlertIntent, FieldState, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId, TextArea,
 };
 
-use crate::appearance::{SettingsDocument, SettingsDocumentError, SettingsJsonError, parse_settings};
+use crate::appearance::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::settings_file::SettingsFile;
 
 use super::SettingsWindow;
 use super::controls::action_button;
 use super::import::{ImportError, read_selected_document};
 
-/// How many lines of Settings JSON show before the editor scrolls.
-const SETTINGS_JSON_ROWS: usize = 16;
+/// How many lines of the settings file show before the view scrolls.
+const SETTINGS_FILE_ROWS: usize = 16;
 
-/// The Settings JSON editor, kept for the window's life so an edit survives changing sections.
-pub(super) struct SettingsJsonEditor {
+/// The read-only view of the settings file, kept for the window's life so its scroll position
+/// survives changing sections.
+pub(super) struct SettingsFileView {
     pub(super) area: Entity<TextArea>,
-    /// Whether the person is editing. At rest the text follows the Settings Document.
-    pub(super) editing: bool,
-    /// Why the latest Apply was refused. Editing the text withdraws it.
-    pub(super) error: Option<SettingsJsonError>,
+    /// The document the text shows. A replaced draft is a changed document.
+    shown: Option<Arc<SettingsDocument>>,
 }
 
-impl SettingsJsonEditor {
+impl SettingsFileView {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
         let area = cx.new(|cx| {
-            TextArea::new("settings-json", "Settings JSON", String::new(), window, cx)
+            TextArea::new("settings-file", "Settings file", String::new(), window, cx)
                 .editable(false)
                 .line_numbers(true)
-                .rows(SETTINGS_JSON_ROWS)
+                .rows(SETTINGS_FILE_ROWS)
                 .input_length_limit(None)
-                .debug_selector("settings-json-editor")
+                .debug_selector("settings-file-text")
         });
-        cx.subscribe(&area, |settings, _, event: &TextAreaEvent, cx| {
-            if matches!(event, TextAreaEvent::ValueChanged { .. })
-                && settings.settings_json.error.take().is_some()
-            {
-                cx.notify();
-            }
-        })
-        .detach();
-        Self {
-            area,
-            editing: false,
-            error: None,
-        }
+        Self { area, shown: None }
     }
 }
 
 impl SettingsWindow {
-    /// The Settings JSON editor with its caption and actions.
-    pub(super) fn render_settings_json(
+    /// The settings file, where it lives, and the action that opens it in the person's editor.
+    pub(super) fn render_settings_file(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.follow_settings_json(cx);
-        let editing = self.settings_json.editing;
-        let error = self.settings_json.error;
-        let editable = self.editor.editable();
-        let area = self.settings_json.area.clone();
+        self.follow_settings_file(cx);
+        let location = SettingsFile::location(cx);
+        let area = self.settings_file.area.clone();
         let focus = area.read(cx).focus_handle();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let frame = spaceterm_ui::field_frame(
-            "settings-json-frame",
+            "settings-file-frame",
             &focus,
-            FieldState::default().invalid(error.is_some()),
+            FieldState::default(),
             RadiusRole::Control.pixels(),
             cx,
         )
-        .debug_selector(|| "settings-json-frame".to_owned())
+        .debug_selector(|| "settings-file-frame".to_owned())
         .w_full()
         .min_w_0()
         .px(appearance.spacing(8.0))
@@ -90,46 +75,15 @@ impl SettingsWindow {
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .font_family(crate::bundled_font::FAMILY)
         .child(area);
-        let (caption, caption_color) = match error {
-            Some(error) => (settings_json_error_message(error), colors.error),
-            None if editing => (
-                SharedString::from("Changes take effect when you apply them."),
-                colors.text_muted,
-            ),
-            None => (
-                SharedString::from("Every setting and keyboard shortcut. Installed themes are not included."),
-                colors.text_muted,
-            ),
-        };
         let owner = cx.weak_entity();
-        let actions = if editing {
-            let cancel = owner.clone();
-            vec![
-                action_button("settings-json-cancel", "Cancel", true, move |window, cx| {
-                    let _ = cancel.update(cx, |settings, cx| {
-                        settings.end_settings_json_edit(cx);
-                        settings.focus_handle.focus(window, cx);
-                    });
-                }),
-                action_button("settings-json-apply", "Apply", editable, move |window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.apply_settings_json(window, cx);
-                    });
-                })
-                .variant(ButtonVariant::Primary),
-            ]
-        } else {
-            vec![action_button(
-                "settings-json-edit",
-                "Edit JSON",
-                editable,
-                move |window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.begin_settings_json_edit(window, cx);
-                    });
-                },
-            )]
-        };
+        let edit = action_button(
+            "settings-file-edit",
+            "Edit JSON",
+            location.is_some(),
+            move |_, cx| {
+                let _ = owner.update(cx, |settings, cx| settings.edit_settings_file(cx));
+            },
+        );
         div()
             .flex()
             .flex_col()
@@ -141,101 +95,50 @@ impl SettingsWindow {
                 div()
                     .flex()
                     .flex_row()
-                    .items_start()
+                    .items_center()
                     .w_full()
                     .gap(appearance.spacing(12.0))
                     .child(
                         div()
-                            .debug_selector(|| "settings-json-caption".to_owned())
+                            .debug_selector(|| "settings-file-location".to_owned())
                             .flex_1()
                             .min_w_0()
                             .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(caption_color))
-                            .whitespace_normal()
-                            .child(caption),
+                            .text_color(gpui_color(colors.text_muted))
+                            .truncate()
+                            .children(location),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_none()
-                            .gap(appearance.spacing(6.0))
-                            .children(actions),
-                    ),
+                    .child(edit),
             )
             .into_any_element()
     }
 
-    /// Keeps the resting text equal to the Settings Document's Settings JSON.
-    fn follow_settings_json(&mut self, cx: &mut Context<Self>) {
-        if self.settings_json.editing {
+    /// Keeps the text equal to the document as the settings file stores it.
+    fn follow_settings_file(&mut self, cx: &mut Context<Self>) {
+        let document = self.editor.shared_document();
+        if self
+            .settings_file
+            .shown
+            .as_ref()
+            .is_some_and(|shown| Arc::ptr_eq(shown, &document))
+        {
             return;
         }
-        let Ok(json) = self.editor.document().settings_json() else {
+        let Ok(text) = export_settings(&document) else {
             return;
         };
-        self.settings_json.area.update(cx, |area, cx| {
-            if area.value() != json {
-                area.set_value(json, cx);
+        self.settings_file.shown = Some(document);
+        self.settings_file.area.update(cx, |area, cx| {
+            if area.value() != text {
+                area.set_value(text, cx);
             }
         });
     }
 
-    fn begin_settings_json_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.editor.editable() {
-            return;
-        }
-        self.settings_json.editing = true;
-        let focus = self.settings_json.area.update(cx, |area, cx| {
-            area.set_editable(true, cx);
-            area.focus_handle()
-        });
-        focus.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Leaves editing and returns the text to the Settings Document's.
-    pub(super) fn end_settings_json_edit(&mut self, cx: &mut Context<Self>) {
-        if !self.settings_json.editing {
-            return;
-        }
-        self.settings_json.editing = false;
-        self.settings_json.error = None;
-        self.settings_json
-            .area
-            .update(cx, |area, cx| area.set_editable(false, cx));
-        self.follow_settings_json(cx);
-        cx.notify();
-    }
-
-    /// Applies the edited text, or explains why not and puts the caret where the fault is.
-    fn apply_settings_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.editor.editable() {
-            return;
-        }
-        let text = self.settings_json.area.read(cx).value().to_owned();
-        let mut result = Ok(());
-        self.editor.edit(
-            |document| result = document.apply_settings_json(&text),
-            cx,
-        );
-        match result {
-            Ok(()) => {
-                self.end_settings_json_edit(cx);
-                self.focus_handle.focus(window, cx);
-            }
-            Err(error) => {
-                self.settings_json.error = Some(error);
-                let focus = self.settings_json.area.update(cx, |area, cx| {
-                    if let Some(at) = error.position() {
-                        area.move_caret_to_position(at.line, at.column, cx);
-                    }
-                    area.focus_handle()
-                });
-                focus.focus(window, cx);
-                cx.notify();
-            }
-        }
+    /// Opens the settings file in the person's editor, writing it first if it does not exist.
+    pub(super) fn edit_settings_file(&mut self, cx: &mut Context<Self>) {
+        self.editor.write_file(cx);
+        SettingsFile::open(cx);
     }
 
     /// Asks for an exported Settings Document and offers to replace every setting with it.
@@ -351,7 +254,6 @@ impl SettingsWindow {
             }
             let _ = owner.update(cx, |settings, cx| {
                 settings.shortcuts.dismiss_notice();
-                settings.end_settings_json_edit(cx);
                 settings
                     .editor
                     .edit(|document| document.replace_settings(imported), cx);
@@ -379,23 +281,4 @@ fn present_import_failure(detail: &'static str, window: &mut Window, cx: &mut Co
     )
     .intent(AlertIntent::Warning)
     .present(window, cx, |_, _| {});
-}
-
-/// Content-free wording for a refused Apply. A position names where, never what was there.
-pub(super) fn settings_json_error_message(error: SettingsJsonError) -> SharedString {
-    let located = |at: crate::appearance::JsonPosition, fault: &str| {
-        SharedString::from(format!("Line {}, column {} {fault}", at.line, at.column))
-    };
-    match error {
-        SettingsJsonError::TooLarge => "The JSON is too large.".into(),
-        SettingsJsonError::UnexpectedEnd => "The JSON ends before it is complete.".into(),
-        SettingsJsonError::Syntax(at) => located(at, "is not valid JSON."),
-        SettingsJsonError::DuplicateKey(at) => located(at, "repeats a key."),
-        SettingsJsonError::TooDeep(at) => located(at, "is nested too deeply."),
-        SettingsJsonError::Structure(at) => located(at, "does not match the settings format."),
-        SettingsJsonError::InvalidPreferences => {
-            "A setting has a value SpaceTerm does not accept.".into()
-        }
-        SettingsJsonError::InvalidKeybindings => "A keyboard shortcut is not valid.".into(),
-    }
 }

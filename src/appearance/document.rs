@@ -89,63 +89,6 @@ impl SettingsDocument {
         self.keybindings = imported.keybindings;
         self.terminal_themes = imported.terminal_themes;
     }
-
-    /// Renders this document's Settings JSON.
-    pub(crate) fn settings_json(&self) -> Result<String, SettingsDocumentError> {
-        let json = SettingsJsonView {
-            updates: &self.updates,
-            keybindings: &self.keybindings,
-            preferences: &self.preferences,
-        };
-        serde_json::to_string_pretty(&json)
-            .map(|mut output| {
-                output.push('\n');
-                output
-            })
-            .map_err(|_| SettingsDocumentError::Serialization)
-    }
-
-    /// Replaces every Setting with those that `text`, a Settings JSON, states.
-    ///
-    /// The text passes the same checks as a Settings Document at load time, and the resulting
-    /// document must validate against this document's imported catalog. On any failure the
-    /// document is unchanged.
-    pub(crate) fn apply_settings_json(&mut self, text: &str) -> Result<(), SettingsJsonError> {
-        preflight(text.as_bytes()).map_err(|error| error.locate(text))?;
-        let json: SettingsJson = serde_json::from_str(text)
-            .map_err(|error| SettingsJsonError::from_serde(&error).locate(text))?;
-        let mut candidate = self.clone();
-        candidate.updates = json.updates;
-        candidate.keybindings = json.keybindings;
-        candidate.preferences = json.preferences;
-        candidate.validate().map_err(|error| match error {
-            SettingsDocumentError::InvalidKeybindings => SettingsJsonError::InvalidKeybindings,
-            _ => SettingsJsonError::InvalidPreferences,
-        })?;
-        *self = candidate;
-        Ok(())
-    }
-}
-
-/// Settings JSON: the Settings a person edits directly, in the order a Settings Document writes
-/// them. It leaves out the imported catalog, which is data rather than a Setting, and the identity
-/// fields, which SpaceTerm owns.
-#[derive(Serialize)]
-struct SettingsJsonView<'a> {
-    updates: &'a crate::updates::policy::UpdatePreferences,
-    keybindings: &'a KeybindingPreferences,
-    preferences: &'a AppearancePreferences,
-}
-
-/// Settings JSON as read, with the same defaults and strictness as a Settings Document.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SettingsJson {
-    #[serde(default)]
-    updates: crate::updates::policy::UpdatePreferences,
-    #[serde(default)]
-    keybindings: KeybindingPreferences,
-    preferences: AppearancePreferences,
 }
 
 fn validate_selection(
@@ -166,7 +109,7 @@ fn validate_selection(
 }
 
 pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
-    preflight(bytes).map_err(SettingsDocumentError::from)?;
+    preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
     let document: SettingsDocument =
         serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
     document.validate()?;
@@ -185,34 +128,32 @@ pub(crate) fn export_settings(
         .map_err(|_| SettingsDocumentError::Serialization)
 }
 
-/// Checks the size, syntax, key uniqueness, and nesting depth that every settings text must meet
-/// before its structure is read.
-///
-/// Positions are in bytes. [`SettingsJsonError::locate`] converts them to characters.
-fn preflight(bytes: &[u8]) -> Result<(), SettingsJsonError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreflightError {
+    TooLarge,
+    InvalidJson,
+    DuplicateKey,
+    TooDeep,
+}
+
+fn preflight(bytes: &[u8]) -> Result<(), PreflightError> {
     if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(SettingsJsonError::TooLarge);
+        return Err(PreflightError::TooLarge);
     }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     DepthSeed(0)
         .deserialize(&mut deserializer)
         .map_err(|error| {
-            let at = JsonPosition::of(&error);
-            if error.to_string().contains(DUPLICATE_KEY) {
-                SettingsJsonError::DuplicateKey(at)
-            } else if error.to_string().contains(NESTING_DEPTH) {
-                SettingsJsonError::TooDeep(at)
+            if error.to_string().contains("duplicate key") {
+                PreflightError::DuplicateKey
+            } else if error.to_string().contains("nesting depth") {
+                PreflightError::TooDeep
             } else {
-                SettingsJsonError::from_serde(&error)
+                PreflightError::InvalidJson
             }
         })?;
-    deserializer
-        .end()
-        .map_err(|error| SettingsJsonError::from_serde(&error))
+    deserializer.end().map_err(|_| PreflightError::InvalidJson)
 }
-
-const DUPLICATE_KEY: &str = "duplicate key";
-const NESTING_DEPTH: &str = "nesting depth exceeded";
 
 struct DepthSeed(usize);
 impl<'de> DeserializeSeed<'de> for DepthSeed {
@@ -222,7 +163,7 @@ impl<'de> DeserializeSeed<'de> for DepthSeed {
         D: serde::Deserializer<'de>,
     {
         if self.0 > MAX_DEPTH {
-            return Err(de::Error::custom(NESTING_DEPTH));
+            return Err(de::Error::custom("nesting depth exceeded"));
         }
         deserializer.deserialize_any(DepthVisitor(self.0))
     }
@@ -277,7 +218,7 @@ impl<'de> Visitor<'de> for DepthVisitor {
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
             if !keys.insert(key) {
-                return Err(de::Error::custom(DUPLICATE_KEY));
+                return Err(de::Error::custom("duplicate key"));
             }
             map.next_value_seed(DepthSeed(self.0 + 1))?;
         }
@@ -312,109 +253,13 @@ pub(crate) enum SettingsDocumentError {
     #[error("settings document cannot be serialized")]
     Serialization,
 }
-impl From<SettingsJsonError> for SettingsDocumentError {
-    fn from(error: SettingsJsonError) -> Self {
+impl SettingsDocumentError {
+    fn from_preflight(error: PreflightError) -> Self {
         match error {
-            SettingsJsonError::TooLarge => Self::TooLarge,
-            SettingsJsonError::DuplicateKey(_) => Self::DuplicateKey,
-            SettingsJsonError::TooDeep(_) => Self::TooDeep,
-            SettingsJsonError::UnexpectedEnd
-            | SettingsJsonError::Syntax(_)
-            | SettingsJsonError::Structure(_) => Self::InvalidJson,
-            SettingsJsonError::InvalidPreferences => Self::InvalidPreferences,
-            SettingsJsonError::InvalidKeybindings => Self::InvalidKeybindings,
-        }
-    }
-}
-
-/// Where a fault in settings text was detected, as a one-based line and column.
-///
-/// The column counts characters, so it matches what a person sees in the text.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct JsonPosition {
-    pub(crate) line: usize,
-    pub(crate) column: usize,
-}
-
-impl JsonPosition {
-    /// The parser's position, whose column counts bytes.
-    fn of(error: &serde_json::Error) -> Self {
-        Self {
-            line: error.line(),
-            column: error.column(),
-        }
-    }
-
-    /// Converts a byte column to a character column within `text`.
-    fn in_characters(self, text: &str) -> Self {
-        let Some(line) = text.split('\n').nth(self.line.saturating_sub(1)) else {
-            return self;
-        };
-        let bytes = self.column.min(line.len());
-        let column = line
-            .char_indices()
-            .take_while(|(offset, _)| *offset < bytes)
-            .count()
-            .max(1);
-        Self {
-            line: self.line,
-            column,
-        }
-    }
-}
-
-/// Why Settings JSON could not be applied. Nothing here carries the text itself.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum SettingsJsonError {
-    #[error("settings JSON is too large")]
-    TooLarge,
-    #[error("settings JSON ends before it is complete")]
-    UnexpectedEnd,
-    #[error("settings JSON has a syntax error")]
-    Syntax(JsonPosition),
-    #[error("settings JSON contains a duplicate key")]
-    DuplicateKey(JsonPosition),
-    #[error("settings JSON nesting is too deep")]
-    TooDeep(JsonPosition),
-    #[error("settings JSON does not match the settings format")]
-    Structure(JsonPosition),
-    #[error("appearance preferences are invalid")]
-    InvalidPreferences,
-    #[error("keybinding preferences are invalid")]
-    InvalidKeybindings,
-}
-
-impl SettingsJsonError {
-    fn from_serde(error: &serde_json::Error) -> Self {
-        use serde_json::error::Category;
-        let at = JsonPosition::of(error);
-        match error.classify() {
-            Category::Eof => Self::UnexpectedEnd,
-            Category::Syntax | Category::Io => Self::Syntax(at),
-            Category::Data => Self::Structure(at),
-        }
-    }
-
-    /// Where the fault was detected, when it has a place in the text.
-    pub(crate) fn position(self) -> Option<JsonPosition> {
-        match self {
-            Self::Syntax(at) | Self::DuplicateKey(at) | Self::TooDeep(at) | Self::Structure(at) => {
-                Some(at)
-            }
-            Self::TooLarge
-            | Self::UnexpectedEnd
-            | Self::InvalidPreferences
-            | Self::InvalidKeybindings => None,
-        }
-    }
-
-    fn locate(self, text: &str) -> Self {
-        match self {
-            Self::Syntax(at) => Self::Syntax(at.in_characters(text)),
-            Self::DuplicateKey(at) => Self::DuplicateKey(at.in_characters(text)),
-            Self::TooDeep(at) => Self::TooDeep(at.in_characters(text)),
-            Self::Structure(at) => Self::Structure(at.in_characters(text)),
-            other => other,
+            PreflightError::TooLarge => Self::TooLarge,
+            PreflightError::InvalidJson => Self::InvalidJson,
+            PreflightError::DuplicateKey => Self::DuplicateKey,
+            PreflightError::TooDeep => Self::TooDeep,
         }
     }
 }

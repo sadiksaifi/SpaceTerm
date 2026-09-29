@@ -206,8 +206,7 @@ pub(crate) use composition::{
     WindowBackgroundAppearance,
 };
 pub(crate) use document::{
-    JsonPosition, SettingsDocument, SettingsDocumentError, SettingsJsonError, export_settings,
-    parse_settings,
+    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 pub(crate) use preferences::{
     AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, ThemeSlots,

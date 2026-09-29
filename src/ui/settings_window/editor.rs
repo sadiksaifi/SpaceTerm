@@ -79,6 +79,12 @@ impl SettingsEditor {
         self.draft.document()
     }
 
+    /// The draft itself, which is replaced rather than mutated, so holding it shows whether the
+    /// document changed since.
+    pub(super) fn shared_document(&self) -> Arc<SettingsDocument> {
+        self.draft.shared_document()
+    }
+
     pub(super) fn editable(&self) -> bool {
         self.draft.editable()
     }
@@ -162,6 +168,30 @@ impl SettingsEditor {
             }
         }
         !self.draft.has_unwritten_changes()
+    }
+
+    /// Writes pending changes, then the document itself if no file holds it yet, so another
+    /// program can open the file.
+    ///
+    /// Both writes are small and run synchronously, as [`Self::flush`] does, so the file exists
+    /// when this returns unless a write failed or one is still running.
+    pub(super) fn write_file(&mut self, cx: &mut Context<SettingsWindow>) {
+        if !self.flush(cx) {
+            return;
+        }
+        match self.draft.prepare_file() {
+            Ok(Some(job)) => {
+                let generation = self.generation;
+                let result = job.run();
+                self.settle(generation, result, cx);
+            }
+            // Another writer owns the transaction, and its write creates the file.
+            Ok(None) | Err(SettingsError::Busy) => {}
+            Err(error) => {
+                self.draft.report(error);
+                cx.notify();
+            }
+        }
     }
 
     pub(super) fn is_writing(&self) -> bool {

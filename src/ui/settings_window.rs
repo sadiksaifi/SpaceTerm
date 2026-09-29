@@ -334,8 +334,8 @@ pub(crate) struct SettingsWindow {
     theme_store: Entity<ThemeStore>,
     /// One shortcut recorder per Command, kept so a recording survives re-rendering.
     shortcuts: ShortcutRows,
-    /// The Settings JSON editor in the Advanced section.
-    settings_json: advanced::SettingsJsonEditor,
+    /// The read-only settings file in the Advanced section.
+    settings_file: advanced::SettingsFileView,
 }
 
 /// How one row returns to its default.
@@ -498,7 +498,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
-        let settings_json = advanced::SettingsJsonEditor::new(window, cx);
+        let settings_file = advanced::SettingsFileView::new(window, cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -519,7 +519,7 @@ impl SettingsWindow {
             theme_gallery,
             theme_store,
             shortcuts,
-            settings_json,
+            settings_file,
         }
     }
 
@@ -1496,7 +1496,7 @@ impl SettingsWindow {
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
-            SettingsRowId::SettingsJson => self.render_settings_json(appearance, cx),
+            SettingsRowId::SettingsFile => self.render_settings_file(appearance, cx),
             SettingsRowId::ExportSettings => {
                 let owner = cx.weak_entity();
                 action_button("settings-document-export", "Export…", true, move |window, cx| {
@@ -2164,7 +2164,6 @@ impl SettingsWindow {
             }
             let _ = owner.update(cx, |settings, cx| {
                 settings.shortcuts.dismiss_notice();
-                settings.end_settings_json_edit(cx);
                 settings.editor.reset_all(cx);
                 cx.notify();
             });
@@ -2326,13 +2325,13 @@ fn control_selector(row: SettingsRowId) -> String {
 
 /// Where a row's label sits.
 ///
-/// The theme preview, the gallery, and Settings JSON present themselves under their group's title,
+/// The theme preview, the gallery, and the settings file present themselves under their group's title,
 /// so they span the row without a label.
 fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SettingsJson => SettingsRowLayout::Full,
+        | SettingsRowId::SettingsFile => SettingsRowLayout::Full,
         _ => SettingsRowLayout::Beside,
     }
 }

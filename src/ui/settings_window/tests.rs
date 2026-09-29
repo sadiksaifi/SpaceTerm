@@ -3078,37 +3078,47 @@ fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
 
 // Advanced ------------------------------------------------------------------------------------
 
-fn settings_json_text(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+fn settings_file_text(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
     window.read_with(cx, |window, cx| {
-        window.settings_json.area.read(cx).value().to_owned()
+        window.settings_file.area.read(cx).value().to_owned()
     })
 }
 
-fn replace_settings_json(window: &Entity<SettingsWindow>, text: &str, cx: &mut VisualTestContext) {
-    let area = window.read_with(cx, |window, _| window.settings_json.area.clone());
-    let text = text.to_owned();
-    cx.update(|_, cx| {
-        area.update(cx, |area, cx| {
-            area.set_value(text, cx);
-        });
-    });
+fn install_settings_file(
+    harness: &Harness,
+    cx: &mut VisualTestContext,
+) -> Rc<crate::platform::settings_file::testing::RecordingSettingsFile> {
+    let file = crate::platform::settings_file::testing::RecordingSettingsFile::watchable();
+    let access: Rc<dyn crate::platform::settings_file::SettingsFileAccess> = file.clone();
+    let settings = harness.settings.clone();
+    cx.update(|_, cx| crate::ui::settings_file::SettingsFile::install(settings, access, cx));
+    cx.run_until_parked();
+    file
+}
+
+/// Lets a save made in another program reach the window.
+fn follow_outside_save(
+    file: &crate::platform::settings_file::testing::RecordingSettingsFile,
+    cx: &mut VisualTestContext,
+) {
+    file.announce_change();
+    cx.executor()
+        .advance_clock(crate::ui::settings_file::SETTLE_DELAY);
     cx.run_until_parked();
 }
 
-fn settings_json_with_density(document: &SettingsDocument, density: ChromeDensity) -> String {
-    let mut json: serde_json::Value =
-        serde_json::from_str(&document.settings_json().unwrap()).unwrap();
-    json["preferences"]["window"]["density"] = serde_json::to_value(density).unwrap();
-    serde_json::to_string_pretty(&json).unwrap()
-}
-
 #[gpui::test]
-fn settings_json_follows_the_document_at_rest(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
+fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext) {
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
+            .expect("fixture Zed family"),
+        ..SettingsDocument::default()
+    };
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Advanced, cx);
     assert_eq!(
-        settings_json_text(&window, cx),
-        document_of(&window, cx).settings_json().unwrap()
+        settings_file_text(&window, cx),
+        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
     );
 
     cx.update(|_, cx| {
@@ -3121,113 +3131,133 @@ fn settings_json_follows_the_document_at_rest(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    let text = settings_json_text(&window, cx);
-    assert_eq!(text, document_of(&window, cx).settings_json().unwrap());
+    let text = settings_file_text(&window, cx);
+    assert_eq!(
+        text,
+        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
+    );
     assert!(text.contains("comfortable"), "the text should follow the change");
 }
 
 #[gpui::test]
-fn resting_settings_json_accepts_no_typing(cx: &mut TestAppContext) {
+fn the_settings_file_accepts_no_typing(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Advanced, cx);
-    let before = settings_json_text(&window, cx);
+    let before = settings_file_text(&window, cx);
 
-    click("settings-json-editor", cx);
+    click("settings-file-text", cx);
     cx.simulate_input("x");
 
-    assert_eq!(settings_json_text(&window, cx), before);
-    assert!(cx.debug_bounds("settings-json-apply").is_none());
+    assert_eq!(settings_file_text(&window, cx), before);
 }
 
 #[gpui::test]
-fn applying_edited_settings_json_changes_the_setting_and_saves_it(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+fn edit_json_opens_the_settings_file_and_shows_where_it_lives(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
     select_section(SettingsSectionId::Advanced, cx);
-    click("settings-json-edit", cx);
-    let edited = settings_json_with_density(&document_of(&window, cx), ChromeDensity::Comfortable);
-    replace_settings_json(&window, &edited, cx);
+    assert!(cx.debug_bounds("settings-file-location").is_some());
+    let writes = harness.storage.writes();
 
-    click("settings-json-apply", cx);
-    settle(cx);
+    click("settings-file-edit", cx);
+
+    assert_eq!(file.opened.get(), 1);
+    assert_eq!(harness.storage.writes(), writes, "an existing file is opened as it is");
+}
+
+#[gpui::test]
+fn edit_json_writes_a_missing_settings_file_before_opening_it(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings_with(cx, Arc::new(MemoryStorage::default()));
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(
+        harness.storage.document().map(|document| document.preferences),
+        Some(SettingsDocument::default().preferences)
+    );
+    assert_eq!(file.opened.get(), 1);
+}
+
+#[gpui::test]
+fn edit_json_saves_pending_changes_before_opening_the_file(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |window, cx| {
+            window.edit(
+                |document| document.preferences.window.density = ChromeDensity::Comfortable,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    click("settings-file-edit", cx);
 
     assert_eq!(
         harness.storage.document().unwrap().preferences.window.density,
+        ChromeDensity::Comfortable,
+        "the editor opens what the window shows"
+    );
+    assert_eq!(file.opened.get(), 1);
+}
+
+#[gpui::test]
+fn edit_json_is_unavailable_without_a_settings_file(cx: &mut TestAppContext) {
+    let (_window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let writes = harness.storage.writes();
+
+    click("settings-file-edit", cx);
+
+    assert_eq!(harness.storage.writes(), writes);
+}
+
+#[gpui::test]
+fn a_save_in_another_editor_reaches_the_window(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    select_section(SettingsSectionId::Advanced, cx);
+    let mut saved = SettingsDocument::default();
+    saved.preferences.window.density = ChromeDensity::Comfortable;
+
+    harness.storage.save_elsewhere(&saved);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
         ChromeDensity::Comfortable
     );
-    assert!(!window.read_with(cx, |window, _| window.settings_json.editing));
-    assert!(cx.debug_bounds("settings-json-edit").is_some());
-    assert_eq!(
-        settings_json_text(&window, cx),
-        document_of(&window, cx).settings_json().unwrap(),
-        "the applied text should be shown as the document writes it"
-    );
+    assert!(settings_file_text(&window, cx).contains("comfortable"));
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
 }
 
-/// Typing through a document is not a change of mind about a setting, so nothing takes effect
-/// until Apply, and a text that fails the load-time rules is refused whole.
 #[gpui::test]
-fn invalid_settings_json_changes_nothing_and_points_at_the_fault(cx: &mut TestAppContext) {
+fn a_malformed_save_pauses_editing_until_a_valid_save(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Advanced, cx);
+    let file = install_settings_file(&harness, cx);
     let before = document_of(&window, cx);
-    let writes = harness.storage.writes();
-    click("settings-json-edit", cx);
-    replace_settings_json(&window, "{\n  \"preferences\": x\n}", cx);
-    settle(cx);
-    assert_eq!(harness.storage.writes(), writes, "an unapplied edit writes nothing");
 
-    click("settings-json-apply", cx);
-    settle(cx);
+    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    follow_outside_save(&file, cx);
 
-    assert_eq!(document_of(&window, cx), before);
-    assert_eq!(harness.storage.writes(), writes);
-    let error = window.read_with(cx, |window, _| window.settings_json.error);
+    assert_eq!(document_of(&window, cx), before, "the last valid settings stay in effect");
+    assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
+    assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+
+    let mut fixed = SettingsDocument::default();
+    fixed.preferences.window.density = ChromeDensity::Comfortable;
+    harness.storage.save_elsewhere(&fixed);
+    follow_outside_save(&file, cx);
+
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
     assert_eq!(
-        error,
-        Some(crate::appearance::SettingsJsonError::Syntax(
-            crate::appearance::JsonPosition { line: 2, column: 18 }
-        ))
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
     );
-    assert_eq!(
-        super::advanced::settings_json_error_message(error.unwrap()).as_ref(),
-        "Line 2, column 18 is not valid JSON."
-    );
-    let (focused, caret) = cx.update(|native, cx| {
-        let area = window.read(cx).settings_json.area.read(cx);
-        (
-            area.focus_handle().is_focused(native),
-            area.value()[..].find('x').unwrap(),
-        )
-    });
-    assert!(focused, "the editor keeps focus so the fault can be fixed");
-    assert!(window.read_with(cx, |window, _| window.settings_json.editing));
-    assert!(caret > 0);
-
-    replace_settings_json(&window, "{}", cx);
-    assert_eq!(
-        window.read_with(cx, |window, _| window.settings_json.error),
-        None,
-        "editing the text withdraws the refusal"
-    );
-}
-
-#[gpui::test]
-fn cancelling_a_settings_json_edit_restores_the_document_text(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Advanced, cx);
-    let writes = harness.storage.writes();
-    click("settings-json-edit", cx);
-    replace_settings_json(&window, "{}", cx);
-
-    click("settings-json-cancel", cx);
-    settle(cx);
-
-    assert_eq!(
-        settings_json_text(&window, cx),
-        document_of(&window, cx).settings_json().unwrap()
-    );
-    assert!(!window.read_with(cx, |window, _| window.settings_json.editing));
-    assert_eq!(harness.storage.writes(), writes);
 }
 
 fn exported_document_with_a_theme() -> Vec<u8> {
@@ -3308,22 +3338,4 @@ fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppCont
 
     assert_eq!(document_of(&window, cx), before);
     assert_eq!(harness.storage.writes(), writes);
-}
-
-#[gpui::test]
-fn resetting_everything_ends_a_settings_json_edit(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Advanced, cx);
-    click("settings-json-edit", cx);
-    replace_settings_json(&window, "{}", cx);
-
-    click("settings-reset-all", cx);
-    click("modal-action-settings-reset-all-confirm", cx);
-    settle(cx);
-
-    assert!(!window.read_with(cx, |window, _| window.settings_json.editing));
-    assert_eq!(
-        settings_json_text(&window, cx),
-        document_of(&window, cx).settings_json().unwrap()
-    );
 }

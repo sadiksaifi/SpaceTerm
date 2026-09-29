@@ -525,7 +525,64 @@ impl UserSettings {
             return Err(SettingsError::Busy);
         }
         state.require_catalog_revision(state.catalog_revision)?;
-        match read_document(self.0.storage.as_ref()) {
+        let read = read_document(self.0.storage.as_ref());
+        self.adopt(&mut state, read)
+    }
+
+    /// Adopts the file another program changed, returning whether SpaceTerm read a new document.
+    ///
+    /// A file SpaceTerm last read or wrote is left alone. Any other file is adopted as an explicit
+    /// reload adopts it, so a malformed or unsafe file keeps the committed state and pauses writes
+    /// until a valid file arrives. A live preview or write owns the transaction, so the caller
+    /// retries once it ends.
+    pub(crate) fn follow_file(&self) -> Result<bool, SettingsError> {
+        let mut state = self.0.lock();
+        if !matches!(state.transaction, Transaction::Idle) {
+            return Err(SettingsError::Busy);
+        }
+        state.require_catalog_revision(state.catalog_revision)?;
+        let snapshot = self.0.storage.read();
+        let unchanged = state.storage_ready
+            && state.status.is_none()
+            && match &snapshot {
+                Ok(Some(snapshot)) => state.expected.as_ref() == Some(&snapshot.identity),
+                Ok(None) => state.expected.is_none(),
+                Err(_) => false,
+            };
+        if unchanged {
+            return Ok(false);
+        }
+        let read = snapshot.map_err(SettingsError::from).and_then(|snapshot| {
+            let Some(snapshot) = snapshot else {
+                return Ok((SettingsDocument::default(), None));
+            };
+            Ok((parse_settings(&snapshot.bytes)?, Some(snapshot.identity)))
+        });
+        self.adopt(&mut state, read).map(|()| true)
+    }
+
+    /// Returns the write that creates the settings file when none holds the document yet.
+    ///
+    /// Another program can open only a file that exists. An existing file, including one SpaceTerm
+    /// cannot read, is left as it is.
+    pub(crate) fn ensure_file(&self) -> Result<Option<CommitJob>, SettingsError> {
+        let mut state = self.0.lock();
+        if !matches!(state.transaction, Transaction::Idle) {
+            return Err(SettingsError::Busy);
+        }
+        if state.expected.is_some() || !state.storage_ready {
+            return Ok(None);
+        }
+        let committed = (*state.committed).clone();
+        self.prepare_direct_commit(&mut state, committed).map(Some)
+    }
+
+    fn adopt(
+        &self,
+        state: &mut State,
+        read: Result<(SettingsDocument, Option<SecureEntryIdentity>), SettingsError>,
+    ) -> Result<(), SettingsError> {
+        match read {
             Ok((mut document, identity)) => {
                 // File revisions belong to another writer. A reload retires every locally
                 // captured revision even when the external document reused the same number.

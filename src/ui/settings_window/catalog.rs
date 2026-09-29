@@ -24,7 +24,7 @@ pub(super) enum SettingsSectionId {
     Privacy,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
-    /// Settings as a whole: Settings JSON, export and import, and Reset All.
+    /// Settings as a whole: the settings file, export and import, and Reset All.
     Advanced,
 }
 
@@ -116,8 +116,8 @@ pub(super) enum SettingsRowId {
     UpdateReminderInterval,
     /// The Keybinding of one Command.
     Shortcut(Command),
-    /// Every Setting as Settings JSON, read-only until the person chooses to edit it.
-    SettingsJson,
+    /// The settings file, shown read-only and edited in the person's own editor.
+    SettingsFile,
     /// Writes the Settings Document to a file the person chooses.
     ExportSettings,
     /// Replaces the Settings Document with one read from a file the person chooses.
@@ -163,7 +163,7 @@ impl SettingsRowId {
             // profile, which returns a displaced default to its Command.
             | Self::Shortcut(_)
             // The Advanced rows act on Settings as a whole and hold no preference of their own.
-            | Self::SettingsJson
+            | Self::SettingsFile
             | Self::ExportSettings
             | Self::ImportSettings
             | Self::ResetAllSettings => {
@@ -470,12 +470,15 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-update-reminder-interval",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::SettingsJson,
+        id: SettingsRowId::SettingsFile,
         section: SettingsSectionId::Advanced,
-        group: "Settings JSON",
-        label: "Settings JSON",
-        keywords: &["json", "edit", "source", "raw", "text", "file", "advanced"],
-        selector: "settings-row-settings-json",
+        group: "Settings File",
+        label: "Settings file",
+        keywords: &[
+            "json", "edit", "editor", "source", "raw", "text", "file", "path", "location",
+            "advanced",
+        ],
+        selector: "settings-row-settings-file",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ExportSettings,
@@ -606,7 +609,7 @@ mod tests {
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
         SettingsRowId::UpdateReminderInterval,
-        SettingsRowId::SettingsJson,
+        SettingsRowId::SettingsFile,
         SettingsRowId::ExportSettings,
         SettingsRowId::ImportSettings,
         SettingsRowId::ResetAllSettings,
@@ -868,7 +871,7 @@ mod tests {
                     | SettingsRowId::UpdateCheckInterval
                     | SettingsRowId::UpdateReminderInterval
                     | SettingsRowId::Shortcut(_)
-                    | SettingsRowId::SettingsJson
+                    | SettingsRowId::SettingsFile
                     | SettingsRowId::ExportSettings
                     | SettingsRowId::ImportSettings
                     | SettingsRowId::ResetAllSettings
@@ -886,7 +889,7 @@ mod tests {
     #[test]
     fn a_whole_settings_query_reaches_the_advanced_rows() {
         for (query, row) in [
-            ("json", SettingsRowId::SettingsJson),
+            ("json", SettingsRowId::SettingsFile),
             ("export", SettingsRowId::ExportSettings),
             ("backup", SettingsRowId::ExportSettings),
             ("restore", SettingsRowId::ImportSettings),

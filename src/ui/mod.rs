@@ -32,6 +32,7 @@ mod scrollbar_theme;
 mod search_field_theme;
 mod segmented_control_theme;
 mod selection_chip;
+pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
 pub(crate) mod ssh_askpass_dialog;
