@@ -1383,8 +1383,7 @@ fn enclosing_directory_item(
         },
         "..",
     )
-    .group(ENCLOSING_ROW)
-    .compact()
+    .band()
     .leading_icon(|foreground, size| {
         Icon::new(IconName::Undo2, size, foreground).into_any_element()
     })
@@ -1906,7 +1905,11 @@ mod tests {
         let child = cx
             .debug_bounds("directory-picker-row-SpaceTerm")
             .expect("the child row should be rendered");
-        assert!(enclosing.bottom() <= child.top());
+        assert_eq!(
+            enclosing.bottom(),
+            child.top(),
+            "a divider separated the enclosing row from the children"
+        );
         assert_eq!(
             enclosing.size.height,
             child.size.height / 2.0,

@@ -115,38 +115,9 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
 }
 
 #[test]
-fn presented_results_should_separate_an_untitled_group_without_a_heading() {
+fn a_band_item_should_take_half_a_single_line_row() {
     let items = vec![
-        CommandPaletteItem::new(1, "..").group("enclosing"),
-        CommandPaletteItem::new(2, "Documents"),
-        CommandPaletteItem::new(3, "Projects"),
-    ];
-    let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Caller);
-
-    assert_eq!(
-        PresentedResults::new(&items, &matches, None).rows(),
-        &[
-            PaletteRow::Item {
-                position: 0,
-                size: ItemRowSize::SingleLine
-            },
-            PaletteRow::Separator,
-            PaletteRow::Item {
-                position: 1,
-                size: ItemRowSize::SingleLine
-            },
-            PaletteRow::Item {
-                position: 2,
-                size: ItemRowSize::SingleLine
-            },
-        ]
-    );
-}
-
-#[test]
-fn a_compact_item_should_take_half_a_single_line_row() {
-    let items = vec![
-        CommandPaletteItem::new(1, "..").compact(),
+        CommandPaletteItem::new(1, "..").band(),
         CommandPaletteItem::new(2, "Documents"),
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Caller);
@@ -158,7 +129,7 @@ fn a_compact_item_should_take_half_a_single_line_row() {
         &[
             PaletteRow::Item {
                 position: 0,
-                size: ItemRowSize::Compact
+                size: ItemRowSize::Band
             },
             PaletteRow::Item {
                 position: 1,
@@ -167,6 +138,43 @@ fn a_compact_item_should_take_half_a_single_line_row() {
         ]
     );
     assert_eq!(results.rows()[0].height(metrics), px(14.0));
+}
+
+#[gpui::test]
+fn a_leading_band_should_fill_the_panel_width_flush_under_the_search_line(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "..")
+                    .band()
+                    .debug_selector("band"),
+                CommandPaletteItem::new(2, "Documents").debug_selector("documents"),
+            ],
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let band = cx.debug_bounds("band").expect("the band was not rendered");
+    let documents = cx.debug_bounds("documents").unwrap();
+    assert!(
+        band.top() - editor.bottom() <= px(1.0),
+        "the band did not sit flush under the search line"
+    );
+    assert!(band.left() - panel.left() <= px(1.0));
+    assert!(panel.right() - band.right() <= px(1.0));
+    assert_eq!(
+        documents.top(),
+        band.bottom(),
+        "a divider followed the band"
+    );
+    assert!(
+        documents.left() > band.left(),
+        "ordinary rows lost their inset"
+    );
 }
 
 #[test]

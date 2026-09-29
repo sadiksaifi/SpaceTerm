@@ -820,8 +820,7 @@ pub struct CommandPaletteItem<I> {
     label: SharedString,
     description: Option<SharedString>,
     section: Option<SharedString>,
-    group: Option<SharedString>,
-    compact: bool,
+    band: bool,
     keywords: Vec<SharedString>,
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
@@ -859,8 +858,7 @@ impl<I> CommandPaletteItem<I> {
             label: label.into(),
             description: None,
             section: None,
-            group: None,
-            compact: false,
+            band: false,
             keywords: Vec::new(),
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
@@ -886,18 +884,11 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Separates this item from neighboring items of another group without a heading.
-    ///
-    /// Like sections, groups follow provider order and apply within one section.
-    pub fn group(mut self, value: impl Into<SharedString>) -> Self {
-        self.group = Some(value.into());
-        self
-    }
-
-    /// Presents this item at half the single-line row height, for a navigation row such as one
-    /// that opens an enclosing directory. A compact item shows no description.
-    pub fn compact(mut self) -> Self {
-        self.compact = true;
+    /// Presents this item as a band: half the single-line row height and filled edge to edge,
+    /// for a navigation row such as one that opens an enclosing directory. A leading band sits
+    /// flush under the search line. A band shows no description.
+    pub fn band(mut self) -> Self {
+        self.band = true;
         self
     }
 
@@ -1582,6 +1573,8 @@ struct CommandPalettePanelLayout {
     height: Pixels,
     list_height: Pixels,
     icon_offset: Pixels,
+    /// Whether the results start flush under the search line, as a leading band does.
+    flush_results: bool,
 }
 
 mod presented_results {
@@ -1602,8 +1595,8 @@ mod presented_results {
     /// How tall one item row is.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum ItemRowSize {
-        /// Half a single-line row, for a navigation row that yields space to the results.
-        Compact,
+        /// Half a single-line row, filled edge to edge.
+        Band,
         SingleLine,
         /// A label with its description below.
         TwoLine,
@@ -1615,7 +1608,7 @@ mod presented_results {
                 Self::Section(_) => metrics.section_height,
                 Self::Separator => metrics.separator_height,
                 Self::Item {
-                    size: ItemRowSize::Compact,
+                    size: ItemRowSize::Band,
                     ..
                 } => metrics.single_line_row_height / 2.0,
                 Self::Item {
@@ -1651,7 +1644,6 @@ mod presented_results {
         ) -> Self {
             let mut rows = Vec::with_capacity(matches.len() + 1);
             let mut current_section: Option<SharedString> = None;
-            let mut current_group: Option<SharedString> = None;
             let mut started = false;
             for (position, matched) in matches.iter().enumerate() {
                 let Some(item) = items.get(matched.item_index) else {
@@ -1665,15 +1657,12 @@ mod presented_results {
                         rows.push(PaletteRow::Section(section));
                     }
                     current_section = item.section.clone();
-                } else if item.group != current_group {
-                    rows.push(PaletteRow::Separator);
                 }
-                current_group = item.group.clone();
                 started = true;
                 rows.push(PaletteRow::Item {
                     position,
-                    size: if item.compact {
-                        ItemRowSize::Compact
+                    size: if item.band {
+                        ItemRowSize::Band
                     } else if item.description.is_none() {
                         ItemRowSize::SingleLine
                     } else {
@@ -1689,6 +1678,17 @@ mod presented_results {
 
         pub(super) fn len(&self) -> usize {
             self.rows.len()
+        }
+
+        /// Whether the first row is a band, which sits flush under the search line.
+        pub(super) fn leads_with_band(&self) -> bool {
+            matches!(
+                self.rows.first(),
+                Some(PaletteRow::Item {
+                    size: ItemRowSize::Band,
+                    ..
+                })
+            )
         }
 
         #[cfg(test)]
@@ -3118,7 +3118,14 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         } else {
             self.presented_results.total_height(metrics)
         };
-        let chrome_height = chrome_height(metrics);
+        let flush_results =
+            !self.loading && !self.matches.is_empty() && self.presented_results.leads_with_band();
+        let chrome_height = chrome_height(metrics)
+            - if flush_results {
+                metrics.panel_padding
+            } else {
+                px(0.0)
+            };
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
         let panel_height = (chrome_height + content_height)
             .min(metrics.maximum_height)
@@ -3165,6 +3172,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 height: panel_height,
                 list_height,
                 icon_offset,
+                flush_results,
             },
             theme,
             typography,
@@ -3415,6 +3423,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             height,
             list_height,
             icon_offset,
+            flush_results,
         } = layout;
         let paint = theme.paint;
         let metrics = theme.metrics;
@@ -3446,7 +3455,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .py(metrics.panel_padding)
+                    .when(!flush_results, |results| results.pt(metrics.panel_padding))
+                    .pb(metrics.panel_padding)
                     .child(content),
             );
         theme.shell.mount(panel).into_any_element()
@@ -3896,22 +3906,35 @@ fn render_row<I: Clone + Eq + 'static>(
     let debug_selector = item.debug_selector.clone();
     let id = item.id.clone();
     let hover_palette = palette.clone();
+    let band = item.band;
+    // A band spans the panel, so its padding carries the inset that aligns its content.
+    let background = if band && !selected && !hovered {
+        theme.shell.divider()
+    } else {
+        row_paint.background
+    };
     let mut row = div()
         .id(("command-palette-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .w_full()
         .h(height)
-        .px(metrics.horizontal_padding)
+        .px(if band {
+            metrics.content_leading_inset()
+        } else {
+            metrics.horizontal_padding
+        })
         .flex()
         .items_center()
         .gap(metrics.gap)
-        .rounded(metrics.row_corner_radius())
+        .when(!band, |row| {
+            row.rounded(metrics.row_corner_radius())
+                .border(theme.shell.hairline())
+                .border_color(row_paint.border)
+        })
         .text_color(foreground)
         .cursor_default()
-        .bg(row_paint.background)
-        .border(theme.shell.hairline())
-        .border_color(row_paint.border)
+        .bg(background)
         .when(!item.disabled, |row| {
             let id = id.clone();
             let entered_id = id.clone();
@@ -3969,7 +3992,7 @@ fn render_row<I: Clone + Eq + 'static>(
         .gap(metrics.row_line_gap)
         .child(label_line)
         .when_some(
-            item.description.clone().filter(|_| !item.compact),
+            item.description.clone().filter(|_| !item.band),
             |text, description| {
                 text.child(
                     div()
@@ -4049,7 +4072,7 @@ fn render_row<I: Clone + Eq + 'static>(
     }
     div()
         .w_full()
-        .px(metrics.panel_padding)
+        .when(!band, |wrapper| wrapper.px(metrics.panel_padding))
         .child(row)
         .into_any_element()
 }
