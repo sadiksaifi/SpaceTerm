@@ -442,7 +442,11 @@ impl SettingsWindow {
                 .disabled(!editable)
                 .tab_stop(true)
                 .debug_selector(use_selector)
-                .on_activate(move |_, _, cx| {
+                .on_activate(move |activation, window, cx| {
+                    // In Use replaces this button, so keyboard focus moves on before it goes.
+                    if activation.source() != spaceterm_ui::ButtonActivationSource::Pointer {
+                        window.focus_next(cx);
+                    }
                     let _ = owner.update(cx, |settings, cx| {
                         settings.set_theme(slot, id.clone(), cx);
                     });

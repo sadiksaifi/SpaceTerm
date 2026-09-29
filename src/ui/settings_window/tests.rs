@@ -596,6 +596,13 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
         AppearanceMode::Auto
     );
     assert_eq!(installed_count(&settings, cx), 1);
+
+    // Use gives way to In Use, so keyboard focus moves on to the same row's removal button.
+    press_return(cx);
+    assert!(
+        cx.debug_bounds("modal-action-settings-remove-theme-confirm")
+            .is_some()
+    );
 }
 
 /// Removing the theme in use asks first, removes every theme its file imported, then returns its
