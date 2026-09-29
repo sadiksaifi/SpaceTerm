@@ -169,9 +169,9 @@ impl WorkspaceSidebar {
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected colors are promoted
         // below, because that promotion is what the row's text and icons consume.
-        // A focused sidebar emphasizes its selection in the accent color, like an AppKit source
-        // list, and draws no focus ring.
-        let emphasized = appearance.active && self.focus.is_focused(window);
+        // A sidebar the keyboard focused emphasizes its selection in the accent color, like an
+        // AppKit source list, and draws no focus ring.
+        let emphasized = appearance.active && self.has_visible_focus(window);
         let selection_colors = if emphasized {
             crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
         } else if appearance.active {

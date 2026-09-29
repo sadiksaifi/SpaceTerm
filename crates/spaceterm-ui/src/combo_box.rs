@@ -2486,10 +2486,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                         .shadow(trigger_shadow.layers())
                         .shadow_outside_only()
                         .when(enabled && !open, |trigger| {
+                            // A ringed trigger keeps its resting border, which the ring fades out
+                            // under its band.
+                            let state_borders =
+                                paint.trigger_state_borders.filter(|_| focus_ring.is_none());
                             trigger
                                 .hover(move |style| {
                                     let style = style.bg(paint.trigger_hover_background);
-                                    match paint.trigger_state_borders {
+                                    match state_borders {
                                         Some(borders) => style.border_color(borders.hovered),
                                         None => style,
                                     }
@@ -2498,7 +2502,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                                     let style = style
                                         .bg(paint.trigger_pressed_background)
                                         .shadow(Vec::new());
-                                    match paint.trigger_state_borders {
+                                    match state_borders {
                                         Some(borders) => style.border_color(borders.pressed),
                                         None => style,
                                     }

@@ -128,6 +128,9 @@ pub(super) struct WorkspaceSidebar {
     scroll_handle: ScrollHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     focus: FocusHandle,
+    /// Whether the keyboard brought focus to the sidebar, so its selection is emphasized. Pointer
+    /// paths that focus the sidebar, like the scrollbar and a secondary click, clear it.
+    focus_visible: bool,
     menu: Option<WorkspaceId>,
     new_workspace_menu_open: bool,
     rename: Option<WorkspaceRenameState>,
@@ -143,6 +146,7 @@ impl WorkspaceSidebar {
             window,
             |sidebar, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
+                    sidebar.focus_visible = false;
                     sidebar.focus.focus(window, cx);
                     cx.emit(SidebarEvent::FocusChanged);
                 }
@@ -181,6 +185,7 @@ impl WorkspaceSidebar {
             scroll_handle: ScrollHandle::new(),
             scrollbar,
             focus,
+            focus_visible: false,
             menu: None,
             new_workspace_menu_open: false,
             rename: None,
@@ -260,6 +265,9 @@ impl WorkspaceSidebar {
         if !self.rows.iter().any(|row| row.workspace_id == workspace_id) {
             return false;
         }
+        // The keyboard opens the menu only from the focused sidebar, so a request from anywhere
+        // else is a secondary click.
+        self.focus_visible &= self.focus.is_focused(window);
         self.focus.focus(window, cx);
         self.rename = None;
         self.menu = Some(workspace_id);
@@ -646,6 +654,7 @@ impl WorkspaceSidebar {
             }
             _ => return,
         };
+        self.focus_visible = true;
         self.scroll_handle.scroll_to_item(next);
         if next != current {
             cx.emit(SidebarEvent::Activate {
@@ -665,6 +674,10 @@ impl WorkspaceSidebar {
     }
     pub(super) fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+    /// Whether the sidebar has focus that the keyboard brought to it.
+    pub(super) fn has_visible_focus(&self, window: &Window) -> bool {
+        self.focus_visible && self.is_focused(window)
     }
     pub(super) fn is_resizing(&self) -> bool {
         self.resize_origin.is_some()
@@ -717,6 +730,7 @@ impl WorkspaceSidebar {
                 self.reveal_row(index, cx);
             }
             cx.defer_in(window, |sidebar, window, cx| {
+                sidebar.focus_visible = true;
                 sidebar.focus.focus(window, cx);
                 cx.emit(SidebarEvent::FocusChanged);
                 cx.notify();

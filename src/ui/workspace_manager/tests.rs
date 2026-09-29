@@ -6994,6 +6994,27 @@ fn a_focused_sidebar_emphasizes_the_active_workspace(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_secondary_click_does_not_emphasize_the_sidebar_it_focuses(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    right_click("workspace-row-1-active", cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    assert!(
+        !active_row_is_emphasized(cx),
+        "only the keyboard emphasizes the sidebar selection"
+    );
+
+    // Keyboard navigation within the focused sidebar restores the emphasis.
+    cx.simulate_keystrokes("home");
+    cx.run_until_parked();
+    assert!(active_row_is_emphasized(cx));
+}
+
+#[gpui::test]
 fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 

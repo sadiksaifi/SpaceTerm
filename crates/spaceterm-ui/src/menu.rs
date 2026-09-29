@@ -1440,15 +1440,22 @@ impl<A: Clone + 'static> MenuControl<A> {
             release_window(reservation, window.window_handle().window_id(), cx);
         }
 
-        let (open, combo_box_overlay_hosted, focus_handle) = {
+        let (open, combo_box_overlay_hosted, focus_handle, restore_focus) = {
             let state = state.read(cx);
             (
                 state.open,
                 state.combo_box_overlay_hosted,
                 state.focus_handle.clone(),
+                state
+                    .restore_focus
+                    .as_ref()
+                    .and_then(|restore| restore.upgrade()),
             )
         };
-        let focused = focus_handle.is_focused(window);
+        // The open panel takes the trigger's own handle, so while open the trigger counts as
+        // focused only when it held focus before opening and will take it back on close.
+        let focused = focus_handle.is_focused(window)
+            && (!open || restore_focus.is_some_and(|restore| restore == focus_handle));
         let trigger_bounds_state = state.downgrade();
         let trigger_kind = self.kind;
         let trigger_state = state.downgrade();
@@ -3682,6 +3689,10 @@ mod tests {
             cx.simulate_keystrokes("space");
             cx.run_until_parked();
             assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+            assert!(
+                cx.debug_bounds(focus_selector).is_some(),
+                "a keyboard-opened {selector} keeps its ring"
+            );
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
             assert!(cx.update(|window, _| keyboard_focus.is_focused(window)));
@@ -3692,6 +3703,17 @@ mod tests {
             cx.simulate_click(bounds.center(), Modifiers::none());
             cx.run_until_parked();
             assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+            crate::focus_ring::settle(cx);
+            assert!(
+                cx.update(|window, _| {
+                    !window.painted_quads().iter().any(|quad| {
+                        let color = Rgba::from(quad.border_color);
+                        let ring = rgba(0x3399ffff);
+                        (color.b - ring.b).abs() < 0.01 && (color.g - ring.g).abs() < 0.01
+                    })
+                }),
+                "a pointer-opened {selector} shows no focus ring"
+            );
             cx.simulate_keystrokes("escape");
             cx.simulate_mouse_move(point(px(500.0), px(500.0)), None, Modifiers::none());
             cx.run_until_parked();
@@ -3768,7 +3790,11 @@ mod tests {
                     .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
                     .reduce(|bounds, next| bounds.union(&next))
             };
-            assert_eq!(visible(ordinary), Some(trigger.scale(scale)));
+            assert_eq!(
+                visible(ordinary),
+                None,
+                "the band hides the ordinary border"
+            );
             assert_eq!(visible(focus), Some(ring.scale(scale)));
         });
     }

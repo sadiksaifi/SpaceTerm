@@ -197,6 +197,19 @@ mod tests {
         assert_eq!(theme.ring_color(), colors[5]);
     }
 
+    /// The union of the visible bounds of the painted quads that `matches` selects.
+    fn painted_bounds(
+        quads: &[gpui::Quad],
+        matches: impl Fn(&gpui::Quad) -> bool,
+    ) -> gpui::Bounds<gpui::ScaledPixels> {
+        quads
+            .iter()
+            .filter(|quad| matches(quad))
+            .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+            .reduce(|bounds, next| bounds.union(&next))
+            .expect("a matching quad was painted")
+    }
+
     struct FocusFixture {
         focus: FocusHandle,
         state: FieldState,
@@ -218,10 +231,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn focused_invalid_field_paints_a_hollow_ring_over_its_frame(cx: &mut gpui::TestAppContext) {
+    fn focused_invalid_field_shows_only_the_ring_over_its_border(cx: &mut gpui::TestAppContext) {
         let fill = gpui::rgba(0x20202080);
         let invalid = gpui::rgba(0xcc0000ff);
-        let ring = gpui::rgba(0x00aa00ff);
+        // Translucent, like the built-in ring, so a border under the band would show through.
+        let ring = gpui::rgba(0x00aa007f);
         let theme = FieldFrameTheme::new(
             fill,
             gpui::rgba(0x555555ff),
@@ -239,18 +253,37 @@ mod tests {
                 theme,
             }
         });
-        crate::focus_ring::settle(cx);
-        let quads = cx.update(|window, _| window.painted_quads());
-        let bounds_for = |color: gpui::Rgba| {
-            quads
-                .iter()
-                .filter(|quad| quad.border_color == color.into())
-                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
-                .reduce(|bounds, next| bounds.union(&next))
-                .unwrap()
+        let red = |quad: &gpui::Quad| {
+            let color = gpui::Rgba::from(quad.border_color);
+            (color.r - invalid.r).abs() < 0.01 && color.g < 0.01 && color.b < 0.01
         };
-        let frame = bounds_for(invalid);
-        let outline = bounds_for(ring);
+        let border_alpha = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| red(quad))
+                    .map(|quad| quad.border_color.a)
+                    .fold(0.0, f32::max)
+            })
+        };
+        cx.run_until_parked();
+        cx.executor().advance_clock(crate::focus_ring::ENTRANCE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let entering = border_alpha(cx);
+        assert!(
+            entering > 0.0 && entering < 1.0,
+            "the border fades as the band fades in, alpha {entering}"
+        );
+
+        crate::focus_ring::settle(cx);
+        assert_eq!(border_alpha(cx), 0.0, "no border shows through the band");
+        let quads = cx.update(|window, _| window.painted_quads());
+        let is_ring = |quad: &&gpui::Quad| {
+            let color = gpui::Rgba::from(quad.border_color);
+            (color.g - ring.g).abs() < 0.01 && color.r < 0.01 && color.a > 0.0
+        };
         assert!(
             quads
                 .iter()
@@ -260,25 +293,19 @@ mod tests {
         assert!(
             quads
                 .iter()
-                .filter(|quad| quad.border_color == ring.into())
+                .filter(is_ring)
                 .all(|quad| quad.background.is_transparent())
         );
+        let frame = painted_bounds(&quads, |quad| {
+            quad.background == gpui::Background::from(fill)
+        });
+        let outline = painted_bounds(&quads, |quad| is_ring(&quad));
         assert!(
-            outline.left() < frame.left(),
-            "frame={frame:?}; outline={outline:?}; all={quads:?}"
-        );
-        assert!(outline.top() < frame.top());
-        assert!(outline.right() > frame.right());
-        assert!(outline.bottom() > frame.bottom());
-        let order_for = |color: gpui::Rgba| {
-            quads
-                .iter()
-                .filter(move |quad| quad.border_color == color.into())
-                .map(|quad| quad.order)
-        };
-        assert!(
-            order_for(ring).min() > order_for(invalid).max(),
-            "the invalid border must not show through the ring"
+            outline.left() < frame.left()
+                && outline.top() < frame.top()
+                && outline.right() > frame.right()
+                && outline.bottom() > frame.bottom(),
+            "frame={frame:?}; outline={outline:?}"
         );
 
         root.update(cx, |root, cx| {

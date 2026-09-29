@@ -3,8 +3,9 @@
 //! One band, measured from AppKit on macOS: its outer edge sits 3pt outside the control's fill and
 //! it runs 3.5pt inward, so it overlaps the fill by half a point and covers any border drawn around
 //! the fill. Its corners stay concentric with the control's. The ring wraps its control and paints
-//! after it, so nothing the control draws, its border included, shows through the band. The control
-//! keeps its resting appearance; the ring alone states focus. On gaining focus the band starts wide
+//! after it, and the control's border fades out as the band fades in, so neither the border nor
+//! anything else the control draws shows through the translucent band. The control otherwise keeps
+//! its resting appearance; the ring alone states focus. On gaining focus the band starts wide
 //! and far out, faint, and contracts onto the control while it fades in. On losing focus it
 //! disappears at once.
 use std::cell::Cell;
@@ -25,7 +26,7 @@ const REACH: f32 = 3.0;
 const WIDTH: f32 = 3.5;
 /// How much wider and further out the band starts when it appears.
 const ENTRANCE_SPREAD: f32 = 17.0;
-const ENTRANCE: Duration = Duration::from_millis(250);
+pub(crate) const ENTRANCE: Duration = Duration::from_millis(250);
 
 /// Creates the ring for a control with the given outer corner radius and border width.
 ///
@@ -153,21 +154,40 @@ impl<E: InteractiveElement> InteractiveElement for Ringed<E> {
 
 impl<E: StatefulInteractiveElement> StatefulInteractiveElement for Ringed<E> {}
 
-impl<E: IntoElement> IntoElement for Ringed<E> {
+impl<E: IntoElement + Styled + 'static> IntoElement for Ringed<E> {
     type Element = RingedElement;
 
     fn into_element(self) -> Self::Element {
+        let mut host = self.host;
         RingedElement {
-            host: self.host.into_any_element(),
+            build: Some(Box::new(move |cover| {
+                fade_border(host.style(), cover);
+                host.into_any_element()
+            })),
+            host: None,
             ring: self.ring,
             marker: None,
         }
     }
 }
 
+/// Takes `cover` of the host's border away, where `cover` is how opaque the band over it is.
+///
+/// The band is translucent, so painting it over the border would still show the border through it.
+fn fade_border(style: &mut StyleRefinement, cover: f32) {
+    if cover <= 0.0 {
+        return;
+    }
+    if let Some(border) = style.border_color.as_mut() {
+        border.a *= 1.0 - cover.min(1.0);
+    }
+}
+
 /// The element a [`Ringed`] control becomes.
 pub struct RingedElement {
-    host: AnyElement,
+    /// Builds the control once layout knows how much of its border the band covers.
+    build: Option<Box<dyn FnOnce(f32) -> AnyElement>>,
+    host: Option<AnyElement>,
     ring: Option<FocusRing>,
     /// An empty element over the ring's resting bounds, which carries its debug selector.
     marker: Option<AnyElement>,
@@ -177,6 +197,14 @@ pub struct RingedElement {
 #[derive(Default)]
 struct BandState {
     shown_since: Option<Instant>,
+}
+
+impl RingedElement {
+    fn host_mut(&mut self) -> &mut AnyElement {
+        self.host
+            .as_mut()
+            .expect("the control is built during layout")
+    }
 }
 
 impl IntoElement for RingedElement {
@@ -207,7 +235,14 @@ impl Element for RingedElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        (self.host.request_layout(window, cx), ())
+        if let Some(build) = self.build.take() {
+            let cover = self
+                .ring
+                .as_ref()
+                .map_or(0.0, |ring| ring.border_cover(window, cx));
+            self.host = Some(build(cover));
+        }
+        (self.host_mut().request_layout(window, cx), ())
     }
 
     fn prepaint(
@@ -219,7 +254,7 @@ impl Element for RingedElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.host.prepaint(window, cx);
+        self.host_mut().prepaint(window, cx);
         let Some(ring) = &self.ring else {
             return;
         };
@@ -247,7 +282,7 @@ impl Element for RingedElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.host.paint(window, cx);
+        self.host_mut().paint(window, cx);
         if let Some(marker) = &mut self.marker {
             marker.paint(window, cx);
         }
@@ -265,7 +300,23 @@ impl FocusRing {
             .unwrap_or(host)
     }
 
-    fn paint(&self, host: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    /// How opaque the band over the control's border is this frame, from 0 to 1.
+    ///
+    /// A ring around one part of the control leaves the control's border alone, and a ring whose
+    /// color is invisible, as in an inactive window, covers nothing.
+    fn border_cover(&self, window: &mut Window, cx: &mut App) -> f32 {
+        if self.target.is_some() || self.color.a <= 0.0 {
+            return 0.0;
+        }
+        self.progress(window, cx)
+            .map_or(0.0, |progress| Band::at(progress).opacity)
+    }
+
+    /// How far the entrance has run, or `None` while the ring is hidden.
+    ///
+    /// Layout and paint both read it in one frame; the first reading that finds the ring shown
+    /// starts the entrance.
+    fn progress(&self, window: &mut Window, cx: &mut App) -> Option<f32> {
         let shown = match &self.visibility {
             Visibility::Shown => true,
             Visibility::Tracking { focus, pinned } => *pinned || focus.is_focused(window),
@@ -273,7 +324,7 @@ impl FocusRing {
         let pinned = matches!(self.visibility, Visibility::Tracking { pinned: true, .. });
         let now = cx.background_executor().now();
         let motion = crate::control_motion(cx);
-        let progress = window.with_global_id(self.id.clone(), |id, window| {
+        window.with_global_id(self.id.clone(), |id, window| {
             window.with_element_state(id, |state: Option<BandState>, _| {
                 let mut state = state.unwrap_or_default();
                 state.shown_since = shown.then(|| state.shown_since.unwrap_or(now));
@@ -286,8 +337,11 @@ impl FocusRing {
                 });
                 (progress, state)
             })
-        });
-        let Some(progress) = progress else {
+        })
+    }
+
+    fn paint(&self, host: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Some(progress) = self.progress(window, cx) else {
             return;
         };
         if progress < 1.0 {
@@ -531,27 +585,45 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ring_paints_over_its_control_border(cx: &mut gpui::TestAppContext) {
+    fn band_hides_its_control_border_and_paints_over_it(cx: &mut gpui::TestAppContext) {
         let (root, cx) = cx.add_window_view(|_, cx| Fixture {
             focus: cx.focus_handle(),
             border_width: px(1.0),
         });
+        let border = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| {
+                        let color = Rgba::from(quad.border_color);
+                        (color.r - BORDER.r).abs() < 0.01 && (color.b - BORDER.b).abs() < 0.01
+                    })
+                    .map(|quad| (quad.order, quad.border_color.a))
+                    .collect::<Vec<_>>()
+            })
+        };
         cx.update(|window, cx| root.read(cx).focus.clone().focus(window, cx));
-        settle(cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(ENTRANCE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
 
-        let ring = ring_quads(cx)[0].order;
-        let border = cx.update(|window, _| {
-            window
-                .painted_quads()
-                .into_iter()
-                .filter(|quad| {
-                    let color = Rgba::from(quad.border_color);
-                    (color.r - BORDER.r).abs() < 0.01 && (color.b - BORDER.b).abs() < 0.01
-                })
-                .map(|quad| quad.order)
-                .max()
-                .expect("the control paints its border")
-        });
-        assert!(ring > border, "the band must cover the control's border");
+        let entering = border(cx);
+        let band = ring_quads(cx)[0].order;
+        assert!(!entering.is_empty(), "the border is still fading out");
+        for (order, alpha) in entering {
+            assert!(
+                alpha > 0.0 && alpha < 1.0,
+                "the border fades, alpha {alpha}"
+            );
+            assert!(band > order, "the band paints over the border");
+        }
+
+        settle(cx);
+        assert!(
+            border(cx).iter().all(|(_, alpha)| *alpha == 0.0),
+            "no border shows through the translucent band at rest"
+        );
     }
 }
