@@ -1,6 +1,13 @@
+use crate::platform::keyboard_layout::{
+    KeyboardLayout, KeyboardLayoutAdapter, KeyboardLayoutUnavailable,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
-use gpui::{DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex};
+use gpui::{
+    KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, KeybindingKeystroke, Keystroke,
+    PlatformKeyboardMapper,
+};
 use thiserror::Error;
 
 use super::{Command, KeybindingPreferences, Shortcut, ShortcutRejection, TerminalConvention};
@@ -74,6 +81,8 @@ pub enum Reservation {
 pub enum KeymapProfileError {
     #[error("command has multiple default entries")]
     DuplicateCommand,
+    #[error("keyboard layout is unavailable")]
+    KeyboardLayoutUnavailable,
     #[error("invalid default shortcut")]
     InvalidDefault(ShortcutRejection),
     #[error("default shortcuts must be unique")]
@@ -91,6 +100,7 @@ pub enum KeybindingState {
     Unassigned,
     Displaced { by: Command },
     Blocked(SystemReservation),
+    TerminalBlocked(TerminalConvention),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -100,7 +110,10 @@ pub struct Reassignment {
 
 #[derive(Clone, Debug)]
 pub struct KeymapProfile {
+    layout_adapter: Rc<dyn KeyboardLayoutAdapter>,
+    layout: KeyboardLayout,
     defaults: BTreeMap<Command, Vec<Shortcut>>,
+    system_reserved_sources: HashMap<Shortcut, SystemReservation>,
     system_reserved: HashMap<Shortcut, SystemReservation>,
     fixed_bindings: Vec<KeyBinding>,
     control_bindings: Vec<KeyBinding>,
@@ -109,11 +122,15 @@ pub struct KeymapProfile {
 impl KeymapProfile {
     /// Omitted commands have no default. An explicit `None` has the same meaning.
     pub fn new(
+        layout_adapter: Rc<dyn KeyboardLayoutAdapter>,
         defaults: impl IntoIterator<Item = (Command, Option<DefaultBinding>)>,
         system_reserved: Vec<SystemReserved>,
         fixed_bindings: Vec<KeyBinding>,
         control_bindings: Vec<KeyBinding>,
     ) -> Result<Self, KeymapProfileError> {
+        let layout = layout_adapter
+            .snapshot()
+            .map_err(|_| KeymapProfileError::KeyboardLayoutUnavailable)?;
         let mut reservations = HashMap::new();
         for reserved in system_reserved {
             if reservations
@@ -145,22 +162,48 @@ impl KeymapProfile {
             }
             parsed_defaults.insert(command, shortcuts);
         }
+        let system_reserved = reservations
+            .iter()
+            .map(|(shortcut, &reason)| (shortcut.resolve(&layout), reason))
+            .collect();
         Ok(Self {
+            layout_adapter,
+            layout,
             defaults: parsed_defaults,
-            system_reserved: reservations,
+            system_reserved_sources: reservations,
+            system_reserved,
             fixed_bindings,
             control_bindings,
         })
     }
 
+    pub(crate) fn refresh_layout(&mut self) -> Result<bool, KeyboardLayoutUnavailable> {
+        let layout = self.layout_adapter.snapshot()?;
+        if layout == self.layout {
+            return Ok(false);
+        }
+        self.system_reserved = self
+            .system_reserved_sources
+            .iter()
+            .map(|(shortcut, &reason)| (shortcut.resolve(&layout), reason))
+            .collect();
+        self.layout = layout;
+        Ok(true)
+    }
+
     pub fn check(&self, shortcut: &Shortcut) -> Result<(), Reservation> {
-        if let Some(convention) = super::terminal_conventions::reservation(shortcut) {
+        let shortcut = shortcut.resolve(&self.layout);
+        if let Some(convention) = super::terminal_conventions::reservation(&shortcut) {
             return Err(Reservation::Terminal(convention));
         }
-        if let Some(&reason) = self.system_reserved.get(shortcut) {
+        if let Some(reason) = self.system_reservation(&shortcut) {
             return Err(Reservation::System(reason));
         }
         Ok(())
+    }
+
+    fn system_reservation(&self, shortcut: &Shortcut) -> Option<SystemReservation> {
+        self.system_reserved.get(shortcut).copied()
     }
 
     pub fn resolve(&self, preferences: &KeybindingPreferences) -> ResolvedKeymap {
@@ -169,14 +212,17 @@ impl KeymapProfile {
             let (shortcuts, state) = match shortcut {
                 None => (Vec::new(), KeybindingState::Unassigned),
                 Some(shortcut) => {
-                    if let Some(&reason) = self.system_reserved.get(shortcut) {
+                    let shortcut = shortcut.resolve(&self.layout);
+                    if let Err(Reservation::Terminal(reason)) = self.check(&shortcut) {
+                        (Vec::new(), KeybindingState::TerminalBlocked(reason))
+                    } else if let Some(reason) = self.system_reservation(&shortcut) {
                         (Vec::new(), KeybindingState::Blocked(reason))
-                    } else if let Some(by) = resolved.owner(shortcut) {
+                    } else if let Some(by) = resolved.owner(&shortcut) {
                         // Invalid duplicate overrides still cannot install two owners.
                         (Vec::new(), KeybindingState::Displaced { by })
                     } else {
                         resolved.owners.insert(shortcut.clone(), command);
-                        (vec![shortcut.clone()], KeybindingState::Overridden)
+                        (vec![shortcut], KeybindingState::Overridden)
                     }
                 }
             };
@@ -199,6 +245,20 @@ impl KeymapProfile {
                 );
                 continue;
             };
+            if let Err(reservation) = self.check(primary) {
+                let state = match reservation {
+                    Reservation::System(reason) => KeybindingState::Blocked(reason),
+                    Reservation::Terminal(reason) => KeybindingState::TerminalBlocked(reason),
+                };
+                resolved.commands.insert(
+                    command,
+                    ResolvedCommand {
+                        shortcuts: Vec::new(),
+                        state,
+                    },
+                );
+                continue;
+            }
             if let Some(by) = resolved.owner(primary) {
                 resolved.commands.insert(
                     command,
@@ -211,9 +271,9 @@ impl KeymapProfile {
             }
             let mut shortcuts = Vec::new();
             for shortcut in defaults {
-                if resolved.owner(shortcut).is_none() {
+                if self.check(&shortcut).is_ok() && resolved.owner(&shortcut).is_none() {
                     resolved.owners.insert(shortcut.clone(), command);
-                    shortcuts.push(shortcut.clone());
+                    shortcuts.push(shortcut);
                 }
             }
             resolved.commands.insert(
@@ -246,7 +306,7 @@ impl KeymapProfile {
     /// Restore the primary and aliases, reclaiming each from its current owner.
     pub fn reset(&self, preferences: &mut KeybindingPreferences, command: Command) {
         for shortcut in self.defaults(command) {
-            self.displace(preferences, command, shortcut);
+            self.displace(preferences, command, &shortcut);
         }
         preferences.remove(command);
     }
@@ -257,12 +317,28 @@ impl KeymapProfile {
         command: Command,
         shortcut: &Shortcut,
     ) -> Option<Command> {
+        let shortcut = shortcut.resolve(&self.layout);
         let resolved = self.resolve(preferences);
-        let owner = resolved.owner(shortcut).filter(|&owner| owner != command)?;
-        let primary = resolved.shortcut(owner);
-        let kept = primary.filter(|&primary| primary != shortcut).cloned();
-        self.retain(preferences, owner, kept);
-        Some(owner)
+        let owner = resolved.owner(&shortcut).filter(|&owner| owner != command);
+        // Displaced overrides still retain their spellings. Clear every competing override
+        // before installing a new owner so none can reappear or invalidate Settings.
+        let conflicts = preferences
+            .iter()
+            .filter_map(|(other, retained)| {
+                (other != command
+                    && retained.is_some_and(|retained| retained.resolve(&self.layout) == shortcut))
+                .then_some(other)
+            })
+            .collect::<Vec<_>>();
+        for other in conflicts {
+            self.retain(preferences, other, None);
+        }
+        if let Some(owner) = owner {
+            let primary = resolved.shortcut(owner);
+            let kept = primary.filter(|&primary| primary != &shortcut).cloned();
+            self.retain(preferences, owner, kept);
+        }
+        owner
     }
 
     /// Records one Keybinding. An override equal to an alias-free default, or Unassigned for a
@@ -273,7 +349,10 @@ impl KeymapProfile {
         command: Command,
         shortcut: Option<Shortcut>,
     ) {
-        let restates_default = match (self.defaults(command), &shortcut) {
+        let restates_default = match (
+            self.defaults.get(&command).map_or(&[][..], Vec::as_slice),
+            &shortcut,
+        ) {
             ([], None) => true,
             ([default], Some(shortcut)) => default == shortcut,
             _ => false,
@@ -285,8 +364,13 @@ impl KeymapProfile {
         }
     }
 
-    fn defaults(&self, command: Command) -> &[Shortcut] {
-        self.defaults.get(&command).map_or(&[], Vec::as_slice)
+    fn defaults(&self, command: Command) -> Vec<Shortcut> {
+        self.defaults
+            .get(&command)
+            .into_iter()
+            .flatten()
+            .map(|shortcut| shortcut.resolve(&self.layout))
+            .collect()
     }
 
     pub fn fixed_bindings(&self) -> &[KeyBinding] {
@@ -360,8 +444,22 @@ fn binding(command: Command, shortcut: &Shortcut, context: Option<&str>) -> KeyB
         predicate,
         false,
         None,
-        &DummyKeyboardMapper,
+        &ResolvedShortcutMapper(shortcut),
     )
     .expect("Shortcut guarantees GPUI-parseable spelling")
     .with_meta(CUSTOMIZABLE_BINDINGS)
+}
+
+// GPUI parses uppercase ASCII as Shift + lowercase. A native layout can instead produce
+// uppercase ASCII with Shift consumed, so restore the resolved identity at its mapping seam.
+struct ResolvedShortcutMapper<'a>(&'a Shortcut);
+
+impl PlatformKeyboardMapper for ResolvedShortcutMapper<'_> {
+    fn map_key_equivalent(&self, _: Keystroke, _: bool) -> KeybindingKeystroke {
+        KeybindingKeystroke::from_keystroke(self.0.to_keystroke())
+    }
+
+    fn get_key_equivalents(&self) -> Option<&rustc_hash::FxHashMap<char, char>> {
+        None
+    }
 }

@@ -284,7 +284,11 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         "Primary+Enter".into(),
         Rc::new(TestingShortcutFormatter),
     );
-    let profile = default_keymap::profile(testing_reserved_shortcuts()).unwrap();
+    let profile = default_keymap::profile(
+        crate::platform::keyboard_layout::testing::us(),
+        testing_reserved_shortcuts(),
+    )
+    .unwrap();
     let keymap = Keymap::new(
         profile
             .resolve(&KeybindingPreferences::default())
@@ -309,7 +313,11 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
             ComboBoxKeybindingProfile::MacOs,
             TextInputKeybindingProfile::MacOs,
         ),
-        default_keymap::profile(testing_reserved_shortcuts()).unwrap(),
+        default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            testing_reserved_shortcuts(),
+        )
+        .unwrap(),
         testing_presentation(),
         std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
     )

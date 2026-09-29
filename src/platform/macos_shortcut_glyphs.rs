@@ -90,7 +90,11 @@ mod tests {
             ("cmd-shift-alt-ctrl--", "⌃⌥⌘_"),
             ("shift-cmd-`", "⌘~"),
         ] {
-            assert_eq!(format(&Shortcut::parse(source).unwrap()).as_ref(), display);
+            let layout = crate::platform::keyboard_layout::testing::us()
+                .snapshot()
+                .unwrap();
+            let shortcut = Shortcut::parse(source).unwrap().resolve(&layout);
+            assert_eq!(format(&shortcut).as_ref(), display);
         }
     }
 }

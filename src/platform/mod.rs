@@ -6,8 +6,11 @@ pub(crate) mod application_menu;
 pub(crate) mod application_quit;
 pub(crate) mod control_socket;
 pub(crate) mod https_transport;
+pub(crate) mod keyboard_layout;
 #[cfg(target_os = "macos")]
 mod macos_appearance;
+#[cfg(target_os = "macos")]
+mod macos_keyboard_layout;
 #[cfg(target_os = "macos")]
 mod macos_quick_look_window;
 #[cfg(target_os = "macos")]

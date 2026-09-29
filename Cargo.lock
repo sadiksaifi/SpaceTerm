@@ -5469,6 +5469,7 @@ dependencies = [
  "pollster 0.4.0",
  "portable-pty",
  "raw-window-handle",
+ "rustc-hash 2.1.3",
  "same-file",
  "serde",
  "serde_json",
