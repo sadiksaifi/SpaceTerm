@@ -743,8 +743,9 @@ impl CommandPaletteEmptyAction {
 /// The first action is the default action: it takes the primary emphasis, and Return activates
 /// it while the empty state is shown and the action is enabled. Activating any action leaves the
 /// palette open; the caller decides what follows.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct CommandPaletteEmpty {
+    icon: Option<IconBuilder>,
     title: SharedString,
     description: Option<SharedString>,
     actions: Vec<CommandPaletteEmptyAction>,
@@ -754,6 +755,7 @@ impl CommandPaletteEmpty {
     /// Creates an empty state with a single-line title and no description or actions.
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
+            icon: None,
             title: title.into(),
             description: None,
             actions: Vec::new(),
@@ -766,6 +768,12 @@ impl CommandPaletteEmpty {
         self
     }
 
+    /// Adds a prominent icon above the title, built with the muted foreground and live size.
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
+        self.icon = Some(Rc::new(build));
+        self
+    }
+
     /// Appends one action. The first appended action is the default action.
     pub fn action(mut self, action: CommandPaletteEmptyAction) -> Self {
         self.actions.push(action);
@@ -775,6 +783,11 @@ impl CommandPaletteEmpty {
     /// Returns the title.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Returns the optional description.
+    pub fn description_text(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     fn default_action(&self) -> Option<&CommandPaletteEmptyAction> {
@@ -1434,6 +1447,11 @@ impl CommandPaletteMetrics {
             icon_width: self.leading_width,
             column_gap: px(0.0),
         }
+    }
+
+    /// Returns the empty state's icon size, which leads the title as its most prominent element.
+    fn empty_icon_size(&self) -> Pixels {
+        self.body_line_height * 2.0
     }
 
     fn header_action_size(&self) -> Pixels {
@@ -2774,10 +2792,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.activate_item(item_id, source, window, cx);
     }
 
+    /// Availability belongs to the action's disabled state, so pending results never block it.
     fn activate_primary_action(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.loading {
-            return;
-        }
         if let Some(action) = self
             .primary_action
             .as_ref()
@@ -3184,6 +3200,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &App,
     ) -> Pixels {
         let mut height = metrics.empty_padding * 2.0 + metrics.body_line_height;
+        if self.empty.icon.is_some() {
+            height += metrics.empty_icon_size() + metrics.empty_line_gap * 2.0;
+        }
         if let Some(description) = &self.empty.description {
             let wrap_width = (panel_width - metrics.content_leading_inset() * 2.0).max(px(1.0));
             let lines = wrapped_line_count(
@@ -3221,6 +3240,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .flex()
             .flex_col()
             .items_center()
+            .when_some(self.empty.icon.as_ref(), |empty, icon| {
+                let size = metrics.empty_icon_size();
+                empty.child(
+                    div()
+                        .size(size)
+                        .flex_shrink_0()
+                        .mb(metrics.empty_line_gap * 2.0)
+                        .child(icon(paint.muted, size)),
+                )
+            })
             .child(
                 div()
                     .debug_selector(|| "command-palette-empty-title".to_owned())

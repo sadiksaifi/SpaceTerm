@@ -39,6 +39,34 @@ const TRUNCATED_LISTING_NOTICE: &str =
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
     "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_DIRECTORY_ROWS: usize = 1024;
+const CONNECTION_LOST_NOTICE: EmptyNotice =
+    EmptyNotice::new(IconName::TriangleAlert, "SSH connection lost");
+const UNSUPPORTED_LOGIN_SHELL_NOTICE: EmptyNotice =
+    EmptyNotice::new(IconName::TriangleAlert, "Unsupported login shell")
+        .description(UNSUPPORTED_LOGIN_SHELL_MESSAGE);
+
+/// The content-unavailable view the list area presents in place of child directories.
+#[derive(Clone, Copy)]
+struct EmptyNotice {
+    icon: IconName,
+    title: &'static str,
+    description: Option<&'static str>,
+}
+
+impl EmptyNotice {
+    const fn new(icon: IconName, title: &'static str) -> Self {
+        Self {
+            icon,
+            title,
+            description: None,
+        }
+    }
+
+    const fn description(mut self, description: &'static str) -> Self {
+        self.description = Some(description);
+        self
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteDirectoryProviderError {
@@ -1081,29 +1109,6 @@ impl RemoteDirectoryPicker {
     }
 
     /// Explains why the path cannot be pinned, or `None` while it can be or may become pinnable.
-    fn blocked_reason(&self) -> Option<&'static str> {
-        match self.status {
-            RemoteDirectoryPickerStatus::Loading
-            | RemoteDirectoryPickerStatus::Readable
-            | RemoteDirectoryPickerStatus::Missing => None,
-            RemoteDirectoryPickerStatus::DiscoveringAccount => {
-                Some("Discovering remote home\u{2026}")
-            }
-            RemoteDirectoryPickerStatus::NotDirectory => Some("Not a remote directory"),
-            RemoteDirectoryPickerStatus::PermissionDenied => {
-                Some("Permission denied for this remote directory")
-            }
-            RemoteDirectoryPickerStatus::ConnectionLost => Some("SSH connection was lost"),
-            RemoteDirectoryPickerStatus::UnsupportedLoginShell => {
-                Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
-            }
-            RemoteDirectoryPickerStatus::Other => {
-                Some("SpaceTerm couldn\u{2019}t read this remote directory")
-            }
-            RemoteDirectoryPickerStatus::Invalid(error) => Some(error.message()),
-        }
-    }
-
     /// Returns the search line's action that pins to or creates the exact path.
     fn confirm_action(&self) -> CommandPalettePrimaryAction {
         CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.confirmation_label())
@@ -1144,15 +1149,85 @@ impl RemoteDirectoryPicker {
             .collect()
     }
 
-    fn empty_text(&self) -> &'static str {
-        if let Some(error) = self.listing_error {
-            return listing_error_text(error);
+    /// Explains the list area whenever it presents no child directory.
+    fn empty_state(&self) -> CommandPaletteEmpty {
+        let notice = self.empty_notice();
+        let icon = notice.icon;
+        let empty = CommandPaletteEmpty::new(notice.title)
+            .icon(move |tint, size| Icon::new(icon, size, tint).into_any_element());
+        match notice.description {
+            Some(description) => empty.description(description),
+            None => empty,
         }
-        self.blocked_reason().unwrap_or("No directories here")
+    }
+
+    /// An unusable exact path outranks the listing, and a missing path offers creation.
+    fn empty_notice(&self) -> EmptyNotice {
+        match self.status {
+            RemoteDirectoryPickerStatus::NotDirectory => {
+                return EmptyNotice::new(IconName::File, "Not a directory")
+                    .description("Only a directory can be a Pinned Directory.");
+            }
+            RemoteDirectoryPickerStatus::PermissionDenied => {
+                return EmptyNotice::new(IconName::Lock, "Permission denied")
+                    .description("The remote account can\u{2019}t open this directory.");
+            }
+            RemoteDirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
+            RemoteDirectoryPickerStatus::UnsupportedLoginShell => {
+                return UNSUPPORTED_LOGIN_SHELL_NOTICE;
+            }
+            RemoteDirectoryPickerStatus::Other => {
+                return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
+            }
+            RemoteDirectoryPickerStatus::Invalid(error) => {
+                return EmptyNotice::new(IconName::CircleAlert, "Invalid path")
+                    .description(error.message());
+            }
+            RemoteDirectoryPickerStatus::Missing => {
+                return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
+                    .description("Choose Create to make it and pin this Workspace to it.");
+            }
+            RemoteDirectoryPickerStatus::DiscoveringAccount
+            | RemoteDirectoryPickerStatus::Loading
+            | RemoteDirectoryPickerStatus::Readable => {}
+        }
+        match self.listing_error {
+            None => EmptyNotice::new(IconName::Folder, "No subdirectories"),
+            Some(RemoteDirectoryProviderError::ConnectionLost) => CONNECTION_LOST_NOTICE,
+            Some(RemoteDirectoryProviderError::UnsupportedLoginShell) => {
+                UNSUPPORTED_LOGIN_SHELL_NOTICE
+            }
+            Some(RemoteDirectoryProviderError::PermissionDenied) => {
+                EmptyNotice::new(IconName::Lock, "Permission denied")
+                    .description("The remote account can\u{2019}t list this directory.")
+            }
+            Some(RemoteDirectoryProviderError::Missing) => {
+                EmptyNotice::new(IconName::CircleAlert, "Enclosing directory doesn\u{2019}t exist")
+            }
+            Some(RemoteDirectoryProviderError::NotDirectory) => {
+                EmptyNotice::new(IconName::CircleAlert, "Enclosing path isn\u{2019}t a directory")
+            }
+            Some(
+                RemoteDirectoryProviderError::InvalidResponse | RemoteDirectoryProviderError::Other,
+            ) => EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory"),
+        }
+    }
+
+    /// Results are pending until the account and the exact path settle, unless rows already show.
+    fn awaiting_results(&self) -> bool {
+        self.busy.is_some()
+            || (self.rows.is_empty()
+                && matches!(
+                    self.status,
+                    RemoteDirectoryPickerStatus::DiscoveringAccount
+                        | RemoteDirectoryPickerStatus::Loading
+                ))
     }
 
     fn sync_palette(&self, cx: &mut Context<Self>) {
-        let loading = self.busy.is_some();
+        let busy = self.busy.is_some();
+        let awaiting_results = self.awaiting_results();
+        let empty = self.empty_state();
         let items = self.child_items();
         let first_child = items.first().map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
@@ -1168,10 +1243,10 @@ impl RemoteDirectoryPicker {
             palette.set_items(items, cx);
             palette.set_leading_action(Some(back_action), cx);
             palette.set_primary_action(Some(confirm_action), cx);
-            palette.set_empty(CommandPaletteEmpty::new(self.empty_text()), cx);
-            palette.set_loading(loading, cx);
-            palette.set_query_editable(!loading, cx);
-            palette.set_dismissible(!loading, cx);
+            palette.set_empty(empty, cx);
+            palette.set_loading(awaiting_results, cx);
+            palette.set_query_editable(!busy, cx);
+            palette.set_dismissible(!busy, cx);
             palette.set_escape_cancellable(
                 matches!(self.busy, Some(RemoteDirectoryPickerBusy::Validating)),
                 cx,
@@ -1285,21 +1360,6 @@ fn child_directory_item(
         palette_item.section(TRUNCATED_LISTING_NOTICE)
     } else {
         palette_item
-    }
-}
-
-fn listing_error_text(error: RemoteDirectoryProviderError) -> &'static str {
-    match error {
-        RemoteDirectoryProviderError::ConnectionLost => "SSH connection was lost",
-        RemoteDirectoryProviderError::Missing => "Remote parent directory no longer exists",
-        RemoteDirectoryProviderError::NotDirectory => "Remote parent path is not a directory",
-        RemoteDirectoryProviderError::PermissionDenied => {
-            "Permission denied while listing this remote directory"
-        }
-        RemoteDirectoryProviderError::UnsupportedLoginShell => UNSUPPORTED_LOGIN_SHELL_MESSAGE,
-        RemoteDirectoryProviderError::InvalidResponse | RemoteDirectoryProviderError::Other => {
-            "SpaceTerm couldn\u{2019}t list this remote directory"
-        }
     }
 }
 
@@ -1634,6 +1694,10 @@ mod tests {
             ("Create", true)
         );
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.empty_state().title().to_owned()),
+            "Directory doesn\u{2019}t exist"
+        );
 
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -1861,11 +1925,13 @@ mod tests {
 
         assert_eq!(
             picker.read_with(cx, |picker, _| {
+                let empty = picker.empty_state();
                 (
                     picker.status,
                     picker.can_confirm(),
                     picker.listing_error,
-                    picker.empty_text(),
+                    empty.title().to_owned(),
+                    empty.description_text().map(str::to_owned),
                     picker.row_names(),
                 )
             }),
@@ -1873,7 +1939,8 @@ mod tests {
                 RemoteDirectoryPickerStatus::Readable,
                 true,
                 Some(RemoteDirectoryProviderError::PermissionDenied),
-                "Permission denied while listing this remote directory",
+                "Permission denied".to_owned(),
+                Some("The remote account can\u{2019}t list this directory.".to_owned()),
                 Vec::<String>::new(),
             )
         );
@@ -1952,6 +2019,36 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(dropped_operations.load(AtomicOrdering::SeqCst), 2);
+        picker.update(cx, |picker, cx| {
+            picker.finish_close(CommandPaletteCloseReason::Programmatic, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_pending_listing_should_present_loading_instead_of_an_empty_directory(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = Arc::new(CancellationTrackingRemoteDirectoryProvider {
+            executor: cx.executor(),
+            dropped_operations: Arc::new(AtomicUsize::new(0)),
+        });
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker = cx.new(|cx| RemoteDirectoryPicker::new(injected, "orb", window, cx));
+            RemoteDirectoryPickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette-loading").is_some());
+        assert!(cx.debug_bounds("command-palette-empty").is_none());
         picker.update(cx, |picker, cx| {
             picker.finish_close(CommandPaletteCloseReason::Programmatic, cx);
         });

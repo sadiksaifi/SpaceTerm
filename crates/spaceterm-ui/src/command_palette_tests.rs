@@ -1139,6 +1139,40 @@ fn return_should_activate_the_default_empty_action_without_closing(cx: &mut Test
 }
 
 #[gpui::test]
+fn an_empty_state_icon_should_sit_above_the_title_without_clipping(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No folders")
+            .description("Pin this folder, or type another path.")
+            .icon(|_, size| {
+                div()
+                    .debug_selector(|| "empty-icon".to_owned())
+                    .size(size)
+                    .into_any_element()
+            }),
+        cx,
+    );
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let icon = cx
+        .debug_bounds("empty-icon")
+        .expect("the empty state did not render its icon");
+    let title = cx.debug_bounds("command-palette-empty-title").unwrap();
+    let description = cx
+        .debug_bounds("command-palette-empty-description")
+        .unwrap();
+    assert!(icon.size.height > title.size.height);
+    assert!(icon.bottom() <= title.top());
+    assert!((icon.center().x - title.center().x).abs() < px(0.5));
+    assert!(
+        description.bottom() <= panel.bottom(),
+        "the panel clipped the empty state: {description:?} in {panel:?}"
+    );
+}
+
+#[gpui::test]
 fn a_disabled_default_empty_action_should_ignore_return(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     show_empty_state(
@@ -1283,6 +1317,22 @@ fn the_confirm_key_should_ignore_a_disabled_primary_action(cx: &mut TestAppConte
         "the confirm key activated a disabled primary action"
     );
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn the_confirm_key_should_activate_the_primary_action_while_results_load(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
+    });
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
 }
 
 #[gpui::test]
