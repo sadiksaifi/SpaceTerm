@@ -27,6 +27,8 @@ use crate::{
 };
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
+/// A focused trigger binds its opening keys, so they outrank an enclosing context's bindings.
+const TRIGGER_KEY_CONTEXT: &str = "SpaceTermMenuTrigger";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
 const SUBMENU_OPEN_DELAY: Duration = Duration::from_millis(100);
 const SUBMENU_CLOSE_GRACE: Duration = Duration::from_millis(150);
@@ -36,7 +38,7 @@ const MENU_ROLE: FloatingRole = FloatingRole::Popover;
 actions!(
     spaceterm_menu,
     [
-        MoveUp, MoveDown, MoveHome, MoveEnd, MoveLeft, MoveRight, Activate, Dismiss
+        MoveUp, MoveDown, MoveHome, MoveEnd, MoveLeft, MoveRight, Activate, Dismiss, Open
     ]
 );
 
@@ -69,6 +71,9 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("enter", Activate, Some(KEY_CONTEXT)),
         KeyBinding::new("space", Activate, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("space", Open, Some(TRIGGER_KEY_CONTEXT)),
+        KeyBinding::new("enter", Open, Some(TRIGGER_KEY_CONTEXT)),
+        KeyBinding::new("down", Open, Some(TRIGGER_KEY_CONTEXT)),
     ]);
     if !cx.has_global::<MenuCoordinator>() {
         cx.set_global(MenuCoordinator::default());
@@ -1701,6 +1706,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         .inset_0();
 
         let key_state = state.downgrade();
+        let open_state = state.downgrade();
         let fill_parent_width = self.fill_parent_width;
         let preserve_trigger_cursor = self.preserve_trigger_cursor;
         let debug_selector = self.debug_selector;
@@ -1726,53 +1732,51 @@ impl<A: Clone + 'static> MenuControl<A> {
             })
             .child(content)
             .child(trigger_tracker)
+            .when(self.kind != TriggerKind::Context, |trigger| {
+                trigger
+                    .key_context(TRIGGER_KEY_CONTEXT)
+                    .on_action(move |_: &Open, window, cx| {
+                        if !enabled {
+                            cx.propagate();
+                            return;
+                        }
+                        window.prevent_default();
+                        open_menu(&open_state, None, window, cx);
+                    })
+            })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !enabled {
+                if !enabled || trigger_kind != TriggerKind::Context || !keyboard_context_enabled {
                     return;
                 }
-                if trigger_kind == TriggerKind::Context {
-                    if !keyboard_context_enabled {
-                        return;
-                    }
-                    let modifiers = &event.keystroke.modifiers;
-                    let requested = (event.keystroke.key == "f10"
-                        && modifiers.shift
-                        && !modifiers.control
-                        && !modifiers.alt
-                        && !modifiers.platform)
-                        || (event.keystroke.key == "menu" && !modifiers.modified());
-                    if !requested {
-                        return;
-                    }
-                    let Some(position) = key_state
-                        .read_with(cx, |state, _| {
-                            state.trigger_bounds.map(|bounds| bounds.bottom_left())
-                        })
-                        .ok()
-                        .flatten()
-                    else {
-                        return;
-                    };
-                    let request = ContextMenuOpenRequest { position };
-                    if key_context_open
-                        .as_ref()
-                        .is_some_and(|handler| !handler(&request, window, cx))
-                    {
-                        return;
-                    }
-                    window.prevent_default();
-                    open_menu(&key_state, Some(position), window, cx);
-                    cx.stop_propagation();
+                let modifiers = &event.keystroke.modifiers;
+                let requested = (event.keystroke.key == "f10"
+                    && modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform)
+                    || (event.keystroke.key == "menu" && !modifiers.modified());
+                if !requested {
                     return;
                 }
-                if event.keystroke.modifiers.modified() {
+                let Some(position) = key_state
+                    .read_with(cx, |state, _| {
+                        state.trigger_bounds.map(|bounds| bounds.bottom_left())
+                    })
+                    .ok()
+                    .flatten()
+                else {
+                    return;
+                };
+                let request = ContextMenuOpenRequest { position };
+                if key_context_open
+                    .as_ref()
+                    .is_some_and(|handler| !handler(&request, window, cx))
+                {
                     return;
                 }
-                if matches!(event.keystroke.key.as_str(), "space" | "enter" | "down") {
-                    window.prevent_default();
-                    open_menu(&key_state, None, window, cx);
-                    cx.stop_propagation();
-                }
+                window.prevent_default();
+                open_menu(&key_state, Some(position), window, cx);
+                cx.stop_propagation();
             });
 
         let mut ring = None;

@@ -1482,6 +1482,52 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
 }
 
 #[gpui::test]
+fn down_on_the_focused_menu_segment_should_open_the_menu_and_keep_the_selection(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Documents"),
+                CommandPaletteItem::new(2, "Downloads"),
+            ],
+            cx,
+        );
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .menu_item("choose", "Choose Directory\u{2026}"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    cx.simulate_keystrokes("tab tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-open-menu-keyboard-focus")
+            .is_some(),
+        "the menu segment did not take focus"
+    );
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("command-palette-primary-menu-choose")
+            .is_some(),
+        "Down did not open the menu"
+    );
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1),
+        "Down moved the list selection"
+    );
+}
+
+#[gpui::test]
 fn a_disabled_primary_action_menu_should_not_open(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
