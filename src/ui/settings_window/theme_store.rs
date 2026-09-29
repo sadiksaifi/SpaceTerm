@@ -27,7 +27,7 @@ use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
 use super::controls::action_button;
-use super::import::{ImportError as ThemeReadError, read_theme_document};
+use super::import::{ImportError as ThemeReadError, read_selected_document};
 
 /// Results beyond this many ask for a narrower search instead of growing the list.
 const MAX_RESULTS: usize = 40;
@@ -245,7 +245,7 @@ impl ThemeStore {
             };
             let read = cx
                 .background_executor()
-                .spawn(async move { read_theme_document(&path, opener.as_ref()) })
+                .spawn(async move { read_selected_document(&path, opener.as_ref()) })
                 .await;
             let _ = store.update(cx, |store, cx| store.finish_import(read, cx));
         })
