@@ -103,7 +103,9 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
 ];
 
 const LUCIDE_ASSET_PREFIX: &str = "spaceterm-ui/lucide/";
-const MIN_LUCIDE_ARTWORK_SIZE: u8 = 8;
+/// The compact search clear mark strikes a 7-point glyph. Below 7 points, a normalized 1-point
+/// stroke reaches the view box edge.
+const MIN_LUCIDE_ARTWORK_SIZE: u8 = 7;
 const MAX_LUCIDE_ARTWORK_SIZE: u8 = 40;
 
 macro_rules! lucide_sources {
@@ -798,16 +800,28 @@ mod tests {
         assert_eq!(normalized_stroke_width(gpui::px(17.0)), 1.0);
         assert_eq!(normalized_stroke_width(gpui::px(18.0)), 2.0);
 
-        // Product roles can produce artwork from 9 through 36 points after the text-role clamp,
-        // glyph offsets, and PinOff optical correction. The embedded sources' nearest geometry is
-        // two view-box units from an edge. The normalized stroke keeps a positive geometric margin
-        // at both extremes; an antialiased outer raster pixel is therefore not evidence of clipping.
+        // Product roles can produce artwork from 7 through 36 points after the text-role clamp,
+        // glyph offsets, PinOff optical correction, and the compact search clear mark. The
+        // embedded sources' nearest geometry is two view-box units from an edge. The normalized
+        // stroke keeps a positive geometric margin at both extremes; an antialiased outer raster
+        // pixel is therefore not evidence of clipping.
         let edge_margin = |artwork_size: f32, stroke_width: f32| {
             let source_width = stroke_width * 24.0 / artwork_size;
             (2.0 - source_width / 2.0) * artwork_size / 24.0
         };
-        assert!(edge_margin(9.0, 1.0) > 0.0);
+        assert!(edge_margin(7.0, 1.0) > 0.0);
+        assert!(edge_margin(6.0, 1.0) <= 0.0);
         assert!(edge_margin(36.0, 2.0) > 0.0);
+    }
+
+    #[test]
+    fn compact_clear_mark_glyph_paints_prepared_vector_artwork() {
+        // The Lucide font fallback places its glyph by text metrics rather than centering its
+        // artwork, which strikes the clear mark off its disc.
+        let path = lucide_asset_path(IconName::X, gpui::px(7.0), gpui::px(7.0))
+            .expect("the 7-point clear glyph has a prepared asset");
+        assert_eq!(path, format!("{LUCIDE_ASSET_PREFIX}x/7/1.svg"));
+        assert!(EmbeddedAssets.load(&path).expect("asset lookup").is_some());
     }
 
     #[test]
@@ -816,7 +830,7 @@ mod tests {
         assert!(prepared_lucide_asset("spaceterm-ui/lucide/x/12/3.svg").is_none());
         assert!(prepared_lucide_asset("spaceterm-ui/lucide/not-an-icon/12/1.svg").is_none());
         assert!(lucide_asset_path(IconName::X, gpui::px(41.0), gpui::px(41.0)).is_none());
-        assert!(lucide_asset_path(IconName::PinOff, gpui::px(8.0), gpui::px(7.0)).is_none());
+        assert!(lucide_asset_path(IconName::PinOff, gpui::px(7.0), gpui::px(6.0)).is_none());
     }
 
     #[test]
