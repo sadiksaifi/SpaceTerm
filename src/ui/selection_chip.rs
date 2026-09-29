@@ -115,6 +115,32 @@ impl ChipPaint {
     }
 }
 
+/// The selection paints of a collection with keyboard focus in an active window.
+///
+/// AppKit draws no focus ring around a focused list. It paints the selection in the accent color
+/// with the accent's foreground on all of the item's text and icons instead. The accent is opaque, so a
+/// chip painted from these colors skips the window's material.
+pub(crate) fn emphasized_selection_colors(
+    colors: &crate::appearance::ChromeColors,
+) -> crate::appearance::ChromeColors {
+    let accent = colors.primary_background;
+    let foreground = colors.primary_foreground;
+    let mut emphasized = colors.clone();
+    emphasized.row_selected_background = accent;
+    emphasized.row_selected_hover_background = accent;
+    emphasized.row_selected_border = accent;
+    emphasized.row_selected_hover_border = accent;
+    emphasized.row_selected_foreground = foreground;
+    emphasized.row_selected_hover_foreground = foreground;
+    emphasized.row_selected_icon = foreground;
+    emphasized.row_selected_hover_icon = foreground;
+    emphasized.row_selected_match = foreground;
+    emphasized.row_selected_hover_match = foreground;
+    emphasized.row_selected_secondary = foreground;
+    emphasized.row_selected_hover_secondary = foreground;
+    emphasized
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SelectionChip {
     shape: ChipShape,

@@ -7,10 +7,11 @@ use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 /// The chip carrying a Workspace row's hover and persistent selection.
 ///
-/// The geometry and the paints are read together so the fill, the hover state, and the keyboard
-/// focus ring cannot drift apart.
+/// The geometry and the paints are read together so the fill and the hover state cannot drift
+/// apart. An emphasized selection marks a sidebar with keyboard focus.
 fn row_chip(
     selected: bool,
+    emphasized: bool,
     appearance: &crate::ui::appearance::ChromeAppearance,
     colors: &crate::appearance::ChromeColors,
     selection_colors: &crate::appearance::ChromeColors,
@@ -35,7 +36,10 @@ fn row_chip(
             hover_rim: appearance.active.then_some(colors.row_hover_border),
         }
     };
-    let paint = if selected {
+    let paint = if selected && emphasized {
+        // The accent is opaque, so the window's material does not thin it.
+        paint
+    } else if selected {
         paint.selected_on(appearance, colors.row_background)
     } else {
         paint.raised_on(appearance, colors.row_background)
@@ -165,14 +169,26 @@ impl WorkspaceSidebar {
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected colors are promoted
         // below, because that promotion is what the row's text and icons consume.
-        let selection_colors = if appearance.active && !self.focus.is_focused(window) {
+        // A focused sidebar emphasizes its selection in the accent color, like an AppKit source
+        // list, and draws no focus ring.
+        let emphasized = appearance.active && self.focus.is_focused(window);
+        let selection_colors = if emphasized {
+            crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
+        } else if appearance.active {
             appearance
                 .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
                 .clone()
         } else {
             row_colors.clone()
         };
-        let chip = row_chip(active, appearance, &row_colors, &selection_colors, cx);
+        let chip = row_chip(
+            active,
+            emphasized,
+            appearance,
+            &row_colors,
+            &selection_colors,
+            cx,
+        );
         if active {
             row_colors.row_selected_background = selection_colors.row_selected_background;
             row_colors.row_selected_hover_background =

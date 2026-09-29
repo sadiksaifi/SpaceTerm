@@ -6955,6 +6955,44 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
     );
 }
 
+/// Whether the Active Workspace chip paints the accent fill that marks a focused sidebar.
+fn active_row_is_emphasized(cx: &mut VisualTestContext) -> bool {
+    let chip = cx
+        .debug_bounds("workspace-row-selection-1")
+        .expect("the Active Workspace chip was rendered");
+    cx.update(|window, cx| {
+        let accent = crate::ui::appearance::chrome(cx)
+            .host_colors(spaceterm_ui::ControlHost::Panel)
+            .primary_background;
+        let fill = gpui::Background::from(crate::ui::appearance::gpui_color(accent));
+        let bounds = chip.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .any(|quad| quad.bounds == bounds && quad.background == fill)
+    })
+}
+
+#[gpui::test]
+fn a_focused_sidebar_emphasizes_the_active_workspace(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(!active_row_is_emphasized(cx), "the Pane has focus");
+
+    cx.simulate_keystrokes("cmd-shift-e");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    assert!(
+        active_row_is_emphasized(cx),
+        "a focused sidebar paints its selection in the accent color"
+    );
+
+    cx.simulate_keystrokes("cmd-shift-e");
+    cx.run_until_parked();
+    assert!(!active_row_is_emphasized(cx), "focus returned to the Pane");
+}
+
 #[gpui::test]
 fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
