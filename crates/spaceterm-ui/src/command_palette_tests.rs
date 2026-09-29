@@ -115,6 +115,35 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
 }
 
 #[test]
+fn presented_results_should_separate_an_untitled_group_without_a_heading() {
+    let items = vec![
+        CommandPaletteItem::new(1, "..").group("enclosing"),
+        CommandPaletteItem::new(2, "Documents"),
+        CommandPaletteItem::new(3, "Projects"),
+    ];
+    let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Caller);
+
+    assert_eq!(
+        PresentedResults::new(&items, &matches, None).rows(),
+        &[
+            PaletteRow::Item {
+                position: 0,
+                single_line: true
+            },
+            PaletteRow::Separator,
+            PaletteRow::Item {
+                position: 1,
+                single_line: true
+            },
+            PaletteRow::Item {
+                position: 2,
+                single_line: true
+            },
+        ]
+    );
+}
+
+#[test]
 fn presented_results_should_own_section_order_and_match_mapping() {
     let (results, _) = sectioned_results();
 
@@ -1411,40 +1440,29 @@ fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn a_leading_action_should_precede_the_query_as_a_round_control(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
+fn a_query_prefix_should_lead_the_query_without_joining_it(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
-        palette.set_leading_action(
-            Some(
-                CommandPaletteAction::new("back", "Enclosing Folder", |_| div().into_any_element())
-                    .debug_selector("leading-back"),
-            ),
-            cx,
-        );
+        palette.set_query_prefix(Some("orb:".into()), cx);
     });
     open_palette(&root, &palette, cx);
 
-    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let prefix = cx
+        .debug_bounds("command-palette-query-prefix")
+        .expect("the query prefix was not rendered");
     let input = cx.debug_bounds("command-palette-input").unwrap();
-    let button = cx
-        .debug_bounds("leading-back")
-        .expect("the leading action was not rendered");
-    assert_eq!(button.size.width, button.size.height);
+    assert!(prefix.right() <= input.left());
     assert!(
-        button.right() <= input.left(),
-        "the control overlapped the query"
-    );
-    assert_eq!(
-        button.left() - editor.left(),
-        button.top() - editor.top(),
-        "the control was not inset like the other search-line controls"
+        input.left() - prefix.right() < px(1.0),
+        "the prefix was set apart from the query"
     );
 
-    cx.simulate_click(button.center(), Modifiers::default());
+    cx.simulate_keystrokes("a b");
     cx.run_until_parked();
-
-    assert_eq!(header_actions(&events), vec![SharedString::from("back")]);
-    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.query().to_owned()),
+        "ab"
+    );
 }
 
 #[gpui::test]

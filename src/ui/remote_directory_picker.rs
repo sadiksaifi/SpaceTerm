@@ -4,11 +4,9 @@ use gpui::prelude::*;
 use gpui::{Action, App, SharedString};
 use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertOutcome, CommandPalette, CommandPaletteAction, CommandPaletteActivationPolicy,
-    CommandPaletteCloseReason,
+    Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
     CommandPaletteMatching, CommandPalettePrimaryAction, CommandPaletteReplacementFocus,
-    CommandPaletteScope,
     FuzzyTarget, Icon, IconName, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
     fuzzy_filter,
 };
@@ -24,7 +22,6 @@ use super::{
     ToggleSidebarFocus,
 };
 
-use super::chrome_icons::IconRole;
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, RemoteWorkspaceValueError};
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
@@ -32,8 +29,8 @@ const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "remote-workspace-create-directory";
 /// Identifies the search line's Pin or Create action.
 const CONFIRM_ACTION: &str = "remote-directory-picker-confirm";
-/// Identifies the search line's control that opens the enclosing directory.
-const BACK_ACTION: &str = "remote-directory-picker-back";
+/// Identifies the row that opens the enclosing directory.
+const ENCLOSING_ROW: &str = "remote-directory-picker-enclosing";
 const TRUNCATED_LISTING_NOTE: &str =
     "Showing the first 1024 directories. Type a path to open others.";
 const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
@@ -415,12 +412,17 @@ enum RemoteDirectoryPickerBusy {
     AwaitingActivation,
 }
 
-/// Identifies one listed child directory within one operation generation.
+/// Identifies one presented row within one operation generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RemoteDirectoryPickerItemId {
-    row: RemoteDirectoryRow,
-    directory: RemoteDirectory,
-    operation_generation: u64,
+enum RemoteDirectoryPickerItemId {
+    /// The row that opens the directory enclosing the listed one.
+    Enclosing { operation_generation: u64 },
+    /// One listed child directory.
+    Child {
+        row: RemoteDirectoryRow,
+        directory: RemoteDirectory,
+        operation_generation: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -483,12 +485,10 @@ impl RemoteDirectoryPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scope = CommandPaletteScope::new(host.to_owned()).leading_icon(|tint, size| {
-            Icon::new(IconName::Server, size, tint).into_any_element()
-        });
+        let prefix = SharedString::from(format!("{host}:"));
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
-            palette.set_query_scope(Some(scope), cx);
+            palette.set_query_prefix(Some(prefix), cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
@@ -658,19 +658,24 @@ impl RemoteDirectoryPicker {
             CommandPaletteEvent::QueryChanged(query) => {
                 self.refresh_for_input(query.text().to_owned(), window, cx);
             }
-            CommandPaletteEvent::Activated(activation) => {
-                let RemoteDirectoryPickerItemId {
+            CommandPaletteEvent::Activated(activation) => match activation.item_id() {
+                RemoteDirectoryPickerItemId::Enclosing {
+                    operation_generation,
+                } => {
+                    if *operation_generation == self.operation_generation {
+                        self.open_enclosing_directory(window, cx);
+                    }
+                }
+                RemoteDirectoryPickerItemId::Child {
                     row,
                     directory,
                     operation_generation,
-                } = activation.item_id();
-                self.descend_to(row, directory, *operation_generation, window, cx);
-            }
+                } => {
+                    self.descend_to(row, directory, *operation_generation, window, cx);
+                }
+            },
             CommandPaletteEvent::HeaderAction(action) if action == CONFIRM_ACTION => {
                 self.confirm_current(window, cx);
-            }
-            CommandPaletteEvent::HeaderAction(action) if action == BACK_ACTION => {
-                self.open_enclosing_directory(window, cx);
             }
             _ => {}
         }
@@ -1102,13 +1107,12 @@ impl RemoteDirectoryPicker {
 
     fn confirmation_label(&self) -> &'static str {
         if self.status == RemoteDirectoryPickerStatus::Missing {
-            "Create"
+            "Create & Pin"
         } else {
             "Pin"
         }
     }
 
-    /// Explains why the path cannot be pinned, or `None` while it can be or may become pinnable.
     /// Returns the search line's action that pins to or creates the exact path.
     fn confirm_action(&self) -> CommandPalettePrimaryAction {
         CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.confirmation_label())
@@ -1116,30 +1120,23 @@ impl RemoteDirectoryPicker {
             .debug_selector(CONFIRM_ACTION)
     }
 
-    /// Returns the search line's control that opens the enclosing directory.
-    fn back_action(&self, cx: &App) -> CommandPaletteAction {
-        let icon_size = super::appearance::chrome(cx)
-            .icons
-            .metrics(IconRole::Control)
-            .glyph_size;
-        CommandPaletteAction::new(BACK_ACTION, "Enclosing Directory", move |tint| {
-            Icon::new(IconName::ChevronLeft, icon_size, tint).into_any_element()
-        })
-        .disabled(self.busy.is_some() || self.enclosing_directory().is_none())
-        .debug_selector(BACK_ACTION)
-    }
-
-    fn child_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
+    /// Returns the listed rows: the enclosing directory, then the matching children.
+    ///
+    /// The enclosing row accompanies a readable listing, so an unusable or missing path presents
+    /// its notice instead.
+    fn palette_items(&self) -> Vec<CommandPaletteItem<RemoteDirectoryPickerItemId>> {
         let Some(directory) = self.rows_directory.as_ref() else {
             return Vec::new();
         };
-        self.rows
-            .iter()
-            .cloned()
-            .map(|matched| {
+        let enclosing = (self.enclosing_directory().is_some()
+            && (!self.rows.is_empty() || self.status == RemoteDirectoryPickerStatus::Readable))
+            .then(|| enclosing_directory_item(self.operation_generation));
+        enclosing
+            .into_iter()
+            .chain(self.rows.iter().cloned().map(|matched| {
                 child_directory_item(matched.row, directory.clone(), self.operation_generation)
                     .matched_indices(matched.matched_indices)
-            })
+            }))
             .collect()
     }
 
@@ -1228,20 +1225,22 @@ impl RemoteDirectoryPicker {
         let awaiting_results = self.awaiting_results();
         let empty = self.empty_state();
         let results_note = self.results_note().map(SharedString::from);
-        let items = self.child_items();
-        let first_child = items.first().map(|item| item.id().clone());
+        let items = self.palette_items();
+        let first_child = items
+            .iter()
+            .find(|item| matches!(item.id(), RemoteDirectoryPickerItemId::Child { .. }))
+            .or(items.first())
+            .map(|item| item.id().clone());
         let confirm_action = self.confirm_action();
-        let back_action = self.back_action(cx);
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
-            // child, and the confirm key pins regardless of selection.
+            // child rather than leaving, and the confirm key pins regardless of selection.
             let retained = palette
                 .selected_item_id()
                 .filter(|selected| items.iter().any(|item| item.id() == *selected))
                 .cloned();
             palette.set_preferred_item(retained.or(first_child), cx);
             palette.set_items(items, cx);
-            palette.set_leading_action(Some(back_action), cx);
             palette.set_primary_action(Some(confirm_action), cx);
             palette.set_empty(empty, cx);
             palette.set_results_note(results_note, cx);
@@ -1339,6 +1338,22 @@ impl Render for RemoteDirectoryPicker {
     }
 }
 
+fn enclosing_directory_item(
+    operation_generation: u64,
+) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
+    CommandPaletteItem::new(
+        RemoteDirectoryPickerItemId::Enclosing {
+            operation_generation,
+        },
+        "..",
+    )
+    .group(ENCLOSING_ROW)
+    .leading_icon(|foreground, size| {
+        Icon::new(IconName::CornerLeftUp, size, foreground).into_any_element()
+    })
+    .debug_selector(ENCLOSING_ROW)
+}
+
 fn child_directory_item(
     row: RemoteDirectoryRow,
     directory: RemoteDirectory,
@@ -1346,7 +1361,7 @@ fn child_directory_item(
 ) -> CommandPaletteItem<RemoteDirectoryPickerItemId> {
     let selector = format!("remote-directory-picker-row-{}", row.name());
     let label = row.name().to_owned();
-    let id = RemoteDirectoryPickerItemId {
+    let id = RemoteDirectoryPickerItemId::Child {
         row,
         directory,
         operation_generation,
@@ -1686,9 +1701,11 @@ mod tests {
                 picker.confirmation_label(),
                 picker.can_confirm()
             )),
-            ("Create", true)
+            ("Create & Pin", true)
         );
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
+        assert!(cx.debug_bounds(ENCLOSING_ROW).is_none());
+        assert!(cx.debug_bounds("command-palette-empty").is_some());
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.empty_state().title().to_owned()),
             "Directory doesn\u{2019}t exist"
@@ -1716,7 +1733,7 @@ mod tests {
         let (picker, events, cx) = remote_directory_picker(Arc::clone(&provider), cx);
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
-            Some(RemoteDirectoryPickerItemId { .. })
+            Some(RemoteDirectoryPickerItemId::Child { .. })
         ));
 
         cx.simulate_keystrokes("cmd-enter");
@@ -1802,10 +1819,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_back_button_should_open_the_enclosing_directory(cx: &mut TestAppContext) {
+    fn the_enclosing_row_should_lead_the_children_and_open_the_enclosing_directory(
+        cx: &mut TestAppContext,
+    ) {
         let provider = scripted_provider(
-            [Ok(remote_rows(["Projects"])), Ok(remote_rows(["SpaceTerm"]))],
             [
+                Ok(remote_rows(["Projects"])),
+                Ok(remote_rows(["SpaceTerm"])),
+                Ok(remote_rows(["Projects"])),
+                Ok(remote_rows(["tester"])),
+            ],
+            [
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
+                Ok(RemoteDirectoryExactPathState::ReadableDirectory),
                 Ok(RemoteDirectoryExactPathState::ReadableDirectory),
                 Ok(RemoteDirectoryExactPathState::ReadableDirectory),
             ],
@@ -1815,17 +1841,27 @@ mod tests {
         let (picker, _, cx) = remote_directory_picker(provider, cx);
         set_remote_input(&picker, "~/Projects/", cx);
 
+        let enclosing = cx
+            .debug_bounds(ENCLOSING_ROW)
+            .expect("the enclosing row should be rendered");
+        let child = cx
+            .debug_bounds("remote-directory-picker-row-SpaceTerm")
+            .expect("the child row should be rendered");
+        assert!(enclosing.bottom() <= child.top());
+        assert!(matches!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).selected_item_id().cloned()),
+            Some(RemoteDirectoryPickerItemId::Child { .. })
+        ));
+
         let query = |picker: &gpui::Entity<RemoteDirectoryPicker>, cx: &mut VisualTestContext| {
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned())
         };
-        let back = cx
-            .debug_bounds(BACK_ACTION)
-            .expect("the back button should be rendered");
-        cx.simulate_click(back.center(), Modifiers::none());
+        cx.simulate_click(enclosing.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(query(&picker, cx), HOME_DISPLAY);
 
-        cx.simulate_click(back.center(), Modifiers::none());
+        let enclosing = cx.debug_bounds(ENCLOSING_ROW).unwrap();
+        cx.simulate_click(enclosing.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(query(&picker, cx), "/home/");
         assert!(picker.read_with(cx, |picker, _| picker.is_open()));
@@ -1953,7 +1989,7 @@ mod tests {
             [],
         );
         let (picker, _, cx) = remote_directory_picker(provider, cx);
-        let Some(RemoteDirectoryPickerItemId {
+        let Some(RemoteDirectoryPickerItemId::Child {
             row,
             directory,
             operation_generation,
@@ -2077,7 +2113,7 @@ mod tests {
         assert_eq!(
             picker.read_with(cx, |picker, _| {
                 (
-                    picker.child_items().first().map(|item| item.section_text().is_none()),
+                    picker.palette_items().first().map(|item| item.section_text().is_none()),
                     picker.results_note(),
                 )
             }),

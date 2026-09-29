@@ -620,31 +620,6 @@ impl CommandPaletteAction {
     }
 }
 
-/// A fixed label presented before the query, naming what the query is scoped to.
-///
-/// The label is not part of the editable query, so editing never changes or removes it.
-#[derive(Clone)]
-pub struct CommandPaletteScope {
-    label: SharedString,
-    leading_icon: Option<IconBuilder>,
-}
-
-impl CommandPaletteScope {
-    /// Creates a scope label. The label is also its logical accessibility name.
-    pub fn new(label: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            leading_icon: None,
-        }
-    }
-
-    /// Adds an icon built with the resolved label foreground color and live size.
-    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
-        self.leading_icon = Some(Rc::new(build));
-        self
-    }
-}
-
 /// The search line's primary command, presented as a labeled button at its trailing edge.
 ///
 /// The confirm key activates it while it is enabled, and so does Return while no result is
@@ -830,6 +805,7 @@ pub struct CommandPaletteItem<I> {
     label: SharedString,
     description: Option<SharedString>,
     section: Option<SharedString>,
+    group: Option<SharedString>,
     keywords: Vec<SharedString>,
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
@@ -867,6 +843,7 @@ impl<I> CommandPaletteItem<I> {
             label: label.into(),
             description: None,
             section: None,
+            group: None,
             keywords: Vec::new(),
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
@@ -889,6 +866,14 @@ impl<I> CommandPaletteItem<I> {
     /// supply that section's items contiguously.
     pub fn section(mut self, value: impl Into<SharedString>) -> Self {
         self.section = Some(value.into());
+        self
+    }
+
+    /// Separates this item from neighboring items of another group without a heading.
+    ///
+    /// Like sections, groups follow provider order and apply within one section.
+    pub fn group(mut self, value: impl Into<SharedString>) -> Self {
+        self.group = Some(value.into());
         self
     }
 
@@ -1531,8 +1516,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
-    leading_action: Option<CommandPaletteAction>,
-    query_scope: Option<CommandPaletteScope>,
+    query_prefix: Option<SharedString>,
     header_actions: Vec<CommandPaletteAction>,
     primary_action: Option<CommandPalettePrimaryAction>,
     results_note: Option<SharedString>,
@@ -1624,21 +1608,25 @@ mod presented_results {
             note: Option<&SharedString>,
         ) -> Self {
             let mut rows = Vec::with_capacity(matches.len() + 1);
-            let mut current: Option<SharedString> = None;
+            let mut current_section: Option<SharedString> = None;
+            let mut current_group: Option<SharedString> = None;
             let mut started = false;
             for (position, matched) in matches.iter().enumerate() {
                 let Some(item) = items.get(matched.item_index) else {
                     continue;
                 };
-                if !started || item.section != current {
+                if !started || item.section != current_section {
                     if started {
                         rows.push(PaletteRow::Separator);
                     }
                     if let Some(section) = item.section.clone() {
                         rows.push(PaletteRow::Section(section));
                     }
-                    current = item.section.clone();
+                    current_section = item.section.clone();
+                } else if item.group != current_group {
+                    rows.push(PaletteRow::Separator);
                 }
+                current_group = item.group.clone();
                 started = true;
                 rows.push(PaletteRow::Item {
                     position,
@@ -1949,8 +1937,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             presented_results,
             leading_columns,
             input_leading_icon: None,
-            leading_action: None,
-            query_scope: None,
+            query_prefix: None,
             header_actions: Vec::new(),
             primary_action: None,
             results_note: None,
@@ -2065,25 +2052,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx.notify();
     }
 
-    /// Replaces the control rendered at the leading edge of the search line.
+    /// Replaces the quiet text that leads the query, such as the machine a path belongs to.
     ///
-    /// Activating it emits [`CommandPaletteEvent::HeaderAction`] with the caller's identity.
-    pub fn set_leading_action(
-        &mut self,
-        action: Option<CommandPaletteAction>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.leading_action = action;
-        cx.notify();
-    }
-
-    /// Replaces the fixed label presented before the query.
-    pub fn set_query_scope(
-        &mut self,
-        scope: Option<CommandPaletteScope>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.query_scope = scope;
+    /// The prefix is not part of the editable query, so editing never changes or removes it.
+    pub fn set_query_prefix(&mut self, prefix: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        self.query_prefix = prefix;
         cx.notify();
     }
 
@@ -2781,7 +2754,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
         let maximum_steps = self.header_actions.len()
-            + usize::from(self.leading_action.is_some())
             + usize::from(self.primary_action.is_some())
             + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
@@ -3440,13 +3412,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .w_full()
             .h(metrics.input_height)
             .flex_shrink_0()
-            .pl(
-                if self.leading_action.is_some() || self.input_leading_icon.is_some() {
-                    metrics.panel_padding
-                } else {
-                    metrics.content_leading_inset()
-                },
-            )
+            .pl(if self.input_leading_icon.is_some() {
+                metrics.panel_padding
+            } else {
+                metrics.content_leading_inset()
+            })
             .pr(metrics.panel_padding)
             .flex()
             .flex_row()
@@ -3454,18 +3424,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .gap(metrics.panel_padding)
             .text_size(metrics.input_size)
             .line_height(metrics.body_line_height)
-            .when_some(self.leading_action.as_ref(), |editor, action| {
-                editor.child(
-                    search_line_icon_button(
-                        palette.clone(),
-                        "command-palette-leading-action",
-                        action,
-                        theme,
-                    )
-                    .variant(ButtonVariant::Secondary)
-                    .corner_radius(metrics.header_action_size() / 2.0),
-                )
-            })
             .when_some(self.input_leading_icon.as_ref(), |editor, icon| {
                 editor.child(
                     div()
@@ -3477,10 +3435,26 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         .child(icon(theme.paint.muted, metrics.input_icon_size)),
                 )
             })
-            .when_some(self.query_scope.as_ref(), |editor, scope| {
-                editor.child(render_query_scope(scope, theme))
-            })
-            .child(div().min_w_0().flex_1().child(self.input.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .when_some(self.query_prefix.clone(), |query, prefix| {
+                        query.child(
+                            div()
+                                .debug_selector(|| "command-palette-query-prefix".to_owned())
+                                .flex_shrink_0()
+                                .max_w(gpui::relative(0.4))
+                                .truncate()
+                                .text_color(theme.paint.muted)
+                                .child(prefix),
+                        )
+                    })
+                    .child(div().min_w_0().flex_1().child(self.input.clone())),
+            )
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
                     div()
@@ -3663,30 +3637,14 @@ fn render_header_action<I: Clone + Eq + 'static>(
     action: &CommandPaletteAction,
     theme: CommandPaletteTheme,
 ) -> AnyElement {
-    search_line_icon_button(
-        palette,
-        ("command-palette-header-action", index),
-        action,
-        theme,
-    )
-    .variant(ButtonVariant::Ghost)
-    .into_any_element()
-}
-
-/// Builds one search-line control at the shared search-line size from the installed catalog.
-fn search_line_icon_button<I: Clone + Eq + 'static>(
-    palette: WeakEntity<CommandPalette<I>>,
-    element_id: impl Into<gpui::ElementId>,
-    action: &CommandPaletteAction,
-    theme: CommandPaletteTheme,
-) -> IconButton {
     let id = action.id.clone();
     let icon = action.icon.clone();
     let mut button = IconButton::new(
-        element_id,
+        ("command-palette-header-action", index),
         action.accessibility_name.clone(),
         move |foreground| icon(foreground),
     )
+    .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Compact)
     .target_size(theme.metrics.header_action_size())
     .corner_radius(theme.shell.nested_radius())
@@ -3701,38 +3659,7 @@ fn search_line_icon_button<I: Clone + Eq + 'static>(
     if let Some(selector) = action.debug_selector.clone() {
         button = button.debug_selector(selector);
     }
-    button
-}
-
-/// Renders the query scope as a quiet capsule that reads as part of the search line.
-fn render_query_scope(scope: &CommandPaletteScope, theme: CommandPaletteTheme) -> AnyElement {
-    let metrics = theme.metrics;
-    let paint = theme.paint;
-    div()
-        .debug_selector(|| "command-palette-scope".to_owned())
-        .flex_shrink_0()
-        .max_w(gpui::relative(0.4))
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(metrics.accessory_padding)
-        .px(metrics.accessory_padding * 2.0)
-        .py(metrics.accessory_line_padding)
-        .rounded_full()
-        .bg(theme.shell.divider())
-        .text_size(metrics.label_size)
-        .line_height(metrics.body_line_height)
-        .text_color(paint.foreground)
-        .when_some(scope.leading_icon.as_ref(), |label, icon| {
-            label.child(
-                div()
-                    .flex_shrink_0()
-                    .child(icon(paint.muted, metrics.icon_size)),
-            )
-        })
-        .child(div().min_w_0().truncate().child(scope.label.clone()))
-        .into_any_element()
+    button.into_any_element()
 }
 
 /// Renders the search line's primary command as a prominent capsule at its trailing edge.

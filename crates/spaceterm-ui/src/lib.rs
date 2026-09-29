@@ -68,8 +68,7 @@ pub use command_palette::{
     CommandPaletteGeneration, CommandPaletteItem, CommandPaletteKeybindingProfile,
     CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteMetrics,
     CommandPalettePaint, CommandPalettePrimaryAction, CommandPaletteQuery,
-    CommandPaletteReplacementFocus, CommandPaletteScope, CommandPaletteTheme,
-    install_command_palette_keybindings,
+    CommandPaletteReplacementFocus, CommandPaletteTheme, install_command_palette_keybindings,
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
 pub use floating_surface::{
