@@ -2829,11 +2829,6 @@ impl WorkspaceManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
-        let top_chrome_background = if window.is_window_active() {
-            appearance.colors.title_bar_background
-        } else {
-            appearance.colors.title_bar_inactive_background
-        };
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let top_chrome_height = frame.top_chrome_height(appearance.top_height());
         let chrome_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
@@ -3085,12 +3080,39 @@ impl WorkspaceManager {
                     .left_0()
                     .w(layout.width)
                     .h(top_chrome_height)
-                    .bg(gpui_color(appearance.surface(
-                        crate::appearance::SurfaceRole::Base,
-                        top_chrome_background,
-                    )))
                     .child(drag_region),
             )
+            .into_any_element()
+    }
+
+    /// The title-bar surface behind the top-left chrome.
+    ///
+    /// It paints beneath the Tab manager rather than with the chrome's controls. The first Tab's
+    /// leading inset reaches under the chrome, so an opaque surface painted above the Tab strip
+    /// would hide the mark that separates the strip's start from the sidebar.
+    fn render_top_left_chrome_surface(
+        layout: WorkspaceChromeLayout,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let appearance = super::appearance::chrome(cx);
+        let background = if window.is_window_active() {
+            appearance.colors.title_bar_background
+        } else {
+            appearance.colors.title_bar_inactive_background
+        };
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        div()
+            .debug_selector(|| "workspace-top-chrome-surface".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(layout.width)
+            .h(frame.top_chrome_height(appearance.top_height()))
+            .bg(gpui_color(appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                background,
+            )))
             .into_any_element()
     }
 
@@ -3197,6 +3219,7 @@ impl WorkspaceManager {
                     .typography
                     .style(TextRole::Body),
             )
+            .child(Self::render_top_left_chrome_surface(chrome, window, cx))
             .child(active_tab_manager)
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
