@@ -55,6 +55,10 @@ pub enum CustomIconName {
     RectangleStackBadgePlus,
     /// Decreasing horizontal lines in a circle, using supplied filter artwork.
     FilterCircle,
+    /// A folder with an add badge, using the supplied folder.badge.plus artwork.
+    FolderBadgePlus,
+    /// A folder with a globe badge, drawn on the supplied folder.badge.plus folder.
+    FolderBadgeGlobe,
 }
 
 impl CustomIconName {
@@ -67,6 +71,8 @@ impl CustomIconName {
             Self::FilterCircle => "spaceterm-ui/icons/filter-circle.svg",
             Self::GlobePlus => "spaceterm-ui/icons/globe-plus.svg",
             Self::RectangleStackBadgePlus => "spaceterm-ui/icons/rectangle-stack-badge-plus.svg",
+            Self::FolderBadgePlus => "spaceterm-ui/icons/folder-badge-plus.svg",
+            Self::FolderBadgeGlobe => "spaceterm-ui/icons/folder-badge-globe.svg",
         }
     }
 }
@@ -99,6 +105,14 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
     (
         "spaceterm-ui/icons/rectangle-stack-badge-plus.svg",
         include_bytes!("../assets/icons/rectangle-stack-badge-plus.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/folder-badge-plus.svg",
+        include_bytes!("../assets/icons/folder-badge-plus.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/folder-badge-globe.svg",
+        include_bytes!("../assets/icons/folder-badge-globe.svg"),
     ),
 ];
 
@@ -886,7 +900,9 @@ mod tests {
                 CustomIconName::FilterCircle.path().into(),
                 SharedString::from(path),
                 CustomIconName::GlobePlus.path().into(),
-                CustomIconName::RectangleStackBadgePlus.path().into()
+                CustomIconName::RectangleStackBadgePlus.path().into(),
+                CustomIconName::FolderBadgePlus.path().into(),
+                CustomIconName::FolderBadgeGlobe.path().into(),
             ]
         );
         assert!(
@@ -907,6 +923,8 @@ mod tests {
             (CustomIconName::FilterCircle, 22),
             (CustomIconName::GlobePlus, 33),
             (CustomIconName::RectangleStackBadgePlus, 28),
+            (CustomIconName::FolderBadgePlus, 33),
+            (CustomIconName::FolderBadgeGlobe, 33),
         ] {
             let bytes = EmbeddedAssets
                 .load(icon.path())
