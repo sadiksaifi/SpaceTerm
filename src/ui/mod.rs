@@ -35,6 +35,7 @@ mod selection_chip;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
+mod sidebar_window;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;

@@ -11,7 +11,7 @@ use crate::keybindings::{Command, CommandGroup};
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum SettingsSectionId {
+pub(crate) enum SettingsSectionId {
     /// How SpaceTerm's windows present themselves: density, transparency, and blur.
     Interface,
     /// Terminal typography and text rendering.

@@ -489,7 +489,7 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrafficLightChrome {
     Workspace,
-    Settings,
+    SidebarWindow,
 }
 
 /// Owns one Operating-System Window's native traffic-light position across density changes.
@@ -511,9 +511,9 @@ impl WindowTrafficLightOwner {
         }
     }
 
-    pub(crate) fn settings() -> Self {
+    pub(crate) fn sidebar_window() -> Self {
         Self {
-            role: TrafficLightChrome::Settings,
+            role: TrafficLightChrome::SidebarWindow,
             applied: None,
         }
     }
@@ -530,8 +530,8 @@ impl WindowTrafficLightOwner {
                     .top_chrome_height(appearance.top_height());
                 geometry.workspace_traffic_light_position(height)
             }
-            TrafficLightChrome::Settings => {
-                geometry.settings_traffic_light_position(appearance.top_height())
+            TrafficLightChrome::SidebarWindow => {
+                geometry.sidebar_window_traffic_light_position(appearance.top_height())
             }
         }
     }

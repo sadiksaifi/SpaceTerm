@@ -16,6 +16,7 @@ use crate::ui::appearance_runtime;
 
 use super::editor::{COMMIT_DELAY, SaveStatus};
 use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use crate::ui::sidebar_window::SidebarOwner as _;
 
 use super::test_support::MemoryStorage;
 
@@ -1224,12 +1225,12 @@ fn escape_with_an_empty_search_preserves_navigation_focus(cx: &mut TestAppContex
     let (window, _harness, cx) = open_settings(cx);
     cx.simulate_keystrokes("cmd-f tab");
     cx.run_until_parked();
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation.list_focus().is_focused(gpui_window)));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation.list_focus().is_focused(gpui_window)));
 }
 
 #[gpui::test]
@@ -2795,8 +2796,8 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
 fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     cx.simulate_resize(gpui::size(
-        px(super::WINDOW_WIDTH),
-        px(super::WINDOW_HEIGHT),
+        px(crate::ui::sidebar_window::WINDOW_WIDTH),
+        px(crate::ui::sidebar_window::WINDOW_HEIGHT),
     ));
     cx.run_until_parked();
     select_section(SettingsSectionId::Font, cx);

@@ -13,7 +13,7 @@ use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
-use super::super::controls::CaptionTone;
+use crate::ui::sidebar_window::form::CaptionTone;
 use super::ShortcutDescription;
 
 fn open_keybindings(

@@ -518,8 +518,8 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
         Ok(MicrophoneAuthorization::Restricted),
         Err(MicrophoneAccessError::PlatformRejected),
     ];
-    for width in [super::WINDOW_WIDTH, 1100.0, 1400.0] {
-        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(super::WINDOW_HEIGHT)));
+    for width in [crate::ui::sidebar_window::WINDOW_WIDTH, 1100.0, 1400.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(crate::ui::sidebar_window::WINDOW_HEIGHT)));
         cx.run_until_parked();
         for state in states {
             access.authorization.set(state);
@@ -560,8 +560,8 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     }
     // The narrowest window wraps the guidance, which is the layout that once stretched.
     cx.simulate_resize(gpui::size(
-        gpui::px(super::WINDOW_WIDTH),
-        gpui::px(super::WINDOW_HEIGHT),
+        gpui::px(crate::ui::sidebar_window::WINDOW_WIDTH),
+        gpui::px(crate::ui::sidebar_window::WINDOW_HEIGHT),
     ));
     access
         .authorization

@@ -7,7 +7,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, SharedString};
 use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
-use super::controls::action_button;
+use crate::ui::sidebar_window::form::action_button;
 use super::{SettingsRowId, SettingsWindow};
 use crate::appearance::SettingsDocument;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};

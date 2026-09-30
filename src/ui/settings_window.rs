@@ -7,7 +7,6 @@
 
 mod advanced;
 mod catalog;
-mod controls;
 mod editor;
 mod import;
 mod keybindings;
@@ -38,17 +37,15 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels,
-    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, actions, div, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Entity, FocusHandle, Global, Pixels, ScrollHandle,
+    SharedString, Window, WindowHandle, actions, div, px,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconName, ModalAction, ModalActionEmphasis,
     ModalActionIntent, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar,
     OverlayScrollbarEvent, ScrollMetrics, SearchField, SegmentedControl, SegmentedOption,
     SegmentedSize, Switch, TextInput, TextInputEscapeBehavior, TextInputEvent,
-    TextInputReturnBehavior, TextInputVariant, ToggleSize, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse,
+    TextInputReturnBehavior, TextInputVariant, ToggleSize,
 };
 
 use crate::appearance::{
@@ -60,18 +57,21 @@ use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
-    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
+    OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
+use crate::ui::sidebar_window::{
+    DetailHeading, NavigationEntry, Sidebar, SidebarNavigation, SidebarOwner, WindowMovement,
+    card_gutter,
+};
 
 use catalog::{SettingsRowId, SettingsSectionId};
-use controls::{
-    SettingsGroup, SettingsRow, SettingsRowLayout, Stepper, action_button,
+use crate::ui::sidebar_window::form::{
+    FormGroup, FormRow, FormRowLayout, Stepper, action_button,
     reset_button, row_horizontal_inset, section_heading,
 };
 use editor::{SaveStatus, SettingsEditor};
@@ -92,73 +92,6 @@ actions!(
 
 /// The key context the Settings Window publishes, so its shortcuts override Workspace shortcuts.
 pub(crate) const SETTINGS_KEY_CONTEXT: &str = "Settings";
-
-/// Fixed window geometry. Settings does not resize, so content scrolls inside a stable frame.
-const WINDOW_WIDTH: f32 = 880.0;
-const WINDOW_HEIGHT: f32 = 640.0;
-const SIDEBAR_WIDTH: f32 = 196.0;
-const SIDEBAR_INSET: f32 = 10.0;
-/// The strip under the content column carrying the save status.
-const FOOTER_HEIGHT: f32 = 40.0;
-/// The height of one navigation entry and of the search field above it, so the sidebar runs on one
-/// rhythm from its first row to its last.
-const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
-/// The chip a navigation entry rests its hover and its current-section state on.
-///
-/// It fills the entry rather than insetting further: the sidebar's own padding and the space
-/// between entries are already the air around it, and a second inset would narrow the chip against
-/// the search field it sits under.
-fn navigation_chip(
-    selected: bool,
-    available: bool,
-    emphasized: bool,
-    appearance: &ChromeAppearance,
-    selection_colors: &crate::appearance::ChromeColors,
-) -> SelectionChip {
-    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-    let paint_colors = if selected { selection_colors } else { colors };
-    let paint = navigation_chip_paint(selected, available, paint_colors);
-    let paint = if selected && emphasized {
-        // The accent is opaque, so the window's material does not thin it.
-        paint
-    } else if selected {
-        paint.selected_on(appearance, colors.panel_background)
-    } else {
-        paint.raised_on(appearance, colors.panel_background)
-    };
-    SelectionChip::new(
-        ChipShape::symmetric(px(0.0), px(0.0), RadiusRole::Control.pixels()),
-        paint,
-    )
-}
-
-fn navigation_chip_paint(
-    selected: bool,
-    available: bool,
-    colors: &crate::appearance::ChromeColors,
-) -> ChipPaint {
-    // Hover changes the fill. Keyboard focus changes the selection colors rather than adding a
-    // rim, so pointer selection does not leave a focus-like edge behind it.
-    if selected {
-        ChipPaint {
-            fill: Some(colors.row_selected_background),
-            rim: Some(colors.row_selected_border),
-            hover_fill: Some(colors.row_selected_hover_background),
-            hover_rim: None,
-        }
-    } else {
-        ChipPaint {
-            // A resting row the same color as the sidebar paints nothing, so the base is not
-            // composited twice beneath a translucent window.
-            fill: (colors.row_background != colors.panel_background)
-                .then_some(colors.row_background),
-            rim: None,
-            // A section the query emptied cannot be chosen, so nothing lights under the pointer.
-            hover_fill: available.then_some(colors.row_hover_background),
-            hover_rim: None,
-        }
-    }
-}
 
 /// The one Settings Window, so a second request activates the existing window.
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
@@ -214,33 +147,8 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     let window_drag = composition.window_movement.create();
     let microphone_access = composition.microphone_access.clone();
     let theme_registry = composition.theme_registry.clone();
-    let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
-    let traffic_light_position = cx
-        .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
-        .and_then(|geometry| geometry.settings_traffic_light_position(titlebar_height));
-    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
-        WindowOptions {
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Settings".into()),
-                // Retain the native title for the Window menu and accessibility while drawing the
-                // visible section title in the client surface.
-                appears_transparent: true,
-                traffic_light_position,
-            }),
-            // A floating window stays ordinary and modeless: the normal window level and the
-            // ordinary window class, with only tabbing, resizing, and minimizing withheld. It is
-            // deliberately not a popup and never orders itself above other applications.
-            kind: WindowKind::Floating,
-            is_movable: true,
-            is_resizable: false,
-            is_minimizable: false,
-            tabbing_identifier: None,
-            ..WindowOptions::default()
-        },
+        super::sidebar_window::window_options("Settings", cx),
         |window, cx| {
             let settings = cx.new(|cx| {
                 SettingsWindow::new_with_capabilities(
@@ -323,11 +231,8 @@ pub(crate) struct SettingsWindow {
     /// reaching a row outside the viewport can scroll it into view.
     row_bounds: Rc<RefCell<HashMap<SettingsRowId, Bounds<Pixels>>>>,
     focus_handle: FocusHandle,
-    /// One keyboard stop for section navigation. Pointer selection leaves focus on the window root.
-    navigation_focus: FocusHandle,
-    /// Keyboard traversal enables the ring; pointer selection withdraws keyboard focus and the ring.
-    navigation_focus_visible: bool,
-    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+    navigation: SidebarNavigation,
+    window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
@@ -336,6 +241,38 @@ pub(crate) struct SettingsWindow {
     shortcuts: ShortcutRows,
     /// The read-only settings file in the Advanced section.
     settings_file: advanced::SettingsFileView,
+}
+
+impl SidebarOwner for SettingsWindow {
+    type Section = SettingsSectionId;
+
+    fn navigation(&mut self) -> &mut SidebarNavigation {
+        &mut self.navigation
+    }
+
+    fn active_section(&self) -> SettingsSectionId {
+        self.active_section
+    }
+
+    /// The sections the current query left something to present.
+    fn navigable_sections(&self) -> Vec<SettingsSectionId> {
+        let matching = catalog::matching_rows(&self.query);
+        SettingsSectionId::ALL
+            .into_iter()
+            .filter(|section| {
+                catalog::rows().any(|row| row.section == *section && matching.contains(&row.id))
+            })
+            .collect()
+    }
+
+    /// Each section is its own view, so the detail pane starts at its top.
+    fn select_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
+        self.active_section = section;
+        self.shortcuts.dismiss_notice();
+        self.shortcuts.end_search_capture(cx);
+        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        cx.notify();
+    }
 }
 
 /// How one row returns to its default.
@@ -372,7 +309,7 @@ impl SettingsWindow {
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
         window_appearance.apply(window, cx);
         let mut window_traffic_lights =
-            super::appearance_runtime::WindowTrafficLightOwner::settings();
+            super::appearance_runtime::WindowTrafficLightOwner::sidebar_window();
         window_traffic_lights.apply(window, cx);
         let settings = cx
             .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
@@ -398,11 +335,12 @@ impl SettingsWindow {
         // opens, rather than only after something inside it is clicked.
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let navigation_focus = cx.focus_handle().tab_stop(true);
-        cx.on_focus(&navigation_focus, window, |_, _, cx| cx.notify())
-            .detach();
-        cx.on_blur(&navigation_focus, window, |_, _, cx| cx.notify())
-            .detach();
+        let navigation = SidebarNavigation::new(focus_handle.clone(), window, cx);
+        let window_movement = WindowMovement::new(
+            operating_system_window_drag_platform,
+            focus_handle.clone(),
+            "Settings",
+        );
         let search = cx.new(|cx| {
             TextInput::new(
                 "settings-search",
@@ -428,7 +366,7 @@ impl SettingsWindow {
                     event,
                     TextInputEvent::TabForwardRequested | TextInputEvent::TabBackwardRequested
                 ) {
-                    settings.navigation_focus_visible = true;
+                    settings.navigation.show_focus();
                     if matches!(event, TextInputEvent::TabForwardRequested) {
                         window.focus_next(cx);
                     } else {
@@ -512,9 +450,8 @@ impl SettingsWindow {
             revealed: None,
             row_bounds: Rc::default(),
             focus_handle,
-            navigation_focus,
-            navigation_focus_visible: true,
-            operating_system_window_drag_platform,
+            navigation,
+            window_movement,
             microphone_access: MicrophoneAccessRow::new(microphone_access),
             theme_gallery,
             theme_store,
@@ -616,15 +553,6 @@ impl SettingsWindow {
             offset.x,
             (offset.y + shift).clamp(lowest, px(0.0)),
         ));
-        cx.notify();
-    }
-
-    /// Presents one section. Each section is its own view, so the detail pane starts at its top.
-    fn reveal_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
-        self.active_section = section;
-        self.shortcuts.dismiss_notice();
-        self.shortcuts.end_search_capture(cx);
-        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
 
@@ -751,12 +679,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let activity = super::appearance::window_activity(window);
-        let scope = spaceterm_ui::ControlThemeScope::Settings;
-        activity.mount(
-            activity
-                .with_scope(|| scope.mount(scope.with_scope(|| self.render_chrome(window, cx)))),
-        )
+        super::sidebar_window::render_scoped(window, |window| self.render_chrome(window, cx))
     }
 }
 
@@ -765,48 +688,14 @@ impl SettingsWindow {
         let settings = crate::ui::appearance::settings::shared(cx);
         let appearance = &settings.chrome;
         self.sync_scrollbar(cx);
-        let content = div()
+        let surface = div()
             .debug_selector(|| "settings-window-surface".to_owned())
             .key_context(SETTINGS_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::focus_search))
-            .on_action(cx.listener(Self::clear_search))
-            // Record unbound Tab before child key handlers. Search delegates its bound traversal
-            // action explicitly. Focus notifications must never decide input modality.
-            .capture_key_down(cx.listener(|settings, event: &gpui::KeyDownEvent, _, cx| {
-                let modifiers = event.keystroke.modifiers;
-                if event.keystroke.key == "tab"
-                    && !modifiers.control
-                    && !modifiers.alt
-                    && !modifiers.platform
-                    && !modifiers.function
-                    && !settings.navigation_focus_visible
-                {
-                    settings.navigation_focus_visible = true;
-                    cx.notify();
-                }
-            }))
-            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                if event.keystroke.key != "tab"
-                    || modifiers.control
-                    || modifiers.alt
-                    || modifiers.platform
-                    || modifiers.function
-                {
-                    return;
-                }
-                // Inputs and popups handle their own traversal first. Other Settings controls
-                // delegate an unhandled Tab to the window's registered focus order.
-                if modifiers.shift {
-                    window.focus_prev(cx);
-                } else {
-                    window.focus_next(cx);
-                }
-                window.prevent_default();
-                cx.stop_propagation();
-            })
+            .on_action(cx.listener(Self::clear_search));
+        let content = super::sidebar_window::tab_traversal(surface, cx)
             .size_full()
             .flex()
             .flex_row()
@@ -830,201 +719,22 @@ impl SettingsWindow {
 }
 
 impl SettingsWindow {
-    fn handle_window_drag_event(
-        &mut self,
-        event: WindowDragRegionEvent,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> WindowDragRegionResponse {
-        match event {
-            WindowDragRegionEvent::InteractionStarted { .. } => {
-                self.focus_handle.focus(window, cx);
-                if let Err(error) = self
-                    .operating_system_window_drag_platform
-                    .interaction_started()
-                {
-                    Self::report_window_drag_error("begin", error);
-                }
-                WindowDragRegionResponse::Continue
-            }
-            WindowDragRegionEvent::MoveRequested { .. } => {
-                match self
-                    .operating_system_window_drag_platform
-                    .start_window_move(window)
-                {
-                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
-                    Err(error) => {
-                        Self::report_window_drag_error("start", error);
-                        WindowDragRegionResponse::Continue
-                    }
-                }
-            }
-            WindowDragRegionEvent::DoubleActivationRequested => {
-                window.titlebar_double_click();
-                WindowDragRegionResponse::Continue
-            }
-            WindowDragRegionEvent::InteractionFinished { .. } => {
-                self.operating_system_window_drag_platform
-                    .interaction_finished();
-                WindowDragRegionResponse::Continue
-            }
-        }
-    }
-
-    fn report_window_drag_error(operation: &str, error: OperatingSystemWindowDragError) {
-        eprintln!("failed to {operation} Settings Window drag: {error}");
-    }
-
-    /// Wraps client chrome in a native window-movement region.
-    ///
-    /// The sidebar's traffic-light strip and the content column's heading are separate regions so
-    /// Search and every other control stay outside drag ownership, while the uncovered space in
-    /// both behaves as the titlebar, including double-click.
-    fn window_drag_region(
-        &self,
-        id: &'static str,
-        content: impl IntoElement,
-        pointer_insets: Edges<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> WindowDragRegion {
-        let owner = cx.weak_entity();
-        WindowDragRegion::new(
-            id,
-            "Move Operating-System Window from Settings chrome",
-            content,
-        )
-        .pointer_insets(pointer_insets)
-        .debug_selector(id)
-        .on_event(move |event, window, cx| {
-            let event = *event;
-            owner
-                .update(cx, |settings, cx| {
-                    settings.handle_window_drag_event(event, window, cx)
-                })
-                .unwrap_or_default()
-        })
-    }
-
-    /// The sidebar material beneath the native traffic lights, reserved for window movement.
-    fn render_sidebar_titlebar(
-        &self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let region = self.window_drag_region(
-            "settings-sidebar-drag-region",
-            div().size_full(),
-            Edges {
-                left: px(super::workspace_chrome::TRAFFIC_LIGHT_CLEARANCE),
-                ..Edges::default()
-            },
-            cx,
-        );
-        div()
-            .debug_selector(|| "settings-sidebar-titlebar".to_owned())
-            .flex_none()
-            .w_full()
-            .h(appearance.top_height())
-            .child(region)
-            .into_any_element()
-    }
-
     /// The active section's large title and description at the head of the content surface.
-    ///
-    /// The heading stays fixed while rows scroll beneath it, the way a native Settings pane keeps
-    /// its identity in view. Its top edge shares the traffic-light row, and the whole heading is
-    /// window-movement space; a hairline appears only once content has scrolled under it.
-    fn render_detail_heading(
-        &self,
-        settings: &SettingsAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let appearance = &settings.chrome;
+    fn render_detail_heading(&self, settings: &SettingsAppearance) -> AnyElement {
         let section = self.active_section;
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
-        let heading = div()
-            .size_full()
-            .px(appearance.spacing(CONTENT_GUTTER))
-            .pt(appearance.spacing(HEADING_TOP_INSET))
-            .pb(appearance.spacing(14.0))
-            .child(section_heading(
+        DetailHeading::new(
+            "settings",
+            section_heading(
                 section.selector(),
                 section.title(),
                 section.description(),
-                appearance,
-            ));
-        let region =
-            self.window_drag_region("settings-detail-drag-region", heading, Edges::default(), cx);
-        div()
-            .debug_selector(|| "settings-detail-heading".to_owned())
-            .relative()
-            .flex_none()
-            .w_full()
-            .child(region)
-            .when(scrolled, |heading| {
-                heading.child(
-                    div()
-                        .debug_selector(|| "settings-detail-heading-divider".to_owned())
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(settings.separator(SettingsSurfaceRole::Canvas))),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn navigation_has_visible_focus(&self, window: &Window) -> bool {
-        self.navigation_focus.is_focused(window) && self.navigation_focus_visible
-    }
-
-    /// Moves the navigation selection with the keyboard, skipping what the query emptied.
-    ///
-    /// The list activates as it moves, the way the Workspace sidebar does: each section is a view
-    /// rather than a destination to confirm, so a separate commit step would say nothing.
-    fn navigate_sections(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.navigation_focus.is_focused(window) || event.keystroke.modifiers.modified() {
-            return;
-        }
-        let available = self.navigable_sections();
-        let Some(current) = available
-            .iter()
-            .position(|section| *section == self.active_section)
-        else {
-            return;
-        };
-        let next = match event.keystroke.key.as_str() {
-            "up" => current.saturating_sub(1),
-            "down" => (current + 1).min(available.len() - 1),
-            "home" => 0,
-            "end" => available.len() - 1,
-            _ => return,
-        };
-        window.prevent_default();
-        cx.stop_propagation();
-        self.navigation_focus_visible = true;
-        if next != current {
-            self.reveal_section(available[next], cx);
-        }
-        cx.notify();
-    }
-
-    /// The sections the current query left something to present.
-    fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query);
-        SettingsSectionId::ALL
-            .into_iter()
-            .filter(|section| {
-                catalog::rows().any(|row| row.section == *section && matching.contains(&row.id))
-            })
-            .collect()
+                &settings.chrome,
+            ),
+            &self.window_movement,
+        )
+        .scrolled(scrolled)
+        .render(settings)
     }
 
     fn render_sidebar(
@@ -1033,209 +743,32 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let appearance = &settings.chrome;
         let available = self.navigable_sections();
-        let list_focused = self.navigation_has_visible_focus(window);
-        let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-        // AppKit source lists draw no focus ring. Keyboard focus emphasizes the selection in the
-        // accent color instead, and a list without focus shows it in the unfocused colors.
-        let emphasized = list_focused && appearance.active;
-        let selection_colors = if emphasized {
-            crate::ui::selection_chip::emphasized_selection_colors(panel_colors)
-        } else if appearance.active {
-            appearance
-                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
-                .clone()
-        } else {
-            panel_colors.clone()
-        };
         let entries = SettingsSectionId::ALL
-            .iter()
-            .map(|section| {
-                let section = *section;
-                let has_matches = available.contains(&section);
-                let selected = self.active_section == section && has_matches;
-                let owner = cx.weak_entity();
-                let row_group = format!("settings-row-state-{}", section.selector());
-                let colors = panel_colors;
-                let (foreground, icon, hover_foreground, hover_icon) = if selected {
-                    (
-                        selection_colors.row_selected_foreground,
-                        selection_colors.row_selected_icon,
-                        selection_colors.row_selected_hover_foreground,
-                        selection_colors.row_selected_hover_icon,
-                    )
-                } else {
-                    (
-                        colors.row_foreground,
-                        colors.row_icon,
-                        colors.row_hover_foreground,
-                        colors.row_hover_icon,
-                    )
-                };
-                // The same chip the Workspace sidebar rests its current row on, so the two
-                // navigation surfaces read as one material rather than as two conventions.
-                let chip = navigation_chip(
-                    selected,
-                    has_matches,
-                    emphasized,
-                    appearance,
-                    &selection_colors,
-                );
-                let chip_selector = format!("settings-navigation-chip-{}", section.selector());
-                div()
-                    .id(SharedString::from(format!(
-                        "settings-navigation-{}",
-                        section.title()
-                    )))
-                    .debug_selector(move || format!("settings-navigation-{}", section.selector()))
-                    .relative()
-                    .group(row_group.clone())
-                    .text_color(gpui_color(foreground))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(appearance.spacing(7.0))
-                    .w_full()
-                    .h(appearance
-                        .typography
-                        .style(TextRole::Navigation)
-                        .line_height
-                        + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
-                    .px(appearance.spacing(8.0))
-                    .cursor_default()
-                    .chrome_text(appearance.typography.style(TextRole::Navigation))
-                    .child(chip.render(chip_selector, &row_group))
-                    .when(has_matches, |entry| {
-                        entry
-                            .hover(move |entry| entry.text_color(gpui_color(hover_foreground)))
-                            .on_click(move |_, window, cx| {
-                                let _ = owner.update(cx, |settings, cx| {
-                                    // A completed pointer selection is authoritative even if
-                                    // native focus moved between the press and release.
-                                    settings.navigation_focus_visible = false;
-                                    settings.focus_handle.focus(window, cx);
-                                    settings.reveal_section(section, cx);
-                                });
-                            })
-                    })
-                    .when(!has_matches, |entry| {
-                        entry.text_color(gpui_color(panel_colors.text_disabled))
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(gpui_color(if has_matches {
-                                icon
-                            } else {
-                                colors.icon_disabled
-                            }))
-                            .when(has_matches, |icon| {
-                                icon.group_hover(row_group, |style| {
-                                    style.text_color(gpui_color(hover_icon))
-                                })
-                            })
-                            .child(Icon::inherited(
-                                match section {
-                                    SettingsSectionId::Interface => IconName::AppWindow,
-                                    SettingsSectionId::Font => IconName::Type,
-                                    SettingsSectionId::Themes => IconName::Palette,
-                                    SettingsSectionId::Keybindings => IconName::Keyboard,
-                                    SettingsSectionId::Privacy => IconName::Shield,
-                                    SettingsSectionId::Updates => IconName::Download,
-                                    SettingsSectionId::Advanced => IconName::Cog,
-                                },
-                                appearance.icons.metrics(IconRole::Row).glyph_size,
-                            )),
-                    )
-                    .child(div().min_w_0().flex_1().child(section.title()))
+            .into_iter()
+            .map(|section| NavigationEntry {
+                section,
+                title: section.title(),
+                selector: section.selector(),
+                icon: match section {
+                    SettingsSectionId::Interface => IconName::AppWindow,
+                    SettingsSectionId::Font => IconName::Type,
+                    SettingsSectionId::Themes => IconName::Palette,
+                    SettingsSectionId::Keybindings => IconName::Keyboard,
+                    SettingsSectionId::Privacy => IconName::Shield,
+                    SettingsSectionId::Updates => IconName::Download,
+                    SettingsSectionId::Advanced => IconName::Cog,
+                },
+                available: available.contains(&section),
             })
-            .collect::<Vec<_>>();
-        let sidebar = div()
-            .debug_selector(|| "settings-sidebar".to_owned())
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(appearance.spacing(SIDEBAR_WIDTH))
-            .h_full()
-            .bg(gpui_color(
-                settings.surface(SettingsSurfaceRole::Sidebar).paint,
-            ))
-            // Paint the boundary inside the sidebar without changing column widths.
-            .when_some(settings.sidebar_edge(), |sidebar, edge| {
-                sidebar.child(
-                    div()
-                        .debug_selector(|| "settings-sidebar-divider".to_owned())
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right_0()
-                        .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
-                        .bg(gpui_color(edge)),
-                )
-            })
-            .child(self.render_sidebar_titlebar(appearance, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .px(appearance.spacing(SIDEBAR_INSET))
-                    .pt(appearance.spacing(SIDEBAR_INSET))
-                    .child(self.render_search_field(appearance, cx))
-                    .child(
-                        div()
-                            .id("settings-navigation")
-                            .debug_selector(|| "settings-navigation".to_owned())
-                            .when(!available.is_empty(), |navigation| {
-                                navigation.track_focus(&self.navigation_focus)
-                            })
-                            // GPUI track_focus automatically focuses on mouse-down. Suppress that before
-                            // its bubble listener runs: pointer selection does not enter keyboard navigation.
-                            .capture_any_mouse_down(cx.listener(
-                                |settings, event: &gpui::MouseDownEvent, window, cx| {
-                                    if event.button != gpui::MouseButton::Left {
-                                        return;
-                                    }
-                                    window.prevent_default();
-                                    settings.navigation_focus_visible = false;
-                                    settings.focus_handle.focus(window, cx);
-                                    cx.notify();
-                                },
-                            ))
-                            .on_key_down(cx.listener(|settings, event, window, cx| {
-                                settings.navigate_sections(event, window, cx);
-                            }))
-                            .flex()
-                            .flex_col()
-                            .w_full()
-                            .gap(appearance.spacing(2.0))
-                            .children(entries),
-                    ),
-            )
-            .into_any_element();
-        spaceterm_ui::ControlHost::Panel
-            .mount(sidebar)
-            .into_any_element()
-    }
-
-    fn render_search_field(
-        &mut self,
-        appearance: &ChromeAppearance,
-        _: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .w_full()
-            // The search field belongs to the window, not to the navigation list under it, so
-            // the break between them is wider than the spacing inside the list.
-            .mb(appearance.spacing(12.0))
-            .child(
+            .collect();
+        let movement = self.window_movement.clone();
+        Sidebar::new("settings", entries, &movement)
+            .header(
                 SearchField::new("settings-search-frame", self.search.clone())
                     .debug_selectors("settings-search-frame", "settings-search-clear"),
             )
-            .into_any_element()
+            .render(self, settings, window, cx)
     }
 
     fn render_detail(
@@ -1260,7 +793,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings, cx))
+            .child(self.render_detail_heading(settings))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1356,7 +889,7 @@ impl SettingsWindow {
                     title
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
-                SettingsGroup::new(group_selector(section, title), heading, members)
+                FormGroup::new(group_selector(section, title), heading, members)
                     .on_rows_prepainted(move |bounds, _, _| {
                         row_bounds.borrow_mut().extend(ids.iter().copied().zip(bounds));
                     })
@@ -1381,27 +914,6 @@ impl SettingsWindow {
     }
 }
 
-/// The space between the detail pane's edge and the text inside it.
-///
-/// Rows carry part of it themselves so a card's own edge clears the text it holds, and the column
-/// gives back the rest. The two together are what a reader sees as the content's left edge.
-const CONTENT_GUTTER: f32 = 26.0;
-
-/// The space between the detail pane's edge and the cards standing in it.
-///
-/// It is the content gutter less the inset a row carries, so a card's edge stands outside the text
-/// it holds by exactly that inset and a row's own fill can reach that edge. A card is a container
-/// rather than something to read, so this line belongs to the cards alone: everything a reader
-/// tracks down the page stays on [`CONTENT_GUTTER`].
-fn card_gutter(appearance: &ChromeAppearance) -> Pixels {
-    appearance.spacing(CONTENT_GUTTER) - row_horizontal_inset(appearance)
-}
-
-/// The heading's distance from the window's top edge, which it shares with the traffic lights.
-///
-/// The title's line box begins just under the controls' top edge, so the large title reads as the
-/// window's own name without crowding the native controls in the neighbouring column.
-const HEADING_TOP_INSET: f32 = 20.0;
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -1451,7 +963,7 @@ impl SettingsWindow {
             appearance
         };
         let control = self.render_control(row, content_appearance, window, cx);
-        let mut rendered = SettingsRow::new(descriptor.selector, descriptor.label, control)
+        let mut rendered = FormRow::new(descriptor.selector, descriptor.label, control)
             .layout(row_layout(row))
             .reset(self.row_reset(row, appearance, cx))
             .matched_indices(matched_indices)
@@ -2054,41 +1566,20 @@ impl SettingsWindow {
     }
 
     /// The content column's closing strip: what the last edit did.
-    ///
-    /// The strip belongs to the content column alone, so the sidebar runs unbroken to the window's
-    /// bottom edge. The status ends on the content gutter, the line the title, the group headings,
-    /// and every row label already sit on, because the column a reader tracks down the page is the
-    /// text and the strip that closes the column joins it.
     fn render_footer(&self, settings: &SettingsAppearance) -> AnyElement {
         let appearance = &settings.chrome;
-        let status = self.editor.status();
-        div()
-            .debug_selector(|| "settings-footer".to_owned())
-            .flex()
-            .flex_row()
-            .flex_none()
-            .w_full()
-            .h(appearance.typography.style(TextRole::Secondary).line_height
-                + appearance.spacing(FOOTER_HEIGHT - 15.0))
-            .border_t_1()
-            .border_color(gpui_color(settings.separator(SettingsSurfaceRole::Canvas)))
-            .bg(gpui_color(
-                settings.surface(SettingsSurfaceRole::Canvas).paint,
-            ))
-            .items_center()
-            .justify_end()
-            .px(appearance.spacing(CONTENT_GUTTER))
-            .child(
-                div()
-                    .debug_selector(|| "settings-save-status".to_owned())
-                    .min_w_0()
-                    .truncate()
-                    .chrome_text(appearance.typography.style(TextRole::Secondary))
-                    // The recovery banner owns semantic emphasis on its paired surface.
-                    .text_color(gpui_color(appearance.colors.text_muted))
-                    .child(status.message()),
-            )
-            .into_any_element()
+        super::sidebar_window::render_footer(
+            "settings",
+            settings,
+            div()
+                .debug_selector(|| "settings-save-status".to_owned())
+                .min_w_0()
+                .truncate()
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                // The recovery banner owns semantic emphasis on its paired surface.
+                .text_color(gpui_color(appearance.colors.text_muted))
+                .child(self.editor.status().message()),
+        )
     }
 
     /// Confirms Settings Recovery. The reset replaces the file SpaceTerm could not read, so the
@@ -2327,12 +1818,12 @@ fn control_selector(row: SettingsRowId) -> String {
 ///
 /// The theme preview, the gallery, and the settings file present themselves under their group's title,
 /// so they span the row without a label.
-fn row_layout(row: SettingsRowId) -> SettingsRowLayout {
+fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SettingsFile => SettingsRowLayout::Full,
-        _ => SettingsRowLayout::Beside,
+        | SettingsRowId::SettingsFile => FormRowLayout::Full,
+        _ => FormRowLayout::Beside,
     }
 }
 

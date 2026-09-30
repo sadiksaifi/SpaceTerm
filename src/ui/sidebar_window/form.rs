@@ -1,8 +1,8 @@
-//! Presentation shared by every Settings Row.
+//! The grouped form a sidebar window presents: titled groups of labeled rows.
 //!
-//! These are compositions of existing reusable controls, not new control families: a row is a
-//! label, a control, and an optional reset affordance; a stepper is two icon buttons around a
-//! readout. Interaction behavior stays in `spaceterm-ui`.
+//! Every Settings Row renders as a form row. These are compositions of existing reusable controls,
+//! not new control families: a row is a label, a control, and an optional reset affordance; a
+//! stepper is two icon buttons around a readout. Interaction behavior stays in `spaceterm-ui`.
 
 use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
@@ -28,7 +28,7 @@ type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
 /// A field action rests on its field and uses complete neutral paints while interacting.
 #[cfg(test)]
-pub(super) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
+pub(crate) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
     let paint = |background, foreground| {
         spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), gpui::rgba(0))
     };
@@ -57,7 +57,7 @@ const COMFORTABLE_ROW_HORIZONTAL_INSET: f32 = 14.0;
 const COMPACT_ROW_VERTICAL_INSET: f32 = 8.0;
 const COMFORTABLE_ROW_VERTICAL_INSET: f32 = 11.0;
 
-pub(super) fn row_horizontal_inset(appearance: &ChromeAppearance) -> gpui::Pixels {
+pub(crate) fn row_horizontal_inset(appearance: &ChromeAppearance) -> gpui::Pixels {
     px(if appearance.spacing_scale > 1.0 {
         COMFORTABLE_ROW_HORIZONTAL_INSET
     } else {
@@ -134,7 +134,7 @@ fn label_line_height(appearance: &ChromeAppearance) -> gpui::Pixels {
 
 /// How a row arranges its label and its content.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum SettingsRowLayout {
+pub(crate) enum FormRowLayout {
     /// A right-aligned label beside its control, which is the form default.
     Beside,
     /// A label above content that needs the whole row, such as a list.
@@ -151,7 +151,7 @@ pub(super) enum SettingsRowLayout {
 /// The group uses the document surface and its text pair. Its title and surrounding space carry
 /// grouping. The fixed card edge and inset separators keep related rows legible without adding a
 /// shadow, and the card clips revealed-row fills to its outer corners.
-pub(super) struct SettingsGroup {
+pub(crate) struct FormGroup {
     selector: String,
     title: &'static str,
     rows: Vec<AnyElement>,
@@ -160,8 +160,8 @@ pub(super) struct SettingsGroup {
 
 type RowsPrepainted = Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App)>;
 
-impl SettingsGroup {
-    pub(super) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
+impl FormGroup {
+    pub(crate) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
         Self {
             selector,
             title,
@@ -171,7 +171,7 @@ impl SettingsGroup {
     }
 
     /// Reports where each row was laid out on every frame, in row order and window coordinates.
-    pub(super) fn on_rows_prepainted(
+    pub(crate) fn on_rows_prepainted(
         mut self,
         listener: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
     ) -> Self {
@@ -179,7 +179,7 @@ impl SettingsGroup {
         self
     }
 
-    pub(super) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
+    pub(crate) fn render(self, settings: &SettingsAppearance) -> impl IntoElement {
         let appearance = &settings.chrome;
         let selector = self.selector.clone();
         let title_selector = format!("{selector}-title");
@@ -259,7 +259,7 @@ impl SettingsGroup {
 
 /// What a row's caption tells the reader, which selects its color.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum CaptionTone {
+pub(crate) enum CaptionTone {
     /// Guidance, in the secondary text color.
     #[default]
     Guidance,
@@ -277,7 +277,7 @@ pub(super) enum CaptionTone {
 /// that this setting was changed, the control stays on the one shared right edge whether or not a
 /// reset is present, and keyboard focus reaches the reset just before the control it restores. The
 /// reset's slot is held empty on a row without one, so the label wraps at the same width either way.
-pub(super) struct SettingsRow {
+pub(crate) struct FormRow {
     selector: &'static str,
     label: &'static str,
     description: Option<SharedString>,
@@ -286,11 +286,11 @@ pub(super) struct SettingsRow {
     reset: Option<AnyElement>,
     highlighted: bool,
     matched_indices: Vec<usize>,
-    layout: SettingsRowLayout,
+    layout: FormRowLayout,
 }
 
-impl SettingsRow {
-    pub(super) fn new(
+impl FormRow {
+    pub(crate) fn new(
         selector: &'static str,
         label: &'static str,
         control: impl IntoElement,
@@ -304,18 +304,18 @@ impl SettingsRow {
             reset: None,
             highlighted: false,
             matched_indices: Vec::new(),
-            layout: SettingsRowLayout::Beside,
+            layout: FormRowLayout::Beside,
         }
     }
 
     /// Adds one line of guidance below the control.
-    pub(super) fn description(mut self, description: impl Into<SharedString>) -> Self {
+    pub(crate) fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// Adds one line below the control in the color its tone selects.
-    pub(super) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
+    pub(crate) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
         self.description = Some(message.into());
         self.tone = tone;
         self
@@ -324,29 +324,29 @@ impl SettingsRow {
     /// Adds the affordance restoring this row's default. Present only when it differs.
     ///
     /// A row without a label of its own has nowhere to carry one, so a full-width row drops it.
-    pub(super) fn reset(mut self, reset: Option<impl IntoElement>) -> Self {
+    pub(crate) fn reset(mut self, reset: Option<impl IntoElement>) -> Self {
         self.reset = reset.map(IntoElement::into_any_element);
         self
     }
 
     /// Marks the row Settings Search revealed, so the eye lands on it.
-    pub(super) fn highlighted(mut self, highlighted: bool) -> Self {
+    pub(crate) fn highlighted(mut self, highlighted: bool) -> Self {
         self.highlighted = highlighted;
         self
     }
 
-    pub(super) fn matched_indices(mut self, indices: Vec<usize>) -> Self {
+    pub(crate) fn matched_indices(mut self, indices: Vec<usize>) -> Self {
         self.matched_indices = indices;
         self
     }
 
     /// Chooses where the label sits. Content that needs the whole row takes the label above it.
-    pub(super) fn layout(mut self, layout: SettingsRowLayout) -> Self {
+    pub(crate) fn layout(mut self, layout: FormRowLayout) -> Self {
         self.layout = layout;
         self
     }
 
-    pub(super) fn render(
+    pub(crate) fn render(
         self,
         appearance: &ChromeAppearance,
         window: &Window,
@@ -379,8 +379,8 @@ impl SettingsRow {
             .measure(label_role, self.label, window)
             .ceil();
         let reset_slot_width = reset_slot_width(appearance);
-        let above = self.layout == SettingsRowLayout::Above;
-        let full = self.layout == SettingsRowLayout::Full;
+        let above = self.layout == FormRowLayout::Above;
+        let full = self.layout == FormRowLayout::Full;
         let description_selector = format!("{selector}-description");
         let caption_color = match self.tone {
             CaptionTone::Guidance => secondary,
@@ -512,7 +512,7 @@ impl SettingsRow {
     }
 }
 
-pub(super) fn highlighted_row_background(appearance: &ChromeAppearance) -> Color {
+pub(crate) fn highlighted_row_background(appearance: &ChromeAppearance) -> Color {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     appearance.materials.paint(
         crate::appearance::SurfaceRole::Surface,
@@ -540,7 +540,7 @@ fn highlighted_label(
 ///
 /// It carries no hitbox of its own, so the window-drag region behind it keeps the whole heading
 /// available for native window movement.
-pub(super) fn section_heading(
+pub(crate) fn section_heading(
     selector: &'static str,
     title: &'static str,
     description: &'static str,
@@ -575,7 +575,7 @@ pub(super) fn section_heading(
 ///
 /// It is a quiet glyph sized to the label line it follows. Its accessible name says which setting
 /// it restores, because focus can reach it apart from the label that shows this visually.
-pub(super) fn reset_button(
+pub(crate) fn reset_button(
     selector: String,
     setting: &'static str,
     icon_size: gpui::Pixels,
@@ -604,7 +604,7 @@ pub(super) fn reset_button(
 ///
 /// Every value it can request is inside the range the Settings document already validates, so the
 /// control cannot compose an invalid document.
-pub(super) struct Stepper {
+pub(crate) struct Stepper {
     selector: &'static str,
     accessibility_name: &'static str,
     value: SharedString,
@@ -615,7 +615,7 @@ pub(super) struct Stepper {
 }
 
 impl Stepper {
-    pub(super) fn new(
+    pub(crate) fn new(
         selector: &'static str,
         accessibility_name: &'static str,
         value: impl Into<SharedString>,
@@ -632,19 +632,19 @@ impl Stepper {
     }
 
     /// Disables the ends of the range so the control cannot request a rejected value.
-    pub(super) fn bounds(mut self, can_decrease: bool, can_increase: bool) -> Self {
+    pub(crate) fn bounds(mut self, can_decrease: bool, can_increase: bool) -> Self {
         self.can_decrease = can_decrease;
         self.can_increase = can_increase;
         self
     }
 
-    pub(super) fn enabled(mut self, enabled: bool) -> Self {
+    pub(crate) fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
     }
 
     /// Handles one step, negative for decrement and positive for increment.
-    pub(super) fn on_step(
+    pub(crate) fn on_step(
         mut self,
         handler: impl Fn(i32, &mut Window, &mut App) + 'static,
     ) -> Self {
@@ -652,7 +652,7 @@ impl Stepper {
         self
     }
 
-    pub(super) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
+    pub(crate) fn render(self, appearance: &ChromeAppearance) -> impl IntoElement {
         let text_style = appearance.typography.style(TextRole::Body).tabular();
         let colors = &appearance.card_controls.colors;
         StepperElement {
@@ -785,7 +785,7 @@ impl gpui::RenderOnce for StepperElement {
 /// It is filled rather than outlined, so it reads as a state rather than as one more frame. The
 /// fill comes from the raised element role rather than the plain element background, which a
 /// theme may resolve to the window background and would leave the badge invisible.
-pub(super) fn badge(
+pub(crate) fn badge(
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
@@ -804,7 +804,7 @@ pub(super) fn badge(
 }
 
 /// A text button used by the interchange and diagnostics rows.
-pub(super) fn action_button(
+pub(crate) fn action_button(
     selector: &'static str,
     label: &'static str,
     enabled: bool,

@@ -15,7 +15,7 @@ use spaceterm_ui::{
     ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
 };
 
-use super::controls::{CaptionTone, row_horizontal_inset};
+use crate::ui::sidebar_window::form::{CaptionTone, row_horizontal_inset};
 use super::{SettingsRowId, SettingsWindow, control_selector};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;

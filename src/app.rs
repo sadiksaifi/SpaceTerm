@@ -1663,7 +1663,7 @@ mod runtime_tests {
                     .workspace_traffic_light_position(workspace_height)
                     .unwrap(),
                 geometry
-                    .settings_traffic_light_position(appearance.top_height())
+                    .sidebar_window_traffic_light_position(appearance.top_height())
                     .unwrap(),
             )
         });
