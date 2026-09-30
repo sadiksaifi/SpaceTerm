@@ -25,6 +25,7 @@ mod list_row;
 mod menu;
 mod middle_truncated_text;
 mod modal;
+mod optical_text;
 mod overlay_scrollbar;
 mod progress;
 #[cfg(test)]
