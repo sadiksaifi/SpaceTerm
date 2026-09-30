@@ -61,6 +61,8 @@ pub use combo_box::{
     ComboBoxTheme, NoComboBoxCommands, install_combo_box_keybindings,
     install_portable_combo_box_keybindings, window_combo_box_is_open,
 };
+/// The Command Palette key that activates its primary action, for displaying its Shortcut.
+pub use command_palette::Confirm as CommandPaletteConfirm;
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,

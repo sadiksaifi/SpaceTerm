@@ -632,6 +632,7 @@ impl CommandPaletteAction {
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
     label: SharedString,
+    shortcut: Option<SharedString>,
     disabled: bool,
     menu_items: Vec<(SharedString, SharedString)>,
     menu_disabled: bool,
@@ -644,11 +645,19 @@ impl CommandPalettePrimaryAction {
         Self {
             id: id.into(),
             label: label.into(),
+            shortcut: None,
             disabled: false,
             menu_items: Vec::new(),
             menu_disabled: false,
             debug_selector: None,
         }
+    }
+
+    /// Shows the displayed Shortcut of [`Confirm`], the key that activates the action, after
+    /// its label.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
     }
 
     /// Controls whether the action can activate.
@@ -3736,6 +3745,9 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     )
     .variant(ButtonVariant::Primary)
     .size(ButtonSize::Small)
+    .when_some(action.shortcut.clone(), |button, shortcut| {
+        button.shortcut(shortcut)
+    })
     .disabled(action.disabled)
     .menu_disabled(action.menu_disabled)
     .focus_handle(focus_handle)

@@ -1415,6 +1415,36 @@ fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn the_primary_action_shortcut_should_follow_its_label_inside_the_button(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .shortcut("\u{2318}\u{21a9}")
+                    .debug_selector("primary-open"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let button = cx
+        .debug_bounds("primary-open")
+        .expect("the primary action was not rendered");
+    let shortcut = cx
+        .debug_bounds("primary-open-shortcut")
+        .expect("the primary action shortcut was not rendered");
+    assert!(shortcut.size.width > px(0.0));
+    assert!(
+        shortcut.left() > button.left() + (button.size.width / 2.0),
+        "the shortcut did not follow the label"
+    );
+    assert!(shortcut.right() <= button.right());
+    assert!(shortcut.top() >= button.top() && shortcut.bottom() <= button.bottom());
+}
+
+#[gpui::test]
 fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
