@@ -29,6 +29,8 @@ const EMPTY_ACTION_SIZE: ButtonSize = ButtonSize::Regular;
 const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
 /// How long a load may run before the palette shows its loading state.
 const LOADING_GRACE_PERIOD: Duration = Duration::from_millis(100);
+/// How long a shown loading state stays before results replace it, so it never flickers.
+const LOADING_MINIMUM_DISPLAY: Duration = Duration::from_millis(400);
 /// The loading state's visible text, which also names its progress bar.
 const LOADING_TEXT: &str = "Loading\u{2026}";
 
@@ -1601,8 +1603,9 @@ enum LoadingPresentation {
     /// A load is within its grace period. A palette that has not been visible since it opened
     /// stays hidden, and no results are presented.
     Grace,
-    /// The loading state is presented.
-    Shown,
+    /// The loading state is presented. It stays until [`LOADING_MINIMUM_DISPLAY`] has elapsed,
+    /// even when results arrive sooner.
+    Shown { minimum_elapsed: bool },
 }
 
 struct CommandPalettePanelLayout {
@@ -2420,16 +2423,44 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     let _ = palette.update(cx, |palette, cx| palette.finish_loading_grace(cx));
                 }));
             }
-            (false, LoadingPresentation::Grace | LoadingPresentation::Shown) => {
-                self.settle_loading_presentation();
-            }
+            (
+                false,
+                LoadingPresentation::Grace
+                | LoadingPresentation::Shown {
+                    minimum_elapsed: true,
+                },
+            ) => self.settle_loading_presentation(),
             _ => {}
         }
     }
 
     fn finish_loading_grace(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.loading_presentation == LoadingPresentation::Grace {
-            self.loading_presentation = LoadingPresentation::Shown;
+        if self.loading_presentation != LoadingPresentation::Grace {
+            return;
+        }
+        self.loading_presentation = LoadingPresentation::Shown {
+            minimum_elapsed: false,
+        };
+        self.loading_timer = Some(cx.spawn(async move |palette, cx| {
+            cx.background_executor()
+                .timer(LOADING_MINIMUM_DISPLAY)
+                .await;
+            let _ = palette.update(cx, |palette, cx| palette.finish_loading_minimum(cx));
+        }));
+        cx.notify();
+    }
+
+    fn finish_loading_minimum(&mut self, cx: &mut gpui::Context<Self>) {
+        if !matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
+            return;
+        }
+        if self.loading {
+            self.loading_presentation = LoadingPresentation::Shown {
+                minimum_elapsed: true,
+            };
+            self.loading_timer = None;
+        } else {
+            self.settle_loading_presentation();
             cx.notify();
         }
     }
@@ -3490,7 +3521,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let metrics = theme.metrics;
         let content = if self.loading_presentation == LoadingPresentation::Grace {
             div().into_any_element()
-        } else if self.loading_presentation == LoadingPresentation::Shown {
+        } else if matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
             loading_state(list_height, metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
             self.render_empty_state(theme, cx)

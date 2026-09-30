@@ -2293,6 +2293,53 @@ fn a_slow_load_should_show_loading_only_after_the_grace_period(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_shown_loading_state_should_stay_for_its_minimum_display_time(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    open_palette_loading(&root, &palette, cx);
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(50));
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    assert!(cx.debug_bounds("row-open").is_none());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
+    );
+
+    cx.executor()
+        .advance_clock(LOADING_MINIMUM_DISPLAY - Duration::from_millis(51));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert!(cx.debug_bounds("row-open").is_some());
+}
+
+#[gpui::test]
+fn results_after_the_minimum_display_time_should_replace_loading_at_once(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    show_loading(&palette, cx);
+    cx.executor().advance_clock(LOADING_MINIMUM_DISPLAY * 2);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert!(cx.debug_bounds("row-open").is_some());
+}
+
+#[gpui::test]
 fn loading_state_should_center_its_text_above_an_indeterminate_bar(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
