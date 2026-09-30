@@ -8,11 +8,18 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly REPO_ROOT
 
-[[ $# -eq 0 ]] || {
-    echo "usage: $(basename -- "$0")" >&2
-    exit 2
-}
-readonly INFO_PLIST_SOURCE="$SCRIPT_DIR/development/Info.plist"
+LAUNCH=true
+case "${1:-}" in
+    "") ;;
+    --no-launch) LAUNCH=false ;;
+    *)
+        echo "usage: $(basename -- "$0") [--no-launch]" >&2
+        exit 2
+        ;;
+esac
+readonly LAUNCH
+readonly IDENTITY_DIR="$SCRIPT_DIR/development"
+readonly INFO_PLIST_SOURCE="$IDENTITY_DIR/Info.plist"
 readonly CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
 plist_value() {
@@ -51,10 +58,22 @@ rm -f -- "$ARTIFACT_PATH"
 BUNDLE_PARENT="$(dirname -- "$(dirname -- "$EXECUTABLE")")/development-apps"
 readonly BUNDLE_PARENT
 mkdir -p -- "$BUNDLE_PARENT"
+
+# actool takes seconds, so each version of the icon document compiles once.
+ICON_DIGEST="$(find "$IDENTITY_DIR/$APP_NAME.icon" -type f -print0 | LC_ALL=C sort -z \
+    | xargs -0 shasum -a 256 | shasum -a 256 | cut -c1-16)"
+readonly ICON_CACHE="$BUNDLE_PARENT/icons/$ICON_DIGEST"
+if [[ ! -d "$ICON_CACHE" ]]; then
+    rm -rf -- "$ICON_CACHE.partial"
+    "$SCRIPT_DIR/compile-icon.sh" "$IDENTITY_DIR" "$ICON_CACHE.partial"
+    mv -- "$ICON_CACHE.partial" "$ICON_CACHE"
+fi
+
 STAGING_ROOT="$(mktemp -d "$BUNDLE_PARENT/.bundle.XXXXXX")"
 STAGED_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
 readonly STAGED_BUNDLE
-mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS"
+mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS" "$STAGED_BUNDLE/Contents/Resources"
+install -m 0644 "$ICON_CACHE/SpaceTerm.icns" "$ICON_CACHE/Assets.car" "$STAGED_BUNDLE/Contents/Resources/"
 install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
 BUNDLE_VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --field bundle_version)"
 plutil -insert CFBundleShortVersionString -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
@@ -69,4 +88,8 @@ mv -- "$STAGED_BUNDLE" "$BUNDLE"
 rmdir -- "$STAGING_ROOT"
 STAGING_ROOT=""
 
+if [[ "$LAUNCH" == false ]]; then
+    echo "$BUNDLE"
+    exit 0
+fi
 exec "$BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"

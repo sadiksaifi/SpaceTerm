@@ -14,17 +14,11 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly REPO_ROOT
 readonly DIST_DIR="$REPO_ROOT/dist"
-readonly RELEASE_ICON_SOURCE="$SCRIPT_DIR/spaceterm/$ICON_NAME.icon"
-readonly ICON_GLYPH="Assets/SVG Image 4.svg"
 readonly TERMINFO_SOURCE="$REPO_ROOT/assets/terminfo/xterm-spaceterm.terminfo"
 readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 readonly BUILD_TARGET_DIR="$REPO_ROOT/target"
 readonly PACKAGE_STAGE_DIR="$BUILD_TARGET_DIR/package-macos"
 readonly STAGED_INFO_PLIST="$PACKAGE_STAGE_DIR/Info.plist"
-readonly ICON_PARTIAL_PLIST="$PACKAGE_STAGE_DIR/IconPartialInfo.plist"
-readonly STAGED_ICON_SOURCE="$PACKAGE_STAGE_DIR/icon-source/$ICON_NAME.icon"
-readonly STAGED_ICON="$PACKAGE_STAGE_DIR/$ICON_NAME.icns"
-readonly STAGED_ASSET_CATALOG="$PACKAGE_STAGE_DIR/Assets.car"
 readonly STAGED_TERMINFO="$PACKAGE_STAGE_DIR/terminfo"
 
 RELEASE_TAG=""
@@ -95,40 +89,10 @@ build_native_binary() {
     fi
 }
 
-# Each identity compiles under the one internal icon name that the bundle metadata expects.
-stage_icon_source() {
-    mkdir -p -- "$(dirname -- "$STAGED_ICON_SOURCE")"
-    cp -R -- "$ICON_SOURCE" "$STAGED_ICON_SOURCE"
-}
-
-compile_icon() {
-    echo "Compiling layered $ICON_NAME.icon for $APP_NAME"
-    xcrun actool "$STAGED_ICON_SOURCE" \
-        --compile "$PACKAGE_STAGE_DIR" \
-        --platform macosx \
-        --minimum-deployment-target 26.0 \
-        --app-icon "$ICON_NAME" \
-        --output-partial-info-plist "$ICON_PARTIAL_PLIST" \
-        --enable-on-demand-resources NO \
-        --development-region en \
-        --target-device mac \
-        --bundle-identifier "$BUNDLE_IDENTIFIER" >/dev/null
-    [[ -f "$STAGED_ICON" ]] || die "actool did not produce: $STAGED_ICON"
-    [[ -f "$STAGED_ASSET_CATALOG" ]] || die "actool did not produce: $STAGED_ASSET_CATALOG"
-    [[ -f "$ICON_PARTIAL_PLIST" ]] || die "actool did not produce: $ICON_PARTIAL_PLIST"
-}
-
 prepare_info_plist() {
     local version="$1"
-    local icon_file icon_name
 
     cp "$INFO_PLIST_SOURCE" "$STAGED_INFO_PLIST"
-    icon_file="$(plutil -extract CFBundleIconFile raw -o - "$ICON_PARTIAL_PLIST")"
-    icon_name="$(plutil -extract CFBundleIconName raw -o - "$ICON_PARTIAL_PLIST")"
-    [[ "$icon_file" == "$ICON_NAME" && "$icon_name" == "$ICON_NAME" ]] \
-        || die "actool emitted unexpected icon metadata: file=$icon_file name=$icon_name"
-    plutil -replace CFBundleIconFile -string "$icon_file" "$STAGED_INFO_PLIST"
-    plutil -replace CFBundleIconName -string "$icon_name" "$STAGED_INFO_PLIST"
     plutil -insert CFBundleShortVersionString -string "$version" "$STAGED_INFO_PLIST"
     plutil -insert CFBundleVersion -string "$version" "$STAGED_INFO_PLIST"
     plutil -lint "$STAGED_INFO_PLIST" >/dev/null
@@ -156,7 +120,6 @@ done
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS packaging must run on macOS"
 require_command cargo
 require_command cargo-packager
-require_command cmp
 require_command codesign
 require_command hdiutil
 require_command iconutil
@@ -181,14 +144,8 @@ APP_NAME="$(plutil -extract CFBundleName raw -o - "$INFO_PLIST_SOURCE")"
 readonly APP_NAME
 EXECUTABLE_NAME="$(plutil -extract CFBundleExecutable raw -o - "$INFO_PLIST_SOURCE")"
 readonly EXECUTABLE_NAME
-BUNDLE_IDENTIFIER="$(plutil -extract CFBundleIdentifier raw -o - "$INFO_PLIST_SOURCE")"
-readonly BUNDLE_IDENTIFIER
 readonly OUTPUT_APP="$DIST_DIR/$APP_NAME.app"
 readonly OUTPUT_DMG="$DIST_DIR/$APP_NAME.dmg"
-readonly ICON_SOURCE="$IDENTITY_DIR/$APP_NAME.icon"
-[[ -f "$ICON_SOURCE/icon.json" ]] || die "missing Icon Composer source: $ICON_SOURCE"
-cmp -s "$RELEASE_ICON_SOURCE/$ICON_GLYPH" "$ICON_SOURCE/$ICON_GLYPH" \
-    || die "$APP_NAME icon glyph differs from the SpaceTerm icon glyph"
 [[ -f "$TERMINFO_SOURCE" ]] || die "missing terminfo source: $TERMINFO_SOURCE"
 [[ -f "$THIRD_PARTY_NOTICES_SOURCE" ]] \
     || die "missing third-party notices: $THIRD_PARTY_NOTICES_SOURCE"
@@ -216,8 +173,7 @@ mkdir -p -- "$DIST_DIR"
 rm -rf -- "$PACKAGE_STAGE_DIR"
 mkdir -p -- "$PACKAGE_STAGE_DIR" "$STAGED_TERMINFO"
 
-stage_icon_source
-compile_icon
+"$SCRIPT_DIR/compile-icon.sh" "$IDENTITY_DIR" "$PACKAGE_STAGE_DIR"
 prepare_info_plist "$VERSION"
 
 echo "Compiling xterm-spaceterm terminfo"

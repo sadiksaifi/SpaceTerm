@@ -8,6 +8,10 @@
 	<string>SpaceTerm Development</string>
 	<key>CFBundleExecutable</key>
 	<string>SpaceTerm Development</string>
+	<key>CFBundleIconFile</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleIconName</key>
+	<string>SpaceTerm</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.sadiksaifi.spaceterm-development</string>
 	<key>CFBundleInfoDictionaryVersion</key>

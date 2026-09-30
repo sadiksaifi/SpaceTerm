@@ -197,6 +197,43 @@ mod tests {
         }
     }
 
+    /// All icons share the release glyph and rank by distance from a release with one dot per
+    /// step, which survives the Dark, Clear, and Tinted appearances that replace their colors.
+    #[test]
+    fn identity_icons_should_share_the_glyph_and_rank_by_channel_marks() {
+        let glyphs = [
+            include_bytes!("../packaging/macos/spaceterm/SpaceTerm.icon/Assets/Glyph.svg").as_slice(),
+            include_bytes!("../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Glyph.svg"),
+            include_bytes!(
+                "../packaging/macos/development/SpaceTerm Development.icon/Assets/Glyph.svg"
+            ),
+        ];
+        let marks = [
+            None,
+            Some(include_str!(
+                "../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Channel Mark.svg"
+            )),
+            Some(include_str!(
+                "../packaging/macos/development/SpaceTerm Development.icon/Assets/Channel Mark.svg"
+            )),
+        ];
+        let documents = [
+            include_str!("../packaging/macos/spaceterm/SpaceTerm.icon/icon.json"),
+            include_str!("../packaging/macos/preflight/SpaceTerm Preflight.icon/icon.json"),
+            include_str!("../packaging/macos/development/SpaceTerm Development.icon/icon.json"),
+        ];
+
+        assert!(glyphs.iter().all(|glyph| *glyph == glyphs[0]));
+        assert_eq!(
+            marks.map(|mark| mark.map_or(0, |mark| mark.matches("<circle").count())),
+            [0, 1, 2]
+        );
+        for (document, mark) in documents.into_iter().zip(marks) {
+            assert!(document.contains("\"Glyph.svg\""));
+            assert_eq!(document.contains("\"Channel Mark.svg\""), mark.is_some());
+        }
+    }
+
     #[test]
     fn preflight_bundle_template_should_differ_from_production_only_by_identity() {
         let without_identity = |plist| {
