@@ -25,6 +25,7 @@ mod list_row;
 mod menu;
 mod middle_truncated_text;
 mod modal;
+mod optical_text;
 mod overlay_scrollbar;
 mod progress;
 #[cfg(test)]
@@ -32,6 +33,7 @@ mod progress_tests;
 mod resize_handle;
 mod search_field;
 mod segmented_control;
+mod shortcut_label;
 mod shortcut_recorder;
 #[cfg(test)]
 mod shortcut_recorder_tests;
@@ -128,6 +130,7 @@ pub use segmented_control::{
     SegmentedControl, SegmentedControlTheme, SegmentedMetrics, SegmentedOption, SegmentedPaint,
     SegmentedPaints, SegmentedSize, SegmentedSizes, SegmentedValuePaints,
 };
+pub use shortcut_label::ShortcutLabel;
 pub use shortcut_recorder::{
     ShortcutModifierFormatter, ShortcutRecorder, ShortcutRecorderEvent, ShortcutValidator,
 };

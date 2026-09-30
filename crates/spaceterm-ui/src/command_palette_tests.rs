@@ -1445,6 +1445,53 @@ fn the_primary_action_shortcut_should_follow_its_label_inside_the_button(cx: &mu
 }
 
 #[gpui::test]
+fn the_primary_action_label_and_shortcut_should_be_evenly_spaced_between_the_segment_edges(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .shortcut("\u{2318}\u{21a9}")
+                    .debug_selector("primary-open")
+                    .menu_item("choose", "Choose Directory\u{2026}"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let segment = cx
+        .debug_bounds("primary-open")
+        .expect("the primary segment was not rendered");
+    let label = cx
+        .debug_bounds("primary-open-label")
+        .expect("the primary action label was not rendered");
+    let shortcut = cx
+        .debug_bounds("primary-open-shortcut")
+        .expect("the primary action shortcut was not rendered");
+    let divider = cx
+        .debug_bounds("primary-open-menu")
+        .expect("the menu segment was not rendered")
+        .left();
+    let menu = cx
+        .debug_bounds("primary-open-menu")
+        .expect("the menu segment was not rendered");
+    let gap = shortcut.left() - label.right();
+    assert!(gap > px(0.0));
+    assert_eq!(divider - shortcut.right(), gap);
+    // The leading edge also carries the segment border.
+    let leading = label.left() - segment.left();
+    assert!(leading >= gap && leading - gap <= px(1.0));
+    assert!(
+        gap < menu.size.width / 2.0,
+        "the primary segment is inset more than the menu segment's chevron"
+    );
+    assert_eq!(divider, segment.right());
+}
+
+#[gpui::test]
 fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
