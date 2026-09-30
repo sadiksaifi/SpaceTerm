@@ -2242,7 +2242,9 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     open_workspace_switcher_for_creation(cx);
 
     click("workspace-switcher-create-remote", cx);
+    click("workspace-switcher-open-remote-directory", cx);
     cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-shift-o");
     cx.run_until_parked();
 
     assert_eq!(
@@ -2294,6 +2296,12 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
         (false, None, true)
     );
     click_new_workspace_menu("new-workspace-menu-create-remote", cx);
+    // A disabled row keeps the menu open.
+    click("new-workspace-menu-open-remote-directory", cx);
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
     assert_eq!(create_calls.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(records.starts().len(), 1);
@@ -6408,7 +6416,7 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 /// order the switcher offers, so the two creation paths cannot drift apart. Both surfaces build
 /// from the shared creation descriptors; disabled parity while Remote is unavailable is exercised
 /// by `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
-/// which rejects the Remote row on each surface.
+/// which rejects both remote rows and their Shortcuts on each surface.
 #[gpui::test]
 fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
     use crate::desktop_profile::testing_presentation;
