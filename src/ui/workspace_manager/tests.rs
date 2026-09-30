@@ -4205,6 +4205,71 @@ fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_dire
 }
 
 #[gpui::test]
+fn open_local_directory_should_keep_the_picker_usable_after_a_directory_disappears(
+    cx: &mut TestAppContext,
+) {
+    let root = temporary_directory("open-local-retry");
+    let gone = root.join("gone");
+    let project = root.join("project");
+    fs::create_dir_all(&gone).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    let validated = manager.read_with(cx, |manager, _| {
+        manager.local_filesystem.validate_directory(&gone).unwrap()
+    });
+    fs::remove_dir_all(&gone).unwrap();
+    assert!(!cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_local_directory_workspace(validated, String::new(), window, cx)
+        })
+    }));
+
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert!(manager.pin_picker.is_none());
+    });
+    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_should_close_the_picker_and_alert_when_home_is_unavailable(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local-missing-home-project");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
+    manager.update(cx, |manager, _| {
+        manager.local_home_directory_path = temporary_directory("open-local-missing-home");
+    });
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 1);
+        assert!(manager.pin_picker.is_none());
+    });
+    click("modal-action-workspace-home-error-ok", cx);
+    assert_eq!(records.starts().len(), 1);
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
 fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_create_nothing(
     cx: &mut TestAppContext,
 ) {

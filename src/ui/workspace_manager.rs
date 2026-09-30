@@ -1040,15 +1040,28 @@ impl WorkspaceManager {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
             return false;
         };
-        self.pin_operation = self.pin_operation.wrapping_add(1);
-        self.transient.pin_target = None;
-        match self
+        if self.local_home_directory().is_err() {
+            // The failure is not about the chosen directory, so end the attempt before alerting.
+            if let Some(picker) = self.pin_picker.take() {
+                picker.update(cx, |picker, cx| picker.cancel(window, cx));
+            }
+            self.transient.pin_target = None;
+            Self::show_home_directory_unavailable(window, cx);
+            return false;
+        }
+        let opened = match self
             .workspaces
             .local_workspace_pinned_to(&directory.identity())
         {
             Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
             None => self.create_pinned_local_workspace(Some(name), Some(directory), window, cx),
+        };
+        // A failure keeps the operation current so the still-open picker can retry.
+        if opened {
+            self.pin_operation = self.pin_operation.wrapping_add(1);
+            self.transient.pin_target = None;
         }
+        opened
     }
 
     /// Pins a validated local directory to `target`, creating the Workspace a new target names.
@@ -2270,6 +2283,8 @@ impl WorkspaceManager {
     }
 
     fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
+        let manager = cx.weak_entity();
+        let window_handle = window.window_handle();
         let _ = Alert::new(
             ModalId::new("workspace-home-directory-unavailable"),
             "Home directory unavailable",
@@ -2278,7 +2293,15 @@ impl WorkspaceManager {
             vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-home-error-ok")],
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .present(window, cx, move |_, cx| {
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = manager.update(cx, |manager, cx| {
+                    manager.sync_terminal_focus_blocker(window, cx);
+                    manager.focus(window, cx);
+                    cx.notify();
+                });
+            });
+        });
     }
 
     fn activate_workspace(
