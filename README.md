@@ -69,7 +69,7 @@ mise trust
 mise run setup:macos
 
 # Run from source
-mise run dev
+mise run development
 
 # Build, verify, and install to /Applications
 mise run package:macos:install

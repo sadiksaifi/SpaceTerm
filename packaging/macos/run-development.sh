@@ -12,7 +12,7 @@ readonly REPO_ROOT
     echo "usage: $(basename -- "$0")" >&2
     exit 2
 }
-readonly INFO_PLIST_SOURCE="$SCRIPT_DIR/dev/Info.plist"
+readonly INFO_PLIST_SOURCE="$SCRIPT_DIR/development/Info.plist"
 readonly CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
 plist_value() {

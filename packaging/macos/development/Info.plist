@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>SpaceTerm Dev</string>
+	<string>SpaceTerm Development</string>
 	<key>CFBundleExecutable</key>
-	<string>SpaceTerm Dev</string>
+	<string>SpaceTerm Development</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.sadiksaifi.spaceterm-dev</string>
+	<string>io.github.sadiksaifi.spaceterm-development</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>SpaceTerm Dev</string>
+	<string>SpaceTerm Development</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>LSMinimumSystemVersion</key>

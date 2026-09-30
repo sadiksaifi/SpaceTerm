@@ -198,7 +198,7 @@ cmp -s "$RELEASE_ICON_SOURCE/$ICON_GLYPH" "$ICON_SOURCE/$ICON_GLYPH" \
 
 unset SPACETERM_RELEASE_TAG SPACETERM_SPARKLE_DIR
 export MACOSX_DEPLOYMENT_TARGET=26.0
-# Leaves the SpaceTerm Dev identity; see ADR 0012.
+# Leaves the SpaceTerm Development identity; see ADR 0012.
 export SPACETERM_PACKAGED=1
 if [[ -n "$RELEASE_TAG" ]]; then
     VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"

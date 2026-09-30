@@ -392,7 +392,7 @@ test "$(cat "$artifact_path")" = "$fake_executable"
 
 case_name=development-command
 if grep -Eq 'cargo run --locked|target/debug/spaceterm' \
-    "$script_dir/../.mise.toml" "$script_dir/../packaging/macos/run-dev.sh"; then
+    "$script_dir/../.mise.toml" "$script_dir/../packaging/macos/run-development.sh"; then
     echo "interactive development tasks must build before launching" >&2
     exit 1
 fi

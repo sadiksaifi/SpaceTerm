@@ -18,7 +18,7 @@ SpaceTerm's GPUI renderer, Session scheduling, or application policies.
 ## Source and build ownership
 
 `mise run setup:macos` installs the pinned tools, initializes the submodules, and verifies Apple
-tooling. Other platforms use `mise run setup`. The ordinary `mise run dev`, `check`, `test`, and
+tooling. Other platforms use `mise run setup`. The ordinary `mise run development`, `check`, `test`, and
 packaging tasks compile the native dependency as needed through Cargo.
 
 The build script makes a local Git clone of the committed submodule tree inside Cargo's build

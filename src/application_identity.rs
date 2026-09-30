@@ -21,8 +21,8 @@ impl ApplicationIdentity {
         Self::for_build(cfg!(spaceterm_packaged), cfg!(spaceterm_release))
     }
 
-    /// Only the packaging script leaves SpaceTerm Dev, and only a validated release tag selects
-    /// SpaceTerm, so no other build can replace or share state with a release installation.
+    /// Only the packaging script leaves SpaceTerm Development, and only a validated release tag
+    /// selects SpaceTerm, so no other build can replace or share state with a release installation.
     const fn for_build(packaged: bool, release: bool) -> Self {
         match (packaged, release) {
             (false, _) => Self::development(),
@@ -43,7 +43,8 @@ impl ApplicationIdentity {
         self.update_source
     }
 
-    /// SpaceTerm Dev is re-signed ad hoc on every build, so privacy grants would not persist.
+    /// SpaceTerm Development is re-signed ad hoc on every build, so privacy grants would not
+    /// persist.
     pub(crate) const fn microphone_access(self) -> bool {
         self.microphone_access
     }
@@ -68,8 +69,8 @@ impl ApplicationIdentity {
 
     const fn development() -> Self {
         Self {
-            display_name: "SpaceTerm Dev",
-            directory_name: "spaceterm-dev",
+            display_name: "SpaceTerm Development",
+            directory_name: "spaceterm-development",
             update_source: UpdateSource::Simulation,
             microphone_access: false,
         }
@@ -128,7 +129,7 @@ mod tests {
             [
                 ("SpaceTerm", "spaceterm"),
                 ("SpaceTerm Preflight", "spaceterm-preflight"),
-                ("SpaceTerm Dev", "spaceterm-dev"),
+                ("SpaceTerm Development", "spaceterm-development"),
             ]
         );
     }
@@ -182,8 +183,8 @@ mod tests {
             ),
             (
                 ApplicationIdentity::development(),
-                include_str!("../packaging/macos/dev/Info.plist"),
-                "io.github.sadiksaifi.spaceterm-dev",
+                include_str!("../packaging/macos/development/Info.plist"),
+                "io.github.sadiksaifi.spaceterm-development",
             ),
         ];
 

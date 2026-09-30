@@ -874,20 +874,20 @@ mod tests {
     #[test]
     fn development_application_menu_should_use_its_visible_name() {
         assert_eq!(
-            labels(application_menu("SpaceTerm Dev").owned()),
+            labels(application_menu("SpaceTerm Development").owned()),
             [
-                "About SpaceTerm Dev",
+                "About SpaceTerm Development",
                 "Check for Updates…",
                 "|",
                 "Settings…",
                 "|",
                 "Services",
                 "|",
-                "Hide SpaceTerm Dev",
+                "Hide SpaceTerm Development",
                 "Hide Others",
                 "Show All",
                 "|",
-                "Quit SpaceTerm Dev",
+                "Quit SpaceTerm Development",
             ]
         );
     }
