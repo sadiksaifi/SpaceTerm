@@ -525,7 +525,7 @@ fn render_surface(
                     .line_height(metrics.keyboard_line_height)
                     .font(keyboard_font)
                     .text_color(paint.keyboard)
-                    .child(keyboard),
+                    .child(crate::ShortcutLabel::new(keyboard)),
             )
         });
 

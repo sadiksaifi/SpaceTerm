@@ -3231,7 +3231,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                 .line_height(theme.metrics.secondary_line_height)
                 .font(shortcut_font)
                 .text_color(secondary)
-                .child(shortcut),
+                .child(crate::ShortcutLabel::new(shortcut)),
         );
     }
     if !item.disabled {

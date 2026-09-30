@@ -356,6 +356,9 @@ impl Render for ShortcutRecorder {
                 .on_key_up(cx.listener(Self::key_up))
                 .on_modifiers_changed(cx.listener(Self::modifiers_changed))
         })
-        .child(div().min_w_0().truncate().child(text))
+        .child(div().min_w_0().truncate().child(match tone {
+            ShortcutTone::Value => crate::ShortcutLabel::new(text).into_any_element(),
+            ShortcutTone::Placeholder => text.into_any_element(),
+        }))
     }
 }

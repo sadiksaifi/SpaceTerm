@@ -4238,12 +4238,19 @@ fn render_accessory(
     icon_offset: Pixels,
 ) -> AnyElement {
     match accessory {
-        CommandPaletteAccessory::Text(text) | CommandPaletteAccessory::Shortcut(text) => div()
+        CommandPaletteAccessory::Text(text) => div()
             .flex_shrink_0()
             .text_size(metrics.secondary_size)
             .line_height(metrics.secondary_line_height)
             .text_color(color)
             .child(text)
+            .into_any_element(),
+        CommandPaletteAccessory::Shortcut(shortcut) => div()
+            .flex_shrink_0()
+            .text_size(metrics.secondary_size)
+            .line_height(metrics.secondary_line_height)
+            .text_color(color)
+            .child(crate::ShortcutLabel::new(shortcut))
             .into_any_element(),
         CommandPaletteAccessory::Status(text) => div()
             .flex_shrink_0()

@@ -3580,7 +3580,7 @@ fn render_row(
                     .line_height(style.metrics.shortcut_line_height)
                     .font(menu_shortcut_font(typography).clone())
                     .text_color(secondary_foreground)
-                    .child(shortcut),
+                    .child(crate::ShortcutLabel::new(shortcut)),
             )
         })
         .when(submenu, |row| {

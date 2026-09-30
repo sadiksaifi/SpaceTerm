@@ -1101,7 +1101,7 @@ impl RenderOnce for Button {
                             .flex_none()
                             .font(shortcut_font)
                             .line_height(gpui::relative(style.single_line_height))
-                            .child(shortcut),
+                            .child(crate::ShortcutLabel::new(shortcut)),
                     )
                 })
                 .when(full_width && has_trailing, |content| {
