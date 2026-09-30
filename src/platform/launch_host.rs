@@ -1,26 +1,97 @@
-//! Host facts selected by application composition for shell launch planning.
+//! POSIX host facts selected by application composition for shell launch planning.
 
 use std::path::{Path, PathBuf};
 
+/// The installed resource root beside the executable, or the source tree assets in development.
 pub(crate) fn resource_root() -> PathBuf {
     if let Ok(executable) = std::env::current_exe()
-        && let Some(macos) = executable.parent()
-        && macos.file_name().is_some_and(|name| name == "MacOS")
-        && let Some(contents) = macos.parent()
+        && let Some(resources) = installed_resource_root(&executable)
+        && resources.join("shell-integration").is_dir()
     {
-        let resources = contents.join("Resources");
-        if resources.join("shell-integration").is_dir() {
-            return resources;
-        }
+        return resources;
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
-pub(crate) fn user_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned())
+/// `SpaceTerm.app/Contents/MacOS/spaceterm` reads `SpaceTerm.app/Contents/Resources`.
+#[cfg(target_os = "macos")]
+fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    Some(macos.parent()?.join("Resources"))
+}
+
+/// `<prefix>/bin/spaceterm` reads `<prefix>/share/spaceterm`.
+#[cfg(target_os = "linux")]
+fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
+    let prefix = executable.parent()?.parent()?;
+    Some(prefix.join("share").join("spaceterm"))
+}
+
+pub(crate) fn user_shell() -> PathBuf {
+    std::env::var_os("SHELL")
+        .filter(|value| !value.to_string_lossy().trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(fallback_shell)
+}
+
+#[cfg(target_os = "macos")]
+fn fallback_shell() -> PathBuf {
+    PathBuf::from("/bin/zsh")
+}
+
+/// The account login shell from the password database, else the POSIX shell.
+#[cfg(target_os = "linux")]
+fn fallback_shell() -> PathBuf {
+    account_shell().unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+#[cfg(target_os = "linux")]
+fn account_shell() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buffer = vec![0_u8; 4096];
+    loop {
+        // SAFETY: passwd is plain C data whose zero value is valid storage for getpwuid_r.
+        let mut entry = unsafe { std::mem::zeroed::<libc::passwd>() };
+        let mut result = std::ptr::null_mut();
+        // SAFETY: entry, buffer, and result are writable for the call; getpwuid_r stores string
+        // pointers into buffer, which outlives every read below.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                &mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 1 << 20 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() || entry.pw_shell.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded, so pw_shell is a NUL-terminated string inside buffer.
+        let shell = unsafe { CStr::from_ptr(entry.pw_shell) };
+        let shell = Path::new(std::ffi::OsStr::from_bytes(shell.to_bytes()));
+        return shell.is_absolute().then(|| shell.to_path_buf());
+    }
+}
+
+/// macOS ships Bash 3.2 as `/bin/bash`, which lacks the hooks the integration script needs.
+#[cfg(target_os = "macos")]
+fn shell_integration_supported(shell: &Path) -> bool {
+    shell != Path::new("/bin/bash")
+}
+
+#[cfg(target_os = "linux")]
+fn shell_integration_supported(_shell: &Path) -> bool {
+    true
 }
 
 /// The account name shown as the Local Terminal origin, from the login environment.
@@ -52,9 +123,7 @@ pub(crate) fn local_hostname() -> Option<String> {
 
 /// Capture every shell planning fact once at composition.
 pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner {
-    shell_launch_planner_with(PathBuf::from(user_shell()), resource_root(), |key| {
-        std::env::var_os(key)
-    })
+    shell_launch_planner_with(user_shell(), resource_root(), |key| std::env::var_os(key))
 }
 
 pub(super) fn shell_launch_planner_with(
@@ -64,7 +133,7 @@ pub(super) fn shell_launch_planner_with(
 ) -> super::shell_launch::ShellLaunchPlanner {
     use super::shell_integration::{ShellEnvironment, ShellIntegrationPolicy, configured_mode};
     let policy = ShellIntegrationPolicy {
-        supported: shell != Path::new("/bin/bash"),
+        supported: shell_integration_supported(&shell),
         path_list_separator: ':',
         fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
     };
@@ -79,4 +148,31 @@ pub(super) fn shell_launch_planner_with(
         },
         policy,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_installed_resources_live_under_the_prefix_share_directory() {
+        assert_eq!(
+            installed_resource_root(Path::new("/opt/spaceterm/bin/spaceterm")),
+            Some(PathBuf::from("/opt/spaceterm/share/spaceterm"))
+        );
+        assert!(shell_integration_supported(Path::new("/bin/bash")));
+        assert!(fallback_shell().is_absolute());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_installed_resources_live_in_the_bundle() {
+        assert_eq!(
+            installed_resource_root(Path::new("/Applications/SpaceTerm.app/Contents/MacOS/spaceterm")),
+            Some(PathBuf::from("/Applications/SpaceTerm.app/Contents/Resources"))
+        );
+        assert_eq!(installed_resource_root(Path::new("/usr/local/bin/spaceterm")), None);
+        assert!(!shell_integration_supported(Path::new("/bin/bash")));
+    }
 }

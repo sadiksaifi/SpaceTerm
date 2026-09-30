@@ -24,7 +24,7 @@ pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
     version_label: &'static str,
     directory_name: &'static str,
-    bundle_identifier: &'static str,
+    application_id: &'static str,
     update_source: UpdateSource,
     microphone_access: bool,
 }
@@ -57,17 +57,43 @@ impl ApplicationIdentity {
         self.directory_name
     }
 
-    /// The bundle identifier the Operating System keys this identity's privacy grants to.
-    pub(crate) const fn bundle_identifier(self) -> &'static str {
-        self.bundle_identifier
+    /// The shared desktop identity used by Wayland, X11, D-Bus, and the desktop entry.
+    pub(crate) const fn application_id(self) -> &'static str {
+        self.application_id
     }
 
+    /// The bundle identifier the Operating System keys this identity's privacy grants to.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the native permission host consumes this identity policy"
+        )
+    )]
+    pub(crate) const fn bundle_identifier(self) -> &'static str {
+        self.application_id()
+    }
+
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the native updater host consumes this identity policy"
+        )
+    )]
     pub(crate) const fn update_source(self) -> UpdateSource {
         self.update_source
     }
 
     /// SpaceTerm Development is re-signed ad hoc on every build, so privacy grants would not
     /// persist.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the native microphone host consumes this identity policy"
+        )
+    )]
     pub(crate) const fn microphone_access(self) -> bool {
         self.microphone_access
     }
@@ -78,7 +104,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm",
-            bundle_identifier: "io.github.sadiksaifi.spaceterm",
+            application_id: "io.github.sadiksaifi.spaceterm",
             update_source: UpdateSource::SignedFeed,
             microphone_access: true,
         }
@@ -90,7 +116,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm-preflight",
-            bundle_identifier: "io.github.sadiksaifi.spaceterm-preflight",
+            application_id: "io.github.sadiksaifi.spaceterm-preflight",
             update_source: UpdateSource::Unavailable,
             microphone_access: true,
         }
@@ -102,7 +128,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm-development",
-            bundle_identifier: "io.github.sadiksaifi.spaceterm-development",
+            application_id: "io.github.sadiksaifi.spaceterm-development",
             update_source: UpdateSource::Simulation,
             microphone_access: false,
         }
@@ -221,23 +247,31 @@ mod tests {
     #[test]
     fn bundle_templates_should_name_their_identity() {
         let templates = [
-            (ApplicationIdentity::production(), PRODUCTION_INFO_PLIST),
-            (ApplicationIdentity::preflight(), PREFLIGHT_INFO_PLIST),
+            (
+                ApplicationIdentity::production(),
+                PRODUCTION_INFO_PLIST,
+                "io.github.sadiksaifi.spaceterm",
+            ),
+            (
+                ApplicationIdentity::preflight(),
+                PREFLIGHT_INFO_PLIST,
+                "io.github.sadiksaifi.spaceterm-preflight",
+            ),
             (
                 ApplicationIdentity::development(),
                 include_str!("../packaging/macos/development/Info.plist"),
+                "io.github.sadiksaifi.spaceterm-development",
             ),
         ];
 
-        for (identity, plist) in templates {
+        for (identity, plist, bundle_identifier) in templates {
             // The menu bar title comes from the bundle; its menu items come from the identity.
             for key in ["CFBundleName", "CFBundleDisplayName", "CFBundleExecutable"] {
                 assert_eq!(plist_string(plist, key), identity.display_name(), "{key}");
             }
-            assert_eq!(
-                plist_string(plist, "CFBundleIdentifier"),
-                identity.bundle_identifier()
-            );
+            assert_eq!(plist_string(plist, "CFBundleIdentifier"), bundle_identifier);
+            assert_eq!(identity.application_id(), bundle_identifier);
+            assert_eq!(identity.bundle_identifier(), bundle_identifier);
         }
     }
 

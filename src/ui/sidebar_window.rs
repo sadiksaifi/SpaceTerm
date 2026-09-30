@@ -84,6 +84,7 @@ pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) 
         .and_then(|geometry| geometry.sidebar_window_traffic_light_position(titlebar_height));
     let bounds = Bounds::centered(None, size, cx);
     WindowOptions {
+        app_id: crate::app::window_application_id(),
         window_background: crate::ui::appearance_runtime::window_background(cx),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size),

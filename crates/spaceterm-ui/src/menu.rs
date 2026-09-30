@@ -48,12 +48,14 @@ pub enum MenuKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
     /// and performs no operating-system detection.
     MacOs,
+    /// The same Control-N and Control-P navigation on Linux desktops.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
 pub fn install_menu_keybindings(cx: &mut App, profile: MenuKeybindingProfile) {
     match profile {
-        MenuKeybindingProfile::MacOs => cx.bind_keys([
+        MenuKeybindingProfile::MacOs | MenuKeybindingProfile::Linux => cx.bind_keys([
             KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
         ]),

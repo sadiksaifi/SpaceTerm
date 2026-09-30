@@ -2,6 +2,10 @@ use std::path::Path;
 
 use super::FilePreviewTarget;
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native preview Adapter observes thread affinity")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FilePreviewError {
     StaleTarget,

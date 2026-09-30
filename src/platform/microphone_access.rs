@@ -1,6 +1,10 @@
 //! Portable microphone authorization seam for terminal-hosted voice tools.
 
 /// The application's current Operating-System microphone authorization.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "desktops without microphone authorization construct only the denied states")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MicrophoneAuthorization {
     NotDetermined,
@@ -10,6 +14,10 @@ pub(crate) enum MicrophoneAuthorization {
 }
 
 /// Content-free failures from native microphone authorization and recovery operations.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "desktops without microphone authorization construct only the denied states")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum MicrophoneAccessError {
     #[error("microphone access is unavailable off the main thread")]

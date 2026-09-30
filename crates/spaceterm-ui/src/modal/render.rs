@@ -46,6 +46,8 @@ pub enum ModalKeybindingProfile {
     /// Conventional macOS Command-Period cancellation. Selecting this profile is explicit and
     /// performs no operating-system detection.
     MacOs,
+    /// Linux desktops have no platform cancellation chord beyond the portable Escape.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
@@ -60,6 +62,7 @@ pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) 
             ActivatePlatformCancel,
             Some(MODAL_KEY_CONTEXT),
         )]),
+        ModalKeybindingProfile::Linux => {}
     }
 }
 

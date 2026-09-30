@@ -508,6 +508,10 @@ impl PaneHost {
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_status(
         &mut self,
         workspace_id: WorkspaceId,
@@ -533,6 +537,10 @@ impl PaneHost {
         })
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_target(
         &self,
         origin: NativeServiceOrigin,

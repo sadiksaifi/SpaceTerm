@@ -5720,6 +5720,7 @@ dependencies = [
 name = "spaceterm-directories"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "thiserror 2.0.19",
  "windows-sys 0.61.2",
 ]

@@ -2,6 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native secure input Adapter rejects transitions")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecureInputError {
     TransitionRejected,

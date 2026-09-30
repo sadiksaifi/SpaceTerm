@@ -157,6 +157,10 @@ impl AccessibilityNotification {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AccessibilityNotifications(u8);
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter posts notifications")
+)]
 impl AccessibilityNotifications {
     const ORDERED: [AccessibilityNotification; 3] = [
         AccessibilityNotification::Value,
@@ -323,6 +327,10 @@ impl AccessibilityRowBlock {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter materializes document text")
+)]
 #[derive(Debug)]
 struct AccessibilityDocument {
     blocks: Arc<[Arc<AccessibilityRowBlock>]>,
@@ -470,6 +478,10 @@ impl AccessibilityDocument {
         Some(text)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter materializes document text")
+    )]
     fn text(&self) -> &str {
         self.materialized
             .get_or_init(|| self.text_for_range(0..self.len_utf16).unwrap_or_default())
@@ -723,6 +735,10 @@ impl TerminalAccessibilityModel {
         self.data.screen
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+    )]
     pub(crate) fn text(&self) -> &str {
         self.data.document.text()
     }
@@ -750,6 +766,10 @@ impl TerminalAccessibilityModel {
             .unwrap_or_else(|| self.data.cursor.clone())
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+    )]
     pub(crate) fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
         self.data.document.range_for_line(line)
     }
@@ -758,6 +778,10 @@ impl TerminalAccessibilityModel {
         self.data.document.line_for_index(index)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+    )]
     pub(crate) fn range_for_index(&self, index: usize) -> Option<Range<usize>> {
         if index >= self.len_utf16() {
             return None;
@@ -777,6 +801,10 @@ impl TerminalAccessibilityModel {
         self.data.document.text_for_range(range)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+    )]
     pub(crate) fn selection_request(
         &self,
         range: Range<usize>,
@@ -924,6 +952,10 @@ impl TerminalAccessibilityModel {
             .map(|cell| row_start + cell.utf16.start)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+    )]
     pub(crate) fn range_for_point(
         &self,
         x: f32,

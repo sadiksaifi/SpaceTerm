@@ -541,7 +541,7 @@ impl WindowTrafficLightOwner {
             return;
         };
         if self.applied != Some(desired) {
-            window.set_traffic_light_position(desired);
+            crate::platform::window_frame::place_traffic_lights(window, desired);
             self.applied = Some(desired);
         }
     }

@@ -2,6 +2,10 @@ use gpui::{Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersCh
 
 use super::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native key Adapter reports modifier transitions")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalKeyInputEventKind {
     KeyDown,

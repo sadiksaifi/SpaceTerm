@@ -560,6 +560,7 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     WindowOptions {
+        app_id: window_application_id(),
         window_background: crate::ui::appearance_runtime::window_background(cx),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(480.0), px(260.0))),
@@ -730,6 +731,10 @@ mod tests {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a desktop Services Adapter calls back into the Workspace")
+)]
 #[derive(Clone)]
 struct WorkspaceServicesEndpoint {
     app: gpui::AsyncApp,
@@ -792,6 +797,16 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
             .ok()
             .unwrap_or(false)
     }
+}
+
+/// The desktop application identifier every Operating-System Window carries, which Wayland
+/// and X11 desktop shells match against the installed desktop entry.
+pub(crate) fn window_application_id() -> Option<String> {
+    Some(
+        crate::application_identity::ApplicationIdentity::current()
+            .application_id()
+            .to_owned(),
+    )
 }
 
 /// Application-scoped capabilities shared by every Operating-System Window.
@@ -2102,5 +2117,10 @@ mod runtime_tests {
 
         assert!(settings_cx.has_pending_prompt());
         assert_eq!(application_quit.confirmations(), 0);
+    }
+
+    #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
+    mod macos_adapter_tests {
+        include!("platform/macos_adapter_tests/traffic_lights.rs");
     }
 }

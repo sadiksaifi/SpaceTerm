@@ -662,6 +662,10 @@ impl WorkspaceManager {
         });
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_status(
         &self,
         window: &Window,
@@ -693,6 +697,10 @@ impl WorkspaceManager {
             .native_service_target(origin, cx)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_selection(
         &self,
         origin: NativeServiceOrigin,
@@ -705,6 +713,10 @@ impl WorkspaceManager {
             })
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn insert_native_service_text(
         &self,
         origin: NativeServiceOrigin,

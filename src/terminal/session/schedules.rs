@@ -100,6 +100,10 @@ impl ScheduleInput {
         self.find_queries.replace(FindQueryUpdate::End(generation))
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    )]
     pub(super) fn enqueue_accessibility_demand(&self, requested_at: Instant) -> bool {
         self.accessibility_demand.request(requested_at)
     }
@@ -1259,6 +1263,10 @@ impl Default for AccessibilityDemandMailboxState {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+)]
 impl AccessibilityDemandMailbox {
     fn request(&self, requested_at: Instant) -> bool {
         let mut state = self.lock();

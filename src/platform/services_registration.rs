@@ -2,6 +2,10 @@ use crate::terminal::native_services::services::ServiceEndpoint;
 use gpui::Window;
 use std::rc::Rc;
 use thiserror::Error;
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a desktop Services Adapter reports registration failures")
+)]
 #[derive(Debug, Error)]
 pub(crate) enum ServicesRegistrationError {
     #[error("the application is unavailable")]

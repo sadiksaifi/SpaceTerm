@@ -855,44 +855,7 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
     );
 }
 
-/// Re-applying an unchanged density costs no native work; the owner records the applied row.
-#[gpui::test]
-fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
-    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
-    use gpui::{point, px};
-
-    let _ = start(cx);
-    cx.update(|cx| {
-        cx.set_global(
-            WindowFrameGeometry::new(Some(16.0))
-                .with_outer_edge_width(1.0)
-                .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
-                ),
-        );
-    });
-    let test_window = cx.add_window(|_, _| gpui::EmptyView);
-    let mut owner = WindowTrafficLightOwner::workspace();
-    test_window
-        .update(cx, |_, window, cx| owner.apply(window, cx))
-        .unwrap();
-    assert_eq!(
-        cx.traffic_light_position_updates(test_window.into()),
-        vec![point(px(15.5), px(14.0))]
-    );
-
-    // A repeat apply with unchanged chrome records the same row without native work.
-    test_window
-        .update(cx, |_, window, cx| owner.apply(window, cx))
-        .unwrap();
-    assert_eq!(
-        cx.traffic_light_position_updates(test_window.into()),
-        vec![point(px(15.5), px(14.0))]
-    );
-}
-
 #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
-    include!("../platform/macos_adapter_tests/terminal_fonts.rs");
+    include!("../platform/macos_adapter_tests/appearance_runtime.rs");
 }

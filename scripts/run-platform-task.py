@@ -6,7 +6,7 @@ import os
 import sys
 
 
-PLATFORM_SEGMENTS = {"darwin": "macos"}
+PLATFORM_SEGMENTS = {"darwin": "macos", "linux": "linux"}
 
 
 def platform_task(task: str, platform: str) -> str | None:

@@ -24,6 +24,10 @@ pub(crate) trait TerminalAccessibilityAdapterFactory {
     ) -> Box<dyn TerminalAccessibilityAdapter>;
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "an inert accessibility Adapter reads no update facts")
+)]
 pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) window: &'a Window,
     pub(crate) model: &'a TerminalAccessibilityModel,

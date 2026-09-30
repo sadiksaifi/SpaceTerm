@@ -61,6 +61,7 @@ fn open_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
         WindowOptions {
+            app_id: crate::app::window_application_id(),
             window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
