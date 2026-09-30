@@ -408,3 +408,19 @@ fn registry_eviction_releases_real_handles_before_resolving_more_output() {
     assert_eq!(authority.handles.0.load(Ordering::Acquire), 0);
     assert_eq!(authority.files.0.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn child_directory_listing_follows_links_to_directories_only() {
+    let root = Fixture::new();
+    fs::create_dir(root.0.join("target")).unwrap();
+    fs::write(root.0.join("notes.txt"), b"").unwrap();
+    symlink(root.0.join("target"), root.0.join("alias")).unwrap();
+    symlink(root.0.join("notes.txt"), root.0.join("notes-alias")).unwrap();
+    symlink(root.0.join("missing"), root.0.join("dangling")).unwrap();
+    let authority = LocalFilesystemAuthority::testing();
+
+    let mut names = authority.list_child_directories(&root.0, 8).unwrap().names;
+    names.sort();
+
+    assert_eq!(names, ["alias", "target"]);
+}

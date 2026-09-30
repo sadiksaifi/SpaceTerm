@@ -241,3 +241,71 @@ impl LocalIdentitySource for FixtureIdentities {
         })
     }
 }
+
+#[test]
+fn child_directory_listing_names_only_directories_and_stops_at_its_limit() {
+    let root = Fixture::new();
+    fs::create_dir(root.0.join("beta")).unwrap();
+    fs::create_dir(root.0.join(".hidden")).unwrap();
+    fs::write(root.0.join("notes.txt"), b"").unwrap();
+    let authority = LocalFilesystemAuthority::testing();
+
+    let listing = authority.list_child_directories(&root.0, 8).unwrap();
+    let mut names = listing.names;
+    names.sort();
+    assert_eq!(names, [".hidden", "beta"]);
+    assert!(!listing.truncated);
+
+    let bounded = authority.list_child_directories(&root.0, 1).unwrap();
+    assert_eq!(bounded.names.len(), 1);
+    assert!(bounded.truncated);
+    assert_eq!(format!("{bounded:?}"), "LocalChildDirectories(<redacted>)");
+
+    assert_eq!(
+        authority
+            .list_child_directories(&root.0.join("missing"), 8)
+            .unwrap_err(),
+        LocalFilesystemError::Missing
+    );
+    assert_eq!(
+        authority
+            .list_child_directories(&root.0.join("notes.txt"), 8)
+            .unwrap_err(),
+        LocalFilesystemError::NotDirectory
+    );
+    assert_eq!(
+        authority
+            .list_child_directories(Path::new("relative"), 8)
+            .unwrap_err(),
+        LocalFilesystemError::NotAbsolute
+    );
+}
+
+#[test]
+fn directory_probe_and_creation_classify_the_exact_path() {
+    let root = Fixture::new();
+    let authority = LocalFilesystemAuthority::testing();
+    let nested = root.0.join("one/two");
+
+    assert_eq!(
+        authority.probe_directory(&nested),
+        Err(LocalFilesystemError::Missing)
+    );
+    authority.create_directory_all(&nested).unwrap();
+    assert_eq!(authority.probe_directory(&nested), Ok(()));
+
+    fs::write(root.0.join("notes.txt"), b"").unwrap();
+    assert_eq!(
+        authority.probe_directory(&root.0.join("notes.txt")),
+        Err(LocalFilesystemError::NotDirectory)
+    );
+    assert!(
+        authority
+            .create_directory_all(&root.0.join("notes.txt/child"))
+            .is_err()
+    );
+    assert_eq!(
+        authority.create_directory_all(Path::new("relative")),
+        Err(LocalFilesystemError::NotAbsolute)
+    );
+}

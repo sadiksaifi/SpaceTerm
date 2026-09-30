@@ -109,7 +109,7 @@ fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
     (
-        PresentedResults::new(&items, &matches),
+        PresentedResults::new(&items, &matches, None),
         CommandPaletteMetrics::new(px(420.0), px(40.0)),
     )
 }
@@ -159,7 +159,7 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
         CommandPaletteItem::new(3, "prod.example.com"),
     ];
     let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
-    let results = PresentedResults::new(&items, &matches);
+    let results = PresentedResults::new(&items, &matches, None);
 
     assert_eq!(
         results.rows(),
@@ -1063,7 +1063,7 @@ fn continuing_activation_should_report_the_item_without_closing(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn the_confirm_key_should_stay_unclaimed_without_a_confirm_item(cx: &mut TestAppContext) {
+fn the_confirm_key_should_stay_unclaimed_without_a_primary_action(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
 
@@ -1075,11 +1075,11 @@ fn the_confirm_key_should_stay_unclaimed_without_a_confirm_item(cx: &mut TestApp
             .borrow()
             .iter()
             .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
-        "a palette without a confirm item claimed the confirm key"
+        "a palette without a primary action claimed the confirm key"
     );
     assert!(
         palette.read_with(cx, |palette, _| palette.is_open()),
-        "the confirm key closed a palette that had no confirm item"
+        "the confirm key closed a palette that had no primary action"
     );
 }
 
@@ -1136,6 +1136,40 @@ fn return_should_activate_the_default_empty_action_without_closing(cx: &mut Test
 
     assert_eq!(empty_actions(&events), vec![SharedString::from("add")]);
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn an_empty_state_icon_should_sit_above_the_title_without_clipping(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("No folders")
+            .description("Pin this folder, or type another path.")
+            .icon(|_, size| {
+                div()
+                    .debug_selector(|| "empty-icon".to_owned())
+                    .size(size)
+                    .into_any_element()
+            }),
+        cx,
+    );
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let icon = cx
+        .debug_bounds("empty-icon")
+        .expect("the empty state did not render its icon");
+    let title = cx.debug_bounds("command-palette-empty-title").unwrap();
+    let description = cx
+        .debug_bounds("command-palette-empty-description")
+        .unwrap();
+    assert!(icon.size.height > title.size.height);
+    assert!(icon.bottom() <= title.top());
+    assert!((icon.center().x - title.center().x).abs() < px(0.5));
+    assert!(
+        description.bottom() <= panel.bottom(),
+        "the panel clipped the empty state: {description:?} in {panel:?}"
+    );
 }
 
 #[gpui::test]
@@ -1225,14 +1259,24 @@ fn the_panel_should_contain_a_wrapped_empty_description_and_its_actions(cx: &mut
     );
 }
 
+fn header_actions(events: &RefCell<Vec<CommandPaletteEvent<u8>>>) -> Vec<SharedString> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CommandPaletteEvent::HeaderAction(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[gpui::test]
-fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
+fn the_confirm_key_should_activate_the_primary_action_regardless_of_selection(
     cx: &mut TestAppContext,
 ) {
     let (root, palette, events, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {
-        palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
-        palette.set_confirm_item(Some(3), cx);
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
     });
     open_palette(&root, &palette, cx);
     assert_eq!(
@@ -1243,34 +1287,418 @@ fn the_confirm_key_should_activate_the_confirm_item_regardless_of_selection(
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
-    let activated = events
-        .borrow()
-        .iter()
-        .filter_map(|event| match event {
-            CommandPaletteEvent::Activated(activation) => Some(*activation.item_id()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(activated, vec![3]);
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
+        "the confirm key activated the selected row instead of the primary action"
+    );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 }
 
 #[gpui::test]
-fn the_confirm_key_should_ignore_a_disabled_confirm_item(cx: &mut TestAppContext) {
+fn the_confirm_key_should_ignore_a_disabled_primary_action(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| palette.set_confirm_item(Some(2), cx));
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("pin", "Pin").disabled(true)),
+            cx,
+        );
+    });
     open_palette(&root, &palette, cx);
 
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
     assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, CommandPaletteEvent::Activated(_))),
-        "the confirm key activated a disabled item"
+        header_actions(&events).is_empty(),
+        "the confirm key activated a disabled primary action"
     );
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn the_confirm_key_should_activate_the_primary_action_while_results_load(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
+    });
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+}
+
+#[gpui::test]
+fn a_results_note_should_follow_the_last_result(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_results_note(Some("Only some results are shown".into()), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    let last_row = cx.debug_bounds("row-close").unwrap();
+    let note = cx
+        .debug_bounds("command-palette-results-note")
+        .expect("the results note was not rendered");
+    assert!(note.top() >= last_row.bottom());
+}
+
+#[gpui::test]
+fn a_results_note_should_yield_to_the_empty_state(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_results_note(Some("Only some results are shown".into()), cx);
+    });
+    show_empty_state(&root, &palette, CommandPaletteEmpty::new("No folders"), cx);
+
+    assert!(cx.debug_bounds("command-palette-empty").is_some());
+    assert!(cx.debug_bounds("command-palette-results-note").is_none());
+}
+
+#[gpui::test]
+fn return_should_activate_the_primary_action_when_no_result_is_presented(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
+    });
+    show_empty_state(&root, &palette, CommandPaletteEmpty::new("No folders"), cx);
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+}
+
+#[gpui::test]
+fn the_primary_action_should_be_a_labeled_search_line_button(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("pin", "Pin").debug_selector("primary-pin")),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let editor = cx.debug_bounds("command-palette-editor").unwrap();
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    let button = cx
+        .debug_bounds("primary-pin")
+        .expect("the primary action was not rendered");
+    assert!(
+        button.left() >= input.right(),
+        "the button overlapped the query"
+    );
+    assert!(button.right() < editor.right());
+    assert_eq!(
+        button.top() - editor.top(),
+        editor.bottom() - button.bottom(),
+        "the button was not centered on the search line"
+    );
+
+    cx.simulate_click(button.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(
+        cx.debug_bounds("primary-pin-menu").is_none(),
+        "an action without menu items showed a menu segment"
+    );
+}
+
+#[gpui::test]
+fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("pin", "Pin")
+                    .debug_selector("primary-pin")
+                    .menu_item("choose", "Choose Directory…"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let button = cx.debug_bounds("primary-pin").unwrap();
+    let menu = cx
+        .debug_bounds("primary-pin-menu")
+        .expect("the menu segment was not rendered");
+    assert_eq!(menu.left(), button.right(), "the segments did not join");
+    assert_eq!(menu.top(), button.top());
+    assert_eq!(menu.bottom(), button.bottom());
+    assert_eq!(
+        menu.size.width, menu.size.height,
+        "the menu segment was not square"
+    );
+    let divider = cx
+        .debug_bounds("combo-button-divider")
+        .expect("the segment divider was not rendered");
+    assert_eq!(
+        divider.left(),
+        menu.left(),
+        "the divider did not mark the seam"
+    );
+    assert_eq!(
+        (divider.size.height, divider.center().y),
+        (menu.size.height / 2.0, menu.center().y),
+        "the divider was not half the control height and centered"
+    );
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let ring = cx
+        .debug_bounds("primary-pin-keyboard-focus")
+        .expect("the primary segment did not take focus");
+    assert!(
+        ring.left() < button.left() && ring.right() > button.right() && ring.right() < menu.right(),
+        "the ring did not surround the primary segment: ring={ring:?}, button={button:?}"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-pin-keyboard-focus").is_none()
+            && cx.debug_bounds("primary-pin-menu-keyboard-focus").is_some(),
+        "Tab did not move from the primary segment to the menu segment"
+    );
+
+    cx.simulate_click(menu.center(), Modifiers::default());
+    cx.run_until_parked();
+    let item = cx
+        .debug_bounds("command-palette-primary-menu-choose")
+        .expect("the menu did not open");
+    cx.simulate_click(item.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(header_actions(&events), vec![SharedString::from("choose")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
+fn down_on_the_focused_menu_segment_should_open_the_menu_and_keep_the_selection(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Documents"),
+                CommandPaletteItem::new(2, "Downloads"),
+            ],
+            cx,
+        );
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .menu_item("choose", "Choose Directory\u{2026}"),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    cx.simulate_keystrokes("tab tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-open-menu-keyboard-focus")
+            .is_some(),
+        "the menu segment did not take focus"
+    );
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("command-palette-primary-menu-choose")
+            .is_some(),
+        "Down did not open the menu"
+    );
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1),
+        "Down moved the list selection"
+    );
+}
+
+#[gpui::test]
+fn disabling_the_focused_primary_action_should_keep_escape_cancellation(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("open", "Open").debug_selector("primary-open")),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-open-keyboard-focus").is_some(),
+        "the primary action did not take focus"
+    );
+
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .disabled(true),
+            ),
+            cx,
+        );
+        palette.set_dismissible(false, cx);
+        palette.set_escape_cancellable(true, cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| {
+            palette
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }),
+        "the query did not take focus from the disabled primary action"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !palette.read_with(cx, |palette, _| palette.is_open()),
+        "Escape did not cancel the palette"
+    );
+}
+
+#[gpui::test]
+fn a_disabled_primary_action_menu_should_not_open(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .menu_item("choose", "Choose Directory\u{2026}")
+                    .menu_disabled(true),
+            ),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+
+    let menu = cx
+        .debug_bounds("primary-open-menu")
+        .expect("the menu segment was not rendered");
+    cx.simulate_click(menu.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("command-palette-primary-menu-choose")
+            .is_none(),
+        "a disabled menu opened"
+    );
+}
+
+#[gpui::test]
+fn a_query_prefix_should_lead_the_query_without_joining_it(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_query_prefix(Some("orb:".into()), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    let prefix = cx
+        .debug_bounds("command-palette-query-prefix")
+        .expect("the query prefix was not rendered");
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    assert!(prefix.right() <= input.left());
+    assert!(
+        input.left() - prefix.right() < px(1.0),
+        "the prefix was set apart from the query"
+    );
+
+    cx.simulate_keystrokes("a b");
+    cx.run_until_parked();
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.query().to_owned()),
+        "ab"
+    );
+}
+
+#[gpui::test]
+fn return_should_open_the_primary_action_when_only_items_outside_default_selection_remain(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![CommandPaletteItem::new(1, "Go Back").outside_default_selection()],
+            cx,
+        );
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("open", "Open")), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        None
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(header_actions(&events), vec![SharedString::from("open")]);
+
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "Go Back").outside_default_selection(),
+                CommandPaletteItem::new(2, "Documents"),
+            ],
+            cx,
+        );
+    });
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(2)
+    );
+    cx.simulate_keystrokes("up");
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1),
+        "the item could not be selected on request"
+    );
+}
+
+#[gpui::test]
+fn a_query_note_should_trail_the_query_before_the_primary_action(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("open", "Open").debug_selector("primary-open")),
+            cx,
+        );
+        palette.set_query_note(Some("New directory".into()), cx);
+    });
+    open_palette(&root, &palette, cx);
+
+    let note = cx
+        .debug_bounds("command-palette-query-note")
+        .expect("the query note was not rendered");
+    let input = cx.debug_bounds("command-palette-input").unwrap();
+    let action = cx.debug_bounds("primary-open").unwrap();
+    assert!(input.right() <= note.left());
+    assert!(note.right() <= action.left());
+
+    palette.update(cx, |palette, cx| palette.set_query_note(None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-query-note").is_none());
 }
 
 #[gpui::test]

@@ -14,9 +14,9 @@ use super::remote_utility::{
     SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
-use crate::ui::remote_directory_picker::{
-    RemoteDirectoryExactPathState, RemoteDirectoryListing, RemoteDirectoryProvider,
-    RemoteDirectoryProviderError, RemoteDirectoryRow,
+use crate::ui::directory_picker::{
+    DirectoryListing, DirectoryRow, ExactPathState, RemoteDirectoryProvider,
+    RemoteDirectoryProviderError,
 };
 
 const REMOTE_DIRECTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -96,7 +96,7 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
     fn list_directories(
         &self,
         directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryListing, RemoteDirectoryProviderError>> {
+    ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             let listing = client
                 .list_directories_with_cancellation(directory, cancellation)
@@ -105,29 +105,24 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
             let rows = listing
                 .names()
                 .iter()
-                .map(|name| RemoteDirectoryRow::new(name.clone()))
+                .map(|name| DirectoryRow::new(name.clone()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
-            Ok(RemoteDirectoryListing::from_remote(
-                rows,
-                listing.is_truncated(),
-            ))
+            Ok(DirectoryListing::bounded(rows, listing.is_truncated()))
         })
     }
 
     fn probe_exact_path(
         &self,
         directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryExactPathState, RemoteDirectoryProviderError>> {
+    ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
         self.spawn_operation(move |client, cancellation| async move {
             client
                 .probe_exact_path_with_cancellation(directory, cancellation)
                 .await
                 .map(|state| match state {
-                    RemoteDirectoryProbe::ReadableDirectory => {
-                        RemoteDirectoryExactPathState::ReadableDirectory
-                    }
-                    RemoteDirectoryProbe::Missing => RemoteDirectoryExactPathState::Missing,
+                    RemoteDirectoryProbe::ReadableDirectory => ExactPathState::ReadableDirectory,
+                    RemoteDirectoryProbe::Missing => ExactPathState::Missing,
                 })
                 .map_err(map_error)
         })
@@ -404,7 +399,7 @@ mod tests {
             listing
                 .rows()
                 .iter()
-                .map(RemoteDirectoryRow::name)
+                .map(DirectoryRow::name)
                 .collect::<Vec<_>>(),
             ["Space Term", "-archive"]
         );
@@ -413,7 +408,7 @@ mod tests {
             cx.foreground_executor()
                 .block_test(provider.probe_exact_path(directory("/srv/missing")))
                 .unwrap(),
-            RemoteDirectoryExactPathState::Missing
+            ExactPathState::Missing
         );
         cx.foreground_executor()
             .block_test(provider.create_directory_recursively(directory("/srv/new")))

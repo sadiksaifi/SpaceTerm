@@ -1,4 +1,3 @@
-use crate::ui::appearance::gpui_color;
 use super::chrome_icons::IconRole;
 use super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
 use super::workspace_chrome::{
@@ -18,6 +17,7 @@ use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
+use crate::ui::appearance::gpui_color;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -25,7 +25,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use super::remote_directory_picker::{RemoteDirectoryPicker, RemoteDirectoryPickerEvent};
+use super::directory_picker::{
+    DirectoryPicker, DirectoryPickerEvent, DirectorySource, LocalDirectorySource,
+    RemoteDirectorySource,
+};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
@@ -244,7 +247,7 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
     remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
-    remote_pin_picker: Option<Entity<RemoteDirectoryPicker>>,
+    pin_picker: Option<Entity<DirectoryPicker>>,
     pin_operation: u64,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
@@ -459,7 +462,7 @@ impl WorkspaceManager {
             remote_workspace_backend,
             remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
-            remote_pin_picker: None,
+            pin_picker: None,
             pin_operation: 0,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
@@ -710,7 +713,7 @@ impl WorkspaceManager {
     ) -> Option<TerminalFocusBlocker> {
         TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners {
             picker: self
-                .remote_pin_picker
+                .pin_picker
                 .as_ref()
                 .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
             remote_flow: self
@@ -758,7 +761,7 @@ impl WorkspaceManager {
         if window_modal_is_open(window, cx) {
             return;
         }
-        if let Some(picker) = self.remote_pin_picker.take() {
+        if let Some(picker) = self.pin_picker.take() {
             picker.update(cx, |picker, cx| picker.cancel(window, cx));
             self.transient.pin_target = None;
         }
@@ -1050,49 +1053,90 @@ impl WorkspaceManager {
         .present(window, cx, |_, _| {});
     }
 
-    fn open_remote_pin_picker(
+    /// Opens the Directory Picker for the Workspace's machine. A Local Workspace also offers
+    /// System Directory Selection from the picker.
+    fn open_pin_picker(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
+        let Some(location) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.location().clone())
+        else {
             return;
         };
-        let Some(session) = runtime.session.as_ref() else {
-            Self::show_pin_error(window, cx);
-            return;
+        let (source, remote_generation): (Rc<dyn DirectorySource>, Option<u64>) = match location {
+            WorkspaceLocation::Local => (
+                Rc::new(LocalDirectorySource::new(
+                    self.local_filesystem.clone(),
+                    self.local_home_directory_path.clone(),
+                    cx.background_executor().clone(),
+                )),
+                None,
+            ),
+            WorkspaceLocation::Remote { key, .. } => {
+                let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
+                    return;
+                };
+                let Some(session) = runtime.session.as_ref() else {
+                    Self::show_pin_error(window, cx);
+                    return;
+                };
+                let host = key.destination().host().to_owned();
+                (
+                    Rc::new(RemoteDirectorySource::new(session.provider(), &host)),
+                    Some(runtime.generation),
+                )
+            }
         };
-        let generation = runtime.generation;
+        let system_selection = remote_generation.is_none().then(|| {
+            gpui::SharedString::from(
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .system_directory_selection,
+            )
+        });
         let operation = self.pin_operation;
-        let provider = session.provider();
-        let picker = cx.new(|cx| RemoteDirectoryPicker::new(provider, window, cx));
+        let picker = cx.new(|cx| {
+            let picker = DirectoryPicker::new(source, window, cx);
+            match system_selection {
+                Some(label) => picker.with_system_selection(label),
+                None => picker,
+            }
+        });
         cx.subscribe_in(
             &picker,
             window,
-            move |manager, picker, event: &RemoteDirectoryPickerEvent, window, cx| {
-                if manager.remote_pin_picker.as_ref() != Some(picker) {
+            move |manager, picker, event: &DirectoryPickerEvent, window, cx| {
+                if manager.pin_picker.as_ref() != Some(picker) {
                     return;
                 }
                 match event {
-                    RemoteDirectoryPickerEvent::Confirmed(selection) => {
+                    DirectoryPickerEvent::Confirmed(pinned) => {
                         let current = manager.pin_operation == operation
-                            && manager
-                                .remote_workspace_runtimes
-                                .get(&workspace_id)
-                                .is_some_and(|runtime| {
-                                    runtime.generation == generation && runtime.session.is_some()
-                                });
+                            && remote_generation.is_none_or(|generation| {
+                                manager
+                                    .remote_workspace_runtimes
+                                    .get(&workspace_id)
+                                    .is_some_and(|runtime| {
+                                        runtime.generation == generation
+                                            && runtime.session.is_some()
+                                    })
+                            });
                         let applied = current
-                            && manager.apply_directory_pin(
-                                workspace_id,
-                                Some(PinnedDirectory::Remote {
-                                    directory: selection.directory().clone(),
-                                    identity: selection.physical_directory().clone(),
-                                }),
-                                window,
-                                cx,
-                            );
+                            && match pinned.clone() {
+                                PinnedDirectory::Local(directory) => manager
+                                    .apply_validated_local_pin(workspace_id, directory, window, cx),
+                                remote => manager.apply_directory_pin(
+                                    workspace_id,
+                                    Some(remote),
+                                    window,
+                                    cx,
+                                ),
+                            };
                         let picker = picker.clone();
                         let owner = cx.entity();
                         window.defer(cx, move |window, cx| {
@@ -1105,7 +1149,7 @@ impl WorkspaceManager {
                             });
                             if applied {
                                 owner.update(cx, |manager, cx| {
-                                    manager.remote_pin_picker = None;
+                                    manager.pin_picker = None;
                                     manager.sync_terminal_focus_blocker(window, cx);
                                     manager.focus(window, cx);
                                     cx.notify();
@@ -1113,18 +1157,22 @@ impl WorkspaceManager {
                             }
                         });
                     }
-                    RemoteDirectoryPickerEvent::Dismissed => {
-                        manager.remote_pin_picker = None;
+                    DirectoryPickerEvent::SystemSelectionRequested => {
+                        manager.pin_picker = None;
+                        manager.choose_local_pin_directory(workspace_id, window, cx);
+                    }
+                    DirectoryPickerEvent::Dismissed => {
+                        manager.pin_picker = None;
                         manager.transient.pin_target = None;
                     }
-                    RemoteDirectoryPickerEvent::StateChanged => {}
+                    DirectoryPickerEvent::StateChanged => {}
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             },
         )
         .detach();
-        self.remote_pin_picker = Some(picker.clone());
+        self.pin_picker = Some(picker.clone());
         picker.update(cx, |picker, cx| {
             picker.open(window, cx);
         });
@@ -1154,17 +1202,7 @@ impl WorkspaceManager {
 
         self.transient.pin_target = Some(workspace_id);
         self.pin_operation = self.pin_operation.wrapping_add(1);
-        if self
-            .workspaces
-            .workspace(workspace_id)
-            .is_some_and(|workspace| {
-                matches!(workspace.location(), WorkspaceLocation::Remote { .. })
-            })
-        {
-            self.open_remote_pin_picker(workspace_id, window, cx);
-            return;
-        }
-        self.choose_local_pin_directory(workspace_id, window, cx);
+        self.open_pin_picker(workspace_id, window, cx);
     }
 
     /// Selects a Local Workspace's Pinned Directory through System Directory Selection.
@@ -1212,15 +1250,16 @@ impl WorkspaceManager {
         }
         self.transient.pin_target = None;
         let pinned = match selection {
-            LocalPinSelection::Cancelled => return,
+            LocalPinSelection::Cancelled => None,
             LocalPinSelection::Chosen(Ok(directory)) => {
-                self.apply_validated_local_pin(workspace_id, directory, window, cx)
+                Some(self.apply_validated_local_pin(workspace_id, directory, window, cx))
             }
-            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => false,
+            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => Some(false),
         };
-        if pinned {
-            self.focus(window, cx);
-        } else {
+        // The Directory Picker handed off without restoring focus, so focus returns to the
+        // Workspace on every outcome, before an error alert that restores it on dismissal.
+        self.focus(window, cx);
+        if pinned == Some(false) {
             Self::show_pin_error(window, cx);
         }
         cx.notify();
@@ -2525,7 +2564,7 @@ impl WorkspaceManager {
         if self.transient.pin_target == Some(workspace_id) {
             self.pin_operation = self.pin_operation.wrapping_add(1);
             self.transient.pin_target = None;
-            if let Some(picker) = self.remote_pin_picker.take() {
+            if let Some(picker) = self.pin_picker.take() {
                 picker.update(cx, |picker, cx| picker.cancel(window, cx));
             }
         }
@@ -3109,10 +3148,9 @@ impl WorkspaceManager {
             .left_0()
             .w(layout.width)
             .h(frame.top_chrome_height(appearance.top_height()))
-            .bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                background,
-            )))
+            .bg(gpui_color(
+                appearance.surface(crate::appearance::SurfaceRole::Base, background),
+            ))
             .into_any_element()
     }
 
@@ -3140,14 +3178,9 @@ impl WorkspaceManager {
                     path: path.into(),
                     machine: match workspace.location() {
                         WorkspaceLocation::Local => None,
-                        WorkspaceLocation::Remote { key, .. } => Some(
-                            key.destination()
-                                .as_str()
-                                .rsplit_once('@')
-                                .map_or(key.destination().as_str(), |(_, host)| host)
-                                .to_owned()
-                                .into(),
-                        ),
+                        WorkspaceLocation::Remote { key, .. } => {
+                            Some(key.destination().host().to_owned().into())
+                        }
                     },
                     tooltip: tooltip.into(),
                     pinned: workspace.pinned_directory().is_some(),
@@ -3240,7 +3273,7 @@ impl WorkspaceManager {
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
-            .children(self.remote_pin_picker.iter().cloned());
+            .children(self.pin_picker.iter().cloned());
         ModalLayer::new(content).transient(transients)
     }
 }
@@ -3390,7 +3423,6 @@ fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity 
         ),
     }
 }
-
 
 fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
     if path == home {

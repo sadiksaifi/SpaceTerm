@@ -10,8 +10,9 @@ use gpui::{
 };
 
 use crate::{
-    FloatingRole, FloatingShell, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
-    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
+    MenuPlacement, MenuPlacementConfig, ProgressRing, ProgressSize, ProgressState, TextInput,
+    TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
@@ -620,6 +621,65 @@ impl CommandPaletteAction {
     }
 }
 
+/// The search line's primary command, presented as a labeled button at its trailing edge.
+///
+/// The confirm key activates it while it is enabled, and so does Return while no result is
+/// presented. Related commands join the button as a menu segment, which stays available while the
+/// action is disabled. Activating the action or a menu item emits
+/// [`CommandPaletteEvent::HeaderAction`] with the caller's identity and leaves the palette open;
+/// the caller decides what follows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandPalettePrimaryAction {
+    id: SharedString,
+    label: SharedString,
+    disabled: bool,
+    menu_items: Vec<(SharedString, SharedString)>,
+    menu_disabled: bool,
+    debug_selector: Option<String>,
+}
+
+impl CommandPalettePrimaryAction {
+    /// Creates an enabled action. The label is also its logical accessibility name.
+    pub fn new(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            disabled: false,
+            menu_items: Vec::new(),
+            menu_disabled: false,
+            debug_selector: None,
+        }
+    }
+
+    /// Controls whether the action can activate.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Appends a related command to the action's menu, in presentation order.
+    pub fn menu_item(
+        mut self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        self.menu_items.push((id.into(), label.into()));
+        self
+    }
+
+    /// Controls whether the action's menu can open, independently of the action itself.
+    pub fn menu_disabled(mut self, disabled: bool) -> Self {
+        self.menu_disabled = disabled;
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+}
+
 /// One control offered by the palette's empty state.
 ///
 /// The caller owns the label and the identity it receives back through
@@ -666,8 +726,9 @@ impl CommandPaletteEmptyAction {
 /// The first action is the default action: it takes the primary emphasis, and Return activates
 /// it while the empty state is shown and the action is enabled. Activating any action leaves the
 /// palette open; the caller decides what follows.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct CommandPaletteEmpty {
+    icon: Option<IconBuilder>,
     title: SharedString,
     description: Option<SharedString>,
     actions: Vec<CommandPaletteEmptyAction>,
@@ -677,6 +738,7 @@ impl CommandPaletteEmpty {
     /// Creates an empty state with a single-line title and no description or actions.
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
+            icon: None,
             title: title.into(),
             description: None,
             actions: Vec::new(),
@@ -689,6 +751,12 @@ impl CommandPaletteEmpty {
         self
     }
 
+    /// Adds a prominent icon above the title, built with the muted foreground and live size.
+    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
+        self.icon = Some(Rc::new(build));
+        self
+    }
+
     /// Appends one action. The first appended action is the default action.
     pub fn action(mut self, action: CommandPaletteEmptyAction) -> Self {
         self.actions.push(action);
@@ -698,6 +766,11 @@ impl CommandPaletteEmpty {
     /// Returns the title.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Returns the optional description.
+    pub fn description_text(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     fn default_action(&self) -> Option<&CommandPaletteEmptyAction> {
@@ -744,6 +817,7 @@ pub struct CommandPaletteItem<I> {
     matched_indices: Vec<usize>,
     matched_description_indices: Vec<usize>,
     disabled: bool,
+    default_selectable: bool,
     leading_icon: Option<IconBuilder>,
     trailing: Option<CommandPaletteAccessory>,
     debug_selector: Option<String>,
@@ -781,6 +855,7 @@ impl<I> CommandPaletteItem<I> {
             matched_indices: Vec::new(),
             matched_description_indices: Vec::new(),
             disabled: false,
+            default_selectable: true,
             leading_icon: None,
             trailing: None,
             debug_selector: None,
@@ -823,6 +898,14 @@ impl<I> CommandPaletteItem<I> {
     /// Controls whether navigation and activation may reach this item.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Keeps the palette from selecting this item on its own, such as a row that leaves the
+    /// current context. Navigation and the pointer still reach it. When no other item is
+    /// selectable, Return activates the primary action.
+    pub fn outside_default_selection(mut self) -> Self {
+        self.default_selectable = false;
         self
     }
 
@@ -1359,6 +1442,11 @@ impl CommandPaletteMetrics {
         }
     }
 
+    /// Returns the empty state's icon size, which leads the title as its most prominent element.
+    fn empty_icon_size(&self) -> Pixels {
+        self.body_line_height * 2.0
+    }
+
     fn header_action_size(&self) -> Pixels {
         (self.input_height - self.panel_padding * 2.0).max(self.input_icon_size)
     }
@@ -1436,8 +1524,11 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
     input_leading_icon: Option<IconBuilder>,
+    query_prefix: Option<SharedString>,
+    query_note: Option<SharedString>,
     header_actions: Vec<CommandPaletteAction>,
-    confirm_item: Option<I>,
+    primary_action: Option<CommandPalettePrimaryAction>,
+    results_note: Option<SharedString>,
     matching: CommandPaletteMatching,
     activation: CommandPaletteActivationPolicy,
     selected: Option<I>,
@@ -1453,6 +1544,9 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     coordinator_registration: Option<CommandPaletteRegistration>,
     input: Entity<TextInput>,
     focus_scope: gpui::FocusHandle,
+    /// The primary action's focus, retained so a disabled primary action can return focus to the
+    /// query instead of leaving the window without a focused element.
+    primary_action_focus: gpui::FocusHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     restore_focus: Option<WeakFocusHandle>,
     restore_on_activation: Option<WeakFocusHandle>,
@@ -1483,12 +1577,14 @@ mod presented_results {
 
     use super::{CommandPaletteItem, CommandPaletteMatch, CommandPaletteMetrics};
 
-    /// One presented list row. Section headings and separators are derived, never caller-painted.
+    /// One presented list row. Section headings, separators, and the results note are derived,
+    /// never caller-painted.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(super) enum PaletteRow {
         Section(SharedString),
         Separator,
         Item { position: usize, single_line: bool },
+        Note(SharedString),
     }
 
     impl PaletteRow {
@@ -1498,7 +1594,8 @@ mod presented_results {
                 Self::Separator => metrics.separator_height,
                 Self::Item {
                     single_line: true, ..
-                } => metrics.single_line_row_height,
+                }
+                | Self::Note(_) => metrics.single_line_row_height,
                 Self::Item { .. } => metrics.row_height,
             }
         }
@@ -1506,7 +1603,7 @@ mod presented_results {
         pub(super) const fn item_position(&self) -> Option<usize> {
             match self {
                 Self::Item { position, .. } => Some(*position),
-                Self::Section(_) | Self::Separator => None,
+                Self::Section(_) | Self::Separator | Self::Note(_) => None,
             }
         }
     }
@@ -1520,28 +1617,32 @@ mod presented_results {
         pub(super) fn new<I>(
             items: &[CommandPaletteItem<I>],
             matches: &[CommandPaletteMatch],
+            note: Option<&SharedString>,
         ) -> Self {
-            let mut rows = Vec::with_capacity(matches.len());
-            let mut current: Option<SharedString> = None;
+            let mut rows = Vec::with_capacity(matches.len() + 1);
+            let mut current_section: Option<SharedString> = None;
             let mut started = false;
             for (position, matched) in matches.iter().enumerate() {
                 let Some(item) = items.get(matched.item_index) else {
                     continue;
                 };
-                if !started || item.section != current {
+                if !started || item.section != current_section {
                     if started {
                         rows.push(PaletteRow::Separator);
                     }
                     if let Some(section) = item.section.clone() {
                         rows.push(PaletteRow::Section(section));
                     }
-                    current = item.section.clone();
+                    current_section = item.section.clone();
                 }
                 started = true;
                 rows.push(PaletteRow::Item {
                     position,
                     single_line: item.description.is_none(),
                 });
+            }
+            if started && let Some(note) = note {
+                rows.push(PaletteRow::Note(note.clone()));
             }
             Self { rows }
         }
@@ -1829,7 +1930,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let matches: Rc<[CommandPaletteMatch]> =
             match_command_palette_items(&items, "", CommandPaletteMatching::Semantic).into();
         let selected = first_enabled_id(&items, &matches);
-        let presented_results = Rc::new(PresentedResults::new(&items, &matches));
+        let presented_results = Rc::new(PresentedResults::new(&items, &matches, None));
         let leading_columns = palette_leading_columns(&items);
         let list =
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
@@ -1844,8 +1945,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             presented_results,
             leading_columns,
             input_leading_icon: None,
+            query_prefix: None,
+            query_note: None,
             header_actions: Vec::new(),
-            confirm_item: None,
+            primary_action: None,
+            results_note: None,
             matching: CommandPaletteMatching::Semantic,
             activation: CommandPaletteActivationPolicy::Close,
             selected,
@@ -1861,6 +1965,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             coordinator_registration: None,
             input,
             focus_scope,
+            primary_action_focus: cx.focus_handle(),
             scrollbar,
             restore_focus: None,
             restore_on_activation: None,
@@ -1909,12 +2014,27 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx.notify();
     }
 
-    /// Designates the item the palette's confirm key activates regardless of selection.
+    /// Sets the caption presented after the last result, such as a bound on listed results.
     ///
-    /// The item activates only while it is presented and enabled, exactly as Return would activate
-    /// it. `None` leaves the confirm key for the surrounding application.
-    pub fn set_confirm_item(&mut self, id: Option<I>, cx: &mut gpui::Context<Self>) {
-        self.confirm_item = id;
+    /// The note is never selectable, and the empty state replaces it when nothing matches.
+    pub fn set_results_note(&mut self, note: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        if self.results_note == note {
+            return;
+        }
+        self.results_note = note;
+        self.present_results();
+        cx.notify();
+    }
+
+    /// Replaces the search line's primary command.
+    ///
+    /// `None` leaves the confirm key for the surrounding application.
+    pub fn set_primary_action(
+        &mut self,
+        action: Option<CommandPalettePrimaryAction>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.primary_action = action;
         cx.notify();
     }
 
@@ -1939,6 +2059,20 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.input_leading_icon = Some(Rc::new(build));
+        cx.notify();
+    }
+
+    /// Replaces the quiet text that leads the query, such as the machine a path belongs to.
+    ///
+    /// The prefix is not part of the editable query, so editing never changes or removes it.
+    pub fn set_query_prefix(&mut self, prefix: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        self.query_prefix = prefix;
+        cx.notify();
+    }
+
+    /// Replaces the quiet text that trails the query, such as what the primary action will do.
+    pub fn set_query_note(&mut self, note: Option<SharedString>, cx: &mut gpui::Context<Self>) {
+        self.query_note = note;
         cx.notify();
     }
 
@@ -2206,6 +2340,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.selected.as_ref()
     }
 
+    /// Returns the caption presented after the last result, if any.
+    pub fn results_note(&self) -> Option<&SharedString> {
+        self.results_note.as_ref()
+    }
+
     /// Replaces items immediately.
     ///
     /// Semantic matching preserves selection by stable identity. Caller-ranked results treat the
@@ -2349,11 +2488,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if selected_was_fallback && self.ordinary_match_count > 0 {
             self.selected = None;
         }
-        self.presented_results =
-            Rc::new(PresentedResults::new(&self.presented_items, &self.matches));
-        self.list.reset(self.presented_results.len());
+        self.present_results();
         self.repair_selection();
         self.selection_reveal_pending = true;
+    }
+
+    fn present_results(&mut self) {
+        self.presented_results = Rc::new(PresentedResults::new(
+            &self.presented_items,
+            &self.matches,
+            self.results_note.as_ref(),
+        ));
+        self.list.reset(self.presented_results.len());
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
@@ -2628,7 +2774,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let input_focus = self.input.read(cx).focus_handle();
         input_focus.focus(window, cx);
         let mut last_internal = input_focus;
-        let maximum_steps = self.header_actions.len() + self.presented_empty_actions().len();
+        let maximum_steps = self.header_actions.len()
+            + self
+                .primary_action
+                .as_ref()
+                .map_or(0, |action| 1 + usize::from(!action.menu_items.is_empty()))
+            + self.presented_empty_actions().len();
         for _ in 0..maximum_steps {
             window.focus_next(cx);
             if !self.focus_scope.contains_focused(window, cx) {
@@ -2654,26 +2805,26 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.matches.is_empty() {
             if let Some(action) = self.empty.default_action() {
                 cx.emit(CommandPaletteEvent::EmptyAction(action.id.clone()));
+            } else {
+                self.activate_primary_action(cx);
             }
             return;
         }
         let Some(item_id) = self.selected.clone() else {
+            self.activate_primary_action(cx);
             return;
         };
         self.activate_item(item_id, source, window, cx);
     }
 
-    fn activate_confirm_item(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        if self.loading {
-            return;
-        }
-        if let Some(item_id) = self.confirm_item.clone() {
-            self.activate_item(
-                item_id,
-                CommandPaletteActivationSource::Keyboard,
-                window,
-                cx,
-            );
+    /// Availability belongs to the action's disabled state, so pending results never block it.
+    fn activate_primary_action(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(action) = self
+            .primary_action
+            .as_ref()
+            .filter(|action| !action.disabled)
+        {
+            cx.emit(CommandPaletteEvent::HeaderAction(action.id.clone()));
         }
     }
 
@@ -2880,7 +3031,7 @@ fn first_enabled_id<I: Clone>(
     matches.iter().find_map(|matched| {
         items
             .get(matched.item_index)
-            .filter(|item| !item.disabled)
+            .filter(|item| !item.disabled && item.default_selectable)
             .map(|item| item.id.clone())
     })
 }
@@ -2892,6 +3043,16 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             || crate::modal::window_modal_is_open(window, cx)
         {
             return div().into_any_element();
+        }
+        // A disabled button gives up focus. The query takes it, so the palette's keys, such as
+        // Escape during a cancellable operation, keep reaching the palette.
+        if self
+            .primary_action
+            .as_ref()
+            .is_some_and(|action| action.disabled)
+            && self.primary_action_focus.is_focused(window)
+        {
+            self.input.read(cx).focus_handle().focus(window, cx);
         }
         let theme = command_palette_theme(cx);
         let collection_focused = self.focus_scope.contains_focused(window, cx);
@@ -3028,9 +3189,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 cx.stop_propagation();
             }))
-            .when(self.confirm_item.is_some(), |overlay| {
-                overlay.on_action(cx.listener(|palette, _: &Confirm, window, cx| {
-                    palette.activate_confirm_item(window, cx);
+            .when(self.primary_action.is_some(), |overlay| {
+                overlay.on_action(cx.listener(|palette, _: &Confirm, _, cx| {
+                    palette.activate_primary_action(cx);
                     cx.stop_propagation();
                 }))
             })
@@ -3074,6 +3235,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &App,
     ) -> Pixels {
         let mut height = metrics.empty_padding * 2.0 + metrics.body_line_height;
+        if self.empty.icon.is_some() {
+            height += metrics.empty_icon_size() + metrics.empty_line_gap * 2.0;
+        }
         if let Some(description) = &self.empty.description {
             let wrap_width = (panel_width - metrics.content_leading_inset() * 2.0).max(px(1.0));
             let lines = wrapped_line_count(
@@ -3111,6 +3275,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .flex()
             .flex_col()
             .items_center()
+            .when_some(self.empty.icon.as_ref(), |empty, icon| {
+                let size = metrics.empty_icon_size();
+                empty.child(
+                    div()
+                        .size(size)
+                        .flex_shrink_0()
+                        .mb(metrics.empty_line_gap * 2.0)
+                        .child(icon(paint.muted, size)),
+                )
+            })
             .child(
                 div()
                     .debug_selector(|| "command-palette-empty-title".to_owned())
@@ -3296,7 +3470,37 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         .child(icon(theme.paint.muted, metrics.input_icon_size)),
                 )
             })
-            .child(div().min_w_0().flex_1().child(self.input.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .when_some(self.query_prefix.clone(), |query, prefix| {
+                        query.child(
+                            div()
+                                .debug_selector(|| "command-palette-query-prefix".to_owned())
+                                .flex_shrink_0()
+                                .max_w(gpui::relative(0.4))
+                                .truncate()
+                                .text_color(theme.paint.muted)
+                                .child(prefix),
+                        )
+                    })
+                    .child(div().min_w_0().flex_1().child(self.input.clone())),
+            )
+            .when_some(self.query_note.clone(), |editor, note| {
+                editor.child(
+                    div()
+                        .debug_selector(|| "command-palette-query-note".to_owned())
+                        .flex_shrink_0()
+                        .max_w(gpui::relative(0.4))
+                        .truncate()
+                        .text_color(theme.paint.muted)
+                        .child(note),
+                )
+            })
             .when(!self.header_actions.is_empty(), |editor| {
                 editor.child(
                     div()
@@ -3313,6 +3517,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                 }),
                         ),
                 )
+            })
+            .when_some(self.primary_action.as_ref(), |editor, action| {
+                editor.child(render_primary_action(
+                    palette.clone(),
+                    action,
+                    self.primary_action_focus.clone(),
+                ))
             })
             .into_any_element()
     }
@@ -3353,6 +3564,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         }
                         PaletteRow::Separator => {
                             render_row_separator(row_height, theme).into_any_element()
+                        }
+                        PaletteRow::Note(note) => {
+                            let font = typography.section_font().clone();
+                            render_results_note(note.clone(), row_height, theme, font)
+                                .into_any_element()
                         }
                         PaletteRow::Item { position, .. } => matches
                             .get(*position)
@@ -3464,7 +3680,7 @@ fn render_empty_action<I: Clone + Eq + 'static>(
     .into_any_element()
 }
 
-/// Renders one search-line control as a ghost icon button from the installed button catalog.
+/// Renders one trailing search-line control as a ghost icon button.
 fn render_header_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     index: usize,
@@ -3496,6 +3712,56 @@ fn render_header_action<I: Clone + Eq + 'static>(
     button.into_any_element()
 }
 
+/// Renders the search line's primary command as a prominent capsule at its trailing edge, joined
+/// by a menu segment when it has related commands.
+fn render_primary_action<I: Clone + Eq + 'static>(
+    palette: WeakEntity<CommandPalette<I>>,
+    action: &CommandPalettePrimaryAction,
+    focus_handle: gpui::FocusHandle,
+) -> AnyElement {
+    let id = action.id.clone();
+    let menu_palette = palette.clone();
+    let entries = action
+        .menu_items
+        .iter()
+        .map(|(id, label)| {
+            MenuEntry::action(label.clone(), id.clone())
+                .debug_selector(format!("command-palette-primary-menu-{id}"))
+        })
+        .collect();
+    ComboButton::new(
+        "command-palette-primary-action",
+        action.label.clone(),
+        entries,
+    )
+    .variant(ButtonVariant::Primary)
+    .size(ButtonSize::Small)
+    .disabled(action.disabled)
+    .menu_disabled(action.menu_disabled)
+    .focus_handle(focus_handle)
+    .tab_stop(true)
+    .placement(MenuPlacementConfig::new(
+        MenuPlacement::Bottom,
+        MenuAlignment::End,
+    ))
+    .when_some(action.debug_selector.clone(), |button, selector| {
+        button.debug_selector(selector)
+    })
+    .on_activate(move |_, _, cx| {
+        let id = id.clone();
+        let _ = palette.update(cx, |_, cx| {
+            cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+        });
+    })
+    .on_menu_activate(move |activation, _, cx| {
+        let id = activation.action().clone();
+        let _ = menu_palette.update(cx, |_, cx| {
+            cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+        });
+    })
+    .into_any_element()
+}
+
 fn render_section(
     label: SharedString,
     height: Pixels,
@@ -3514,6 +3780,30 @@ fn render_section(
         .font(font)
         .text_color(theme.paint.section_foreground)
         .child(label)
+}
+
+/// Sets the note in caption type on the row grid, aligned with row labels.
+fn render_results_note(
+    note: SharedString,
+    height: Pixels,
+    theme: CommandPaletteTheme,
+    font: gpui::Font,
+) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .debug_selector(|| "command-palette-results-note".to_owned())
+        .w_full()
+        .h(height)
+        .pl(metrics.content_leading_inset())
+        .pr(metrics.panel_padding)
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .text_size(metrics.section_size)
+        .line_height(metrics.section_line_height)
+        .font(font)
+        .text_color(theme.paint.muted)
+        .child(div().min_w_0().truncate().child(note))
 }
 
 fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl IntoElement {

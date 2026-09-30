@@ -163,6 +163,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "terminal/native_services/hyperlink.rs",
         "terminal/native_services/file_preview.rs",
         "terminal/workspace_terminal_session_factory.rs",
+        "ui/directory_picker/local_source.rs",
         "ui/workspace_manager.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).unwrap();

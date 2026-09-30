@@ -117,6 +117,11 @@ impl SshDestination {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Returns the machine this destination names, without its account prefix.
+    pub(crate) fn host(&self) -> &str {
+        self.0.rsplit_once('@').map_or(&self.0, |(_, host)| host)
+    }
 }
 
 /// The exact user-visible spelling of a directory selected on a remote destination.
@@ -1019,6 +1024,20 @@ mod tests {
                 .map(RemoteDirectory::as_str),
             Some("~/project")
         );
+    }
+
+    #[test]
+    fn ssh_destination_host_should_omit_the_account() {
+        let host = |value: &str| {
+            SshDestination::new(value.to_owned())
+                .unwrap()
+                .host()
+                .to_owned()
+        };
+
+        assert_eq!(host("orb"), "orb");
+        assert_eq!(host("tester@orb"), "orb");
+        assert_eq!(host("tester@example.com@orb"), "orb");
     }
 
     #[test]

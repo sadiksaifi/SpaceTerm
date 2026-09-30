@@ -5,7 +5,7 @@ use crate::app::{
 use crate::application_identity::ApplicationIdentity;
 use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
-    DesktopWording, ShortcutFormatter,
+    DesktopWording,
 };
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::TitlebarOptions;
@@ -61,7 +61,7 @@ fn capture_startup_dependencies(
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
 ) -> Result<DesktopProfile, DesktopProfileError> {
-    DesktopProfile::new(
+    Ok(DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         ControlKeybindingProfiles::new(
             spaceterm_ui::ModalKeybindingProfile::MacOs,
@@ -79,13 +79,12 @@ fn desktop_profile(
             DesktopWording {
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
+                system_directory_selection: "Choose in Finder…",
             },
-            super::macos_shortcut_glyphs::MacosShortcutFormatter
-                .format_chord(gpui::Modifiers::command(), "enter"),
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),
         locale,
-    )
+    ))
 }
 
 fn compose(
@@ -389,9 +388,12 @@ mod tests {
                     .as_deref(),
                 Some("⌥⌘C")
             );
-            assert_eq!(presentation.command_palette_confirm_shortcut(), "⌘↩");
             assert_eq!(presentation.wording().file_preview, "Quick Look");
             assert_eq!(presentation.wording().operating_system_name, "macOS");
+            assert_eq!(
+                presentation.wording().system_directory_selection,
+                "Choose in Finder…"
+            );
         });
     }
 }

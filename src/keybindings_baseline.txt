@@ -8,6 +8,9 @@ right	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::MoveRight
 enter	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Activate
 space	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Activate
 escape	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::Dismiss
+space	Some(Identifier("SpaceTermMenuTrigger"))	spaceterm_menu::Open
+enter	Some(Identifier("SpaceTermMenuTrigger"))	spaceterm_menu::Open
+down	Some(Identifier("SpaceTermMenuTrigger"))	spaceterm_menu::Open
 ctrl-p	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::MoveUp
 ctrl-n	Some(Identifier("SpaceTermMenu"))	spaceterm_menu::MoveDown
 up	Some(Identifier("SpaceTermCommandPalette"))	spaceterm_command_palette::MoveUp

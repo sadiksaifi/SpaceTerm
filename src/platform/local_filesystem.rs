@@ -12,7 +12,6 @@ use thiserror::Error;
 
 use crate::domain::ValidatedLocalDirectory;
 
-
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum LocalFilesystemError {
     #[error("the path is not absolute")]
@@ -211,6 +210,61 @@ impl LocalFilesystemAuthority {
         Ok(current)
     }
 
+    /// Lists the names of `directory`'s child directories, following symbolic links, and stops
+    /// after `limit` names. Names that are not valid UTF-8 are omitted.
+    pub(crate) fn list_child_directories(
+        &self,
+        directory: &Path,
+        limit: usize,
+    ) -> Result<LocalChildDirectories, LocalFilesystemError> {
+        validate_absolute_path(self.paths, directory)?;
+        let mut names = Vec::new();
+        for entry in fs::read_dir(directory).map_err(classify_io_error)? {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let is_directory = match entry.file_type() {
+                Ok(kind) if kind.is_symlink() => {
+                    fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir())
+                }
+                Ok(kind) => kind.is_dir(),
+                Err(_) => false,
+            };
+            let Some(name) = is_directory
+                .then(|| entry.file_name().into_string().ok())
+                .flatten()
+            else {
+                continue;
+            };
+            if names.len() == limit {
+                return Ok(LocalChildDirectories {
+                    names,
+                    truncated: true,
+                });
+            }
+            names.push(name);
+        }
+        Ok(LocalChildDirectories {
+            names,
+            truncated: false,
+        })
+    }
+
+    /// Succeeds when `path` names a readable directory and otherwise classifies why not.
+    pub(crate) fn probe_directory(&self, path: &Path) -> Result<(), LocalFilesystemError> {
+        validate_absolute_path(self.paths, path)?;
+        if !fs::metadata(path).map_err(classify_io_error)?.is_dir() {
+            return Err(LocalFilesystemError::NotDirectory);
+        }
+        fs::read_dir(path).map(drop).map_err(classify_io_error)
+    }
+
+    /// Creates `path` and every missing directory that encloses it.
+    pub(crate) fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {
+        validate_absolute_path(self.paths, path)?;
+        fs::create_dir_all(path).map_err(classify_io_error)
+    }
+
     fn identify_kind(
         &self,
         path: &Path,
@@ -251,6 +305,19 @@ impl LocalFilesystemAuthority {
         }));
         file.revalidated_path()?;
         Some(file)
+    }
+}
+
+/// One bounded level of a local directory's child directory names.
+pub(crate) struct LocalChildDirectories {
+    pub(crate) names: Vec<String>,
+    /// Whether more child directories exist than were listed.
+    pub(crate) truncated: bool,
+}
+
+impl fmt::Debug for LocalChildDirectories {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LocalChildDirectories(<redacted>)")
     }
 }
 
