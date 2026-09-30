@@ -927,6 +927,12 @@ impl Button {
         self
     }
 
+    /// Leaves the focus ring to a composing control, which paints it after its other parts.
+    pub(crate) fn parent_draws_focus_ring(mut self) -> Self {
+        self.core.parent_draws_focus_ring = true;
+        self
+    }
+
     pub(crate) fn modal_borderless(mut self) -> Self {
         self.core.modal_borderless = true;
         self
@@ -1261,6 +1267,7 @@ struct ButtonCore {
     tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
     injected_focus_handle: Option<FocusHandle>,
+    parent_draws_focus_ring: bool,
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
@@ -1288,6 +1295,7 @@ impl ButtonCore {
             tooltip: None,
             on_activate: None,
             injected_focus_handle: None,
+            parent_draws_focus_ring: false,
             modal_borderless: false,
             modal_press_owner: None,
             preserve_ancestor_hover: false,
@@ -1370,7 +1378,7 @@ impl ButtonCore {
             .map(|state| (state.pressed(), state.hovered(), state.focused()))
             .unwrap_or((pressed, hovered, focused));
         let paint = resolve_paint(style, enabled, pressed, hovered);
-        let focus_ring = focused.then_some(style.focus_border);
+        let focus_ring = (focused && !self.parent_draws_focus_ring).then_some(style.focus_border);
         let border_color = if self.modal_borderless {
             paint.background
         } else {

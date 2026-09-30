@@ -1456,9 +1456,19 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
 
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
+    let ring = cx
+        .debug_bounds("primary-pin-keyboard-focus")
+        .expect("the primary segment did not take focus");
     assert!(
-        cx.debug_bounds("primary-pin-keyboard-focus").is_some(),
-        "the primary segment did not take focus"
+        ring.left() < button.left() && ring.right() > button.right() && ring.right() < menu.right(),
+        "the ring did not surround the primary segment: ring={ring:?}, button={button:?}"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-pin-keyboard-focus").is_none()
+            && cx.debug_bounds("primary-pin-menu-keyboard-focus").is_some(),
+        "Tab did not move from the primary segment to the menu segment"
     );
 
     cx.simulate_click(menu.center(), Modifiers::default());

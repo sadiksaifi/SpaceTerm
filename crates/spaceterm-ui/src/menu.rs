@@ -1288,9 +1288,11 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
 /// has entries; without them the control is an ordinary button.
 #[derive(IntoElement)]
 pub struct ComboButton<A: Clone + 'static> {
+    id: ElementId,
     button: Button,
     menu: MenuControl<A>,
     focus_handle: Option<FocusHandle>,
+    focus_selector: String,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1313,7 +1315,9 @@ impl<A: Clone + 'static> ComboButton<A> {
                 entries,
                 TriggerKind::Menu,
             ),
-            button: Button::new(id, label),
+            focus_selector: format!("{label}-keyboard-focus"),
+            button: Button::new(id.clone(), label),
+            id,
             focus_handle: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
@@ -1378,6 +1382,7 @@ impl<A: Clone + 'static> ComboButton<A> {
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         let selector = selector.into();
         self.menu.debug_selector = Some(format!("{selector}-menu"));
+        self.focus_selector = format!("{selector}-keyboard-focus");
         self.button = self.button.debug_selector(selector);
         self
     }
@@ -1403,11 +1408,12 @@ impl<A: Clone + 'static> ComboButton<A> {
 
 impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if let Some(focus_handle) = self.focus_handle.take() {
-            self.button = self.button.focus_handle(focus_handle);
-        }
         if self.menu.entries.is_empty() {
-            return self.button.into_any_element();
+            return match self.focus_handle {
+                Some(focus_handle) => self.button.focus_handle(focus_handle),
+                None => self.button,
+            }
+            .into_any_element();
         }
         let style = resolve_button_style(self.variant, self.size, self.shape, cx);
         let paint = if self.menu.is_enabled() {
@@ -1449,15 +1455,44 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             ))
             .into_any_element();
         self.menu.button_segment = Some(style);
-        let button = self.button.joined_edge(JoinedEdge::Trailing);
+        let focus_handle = self.focus_handle.unwrap_or_else(|| {
+            let focus_id =
+                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "focus".into());
+            window
+                .use_keyed_state(focus_id, cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+        });
+        // A focus ring reaches past its segment's edge. The row paints the primary segment's ring
+        // after both segments so the menu segment cannot cover it. The menu segment paints last,
+        // so its own ring already lies above the primary segment.
+        let ring_target = crate::focus_ring::FocusRingTarget::default();
+        let focus_selector = self.focus_selector;
+        let ring = focus_handle.is_focused(window).then(|| {
+            crate::focus_ring(
+                crate::focus_ring::ring_id(&self.id),
+                style.focus_border,
+                style.corner_radius,
+                style.border_width,
+            )
+            .corner_radii(JoinedEdge::Trailing.corner_radii(style.corner_radius))
+            .target(ring_target.clone())
+            .debug_selector(focus_selector)
+        });
+        let button = self
+            .button
+            .focus_handle(focus_handle)
+            .parent_draws_focus_ring()
+            .joined_edge(JoinedEdge::Trailing);
         let menu = self.menu.render(content, window, cx);
-        div()
+        let row = div()
             .flex()
             .flex_shrink_0()
             .items_center()
+            .on_children_prepainted(move |bounds, _, _| ring_target.set(bounds.first().copied()))
             .child(button)
-            .child(menu)
-            .into_any_element()
+            .child(menu);
+        crate::Ringed::new(row, ring).into_any_element()
     }
 }
 
