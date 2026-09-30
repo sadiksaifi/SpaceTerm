@@ -50,6 +50,20 @@ pub(crate) struct OpticalLayout {
     ink_left: Pixels,
 }
 
+/// Returns the character at `start` when exactly one glyph starts there and the next glyph starts
+/// at the following character.
+fn sole_glyph_character(text: &str, starts: &[usize], start: usize) -> Option<char> {
+    let character = text[start..].chars().next()?;
+    let next = starts
+        .iter()
+        .copied()
+        .filter(|other| *other > start)
+        .min()
+        .unwrap_or(text.len());
+    let sole = starts.iter().filter(|other| **other == start).count() == 1;
+    (sole && next == start + character.len_utf8()).then_some(character)
+}
+
 impl Element for OpticalText {
     type RequestLayoutState = OpticalLayout;
     type PrepaintState = ();
@@ -81,16 +95,20 @@ impl Element for OpticalText {
             &[style.to_run(self.text.len())],
             None,
         );
-        let ink = |glyph_font_id, glyph: &gpui::ShapedGlyph| {
-            let character = self.text[glyph.index..].chars().next()?;
-            text_system
-                .typographic_bounds(glyph_font_id, font_size, character)
-                .ok()
-        };
         let glyphs = || {
             line.runs
                 .iter()
                 .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.font_id, glyph)))
+        };
+        let starts = glyphs().map(|(_, glyph)| glyph.index).collect::<Vec<_>>();
+        // Bounds are looked up by character, so they describe a glyph only when its character
+        // shaped into that one glyph alone. A decomposed, ligated, or combined glyph keeps its
+        // advance box and designed position.
+        let ink = |glyph_font_id, glyph: &gpui::ShapedGlyph| {
+            let character = sole_glyph_character(&self.text, &starts, glyph.index)?;
+            text_system
+                .typographic_bounds(glyph_font_id, font_size, character)
+                .ok()
         };
         let offsets = glyphs()
             .map(|(glyph_font_id, glyph)| {
@@ -179,5 +197,28 @@ impl Element for OpticalText {
                 window.paint_glyph(origin, font_id, glyph.id, line.font_size, layout.color)
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sole_glyph_character;
+
+    #[test]
+    fn a_character_shaped_into_one_glyph_should_be_measurable() {
+        // "⌘↩": two three-byte characters, one glyph each.
+        assert_eq!(sole_glyph_character("⌘↩", &[0, 3], 3), Some('↩'));
+    }
+
+    #[test]
+    fn a_character_shaped_into_several_glyphs_should_not_be_measured() {
+        // "⌘ำ" where ำ decomposes into two glyphs that share its start.
+        assert_eq!(sole_glyph_character("⌘ำ", &[0, 3, 3], 3), None);
+    }
+
+    #[test]
+    fn a_glyph_covering_several_characters_should_not_be_measured() {
+        // "fi" shaped as one ligature glyph.
+        assert_eq!(sole_glyph_character("fi", &[0], 0), None);
     }
 }

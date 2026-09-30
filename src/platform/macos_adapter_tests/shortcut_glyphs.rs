@@ -135,3 +135,28 @@ fn macos_shortcut_label_box_should_span_its_ink() {
         );
     }
 }
+
+#[test]
+fn macos_shortcut_label_box_should_not_overreach_a_decomposed_glyph() {
+    // Thai Sara Am shapes into two glyphs, so its whole-character bounds describe neither. The
+    // label then keeps the plain text box at that edge.
+    let shortcut = MacosShortcutFormatter.format_chord(Modifiers::command(), "\u{e33}");
+    let (ink, label) = painted_label(shortcut.clone());
+    let plain = painted({
+        let shortcut = shortcut.clone();
+        move || shortcut.clone().into_any_element()
+    })
+    .1;
+    let ink_right = ink
+        .iter()
+        .map(|bounds| bounds.right().0)
+        .fold(f32::MIN, f32::max);
+    assert!(
+        label.right().0 <= plain.right().0 + 1.0,
+        "`{shortcut}` box {label:?} reaches past the plain text box {plain:?}"
+    );
+    assert!(
+        ink_right - label.right().0 <= 2.0,
+        "`{shortcut}` box {label:?} cuts its ink at {ink_right}"
+    );
+}
