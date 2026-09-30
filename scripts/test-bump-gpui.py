@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).with_name("gpui-bump.py")
+SCRIPT = Path(__file__).with_name("bump-gpui.py")
 SPEC = importlib.util.spec_from_file_location("gpui_bump", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -364,7 +364,7 @@ class GpuiBumpTests(unittest.TestCase):
         self.assertNotEqual(self.snapshot(), original)
 
         output = io.StringIO()
-        with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
+        with patch.object(sys, "argv", ["bump-gpui.py", NEW_TAG]):
             with patch.object(MODULE, "bump", side_effect=raised.exception):
                 with redirect_stderr(output), self.assertRaises(SystemExit) as exit_result:
                     MODULE.main()
@@ -380,7 +380,7 @@ class GpuiBumpTests(unittest.TestCase):
         for interruption in (KeyboardInterrupt, SystemExit(2), MODULE.BumpCancelled):
             with self.subTest(interruption=interruption):
                 output = io.StringIO()
-                with patch.object(sys, "argv", ["gpui-bump.py", NEW_TAG]):
+                with patch.object(sys, "argv", ["bump-gpui.py", NEW_TAG]):
                     with patch.object(MODULE, "bump", side_effect=interruption):
                         with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
                             MODULE.main()

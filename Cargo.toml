@@ -3,8 +3,8 @@ name = "spaceterm"
 publish = false
 edition = "2024"
 
-# packaging/macos/package-metadata.py supplies the product name, identifier, and binary from the
-# selected Info.plist template.
+# packaging/macos/generate-package-metadata.py supplies the product name, identifier, and binary
+# from the selected Info.plist template.
 [package.metadata.packager]
 formats = ["app", "dmg"]
 out-dir = "dist"

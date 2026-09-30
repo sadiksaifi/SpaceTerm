@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preflight:
+  tag:
     name: Validate release tag
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -35,7 +35,7 @@ jobs:
 
   validate:
     name: Validate macOS
-    needs: preflight
+    needs: tag
     runs-on: macos-26
     timeout-minutes: 65
     steps:
@@ -77,7 +77,7 @@ jobs:
       # task has its own log and deadline, so a failed test is visible immediately.
       - name: Test Cargo artifact guard
         timeout-minutes: 5
-        run: mise run artifacts:test
+        run: mise run test:artifacts
       - name: Test repository scripts
         timeout-minutes: 5
         run: mise run test:scripts
@@ -101,13 +101,13 @@ jobs:
         run: mise run lint:diff
       - name: Test vendored terminal library
         timeout-minutes: 10
-        run: mise run test:vendor
+        run: mise run engine:test
       - name: Test vendored terminal library without graphics
         timeout-minutes: 10
-        run: mise run test:vendor:no-graphics
+        run: mise run engine:test:no-graphics
       - name: Check vendored formatting
         timeout-minutes: 5
-        run: mise run deps:fmt:check
+        run: mise run engine:fmt:check
       - name: Check macOS adapter formatting
         timeout-minutes: 5
         run: mise run fmt:check:macos
@@ -116,10 +116,10 @@ jobs:
         run: mise run test:macos
       - name: Lint macOS scripts
         timeout-minutes: 5
-        run: mise run lint:macos:scripts
+        run: mise run lint:scripts:macos
       - name: Test macOS updater
         timeout-minutes: 10
-        run: mise run test:macos:updater
+        run: mise run test:updater:macos
       - name: Save validation cache even if a test fails
         if: ${{ !cancelled() && steps.validation-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
@@ -135,7 +135,7 @@ jobs:
 
   package:
     name: Package and sign Apple Silicon
-    needs: preflight
+    needs: tag
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -153,14 +153,14 @@ jobs:
       - name: Build and verify Apple Silicon package
         timeout-minutes: 35
         env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
-        run: mise run release:macos:package "$RELEASE_TAG"
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: mise run release:package:macos "$RELEASE_TAG"
       - name: Sign and verify update assets
         timeout-minutes: 10
         env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: mise run release:macos:assets "$RELEASE_TAG"
+        run: mise run release:assets:macos "$RELEASE_TAG"
       - name: Record signed asset checksum
         id: assets
         run: echo "checksum=$(shasum -a 256 dist/release/SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,7 @@ jobs:
 
   publish:
     name: Publish verified release
-    needs: [preflight, validate, package]
+    needs: [tag, validate, package]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
@@ -205,6 +205,6 @@ jobs:
       - name: Publish complete GitHub release
         timeout-minutes: 10
         env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: mise run release:publish "$RELEASE_TAG"

@@ -83,7 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag")
     args = parser.parse_args()
-    version = load("version", ROOT / "packaging/release-version.py").resolve(ROOT, args.tag)["version"]
+    version = load("version", ROOT / "packaging/resolve-release-version.py").resolve(ROOT, args.tag)["version"]
     plist = plistlib.loads((ROOT / "dist/SpaceTerm.app/Contents/Info.plist").read_bytes())
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise SystemExit("Package the selected Git tag before preparing release assets")

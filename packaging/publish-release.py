@@ -18,7 +18,7 @@ def gh(*arguments, check=True):
 
 def release_notes(tag):
     subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("release-version.py")),
+        [sys.executable, str(Path(__file__).with_name("resolve-release-version.py")),
          "--root", str(ROOT), "--tag", tag],
         check=True, capture_output=True, text=True,
     )

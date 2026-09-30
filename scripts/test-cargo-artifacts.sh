@@ -24,7 +24,7 @@ make_oversized_target() {
 
 # Exercise measurement failures with an actual owned process group. The fixture
 # always cleans up its own children, including when the supervisor is broken.
-python3 - "$script_dir/cargo-artifact-supervisor.py" "$repo_dir" "$temp_root" <<'PY'
+python3 - "$script_dir/supervise-cargo-artifacts.py" "$repo_dir" "$temp_root" <<'PY'
 import os
 from pathlib import Path
 import signal
@@ -386,7 +386,7 @@ printf '{"reason":"compiler-artifact","target":{"name":"spaceterm"},"executable"
 EOF
 chmod +x "$fake_bin/cargo"
 PATH="$fake_bin:$PATH" FAKE_EXECUTABLE="$fake_executable" \
-    python3 "$script_dir/cargo-build-executable.py" \
+    python3 "$script_dir/build-cargo-executable.py" \
     --output "$artifact_path" --bin spaceterm -- --locked
 test "$(cat "$artifact_path")" = "$fake_executable"
 

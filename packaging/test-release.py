@@ -9,10 +9,10 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-SPEC = importlib.util.spec_from_file_location("release_version", Path(__file__).with_name("release-version.py"))
+SPEC = importlib.util.spec_from_file_location("release_version", Path(__file__).with_name("resolve-release-version.py"))
 VERSION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERSION)
-ARTIFACT_SPEC = importlib.util.spec_from_file_location("release_artifacts", Path(__file__).parent / "macos" / "release-assets.py")
+ARTIFACT_SPEC = importlib.util.spec_from_file_location("release_artifacts", Path(__file__).parent / "macos" / "create-release-assets.py")
 ARTIFACTS = importlib.util.module_from_spec(ARTIFACT_SPEC)
 ARTIFACT_SPEC.loader.exec_module(ARTIFACTS)
 PUBLISH_SPEC = importlib.util.spec_from_file_location("publish_release", Path(__file__).with_name("publish-release.py"))

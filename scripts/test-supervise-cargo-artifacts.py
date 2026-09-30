@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
-    "cargo_artifact_supervisor", Path(__file__).with_name("cargo-artifact-supervisor.py")
+    "cargo_artifact_supervisor", Path(__file__).with_name("supervise-cargo-artifacts.py")
 )
 SUPERVISOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SUPERVISOR)
@@ -76,7 +76,7 @@ class SupervisorTests(unittest.TestCase):
         process = subprocess.Popen(
             [
                 sys.executable,
-                str(Path(__file__).with_name("cargo-artifact-supervisor.py")),
+                str(Path(__file__).with_name("supervise-cargo-artifacts.py")),
                 "--repo-dir", str(root), "--target-dir", str(root / "target"),
                 "--budget-kib", "1024", "--", sys.executable, str(command), str(pid_file),
             ],

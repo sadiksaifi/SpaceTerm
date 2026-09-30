@@ -158,12 +158,12 @@ export MACOSX_DEPLOYMENT_TARGET=26.0
 # Leaves the SpaceTerm Development identity; see ADR 0012.
 export SPACETERM_PACKAGED=1
 if [[ -n "$RELEASE_TAG" ]]; then
-    VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
+    VERSION="$(python3 "$REPO_ROOT/packaging/resolve-release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
     export SPACETERM_RELEASE_TAG="$RELEASE_TAG"
     SPACETERM_SPARKLE_DIR="$(python3 "$SCRIPT_DIR/prepare-sparkle.py")"
     export SPACETERM_SPARKLE_DIR
 else
-    VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --field bundle_version)"
+    VERSION="$(python3 "$REPO_ROOT/packaging/resolve-release-version.py" --field bundle_version)"
 fi
 readonly VERSION
 PACKAGE_VERSION="$VERSION"
@@ -187,7 +187,7 @@ METADATA_ARGS=(--version "$VERSION" --binaries "$BINARIES_DIR")
 if [[ -n "${SPACETERM_SPARKLE_DIR:-}" ]]; then
     METADATA_ARGS+=(--sparkle "$SPACETERM_SPARKLE_DIR")
 fi
-python3 "$SCRIPT_DIR/package-metadata.py" "${METADATA_ARGS[@]}"
+python3 "$SCRIPT_DIR/generate-package-metadata.py" "${METADATA_ARGS[@]}"
 
 TEMP_ROOT="$(mktemp -d "$DIST_DIR/.package.XXXXXX")"
 readonly TEMP_ROOT

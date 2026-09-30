@@ -49,7 +49,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 "$REPO_ROOT/scripts/cargo-artifacts.sh" run -- \
-    python3 "$REPO_ROOT/scripts/cargo-build-executable.py" \
+    python3 "$REPO_ROOT/scripts/build-cargo-executable.py" \
     --output "$ARTIFACT_PATH" --bin spaceterm -- \
     "${CARGO_ARGUMENTS[@]}"
 EXECUTABLE="$(<"$ARTIFACT_PATH")"
@@ -75,7 +75,7 @@ readonly STAGED_BUNDLE
 mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS" "$STAGED_BUNDLE/Contents/Resources"
 install -m 0644 "$ICON_CACHE/SpaceTerm.icns" "$ICON_CACHE/Assets.car" "$STAGED_BUNDLE/Contents/Resources/"
 install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
-BUNDLE_VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --field bundle_version)"
+BUNDLE_VERSION="$(python3 "$REPO_ROOT/packaging/resolve-release-version.py" --field bundle_version)"
 plutil -insert CFBundleShortVersionString -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
 plutil -insert CFBundleVersion -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
 install -m 0755 "$EXECUTABLE" "$STAGED_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"

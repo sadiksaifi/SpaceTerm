@@ -5,7 +5,7 @@ readonly DEFAULT_BUDGET_MIB=20480
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repo_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
-supervisor=$script_dir/cargo-artifact-supervisor.py
+supervisor=$script_dir/supervise-cargo-artifacts.py
 
 usage() {
     cat <<'EOF'
