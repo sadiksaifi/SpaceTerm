@@ -356,7 +356,7 @@ run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
 
 [tasks."test:macos"]
 description = "Run native macOS Adapter tests"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked macos"
 
 [tasks."lint:macos:scripts"]
 description = "Check macOS scripts and package metadata"

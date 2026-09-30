@@ -8215,7 +8215,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     });
     assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
 }
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/workspace_manager.rs");
 }

@@ -11,7 +11,7 @@ pub(crate) const FACES: [&[u8]; 4] = [
 ];
 
 /// Return PostScript and display names, matching the renderer's CSS weight search.
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 pub(crate) fn face_metadata(weight: u16, italic: bool) -> (&'static str, &'static str) {
     match (weight > 500, italic) {
         (false, false) => ("SpaceTermDefault-Regular", "SpaceTerm Default Regular"),

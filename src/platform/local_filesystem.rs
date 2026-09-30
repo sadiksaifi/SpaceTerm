@@ -441,6 +441,6 @@ impl LocalFileEmissionRegistry {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[path = "macos_adapter_tests/local_filesystem.rs"]
 mod macos_adapter_tests;

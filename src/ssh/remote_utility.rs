@@ -174,7 +174,7 @@ impl<A: SshProcessAdapter> SshRemoteUtilityProcessRunner<A> {
         }
     }
 
-    #[cfg(all(test, feature = "macos-native-tests"))]
+    #[cfg(all(test, feature = "native-tests"))]
     const fn with_timeout(
         adapter: A,
         environment: SshProcessEnvironment,
@@ -1479,6 +1479,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[path = "../platform/macos_adapter_tests/remote_utility.rs"]
 mod macos_adapter_tests;

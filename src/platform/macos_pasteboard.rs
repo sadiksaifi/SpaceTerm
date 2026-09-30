@@ -3,7 +3,7 @@ use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPast
 use objc2_foundation::{NSArray, NSString, NSURL, NSUTF8StringEncoding};
 use std::path::PathBuf;
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard,
@@ -165,7 +165,7 @@ fn write_selection_to_pasteboard(
     Ok(())
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 #[allow(dead_code)]
 pub(in crate::platform) mod tests {
     use super::*;

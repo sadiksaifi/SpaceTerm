@@ -467,7 +467,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
         )
     }
 
-    #[cfg(all(test, feature = "macos-native-tests"))]
+    #[cfg(all(test, feature = "native-tests"))]
     fn create_private_artifact(
         &self,
         directory_handle: &SecureDirectory,
@@ -726,7 +726,7 @@ std::thread_local! {
         std::cell::RefCell::new(None);
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 fn install_before_private_file_publish_hook(hook: impl FnOnce() + 'static) {
     BEFORE_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
@@ -1286,7 +1286,7 @@ fn effective_user_id() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;

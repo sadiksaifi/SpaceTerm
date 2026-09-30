@@ -1,4 +1,4 @@
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 use std::ops::Range;
 
 #[cfg(not(test))]
@@ -13,19 +13,19 @@ use gpui::{Pixels, Window};
 use crate::terminal::TerminalAccessibilityModel;
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::terminal::{AccessibilityDemandSender, AccessibilitySelectionSender};
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 use crate::terminal::{AccessibilityGeometry, AccessibilityNotification};
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 const TEXT_AREA_ROLE: &str = "AXTextArea";
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 const VALUE_CHANGED: &str = "AXValueChanged";
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 const SELECTION_CHANGED: &str = "AXSelectedTextChanged";
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 const FOCUS_CHANGED: &str = "AXFocusedUIElementChanged";
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 fn notification_name(notification: AccessibilityNotification) -> &'static str {
     match notification {
         AccessibilityNotification::Value => VALUE_CHANGED,
@@ -35,7 +35,7 @@ fn notification_name(notification: AccessibilityNotification) -> &'static str {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 struct ScreenRect {
     x: f64,
     y: f64,
@@ -43,7 +43,7 @@ struct ScreenRect {
     height: f64,
 }
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 impl ScreenRect {
     fn contains(self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
@@ -51,7 +51,7 @@ impl ScreenRect {
 }
 
 #[derive(Clone, Debug)]
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 struct AccessibilityElementState {
     model: TerminalAccessibilityModel,
     font: Option<AccessibilityFontMetadata>,
@@ -76,7 +76,7 @@ struct AccessibilityElementState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 struct AccessibilityFontMetadata {
     requested_descriptor: crate::appearance::ResolvedFontDescriptor,
     requested_family: String,
@@ -88,13 +88,13 @@ struct AccessibilityFontMetadata {
 }
 
 #[derive(Debug, PartialEq)]
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 struct AccessibilityAttributedText<'a> {
     text: String,
     font: &'a AccessibilityFontMetadata,
 }
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 impl AccessibilityElementState {
     fn font_request_changed(&self, family: &str, point_size: f32) -> bool {
         let family = normalized_font_family(family);
@@ -759,7 +759,7 @@ mod native {
         }
     }
 }
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 fn resolve_font_metadata(
     descriptor: &crate::appearance::ResolvedFontDescriptor,
     point_size: f32,
@@ -831,7 +831,7 @@ fn resolve_font_metadata(
     })
 }
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 fn normalized_font_family(family: &str) -> &str {
     if family.trim().is_empty() {
         "Menlo"
@@ -840,7 +840,7 @@ fn normalized_font_family(family: &str) -> &str {
     }
 }
 
-#[cfg(any(not(test), feature = "macos-native-tests"))]
+#[cfg(any(not(test), feature = "native-tests"))]
 fn normalized_font_point_size(point_size: f32) -> f32 {
     if point_size.is_finite() && point_size > 0.0 {
         point_size
@@ -883,7 +883,7 @@ impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) mod tests {
     use super::*;
     use crate::terminal::{AccessibilityCell, AccessibilityLine};

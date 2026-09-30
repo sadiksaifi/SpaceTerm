@@ -217,7 +217,7 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         identity: &SecureEntryIdentity,
     ) -> Result<(), SecureFilesystemError>;
 
-    #[cfg(all(test, feature = "macos-native-tests"))]
+    #[cfg(all(test, feature = "native-tests"))]
     fn create_private_artifact(
         &self,
         directory: &SecureDirectory,

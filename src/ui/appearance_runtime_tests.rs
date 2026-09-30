@@ -888,7 +888,7 @@ fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
     );
 }
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
     include!("../platform/macos_adapter_tests/terminal_fonts.rs");
 }

@@ -1,4 +1,4 @@
-#[cfg(feature = "macos-native-tests")]
+#[cfg(feature = "native-tests")]
 use std::fs;
 
 use super::*;
@@ -4892,7 +4892,7 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
     assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
 }
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
     include!("../../platform/macos_adapter_tests/emulator.rs");
 }

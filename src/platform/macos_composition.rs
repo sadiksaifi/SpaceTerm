@@ -204,7 +204,7 @@ fn update_adapter() -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(super::macos_updates::MacosUpdates::new())
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
 

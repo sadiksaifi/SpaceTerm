@@ -413,7 +413,7 @@ mod tests {
         );
         fs::remove_dir_all(directory).unwrap();
     }
-    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+    #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/native_services.rs");
     }

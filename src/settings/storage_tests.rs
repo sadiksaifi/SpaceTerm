@@ -153,7 +153,7 @@ fn oversized_committed_document_is_rejected_on_read() {
     assert!(matches!(storage.read(), Err(StorageError::TooLarge)));
 }
 
-#[cfg(all(target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(target_os = "macos", feature = "native-tests"))]
 mod native {
     use super::*;
     use std::{

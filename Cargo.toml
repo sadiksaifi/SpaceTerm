@@ -41,7 +41,7 @@ resolver = "2"
 
 [features]
 default = []
-macos-native-tests = []
+native-tests = []
 appearance-exerciser = ["spaceterm-ui/appearance-exerciser"]
 development-app = []
 
@@ -49,13 +49,13 @@ development-app = []
 name = "macos_quick_look_ownership"
 path = "tests/macos_quick_look_ownership.rs"
 harness = false
-required-features = ["macos-native-tests"]
+required-features = ["native-tests"]
 
 [[test]]
 name = "macos_native_main_thread"
 path = "tests/macos_native_main_thread.rs"
 harness = false
-required-features = ["macos-native-tests"]
+required-features = ["native-tests"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

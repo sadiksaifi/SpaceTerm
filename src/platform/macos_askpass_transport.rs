@@ -204,7 +204,7 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
