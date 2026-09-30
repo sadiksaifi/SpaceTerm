@@ -18,6 +18,10 @@ impl LocalPathSemantics {
             Self::Posix => path.as_os_str().as_encoded_bytes().starts_with(b"/"),
         }
     }
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only native file URL intake checks URI paths")
+    )]
     pub(crate) fn absolute_uri_path(self, encoded: &str) -> bool {
         match self {
             Self::Posix => encoded.starts_with('/'),

@@ -54,6 +54,8 @@ actions!(
 pub enum CommandPaletteKeybindingProfile {
     /// The shipped macOS navigation, confirmation, dismissal, and focus bindings.
     MacOs,
+    /// The Linux set: the macOS set without Command chords, confirming with Control-Return.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
@@ -70,6 +72,20 @@ pub fn install_command_palette_keybindings(cx: &mut App, profile: CommandPalette
             KeyBinding::new("cmd-enter", Confirm, Some(KEY_CONTEXT)),
             KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
+        ]),
+        CommandPaletteKeybindingProfile::Linux => cx.bind_keys([
+            KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-enter", Confirm, Some(KEY_CONTEXT)),
+            KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
             KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),

@@ -55,6 +55,8 @@ pub enum ComboBoxKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
     /// and performs no operating-system detection.
     MacOs,
+    /// The same Control-N and Control-P navigation on Linux desktops.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
@@ -63,7 +65,7 @@ pub enum ComboBoxKeybindingProfile {
 /// before calling this function. Both sets remain scoped to an open ComboBox.
 pub fn install_combo_box_keybindings(cx: &mut App, profile: ComboBoxKeybindingProfile) {
     match profile {
-        ComboBoxKeybindingProfile::MacOs => cx.bind_keys([
+        ComboBoxKeybindingProfile::MacOs | ComboBoxKeybindingProfile::Linux => cx.bind_keys([
             KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
         ]),

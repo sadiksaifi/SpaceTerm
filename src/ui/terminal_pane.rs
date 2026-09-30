@@ -42,7 +42,7 @@ use crate::platform::terminal_accessibility::{
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
 #[cfg(test)]
-use crate::terminal::UnhandledKeyEvent;
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
@@ -2717,6 +2717,10 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.terminal_session.session.as_ref()?;
         self.selection_copy_from_result(session.copy_selection(), cx)
@@ -2751,6 +2755,10 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_selection(
         &mut self,
         origin: NativeServiceOrigin,
@@ -2785,6 +2793,10 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn insert_native_service_text(
         &mut self,
         origin: NativeServiceOrigin,
@@ -3015,6 +3027,10 @@ impl TerminalPane {
             .map(|hovered| &hovered.target)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     pub(crate) fn native_service_status(
         &mut self,
         workspace_id: WorkspaceId,
@@ -3102,6 +3118,10 @@ impl TerminalPane {
             && self.native_service_hierarchy_generation == guard.hierarchy_generation
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+    )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_session.native_service_session_identity == origin.session_identity()

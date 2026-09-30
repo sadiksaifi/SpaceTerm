@@ -8,7 +8,7 @@ zig = "0.16.0"
 shellcheck = "0.11.0"
 python = "3.13.15"
 uv = "0.11.21"
-"cargo:cargo-packager" = "0.11.8"
+"cargo:cargo-packager" = { version = "0.11.8", os = ["macos"] }
 
 [tasks.setup]
 description = "Prepare the shared development environment"
@@ -41,7 +41,6 @@ set -eu
 cargo --version
 cargo clippy --version
 rustfmt --version
-cargo packager --version
 zig version
 python3 --version
 shellcheck --version | head -n 1
@@ -176,7 +175,10 @@ run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --pac
 
 [tasks.fmt]
 description = "Format shared Rust sources"
-run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui"
+run = [
+  "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui",
+  "rustfmt --edition 2024 src/platform/*_adapter_tests/*.rs",
+]
 
 [tasks."fmt:files"]
 description = "Format selected Rust files during focused changes"
@@ -187,7 +189,10 @@ run = '''python3 -c 'import os, shlex, subprocess; subprocess.run(["rustfmt", "-
 
 [tasks."fmt:check"]
 description = "Check shared Rust formatting"
-run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check"
+run = [
+  "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check",
+  "rustfmt --edition 2024 --check src/platform/*_adapter_tests/*.rs",
+]
 
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
@@ -201,6 +206,7 @@ run = [
   "python3 scripts/test-release-version.py",
   "python3 scripts/test-commit-hook.py",
   "python3 scripts/test-cargo-artifact-supervisor.py",
+  "python3 scripts/test-run-development-app.py",
 ]
 
 [tasks."test:portable"]
@@ -241,7 +247,7 @@ set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
 python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in (".githooks/commit-msg", "scripts/test-commit-hook.py")]'
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/test-run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
 '''
 
 [tasks."lint:diff"]
@@ -321,6 +327,62 @@ arg "[rate]" help="Updates per second" default="60"
 '''
 run = 'python3 scripts/terminal-resource-workload.py --mode "${usage_mode}" --duration "${usage_duration}" --rate "${usage_rate}"'
 
+[tasks."setup:linux"]
+description = "Prepare the Linux development environment"
+run = [
+  { task = "setup" },
+  { task = "doctor:linux" },
+]
+
+[tasks."doctor:linux"]
+description = "Verify Linux development libraries and tools"
+run = '''
+set -eu
+pkg-config --exists xkbcommon xkbcommon-x11 wayland-client xcb x11-xcb fontconfig freetype2 || {
+  echo "Install: pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev" >&2
+  exit 1
+}
+python3 -c 'import ctypes; ctypes.CDLL("libvulkan.so.1")' || {
+  echo "Install a Vulkan loader and driver, for example libvulkan1 and mesa-vulkan-drivers" >&2
+  exit 1
+}
+command -v tic
+command -v dbus-daemon
+command -v ssh
+'''
+
+[tasks."dev:linux"]
+description = "Run SpaceTerm Dev from a source-built private Linux prefix"
+run = "exec bash scripts/run-development-app-linux.sh dev"
+
+[tasks."dev:linux:x11"]
+description = "Run SpaceTerm Dev through X11, using Xwayland on a Wayland session"
+run = "exec env -u WAYLAND_DISPLAY bash scripts/run-development-app-linux.sh dev"
+
+[tasks."dev:appearance:linux"]
+description = "Run the source appearance exerciser from a private Linux prefix"
+run = "exec bash scripts/run-development-app-linux.sh appearance"
+
+[tasks."test:linux"]
+description = "Run native Linux and shared Unix Adapter tests"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
+
+[tasks."lint:linux:scripts"]
+description = "Check Linux scripts"
+run = '''
+set -eu
+bash -n scripts/run-development-app-linux.sh
+shellcheck -x scripts/run-development-app-linux.sh
+'''
+
+[tasks."validate:linux"]
+description = "Run the full Linux validation gate"
+run = [
+  { task = "validate" },
+  { task = "test:linux" },
+  { task = "lint:linux:scripts" },
+]
+
 [tasks."setup:macos"]
 description = "Prepare the macOS development environment"
 run = [
@@ -344,19 +406,12 @@ xcrun --find assetutil
 xcrun --find hdiutil
 xcrun --find iconutil
 xcrun --find tic
+cargo packager --version
 '''
-
-[tasks."fmt:macos"]
-description = "Format isolated macOS Adapter sources"
-run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs"
-
-[tasks."fmt:check:macos"]
-description = "Check isolated macOS Adapter formatting"
-run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
 
 [tasks."test:macos"]
 description = "Run native macOS Adapter tests"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked macos"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- macos unix"
 
 [tasks."lint:macos:scripts"]
 description = "Check macOS scripts and package metadata"
@@ -375,7 +430,6 @@ plutil -lint packaging/macos/Entitlements.plist
 description = "Run the full macOS validation gate"
 run = [
   { task = "validate" },
-  { task = "fmt:check:macos" },
   { task = "test:macos" },
   { task = "lint:macos:scripts" },
   { task = "test:macos:updater" },

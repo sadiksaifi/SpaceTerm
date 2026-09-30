@@ -1689,6 +1689,17 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
     }
 }
 
+/// Ghostty prunes whole pages, and page row capacity follows the host memory page size, so
+/// history-limit tests observe the first retained row and bound it instead of fixing one host's
+/// page boundary.
+fn first_retained(rows: &[String], prefix: &str) -> usize {
+    rows[0]
+        .trim_end()
+        .strip_prefix(prefix)
+        .and_then(|row| row.parse().ok())
+        .expect("history starts with a numbered row")
+}
+
 fn numbered_history(start: usize, end: usize, cols: usize) -> Vec<String> {
     (start..end)
         .map(|row| format!("{:<cols$}", format!("H{row:04}")))
@@ -1741,18 +1752,21 @@ fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
     terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
-    let mut expected_before = numbered_history(591, 1600, 80);
+    let rows_before = all_limited_terminal_rows(&terminal, 80);
+    let first = first_retained(&rows_before, "H");
+    assert!((1..=591).contains(&first), "{first}");
+    let mut expected_before = numbered_history(first, 1600, 80);
     expected_before.push("P".repeat(80));
     expected_before.push(format!("{:<80}", "P".repeat(20)));
     expected_before.push(format!("{:<80}", "> "));
-    assert_eq!(all_limited_terminal_rows(&terminal, 80), expected_before);
+    assert_eq!(rows_before, expected_before);
 
     terminal.resize(160, 10, 10, 20).unwrap();
     assert_eq!(terminal.total_rows().unwrap(), expected_before.len());
     terminal.vt_write(b"\r\r\x1b[2A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
-    let mut expected_after = numbered_history(591, 1600, 160);
+    let mut expected_after = numbered_history(first, 1600, 160);
     expected_after.push(format!("{:<160}", "P".repeat(100)));
     expected_after.push(format!("{:<160}", "> "));
     expected_after.push(" ".repeat(160));
@@ -1778,7 +1792,8 @@ fn background_output_at_prompt_keeps_default_history_bounded() {
             terminal.vt_write(format!("BG{row:05}\r\n").as_bytes());
         }
         let rows = all_limited_terminal_rows(&terminal, 160);
-        let first = if end == 1000 { 290 } else { 10388 };
+        let first = first_retained(&rows, "BG");
+        assert!(first >= start && end - first <= 1000, "{first}");
         let mut expected: Vec<_> = (first..end)
             .map(|row| format!("{:<160}", format!("BG{row:05}")))
             .collect();
@@ -1801,7 +1816,9 @@ fn pre_reflow_prompt_clear_loses_at_most_one_old_page_at_history_limit() {
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    let mut expected = numbered_history(297, 507, 160);
+    let first = first_retained(&rows, "H");
+    assert!((1..=297).contains(&first), "{first}");
+    let mut expected = numbered_history(first, 507, 160);
     expected.push("P".repeat(160));
     expected.push(format!("{:<160}", "P".repeat(140)));
     expected.push(format!("{:<160}", "> "));
@@ -1832,7 +1849,9 @@ fn tall_prompt_at_history_limit_only_prunes_oldest_page() {
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    let mut expected = numbered_history(297, 480, 160);
+    let first = first_retained(&rows, "H");
+    assert!((1..=297).contains(&first), "{first}");
+    let mut expected = numbered_history(first, 480, 160);
     expected.extend(std::iter::repeat_n(" ".repeat(160), 21));
     expected.extend(std::iter::repeat_n("P".repeat(160), 15));
     expected.push(format!("{:<160}", "> "));
@@ -1846,6 +1865,7 @@ fn tall_prompt_at_history_limit_only_prunes_oldest_page() {
 fn tall_prompt_cycles_keep_bounded_exact_scrollback() {
     let prompt = format!("{}\r\n> ", "P".repeat(2400));
     let mut terminal = limited_prompt_terminal(480, &prompt);
+    let mut first = None;
     for cycle in 0..3 {
         for (cols, up) in [(160, 30), (80, 15)] {
             let before = terminal.total_rows().unwrap();
@@ -1859,7 +1879,9 @@ fn tall_prompt_cycles_keep_bounded_exact_scrollback() {
             terminal.vt_write(b"\x1b]133;B\x07");
         }
         let rows = all_limited_terminal_rows(&terminal, 80);
-        let mut expected = numbered_history(297, 480, 80);
+        let retained = *first.get_or_insert_with(|| first_retained(&rows, "H"));
+        assert!((1..=297).contains(&retained), "{retained}");
+        let mut expected = numbered_history(retained, 480, 80);
         expected.extend(std::iter::repeat_n(" ".repeat(80), 27 * (cycle + 1)));
         expected.extend(std::iter::repeat_n("P".repeat(80), 30));
         expected.push(format!("{:<80}", "> "));
@@ -4892,7 +4914,7 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
     assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
 }
 
-#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
-mod macos_adapter_tests {
-    include!("../../platform/macos_adapter_tests/emulator.rs");
+#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+mod unix_adapter_tests {
+    include!("../../platform/unix_adapter_tests/emulator.rs");
 }

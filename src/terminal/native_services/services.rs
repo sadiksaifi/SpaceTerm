@@ -1,4 +1,8 @@
 //! Synchronous Services policy and operation ownership, independent of native responders.
+#![cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a desktop Services Adapter drives Services operations")
+)]
 
 use std::cell::Cell;
 use std::rc::Rc;

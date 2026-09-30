@@ -25,15 +25,8 @@ pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
 
 pub(crate) mod local_filesystem;
-#[cfg(target_os = "macos")]
-mod macos_local_identity;
 pub(crate) mod native_pty;
 pub(crate) mod terminal_accessibility;
-
-#[cfg(all(target_os = "macos", not(test)))]
-mod macos_ssh_process;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_ssh_process;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_attention;
@@ -56,31 +49,11 @@ mod macos_application_quit;
 pub(crate) mod macos_application_quit;
 
 #[cfg(all(target_os = "macos", not(test)))]
-mod macos_control_socket;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_control_socket;
-
-#[cfg(all(target_os = "macos", not(test)))]
-mod macos_host_config_filesystem;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_host_config_filesystem;
-
-#[cfg(all(target_os = "macos", not(test)))]
-mod macos_secure_filesystem;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_secure_filesystem;
-
-#[cfg(all(target_os = "macos", not(test)))]
 mod macos_accessibility;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_accessibility;
 
 pub(crate) mod ssh_askpass;
-
-#[cfg(all(target_os = "macos", not(test)))]
-mod macos_askpass_transport;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_askpass_transport;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_keyboard;
@@ -118,11 +91,6 @@ mod macos_render_lifecycle;
 pub(crate) mod macos_render_lifecycle;
 
 #[cfg(all(target_os = "macos", not(test)))]
-mod macos_pty;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_pty;
-
-#[cfg(all(target_os = "macos", not(test)))]
 mod macos_secure_input;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_secure_input;
@@ -158,11 +126,11 @@ mod macos_window_frame;
 pub(crate) mod shell_integration;
 pub(crate) mod shell_launch;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod launch_host;
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("SpaceTerm currently supports macOS only");
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("SpaceTerm supports macOS and Linux only");
 
 pub(crate) mod askpass;
 #[cfg(target_os = "macos")]
@@ -172,12 +140,20 @@ pub(crate) mod services_registration;
 pub(crate) mod window_movement;
 #[cfg(target_os = "macos")]
 pub(crate) use macos_composition::main;
+#[cfg(target_os = "linux")]
+mod linux_composition;
+#[cfg(target_os = "linux")]
+pub(crate) use linux_composition::main;
 
 pub(crate) mod locale;
 
 #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[path = "macos_adapter_tests/mod.rs"]
 pub(crate) mod macos_adapter_tests;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[path = "unix_adapter_tests/mod.rs"]
+pub(crate) mod unix_adapter_tests;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -190,3 +166,122 @@ pub(crate) mod native_main_thread_tests;
 mod macos_reserved_shortcuts;
 #[cfg(target_os = "macos")]
 mod macos_shortcut_glyphs;
+
+// POSIX mechanics shared by macOS and Linux.
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_askpass_transport;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_askpass_transport;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_host_config_filesystem;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_host_config_filesystem;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_local_identity;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_local_identity;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_local_socket;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_local_socket;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_pty;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_pty;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_secure_filesystem;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_secure_filesystem;
+
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
+mod unix_ssh_process;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
+pub(crate) mod unix_ssh_process;
+
+// Irreducible macOS differences inside the shared POSIX mechanics.
+#[cfg(target_os = "macos")]
+mod macos_atomic_rename;
+
+#[cfg(target_os = "macos")]
+mod macos_peer_credentials;
+
+#[cfg(target_os = "macos")]
+mod macos_pty_host;
+
+// Linux host adapters.
+#[cfg(target_os = "linux")]
+mod linux_accessibility;
+
+#[cfg(target_os = "linux")]
+mod linux_appearance;
+
+#[cfg(target_os = "linux")]
+mod linux_application;
+
+#[cfg(target_os = "linux")]
+mod linux_application_menu;
+
+#[cfg(target_os = "linux")]
+mod linux_application_quit;
+
+#[cfg(target_os = "linux")]
+mod linux_atomic_rename;
+
+#[cfg(target_os = "linux")]
+mod linux_attention;
+
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
+
+#[cfg(target_os = "linux")]
+mod linux_default_keymap;
+
+#[cfg(target_os = "linux")]
+mod linux_file_preview;
+
+#[cfg(target_os = "linux")]
+mod linux_keyboard;
+
+#[cfg(target_os = "linux")]
+mod linux_keyboard_layout;
+
+#[cfg(target_os = "linux")]
+mod linux_locale;
+
+#[cfg(target_os = "linux")]
+mod linux_notification;
+
+#[cfg(target_os = "linux")]
+mod linux_peer_credentials;
+
+#[cfg(target_os = "linux")]
+mod linux_pty_host;
+
+#[cfg(target_os = "linux")]
+mod linux_reserved_shortcuts;
+
+#[cfg(target_os = "linux")]
+mod linux_scroll;
+
+#[cfg(target_os = "linux")]
+mod linux_secure_input;
+
+#[cfg(target_os = "linux")]
+mod linux_services;
+
+#[cfg(target_os = "linux")]
+mod linux_shortcut_text;
+
+#[cfg(target_os = "linux")]
+mod linux_updates;
+
+#[cfg(target_os = "linux")]
+mod linux_window_drag;
+
+#[cfg(target_os = "linux")]
+mod linux_window_visibility;

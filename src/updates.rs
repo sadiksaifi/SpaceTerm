@@ -1,6 +1,6 @@
 //! Application-owned update policy. The platform adapter owns transport and installation.
 
-#[cfg(feature = "development-app")]
+#[cfg(all(feature = "development-app", target_os = "macos"))]
 pub(crate) mod preview;
 
 pub(crate) mod policy;

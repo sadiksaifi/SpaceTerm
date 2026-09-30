@@ -26,15 +26,18 @@ use crate::settings::PreviewToken;
 
 gpui::actions!(appearance_gallery, [NextGalleryFixture]);
 
+const NEXT_GALLERY_FIXTURE_KEYSTROKE: &str = "ctrl-alt-n";
+
 pub(super) fn open(cx: &mut App) -> gpui::Result<()> {
     cx.bind_keys([gpui::KeyBinding::new(
-        "ctrl-alt-n",
+        NEXT_GALLERY_FIXTURE_KEYSTROKE,
         NextGalleryFixture,
         Some("AppearanceGallery"),
     )]);
     let bounds = Bounds::centered(None, size(px(1120.0), px(830.0)), cx);
     cx.open_window(
         WindowOptions {
+            app_id: crate::app::window_application_id(),
             window_background: appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -801,7 +804,12 @@ impl Gallery {
                     .on_activate(|_, _, _| {}),
                 ),
         );
-        content=content.child(div().text_color(gpui_color(appearance.colors.text_muted)).child("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press Ctrl+Alt+N to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-theme Pane Captions."));
+        let next_fixture = gpui::Keystroke::parse(NEXT_GALLERY_FIXTURE_KEYSTROKE)
+            .map(|keystroke| {
+                crate::desktop_profile::DesktopPresentation::get(cx).format_keystroke(&keystroke)
+            })
+            .unwrap_or_default();
+        content=content.child(div().text_color(gpui_color(appearance.colors.text_muted)).child(format!("Columns pin visual states only; focus and drag handlers remain unarmed. Edit a field and press {next_fixture} to change fixtures while retaining focus or an open list. Real Workspace window verifies Tabs and opposite-theme Pane Captions.")));
         ModalLayer::new(content).transient(
             Self::action_scope(cx)
                 .absolute()
@@ -932,6 +940,7 @@ mod tests {
         cx.update(|cx| {
             appearance_runtime::install(settings, Rc::new(platform), cx).unwrap();
             crate::ui::init(cx).unwrap();
+            cx.set_global(crate::desktop_profile::testing_presentation());
             open(cx).unwrap();
         });
         let window = cx
@@ -955,7 +964,7 @@ mod tests {
         assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
 
         for fixture in [Fixture::Light, Fixture::Dark] {
-            cx.simulate_keystrokes("ctrl-alt-n");
+            cx.simulate_keystrokes(NEXT_GALLERY_FIXTURE_KEYSTROKE);
             cx.run_until_parked();
             gallery.read_with(cx, |gallery, cx| {
                 assert_eq!(gallery.fixture, fixture, "{}", gallery.status);

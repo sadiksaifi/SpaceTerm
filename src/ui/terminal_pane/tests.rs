@@ -6923,9 +6923,9 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
     cx.run_until_parked();
     assert!(cx.did_prompt_for_new_path());
 }
-#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
-mod macos_adapter_tests {
-    include!("../../platform/macos_adapter_tests/terminal_pane.rs");
+#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+mod unix_adapter_tests {
+    include!("../../platform/unix_adapter_tests/terminal_pane.rs");
 }
 
 #[gpui::test]

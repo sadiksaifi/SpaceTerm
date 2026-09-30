@@ -13,7 +13,7 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
-    let code = match super::macos_askpass_transport::dispatch_helper_from_environment() {
+    let code = match super::unix_askpass_transport::dispatch_helper_from_environment() {
         Some(code) => code,
         None => crate::app::launch(capture_startup_dependencies(identity), |startup| {
             compose(startup, identity)
@@ -27,17 +27,17 @@ pub(crate) fn main() {
 fn capture_startup_dependencies(
     identity: ApplicationIdentity,
 ) -> Result<
-    StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     StartupDependenciesError,
 > {
     let path_environment = super::app_directories::AppDirectoryEnvironment::capture();
     let directories = super::app_directories::AppDirectories::resolve(identity.directory_name())
         .map_err(|_| StartupDependenciesError::Paths)?;
     let secure_filesystem: Arc<dyn super::secure_filesystem::SecureFilesystem> =
-        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem);
+        Arc::new(super::unix_secure_filesystem::UnixSecureFilesystem);
     let paths = super::app_paths::AppPaths::from_directories(
         directories,
-        103,
+        super::unix_local_socket::LOCAL_IPC_PATH_MAXIMUM,
         Arc::clone(&secure_filesystem),
     )
     .map_err(|_| StartupDependenciesError::Paths)?;
@@ -52,9 +52,9 @@ fn capture_startup_dependencies(
         .map_err(|_| StartupDependenciesError::Paths)?,
         paths,
         executable,
-        super::macos_ssh_process::MacOsSshProcessAdapter,
-        Arc::new(super::macos_control_socket::MacosControlSocketProbe),
-        Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
+        super::unix_ssh_process::UnixSshProcessAdapter,
+        Arc::new(super::unix_local_socket::UnixControlSocketProbe),
+        Arc::new(super::unix_host_config_filesystem::UnixHostConfigFilesystem),
     )
 }
 
@@ -82,13 +82,14 @@ fn desktop_profile(
                 system_directory_selection: "Choose in Finder…",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
+            crate::desktop_profile::ShortcutSelection::NativeMenu,
         ),
         locale,
     ))
 }
 
 fn compose(
-    startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    startup: StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
     let settings_storage = startup.settings_storage();
@@ -116,10 +117,12 @@ fn compose(
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
         paths,
-        Arc::new(super::macos_local_identity::MacosLocalIdentity),
+        Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
-        Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
+        Arc::new(super::unix_pty::UnixNativePtyAdapterFactory::new(Arc::new(
+            super::macos_pty_host::MacosPtyHost,
+        ))),
         super::launch_host::shell_launch_planner(),
         local_filesystem.clone(),
         crate::terminal::metadata::LocalMachine::new(
@@ -129,7 +132,7 @@ fn compose(
         ),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::macos_askpass_transport::AskPassWindowFactory,
+        super::unix_askpass_transport::AskPassWindowFactory,
     ));
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(Rc::new(super::macos_locale::ApplicationLocale))?,

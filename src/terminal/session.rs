@@ -266,11 +266,19 @@ pub(crate) enum SelectionCopyError {
     WorkerStopped,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct AccessibilitySelectionSender {
     commands: CommandSender<Command>,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+)]
 impl AccessibilitySelectionSender {
     #[cfg(test)]
     pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
@@ -294,6 +302,10 @@ impl AccessibilitySelectionSender {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+)]
 #[derive(Clone)]
 pub(crate) struct AccessibilityDemandSender {
     commands: CommandSender<Command>,
@@ -306,6 +318,10 @@ impl fmt::Debug for AccessibilityDemandSender {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+)]
 impl AccessibilityDemandSender {
     pub(crate) fn request(&self) {
         self.request_at(Instant::now());
@@ -759,7 +775,15 @@ enum Command {
         Option<PresentationGeneration>,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
     ),
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    )]
     AccessibilitySelection(AccessibilitySelectionRequest),
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    )]
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
@@ -2041,6 +2065,6 @@ fn join_worker(worker: JoinHandle<()>) {
 #[path = "session/tests.rs"]
 mod tests;
 
-#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
-#[path = "../platform/macos_adapter_tests/session.rs"]
-mod macos_adapter_tests;
+#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[path = "../platform/unix_adapter_tests/session.rs"]
+mod unix_adapter_tests;

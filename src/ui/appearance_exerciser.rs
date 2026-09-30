@@ -96,6 +96,7 @@ pub(crate) fn open(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) -> g
     let bounds = Bounds::centered(None, size(px(920.0), px(420.0)), cx);
     let appearance = cx.open_window(
         WindowOptions {
+            app_id: crate::app::window_application_id(),
             window_background: crate::ui::appearance_runtime::window_background(cx),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.0), px(320.0))),
@@ -652,6 +653,7 @@ impl AppearanceExerciser {
         self.status = if cx
             .open_window(
                 WindowOptions {
+                    app_id: crate::app::window_application_id(),
                     window_background,
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(480.0), px(320.0))),

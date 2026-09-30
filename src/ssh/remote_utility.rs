@@ -1479,6 +1479,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
-#[path = "../platform/macos_adapter_tests/remote_utility.rs"]
-mod macos_adapter_tests;
+#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[path = "../platform/unix_adapter_tests/remote_utility.rs"]
+mod unix_adapter_tests;

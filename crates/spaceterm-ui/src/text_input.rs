@@ -98,6 +98,9 @@ pub enum TextInputKeybindingProfile {
     /// Conventional macOS editing aliases. Selecting this profile is explicit and performs no
     /// operating-system detection.
     MacOs,
+    /// Conventional GTK editing bindings for Linux desktops. Selecting this profile is explicit and
+    /// performs no operating-system detection.
+    Linux,
 }
 
 /// Installs the current bindings for `profile`.
@@ -164,6 +167,40 @@ pub fn install_text_input_keybindings(cx: &mut App, profile: TextInputKeybinding
             KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
             KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
+        ]),
+        TextInputKeybindingProfile::Linux => cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
+            KeyBinding::new("delete", DeleteForward, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-backspace", DeletePreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-delete", DeleteNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-backspace", DeleteToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-delete", DeleteToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("left", MoveLeft, Some(KEY_CONTEXT)),
+            KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-left", MoveToPreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-right", MoveToNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("home", MoveToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-home", SelectToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-end", SelectToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-left", SelectToPreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-c", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-insert", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-x", Cut, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-delete", Cut, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-v", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-insert", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-z", Undo, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-z", Redo, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-y", Redo, Some(KEY_CONTEXT)),
+            KeyBinding::new("enter", Submit, Some(KEY_CONTEXT)),
+            KeyBinding::new("escape", Cancel, Some(KEY_CONTEXT)),
+            KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
         ]),
     }
 }

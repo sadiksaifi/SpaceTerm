@@ -4,25 +4,30 @@ import os
 import sys
 
 
-MACOS_TASK_BY_PROFILE = {
-    "dev": "dev:macos",
-    "appearance": "dev:appearance:macos",
+PROFILES = ("dev", "appearance")
+TASKS_BY_PLATFORM = {
+    "darwin": {
+        "dev": "dev:macos",
+        "appearance": "dev:appearance:macos",
+    },
+    "linux": {
+        "dev": "dev:linux",
+        "appearance": "dev:appearance:linux",
+    },
 }
 
 
 def task_for_platform(profile: str, platform: str) -> str | None:
-    if profile not in MACOS_TASK_BY_PROFILE:
+    if profile not in PROFILES:
         raise ValueError(f"unknown development profile: {profile}")
 
-    if platform == "darwin":
-        return MACOS_TASK_BY_PROFILE[profile]
-
-    return None
+    tasks = TASKS_BY_PLATFORM.get(platform)
+    return None if tasks is None else tasks[profile]
 
 
 def main(arguments: list[str]) -> int:
-    if len(arguments) != 1 or arguments[0] not in MACOS_TASK_BY_PROFILE:
-        profiles = "|".join(MACOS_TASK_BY_PROFILE)
+    if len(arguments) != 1 or arguments[0] not in PROFILES:
+        profiles = "|".join(PROFILES)
         print(f"usage: run-development-app.py <{profiles}>", file=sys.stderr)
         return 2
 

@@ -15,8 +15,8 @@ pub(crate) mod geometry;
 mod graphics;
 pub(crate) use native_services::hyperlink;
 pub(crate) mod identity;
-mod key;
-mod key_input;
+pub(crate) mod key;
+pub(crate) mod key_input;
 mod keyboard_protocol;
 pub(crate) mod metadata;
 pub(crate) mod native_services;
@@ -55,15 +55,12 @@ pub(crate) use find::{
 };
 pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
-pub(crate) use key::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
-};
+pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 #[cfg(all(test, feature = "native-tests"))]
 pub(crate) use key_input::assert_common_adapter_contract;
 pub(crate) use key_input::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, KeyTranslation,
     TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
-    UnhandledKeyEvent,
 };
 pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{

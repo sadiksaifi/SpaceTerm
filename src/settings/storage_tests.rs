@@ -185,7 +185,7 @@ mod native {
                     ..Default::default()
                 },
                 &AppPathHostFacts::new(root.clone(), 103).unwrap(),
-                Arc::new(crate::platform::macos_secure_filesystem::MacosSecureFilesystem),
+                Arc::new(crate::platform::unix_secure_filesystem::UnixSecureFilesystem),
             )
             .unwrap();
             Self {

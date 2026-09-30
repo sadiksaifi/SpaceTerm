@@ -34,8 +34,13 @@ gpui_platform = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["font-kit"
 serde = "1.0"
 other = {{ git = "https://example.com/other", tag = "{OLD_TAG}" }}
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["wayland", "x11"] }}
+
 [dev-dependencies]
 gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
 '''
 TOOLCHAIN = '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'

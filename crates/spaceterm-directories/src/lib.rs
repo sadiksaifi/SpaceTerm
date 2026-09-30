@@ -135,7 +135,12 @@ impl AppDirectories {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let environment = AppDirectoryEnvironment::capture();
-            return Self::resolve_xdg_for_host(app_name, &environment, os_temporary_directory);
+            return Self::resolve_xdg_for_host(
+                app_name,
+                &environment,
+                os_temporary_directory,
+                &temporary_runtime_name(app_name),
+            );
         }
 
         #[cfg(target_os = "windows")]
@@ -152,18 +157,35 @@ impl AppDirectories {
         app_name: &str,
         environment: &AppDirectoryEnvironment,
         os_temporary: impl FnOnce() -> Option<PathBuf>,
+        temporary_runtime_name: &str,
     ) -> Result<Self, DirectoryError> {
         let temporary = environment
             .configured_temporary_root()
             .and_then(canonical_temporary_directory)
             .or_else(|| os_temporary().and_then(canonical_temporary_directory));
-        Self::resolve_xdg(app_name, environment, temporary)
+        Self::resolve_xdg_with_runtime_name(
+            app_name,
+            environment,
+            temporary,
+            temporary_runtime_name,
+        )
     }
 
     pub fn resolve_xdg(
         app_name: &str,
         environment: &AppDirectoryEnvironment,
         runtime_fallback: Option<PathBuf>,
+    ) -> Result<Self, DirectoryError> {
+        Self::resolve_xdg_with_runtime_name(app_name, environment, runtime_fallback, app_name)
+    }
+
+    /// Resolve XDG roots. `temporary_runtime_name` names the runtime directory when the runtime
+    /// root falls back to the shared temporary directory instead of `XDG_RUNTIME_DIR`.
+    fn resolve_xdg_with_runtime_name(
+        app_name: &str,
+        environment: &AppDirectoryEnvironment,
+        runtime_fallback: Option<PathBuf>,
+        temporary_runtime_name: &str,
     ) -> Result<Self, DirectoryError> {
         validate_directory_name(app_name)?;
         let home = absolute_environment_path(environment.home.as_deref());
@@ -196,10 +218,12 @@ impl AppDirectories {
             app_name,
         )?;
         let temporary = runtime_fallback.filter(|path| is_absolute_normal_path(path));
-        let runtime = environment
-            .configured_runtime_root()
-            .or_else(|| temporary.clone())
-            .map(|root| root.join(app_name));
+        let runtime = match environment.configured_runtime_root() {
+            Some(root) => Some(root.join(app_name)),
+            None => temporary
+                .as_ref()
+                .map(|root| root.join(temporary_runtime_name)),
+        };
         Ok(Self {
             config,
             data,
@@ -329,6 +353,21 @@ fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+/// The runtime directory name inside the temporary root. macOS temporary roots are already
+/// per-user. Linux `/tmp` is shared, so the name carries the effective user so another account
+/// cannot pre-create the private runtime directory.
+#[cfg(target_os = "macos")]
+fn temporary_runtime_name(app_name: &str) -> String {
+    app_name.to_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn temporary_runtime_name(app_name: &str) -> String {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    format!("{app_name}-{user}")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -613,14 +652,20 @@ mod tests {
         };
         let fallback_consulted = std::cell::Cell::new(false);
 
-        let directories = AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || {
-            fallback_consulted.set(true);
-            None
-        })
+        let runtime_name = temporary_runtime_name(APP_DIR_NAME);
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment,
+            || {
+                fallback_consulted.set(true);
+                None
+            },
+            &runtime_name,
+        )
         .unwrap();
 
         let expected = std::fs::canonicalize("/tmp").unwrap();
-        let expected_runtime = expected.join(APP_DIR_NAME);
+        let expected_runtime = expected.join(runtime_name);
         assert!(!fallback_consulted.get());
         assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
         assert_eq!(
@@ -637,16 +682,42 @@ mod tests {
             ..environment()
         };
         let expected = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let directories = AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || {
-            Some(std::env::temp_dir())
-        })
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment,
+            || Some(std::env::temp_dir()),
+            APP_DIR_NAME,
+        )
         .unwrap();
         assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
 
         let directories =
-            AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || None).unwrap();
+            AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || None, APP_DIR_NAME)
+                .unwrap();
         assert_eq!(directories.temporary_directory(), None);
         assert_eq!(directories.runtime, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_temporary_runtime_should_be_private_to_the_effective_user() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let user = unsafe { libc::geteuid() };
+        assert_eq!(
+            temporary_runtime_name(APP_DIR_NAME),
+            format!("{APP_DIR_NAME}-{user}")
+        );
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment(),
+            || Some(PathBuf::from("/tmp")),
+            &temporary_runtime_name(APP_DIR_NAME),
+        )
+        .unwrap();
+        let expected = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("{APP_DIR_NAME}-{user}"));
+        assert_eq!(directories.runtime.as_deref(), Some(expected.as_path()));
     }
 
     #[test]

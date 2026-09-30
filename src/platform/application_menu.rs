@@ -10,10 +10,10 @@ pub(crate) enum ApplicationMenuCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[cfg_attr(
-    test,
+    any(test, not(target_os = "macos")),
     expect(
         dead_code,
-        reason = "ordinary tests replace native AppKit effects with the recording adapter"
+        reason = "ordinary tests and desktops without a native menu construct only some failures"
     )
 )]
 pub(crate) enum ApplicationMenuError {

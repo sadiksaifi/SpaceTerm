@@ -2,6 +2,7 @@
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
     directory_name: &'static str,
+    application_id: &'static str,
 }
 
 impl ApplicationIdentity {
@@ -30,10 +31,17 @@ impl ApplicationIdentity {
         self.directory_name
     }
 
+    /// The reverse-DNS application identifier: the Wayland `app_id`, the X11 `WM_CLASS`, and
+    /// the desktop entry name that desktop shells match windows against.
+    pub(crate) const fn application_id(self) -> &'static str {
+        self.application_id
+    }
+
     const fn production() -> Self {
         Self {
             display_name: "SpaceTerm",
             directory_name: "spaceterm",
+            application_id: "io.github.sadiksaifi.spaceterm",
         }
     }
 
@@ -41,6 +49,7 @@ impl ApplicationIdentity {
         Self {
             display_name: "SpaceTerm Dev",
             directory_name: "spaceterm-dev",
+            application_id: "io.github.sadiksaifi.spaceterm-dev",
         }
     }
 
@@ -48,6 +57,7 @@ impl ApplicationIdentity {
         Self {
             display_name: "SpaceTerm Appearance",
             directory_name: "spaceterm-appearance-exerciser",
+            application_id: "io.github.sadiksaifi.spaceterm.appearance-exerciser",
         }
     }
 }
@@ -70,6 +80,23 @@ mod tests {
                 ("SpaceTerm", "spaceterm"),
                 ("SpaceTerm Dev", "spaceterm-dev"),
                 ("SpaceTerm Appearance", "spaceterm-appearance-exerciser")
+            ]
+        );
+    }
+
+    #[test]
+    fn application_identities_should_have_distinct_desktop_application_ids() {
+        assert_eq!(
+            [
+                ApplicationIdentity::production(),
+                ApplicationIdentity::development(),
+                ApplicationIdentity::appearance(),
+            ]
+            .map(ApplicationIdentity::application_id),
+            [
+                "io.github.sadiksaifi.spaceterm",
+                "io.github.sadiksaifi.spaceterm-dev",
+                "io.github.sadiksaifi.spaceterm.appearance-exerciser",
             ]
         );
     }

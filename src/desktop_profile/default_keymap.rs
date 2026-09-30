@@ -1,4 +1,8 @@
 //! Explicit application shortcut policy shared by host composition and test fixtures.
+#![cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "the Command-key desktop composes this table; other desktops use it only as a test fixture")
+)]
 use crate::app::*;
 use crate::keybindings::{
     Command, DefaultBinding, KeymapProfile, KeymapProfileError, SystemReserved,
@@ -180,6 +184,7 @@ pub(crate) fn profile(
     ];
     KeymapProfile::new(
         layout,
+        crate::keybindings::TerminalConventions::CommandShortcuts,
         defaults,
         system_reserved,
         fixed_bindings(),

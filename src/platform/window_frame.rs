@@ -1,7 +1,7 @@
 //! Immutable geometry supplied by the host for application-owned window content and native
 //! titlebar controls.
 
-use gpui::{Pixels, Point, point, px};
+use gpui::{Pixels, Point, Window, point, px};
 
 /// A native traffic-light position anchored to one client titlebar height.
 ///
@@ -13,6 +13,10 @@ pub(crate) struct TrafficLightPlacement {
     compact_titlebar_height: Pixels,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only desktops with native window controls place them")
+)]
 impl TrafficLightPlacement {
     pub(crate) const fn new(
         compact_position: Point<Pixels>,
@@ -28,6 +32,15 @@ impl TrafficLightPlacement {
         let delta = (f32::from(titlebar_height) - f32::from(self.compact_titlebar_height)) / 2.0;
         point(self.compact_position.x, self.compact_position.y + px(delta))
     }
+}
+
+/// Moves the native traffic lights of `window`. Only hosts that supply a
+/// [`TrafficLightPlacement`] produce a position, so other hosts never reach a native effect.
+pub(crate) fn place_traffic_lights(window: &Window, position: Point<Pixels>) {
+    #[cfg(target_os = "macos")]
+    window.set_traffic_light_position(position);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, position);
 }
 
 /// Geometry the application needs to make inset surfaces follow their hosting window.
@@ -53,11 +66,19 @@ impl WindowFrameGeometry {
     }
 
     /// Records the edge the window paints over the outermost points of its own content.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only desktops with native window controls describe frame placement")
+    )]
     pub(crate) const fn with_outer_edge_width(mut self, width: f32) -> Self {
         self.outer_edge_width = width;
         self
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only desktops with native window controls place them")
+    )]
     pub(crate) const fn with_traffic_lights(
         mut self,
         workspace: TrafficLightPlacement,

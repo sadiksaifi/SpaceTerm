@@ -771,7 +771,7 @@ fn resolve_font_metadata(
     let requested_family = normalized_font_family(&descriptor.primary_family);
     let point_size = normalized_font_point_size(point_size);
     if requested_family == crate::bundled_font::FAMILY {
-        let (name, display_name) = crate::bundled_font::face_metadata(
+        let (name, display_name) = bundled_face_metadata(
             descriptor.weight,
             descriptor.style == crate::appearance::FontStyle::Italic,
         );
@@ -880,6 +880,21 @@ impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
     }
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
         self.update(update)
+    }
+}
+
+/// Return the bundled family's PostScript and display names, matching the renderer's CSS
+/// weight search.
+#[cfg(any(not(test), feature = "native-tests"))]
+fn bundled_face_metadata(weight: u16, italic: bool) -> (&'static str, &'static str) {
+    match (weight > 500, italic) {
+        (false, false) => ("SpaceTermDefault-Regular", "SpaceTerm Default Regular"),
+        (true, false) => ("SpaceTermDefault-Bold", "SpaceTerm Default Bold"),
+        (false, true) => ("SpaceTermDefault-Italic", "SpaceTerm Default Italic"),
+        (true, true) => (
+            "SpaceTermDefault-BoldItalic",
+            "SpaceTerm Default Bold Italic",
+        ),
     }
 }
 
