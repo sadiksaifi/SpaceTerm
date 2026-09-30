@@ -3386,6 +3386,9 @@ fn natural_menu_width<I, C>(
                 None,
             )
             .width
+            // Layout snaps each text element to whole pixels; rounding each one up keeps a
+            // shortcut that snaps wider from taking width the label needs.
+            .ceil()
     };
     let fixed = theme.metrics.border_width * 2.0
         + theme.metrics.panel_padding * 2.0
@@ -3422,7 +3425,7 @@ fn natural_menu_width<I, C>(
         });
         widest.max(fixed + leading + text + accessory + shortcut)
     });
-    // Layout snaps to device pixels; round up so snapping never clips the widest label.
+    // Scaled metrics can be fractional; round up so the panel snaps no narrower than its rows.
     widest
         .ceil()
         .max(px(MENU_MINIMUM_WIDTH))

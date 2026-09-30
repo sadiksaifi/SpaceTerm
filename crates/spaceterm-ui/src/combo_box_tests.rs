@@ -1784,18 +1784,21 @@ fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
     cx: &mut TestAppContext,
 ) {
     let label = "Open Remote Directory on Another Host…";
-    let items = vec![ComboBoxItem::new(1, label).shortcut("⇧⌘O")];
+    let items = vec![ComboBoxItem::new(1, label).shortcut("⌘O")];
     let (root, _, _, cx) = combo_box_window(cx, None, items, false);
     let color = rgba(0x101010ff);
     let row = crate::ListRowPaint::new(color, color, color, color, color, color);
-    let label_size = px(12.0);
+    let label_size = px(13.0);
     cx.update(|window, cx| {
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
                 color, color, color, color, color, color, color, color, color,
             )
             .rows(crate::ListRowPaints::new(row, row, row, row, row)),
-            ComboBoxMetrics::new(px(240.0), px(40.0)).font_sizes(label_size, px(11.0)),
+            ComboBoxMetrics::new(px(240.0), px(40.0))
+                .spacing(px(8.0), px(18.0), px(6.0))
+                .row_gutters(px(16.0), px(18.0), px(4.0), px(6.0))
+                .font_sizes(label_size, px(11.0)),
         ));
         window.refresh();
     });
