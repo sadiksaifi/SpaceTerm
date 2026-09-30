@@ -2458,6 +2458,38 @@ fn page_navigation_should_include_the_command_group_separator(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_command_that_starts_a_group_should_be_separated_from_the_commands_before_it(
+    cx: &mut TestAppContext,
+) {
+    let choices = vec![ComboBoxItem::new(1, "Workspace 1")];
+    let (root, _, _, cx) = combo_box_window(cx, Some(1), choices, false);
+    root.update(cx, |root, cx| {
+        root.commands = Some(Rc::new(|_| {
+            vec![
+                ComboBoxCommand::new(100, "Local Workspace").debug_selector("local"),
+                ComboBoxCommand::new(101, "Remote Workspace").debug_selector("remote"),
+                ComboBoxCommand::new(102, "Open Local Directory")
+                    .starts_group()
+                    .debug_selector("open-local"),
+            ]
+        }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+
+    assert!(cx.debug_bounds("local-group-separator").is_some());
+    assert!(cx.debug_bounds("remote-group-separator").is_none());
+    let remote = cx.debug_bounds("remote").unwrap();
+    let separator = cx
+        .debug_bounds("open-local-group-separator")
+        .expect("a command that starts a group must draw a separator before it");
+    let open_local = cx.debug_bounds("open-local").unwrap();
+    assert!(remote.bottom() <= separator.top());
+    assert!(separator.bottom() <= open_local.top());
+}
+
+#[gpui::test]
 fn repaired_provisional_item_should_be_revealed_after_a_long_model_update(cx: &mut TestAppContext) {
     let (root, _, _, cx) = combo_box_window(cx, Some(1), long_items(), false);
     open_by_pointer(cx);

@@ -225,6 +225,7 @@ pub struct ComboBoxItem<I> {
     leading_icon: Option<IconBuilder>,
     trailing: Option<ComboBoxAccessory>,
     shortcut: Option<SharedString>,
+    starts_group: bool,
     debug_selector: Option<String>,
     #[cfg(feature = "appearance-exerciser")]
     preview_selected: bool,
@@ -242,6 +243,7 @@ impl<I> ComboBoxItem<I> {
             leading_icon: None,
             trailing: None,
             shortcut: None,
+            starts_group: false,
             debug_selector: None,
             #[cfg(feature = "appearance-exerciser")]
             preview_selected: false,
@@ -334,6 +336,7 @@ impl<I> ComboBoxItem<I> {
             leading_icon: self.leading_icon,
             trailing: self.trailing,
             shortcut: self.shortcut,
+            starts_group: self.starts_group,
             debug_selector: self.debug_selector,
             #[cfg(feature = "appearance-exerciser")]
             preview_selected: self.preview_selected,
@@ -386,6 +389,12 @@ impl<C> ComboBoxCommand<C> {
     /// Adds a display-only keyboard equivalent after any trailing accessory.
     pub fn shortcut(self, shortcut: impl Into<SharedString>) -> Self {
         Self(self.0.shortcut(shortcut))
+    }
+
+    /// Starts a new command group, separated from the commands before it.
+    pub fn starts_group(mut self) -> Self {
+        self.0.starts_group = true;
+        self
     }
 
     /// Adds a stable selector used by GPUI interaction tests.
@@ -2190,11 +2199,10 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             self.matches.iter().take(position).enumerate().fold(
                 px(0.0),
                 |top, (position, index)| {
+                    let item = self.presented_items.get(*index);
                     top + metrics.list_item_height(
-                        self.presented_items
-                            .get(*index)
-                            .is_some_and(|item| item.description.is_some()),
-                        group_separator_before(position, self.choice_match_count),
+                        item.is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, self.choice_match_count, item),
                     )
                 },
             )
@@ -2654,6 +2662,7 @@ fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> b
                 && current.disabled == next.disabled
                 && current.trailing == next.trailing
                 && current.shortcut == next.shortcut
+                && current.starts_group == next.starts_group
         })
 }
 
@@ -2691,8 +2700,14 @@ fn match_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<(usize, ComboBo
     .collect()
 }
 
-fn group_separator_before(position: usize, choice_match_count: usize) -> bool {
-    choice_match_count > 0 && position == choice_match_count
+/// A separator precedes the first command after matching choices and each later command group.
+fn group_separator_before<I>(
+    position: usize,
+    choice_match_count: usize,
+    item: Option<&ComboBoxItem<I>>,
+) -> bool {
+    (choice_match_count > 0 && position == choice_match_count)
+        || (position > 0 && item.is_some_and(|item| item.starts_group))
 }
 
 fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
@@ -2718,13 +2733,11 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
             .iter()
             .enumerate()
             .fold(px(0.0), |height, (position, index)| {
+                let item = snapshot.presented_items.get(*index);
                 height
                     + theme.metrics.list_item_height(
-                        snapshot
-                            .presented_items
-                            .get(*index)
-                            .is_some_and(|item| item.description.is_some()),
-                        group_separator_before(position, snapshot.choice_match_count),
+                        item.is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, snapshot.choice_match_count, item),
                     )
             })
     };
@@ -2871,7 +2884,11 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                         },
                         ComboBoxRowRenderContext {
                             columns: group_columns.of(&item.id),
-                            separator_before: group_separator_before(position, choice_match_count),
+                            separator_before: group_separator_before(
+                                position,
+                                choice_match_count,
+                                Some(item),
+                            ),
                             shortcut_gap: menu_with_filter_header.then_some(
                                 (px(MENU_SHORTCUT_GAP) - theme.metrics.gap).max(px(0.0)),
                             ),
