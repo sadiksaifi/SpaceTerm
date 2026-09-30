@@ -199,6 +199,7 @@ run = [
   "python3 scripts/test-gpui-local.py",
   "python3 scripts/test-gpui-bump.py",
   "python3 scripts/test-release-version.py",
+  "python3 scripts/test-release-workflow.py",
   "python3 scripts/test-commit-hook.py",
   "python3 scripts/test-cargo-artifact-supervisor.py",
 ]
@@ -241,7 +242,7 @@ set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
 python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in (".githooks/commit-msg", "scripts/test-commit-hook.py")]'
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/test-release-workflow.py scripts/publish-release.py
 '''
 
 [tasks."lint:diff"]
