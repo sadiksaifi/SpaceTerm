@@ -371,11 +371,15 @@ mod tests {
             expected.extend([
                 format!(
                     "alt-cmd-a\tNone\t{}",
-                    crate::ui::appearance_exerciser::ShowAppearanceExerciser.name()
+                    crate::ui::developer_workbench::OpenDeveloperWorkbench.name()
                 ),
                 format!(
                     "alt-cmd-c\tNone\t{}",
-                    crate::ui::appearance_exerciser::ToggleAppearancePreview.name()
+                    crate::ui::developer_workbench::ToggleAppearancePreview.name()
+                ),
+                format!(
+                    "cmd-w\tSome(Identifier(\"DeveloperWorkbench\"))\t{}",
+                    crate::ui::developer_workbench::CloseDeveloperWorkbench.name()
                 ),
             ]);
             expected

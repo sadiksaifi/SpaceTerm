@@ -403,7 +403,7 @@ mod tests {
             #[cfg(feature = "developer-tools")]
             assert_eq!(
                 presentation
-                    .shortcut(&crate::ui::appearance_exerciser::ToggleAppearancePreview)
+                    .shortcut(&crate::ui::developer_workbench::ToggleAppearancePreview)
                     .as_deref(),
                 Some("⌥⌘C")
             );

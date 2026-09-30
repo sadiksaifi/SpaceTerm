@@ -5561,7 +5561,7 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     let commands = records.commands();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 
-    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(true, cx));
+    cx.update(|_, cx| crate::ui::developer_workbench::set_link_preview_fixture(true, cx));
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("terminal-link-preview").is_some());
@@ -5573,7 +5573,7 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     });
     assert_eq!(records.commands(), commands);
 
-    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(false, cx));
+    cx.update(|_, cx| crate::ui::developer_workbench::set_link_preview_fixture(false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 }

@@ -1944,7 +1944,7 @@ fn render_pane_caption(
             let mut caption = caption;
             #[cfg(feature = "developer-tools")]
             {
-                caption.text = super::appearance_exerciser::caption_fixture(cx)
+                caption.text = super::developer_workbench::caption_fixture(cx)
                     .map(PaneCaptionText::from_facts)
                     .unwrap_or(caption.text);
             }

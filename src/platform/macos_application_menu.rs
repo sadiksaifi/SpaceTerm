@@ -278,6 +278,26 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     },
 ];
 
+/// The Develop menu exists only in SpaceTerm Development.
+const DEVELOP_MENU_ITEM_ICONS: &[MenuItemIcon] = if cfg!(feature = "developer-tools") {
+    &[
+        MenuItemIcon {
+            menu: "Develop",
+            submenu: None,
+            item: "Developer Workbench",
+            symbol: "hammer",
+        },
+        MenuItemIcon {
+            menu: "Develop",
+            submenu: None,
+            item: "Toggle Appearance",
+            symbol: "circle.lefthalf.filled",
+        },
+    ]
+} else {
+    &[]
+};
+
 impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
         let application_name = self.identity.display_name();
@@ -293,14 +313,16 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
 }
 
 fn menus(application_name: &str) -> Vec<Menu> {
-    vec![
+    let mut menus = vec![
         application_menu(application_name),
         file_menu(),
         edit_menu(),
         view_menu(),
-        window_menu(),
-        help_menu(),
-    ]
+    ];
+    #[cfg(feature = "developer-tools")]
+    menus.push(develop_menu());
+    menus.extend([window_menu(), help_menu()]);
+    menus
 }
 
 fn application_menu(application_name: &str) -> Menu {
@@ -397,6 +419,24 @@ fn view_menu() -> Menu {
                 ],
             }),
             MenuItem::action(TOGGLE_PANE_ZOOM_TITLE, TogglePaneZoom),
+        ],
+    }
+}
+
+#[cfg(feature = "developer-tools")]
+fn develop_menu() -> Menu {
+    Menu {
+        disabled: false,
+        name: "Develop".into(),
+        items: vec![
+            MenuItem::action(
+                "Developer Workbench",
+                crate::ui::developer_workbench::OpenDeveloperWorkbench,
+            ),
+            MenuItem::action(
+                "Toggle Appearance",
+                crate::ui::developer_workbench::ToggleAppearancePreview,
+            ),
         ],
     }
 }
@@ -508,8 +548,8 @@ mod native {
     use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
 
     use super::{
-        ApplicationMenuCommand, ApplicationMenuError, MENU_ITEM_ICONS, MenuItemIcon,
-        NativeKeyEquivalent,
+        ApplicationMenuCommand, ApplicationMenuError, DEVELOP_MENU_ITEM_ICONS, MENU_ITEM_ICONS,
+        MenuItemIcon, NativeKeyEquivalent,
     };
 
     const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
@@ -606,7 +646,7 @@ mod native {
                 .ok_or(ApplicationMenuError::Unavailable)?;
             set_symbol_image(&item, decoration.symbol)?;
         }
-        for decoration in MENU_ITEM_ICONS {
+        for decoration in MENU_ITEM_ICONS.iter().chain(DEVELOP_MENU_ITEM_ICONS) {
             let item = find_menu_item(&main_menu, decoration, application_name)
                 .ok_or(ApplicationMenuError::Unavailable)?;
             set_symbol_image(&item, decoration.symbol)?;
@@ -824,16 +864,19 @@ mod tests {
             .map(|menu| menu.name.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            names,
-            ["SpaceTerm", "File", "Edit", "View", "Window", "Help"]
-        );
+        let expected: &[&str] = if cfg!(feature = "developer-tools") {
+            &["SpaceTerm", "File", "Edit", "View", "Develop", "Window", "Help"]
+        } else {
+            &["SpaceTerm", "File", "Edit", "View", "Window", "Help"]
+        };
+        assert_eq!(names, expected);
     }
 
     #[test]
     fn every_custom_menu_item_should_have_a_native_icon() {
         let mut decorated = MENU_ITEM_ICONS
             .iter()
+            .chain(DEVELOP_MENU_ITEM_ICONS)
             .map(|decoration| {
                 (
                     decoration.menu.to_owned(),

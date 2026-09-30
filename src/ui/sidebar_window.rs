@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, TitlebarOptions,
-    Window, WindowBounds, WindowKind, WindowOptions, div, px, size,
+    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size,
+    TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
     Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
@@ -32,10 +32,6 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
-/// Fixed window geometry. A sidebar window does not resize, so content scrolls inside a stable
-/// frame.
-pub(crate) const WINDOW_WIDTH: f32 = 880.0;
-pub(crate) const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
 const SIDEBAR_INSET: f32 = 10.0;
 /// The strip under the content column carrying its status.
@@ -71,16 +67,18 @@ pub(crate) fn card_gutter(appearance: &ChromeAppearance) -> Pixels {
 /// A floating window stays ordinary and modeless: the normal window level and the ordinary window
 /// class, with only tabbing, resizing, and minimizing withheld. It is deliberately not a popup and
 /// never orders itself above other applications.
-pub(crate) fn window_options(title: &'static str, cx: &App) -> WindowOptions {
+///
+/// A sidebar window does not resize, so content scrolls inside a stable frame of `size`.
+pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) -> WindowOptions {
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
         .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
         .and_then(|geometry| geometry.sidebar_window_traffic_light_position(titlebar_height));
-    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    let bounds = Bounds::centered(None, size, cx);
     WindowOptions {
         window_background: crate::ui::appearance_runtime::window_background(cx),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
+        window_min_size: Some(size),
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
             // Retain the native title for the Window menu and accessibility while drawing the
@@ -99,13 +97,12 @@ pub(crate) fn window_options(title: &'static str, cx: &App) -> WindowOptions {
 
 /// Renders a sidebar window's surface inside its window-activity and control-theme scopes.
 pub(crate) fn render_scoped(
-    window: &mut Window,
-    render: impl FnOnce(&mut Window) -> AnyElement,
+    activity: spaceterm_ui::ControlWindowActivity,
+    render: impl FnOnce() -> AnyElement,
 ) -> AnyElement {
-    let activity = crate::ui::appearance::window_activity(window);
     let scope = spaceterm_ui::ControlThemeScope::Settings;
     activity
-        .mount(activity.with_scope(|| scope.mount(scope.with_scope(|| render(window)))))
+        .mount(activity.with_scope(|| scope.mount(scope.with_scope(render))))
         .into_any_element()
 }
 
@@ -671,6 +668,14 @@ impl<'a> DetailHeading<'a> {
             scrolled: false,
             movement,
         }
+    }
+
+    /// Window-wide controls beside the heading, outside window-movement ownership. Only the
+    /// Developer Workbench has any.
+    #[cfg(feature = "developer-tools")]
+    pub(crate) fn toolbar(mut self, toolbar: impl IntoElement) -> Self {
+        self.toolbar = Some(toolbar.into_any_element());
+        self
     }
 
     pub(crate) fn scrolled(mut self, scrolled: bool) -> Self {

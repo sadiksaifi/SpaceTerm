@@ -167,6 +167,28 @@ export SPACETERM_UPDATE_PREVIEW="${usage_scenario}"
 exec bash packaging/macos/run-development.sh
 '''
 
+[tasks."development:workbench"]
+description = "Open the Developer Workbench in SpaceTerm Development"
+usage = '''
+arg "[section]" help="appearance, controls, floating-surfaces, modals, terminal, document" default="appearance"
+'''
+run = 'python3 scripts/run-platform-task.py development:workbench "${usage_section}"'
+
+[tasks."development:workbench:macos"]
+description = "Open the Developer Workbench in SpaceTerm Development on macOS"
+hide = true
+usage = '''
+arg "[section]" default="appearance"
+'''
+run = '''
+case "${usage_section}" in
+  appearance|controls|floating-surfaces|modals|terminal|document) ;;
+  *) echo "Unknown Developer Workbench section" >&2; exit 2 ;;
+esac
+export SPACETERM_DEVELOPER_WORKBENCH="${usage_section}"
+exec bash packaging/macos/run-development.sh
+'''
+
 [tasks.check]
 description = "Check every target and feature"
 run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"

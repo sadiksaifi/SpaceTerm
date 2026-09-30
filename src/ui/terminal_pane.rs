@@ -3806,10 +3806,10 @@ impl Render for TerminalPane {
             .map(|link| link.target.value.clone());
         #[cfg(feature = "developer-tools")]
         let link_preview_text = link_preview_text.or_else(|| {
-            // The development fixture exercises this readout without granting hover or
+            // The Developer Workbench fixture exercises this readout without granting hover or
             // activation authority to its synthetic text.
             (displaying_current && self.product_focus.focused_pane)
-                .then(|| super::appearance_exerciser::link_preview_fixture(cx))
+                .then(|| super::developer_workbench::link_preview_fixture(cx))
                 .flatten()
                 .map(str::to_owned)
         });

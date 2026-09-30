@@ -268,7 +268,7 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Paints this row as persistently selected in development acceptance fixtures.
+    /// Paints this row as persistently selected in Developer Workbench fixtures.
     ///
     /// This does not make a disabled item eligible for navigation or activation.
     #[cfg(feature = "control-preview")]

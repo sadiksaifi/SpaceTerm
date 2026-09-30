@@ -205,13 +205,18 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         .chain([
             KeyBinding::new(
                 "cmd-alt-a",
-                crate::ui::appearance_exerciser::ShowAppearanceExerciser,
+                crate::ui::developer_workbench::OpenDeveloperWorkbench,
                 None,
             ),
             KeyBinding::new(
                 "cmd-alt-c",
-                crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                crate::ui::developer_workbench::ToggleAppearancePreview,
                 None,
+            ),
+            KeyBinding::new(
+                "cmd-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
             ),
         ])
         .collect();

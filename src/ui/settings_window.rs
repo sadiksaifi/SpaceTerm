@@ -38,7 +38,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, Entity, FocusHandle, Global, Pixels, ScrollHandle,
-    SharedString, Window, WindowHandle, actions, div, px,
+    SharedString, Window, WindowHandle, actions, div, px, size,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconName, ModalAction, ModalActionEmphasis,
@@ -92,6 +92,10 @@ actions!(
 
 /// The key context the Settings Window publishes, so its shortcuts override Workspace shortcuts.
 pub(crate) const SETTINGS_KEY_CONTEXT: &str = "Settings";
+
+/// Fixed window geometry. Settings does not resize, so content scrolls inside a stable frame.
+const WINDOW_WIDTH: f32 = 880.0;
+const WINDOW_HEIGHT: f32 = 640.0;
 
 /// The one Settings Window, so a second request activates the existing window.
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
@@ -148,7 +152,11 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     let microphone_access = composition.microphone_access.clone();
     let theme_registry = composition.theme_registry.clone();
     let opened = cx.open_window(
-        super::sidebar_window::window_options("Settings", cx),
+        super::sidebar_window::window_options(
+            "Settings",
+            size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+            cx,
+        ),
         |window, cx| {
             let settings = cx.new(|cx| {
                 SettingsWindow::new_with_capabilities(
@@ -679,7 +687,8 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::sidebar_window::render_scoped(window, |window| self.render_chrome(window, cx))
+        let activity = super::appearance::window_activity(window);
+        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
     }
 }
 

@@ -2796,8 +2796,8 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
 fn a_described_row_keeps_its_label_inside_the_row_at_minimum_width(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     cx.simulate_resize(gpui::size(
-        px(crate::ui::sidebar_window::WINDOW_WIDTH),
-        px(crate::ui::sidebar_window::WINDOW_HEIGHT),
+        px(super::WINDOW_WIDTH),
+        px(super::WINDOW_HEIGHT),
     ));
     cx.run_until_parked();
     select_section(SettingsSectionId::Font, cx);
