@@ -14,11 +14,11 @@ import threading
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle-macos.py"))
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle.py"))
 SPARKLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SPARKLE)
-ARTIFACT_SPEC = importlib.util.spec_from_file_location("artifacts", Path(__file__).with_name("release-artifacts-macos.py"))
+ARTIFACT_SPEC = importlib.util.spec_from_file_location("artifacts", Path(__file__).with_name("release-assets.py"))
 ARTIFACTS = importlib.util.module_from_spec(ARTIFACT_SPEC)
 ARTIFACT_SPEC.loader.exec_module(ARTIFACTS)
 

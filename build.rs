@@ -10,7 +10,7 @@ fn main() {
     // Watch source changes as well as refs so development identity cannot retain a release label.
     for path in [
         "src",
-        "scripts/release-version.py",
+        "packaging/release-version.py",
         ".git/HEAD",
         ".git/index",
         ".git/refs",
@@ -20,7 +20,7 @@ fn main() {
     }
     let release_tag = env::var("SPACETERM_RELEASE_TAG").ok();
     let mut version = Command::new("python3");
-    version.args(["scripts/release-version.py", "--cargo"]);
+    version.args(["packaging/release-version.py", "--cargo"]);
     if let Some(tag) = &release_tag {
         version.args(["--tag", tag, "--require-clean"]);
     }

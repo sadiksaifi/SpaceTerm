@@ -8,7 +8,7 @@ import plistlib
 import tomllib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
@@ -27,11 +27,11 @@ def main():
     config["version"] = args.version
     config["binaries-dir"] = str(args.binaries)
     if args.sparkle:
-        key = (ROOT / "packaging/macos/update-public-key.txt").read_text().strip()
+        key = Path(__file__).with_name("update-public-key.txt").read_text().strip()
         if len(base64.b64decode(key, validate=True)) != 32:
             raise SystemExit("A valid release public key is required")
         config["macos"]["frameworks"] = [str(args.sparkle / "Sparkle.framework")]
-        entitlements = plistlib.loads((ROOT / "packaging/macos/Entitlements.plist").read_bytes())
+        entitlements = plistlib.loads(Path(__file__).with_name("Entitlements.plist").read_bytes())
         # Ad hoc binaries have no team identity with which Library Validation can trust Sparkle.
         entitlements["com.apple.security.cs.disable-library-validation"] = True
         (stage / "Entitlements.plist").write_bytes(plistlib.dumps(entitlements))

@@ -13,13 +13,13 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 ACCOUNT = "io.github.sadiksaifi.spaceterm"
 
 
-def load(name, filename):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -33,7 +33,7 @@ def checked(arguments, **kwargs):
 
 
 def signing_options(tools):
-    public = (ROOT / "packaging/macos/update-public-key.txt").read_text().strip()
+    public = Path(__file__).with_name("update-public-key.txt").read_text().strip()
     secret = os.environ.get("SPARKLE_PRIVATE_KEY")
     if secret:
         try:
@@ -83,11 +83,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag")
     args = parser.parse_args()
-    version = load("version", "release-version.py").resolve(ROOT, args.tag)["version"]
+    version = load("version", ROOT / "packaging/release-version.py").resolve(ROOT, args.tag)["version"]
     plist = plistlib.loads((ROOT / "dist/SpaceTerm.app/Contents/Info.plist").read_bytes())
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise SystemExit("Package the selected Git tag before preparing release assets")
-    tools = load("sparkle", "prepare-sparkle-macos.py").prepare() / "bin"
+    tools = load("sparkle", Path(__file__).with_name("prepare-sparkle.py")).prepare() / "bin"
     options, stdin = signing_options(tools)
     environment = {key: value for key, value in os.environ.items() if key != "SPARKLE_PRIVATE_KEY"}
     with tempfile.TemporaryDirectory(dir=ROOT / "dist") as temporary:

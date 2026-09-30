@@ -140,7 +140,7 @@ run = "python3 scripts/run-development-app.py dev"
 
 [tasks."dev:macos"]
 description = "Run SpaceTerm Dev from a source-built macOS application bundle"
-run = "exec bash scripts/run-development-app-macos.sh"
+run = "exec bash packaging/macos/run-dev.sh"
 
 [tasks."dev:macos:updates"]
 description = "Preview the real update UI in SpaceTerm Dev with a simulated updater"
@@ -155,7 +155,7 @@ esac
 echo "Update preview: ${usage_scenario}. Choose SpaceTerm Dev > Check for Updates…"
 echo "Downloads and installation are simulated. Nothing will be installed or restarted."
 export SPACETERM_UPDATE_PREVIEW="${usage_scenario}"
-exec bash scripts/run-development-app-macos.sh
+exec bash packaging/macos/run-dev.sh
 '''
 
 [tasks.check]
@@ -190,7 +190,7 @@ description = "Test shared repository scripts"
 run = [
   "python3 scripts/test-gpui-local.py",
   "python3 scripts/test-gpui-bump.py",
-  "python3 scripts/test-release-version.py",
+  "python3 packaging/test-release.py",
   "python3 scripts/test-release-workflow.py",
   "python3 scripts/test-commit-hook.py",
   "python3 scripts/test-cargo-artifact-supervisor.py",
@@ -234,7 +234,7 @@ set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
 python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in (".githooks/commit-msg", "scripts/test-commit-hook.py")]'
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/test-release-workflow.py scripts/publish-release.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' $(git ls-files 'scripts/*.py' 'packaging/*.py' ':!:*-macos.py' ':!:packaging/macos/*')
 '''
 
 [tasks."lint:diff"]
@@ -355,13 +355,10 @@ run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-
 description = "Check macOS scripts and package metadata"
 run = '''
 set -eu
-bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/prepare-sparkle-macos.py scripts/setup-update-key-macos.py scripts/package-metadata-macos.py scripts/release-artifacts-macos.py scripts/configure-update-secret-macos.py scripts/test-updater-macos.py
-plutil -lint packaging/macos/Info.plist
-plutil -lint packaging/macos/Preflight-Info.plist
-plutil -lint packaging/macos/Development-Info.plist
-plutil -lint packaging/macos/Entitlements.plist
+bash -n packaging/macos/*.sh
+shellcheck -x packaging/macos/*.sh
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/*-macos.py packaging/macos/*.py
+plutil -lint packaging/macos/*.plist packaging/macos/*/Info.plist
 '''
 
 [tasks."validate:macos"]
@@ -381,11 +378,11 @@ arg "<pid>" help="SpaceTerm process ID"
 arg "[duration]" help="Duration in seconds" default="20"
 arg "[interval]" help="Sampling interval in seconds" default="1"
 '''
-run = 'python3 scripts/measure-macos-terminal-resources.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
+run = 'python3 scripts/measure-resources-macos.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
 
 [tasks."package:macos"]
 description = "Build and verify SpaceTerm Preflight, the optimized macOS app and disk image"
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh'
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./packaging/macos/package.sh'
 
 [tasks."package:macos:install"]
 description = "Build, verify, and install SpaceTerm Preflight beside a SpaceTerm release"
@@ -397,7 +394,7 @@ run = [
 
 [tasks."package:macos:verify"]
 description = "Verify existing SpaceTerm Preflight artifacts"
-run = "./scripts/verify-macos-package.sh"
+run = "./packaging/macos/verify-package.sh"
 
 [tasks."package:macos:open"]
 description = "Open the packaged SpaceTerm Preflight application"
@@ -422,7 +419,7 @@ run = "xcodebuild -downloadComponent MetalToolchain"
 
 [tasks."test:release"]
 description = "Verify Git release provenance and generated update metadata"
-run = "python3 scripts/test-release-version.py"
+run = "python3 packaging/test-release.py"
 
 [tasks."release:targets"]
 description = "Validate Tagsmith release configuration"
@@ -437,16 +434,16 @@ run = 'npx --yes tagsmith@latest tag --target spaceterm --channel stable --versi
 
 [tasks."deps:macos:sparkle"]
 description = "Download and verify the pinned macOS updater"
-run = "python3 scripts/prepare-sparkle-macos.py"
+run = "python3 packaging/macos/prepare-sparkle.py"
 
 [tasks."release:macos:key"]
 description = "Prepare the update signing key in macOS Keychain"
-run = "python3 scripts/setup-update-key-macos.py"
+run = "python3 packaging/macos/setup-update-key.py"
 
 [tasks."check:macos:updater"]
 description = "Check the native updater and its Rust integration"
 run = '''
-export SPACETERM_SPARKLE_DIR="$(python3 scripts/prepare-sparkle-macos.py)"
+export SPACETERM_SPARKLE_DIR="$(python3 packaging/macos/prepare-sparkle.py)"
 ./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --all-targets --all-features --locked
 '''
 
@@ -455,7 +452,7 @@ description = "Package the annotated release tag for Apple Silicon"
 usage = '''
 arg "<tag>" help="Annotated stable release tag"
 '''
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --release "${usage_tag}"'
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./packaging/macos/package.sh --release "${usage_tag}"'
 
 [tasks."release:validate"]
 description = "Validate the GitHub Actions annotated release tag"
@@ -466,21 +463,21 @@ description = "Generate and verify signed GitHub update assets"
 usage = '''
 arg "<tag>" help="Annotated stable release tag"
 '''
-run = 'python3 scripts/release-artifacts-macos.py "${usage_tag}"'
+run = 'python3 packaging/macos/release-assets.py "${usage_tag}"'
 
 [tasks."release:publish"]
 description = "Upload assets to a draft, then publish the GitHub release"
 usage = '''
 arg "<tag>" help="Validated stable release tag"
 '''
-run = 'python3 scripts/publish-release.py "${usage_tag}"'
+run = 'python3 packaging/publish-release.py "${usage_tag}"'
 
 [tasks."release:notes"]
 description = "Print git-cliff notes for the annotated release tag at HEAD"
 usage = '''
 arg "<tag>" help="Annotated stable release tag"
 '''
-run = 'python3 scripts/publish-release.py "${usage_tag}" --notes-only'
+run = 'python3 packaging/publish-release.py "${usage_tag}" --notes-only'
 
 [tasks."release:notes:preview"]
 description = "Preview git-cliff notes for changes since the last release"
@@ -488,8 +485,8 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
 [tasks."test:macos:updater"]
 description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
-run = "python3 scripts/test-updater-macos.py"
+run = "python3 packaging/macos/test-updater.py"
 
 [tasks."release:macos:configure-secret"]
 description = "Configure the GitHub Actions signing secret from macOS Keychain"
-run = "python3 scripts/configure-update-secret-macos.py"
+run = "python3 packaging/macos/configure-update-secret.py"

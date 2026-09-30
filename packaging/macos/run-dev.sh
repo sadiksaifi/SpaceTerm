@@ -5,14 +5,14 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly REPO_ROOT
 
 [[ $# -eq 0 ]] || {
     echo "usage: $(basename -- "$0")" >&2
     exit 2
 }
-readonly INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Development-Info.plist"
+readonly INFO_PLIST_SOURCE="$SCRIPT_DIR/dev/Info.plist"
 readonly CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
 plist_value() {
@@ -41,8 +41,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-"$SCRIPT_DIR/cargo-artifacts.sh" run -- \
-    python3 "$SCRIPT_DIR/cargo-build-executable.py" \
+"$REPO_ROOT/scripts/cargo-artifacts.sh" run -- \
+    python3 "$REPO_ROOT/scripts/cargo-build-executable.py" \
     --output "$ARTIFACT_PATH" --bin spaceterm -- \
     "${CARGO_ARGUMENTS[@]}"
 EXECUTABLE="$(<"$ARTIFACT_PATH")"
@@ -56,7 +56,7 @@ STAGED_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
 readonly STAGED_BUNDLE
 mkdir -p -- "$STAGED_BUNDLE/Contents/MacOS"
 install -m 0644 "$INFO_PLIST_SOURCE" "$STAGED_BUNDLE/Contents/Info.plist"
-BUNDLE_VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --field bundle_version)"
+BUNDLE_VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --field bundle_version)"
 plutil -insert CFBundleShortVersionString -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
 plutil -insert CFBundleVersion -string "$BUNDLE_VERSION" "$STAGED_BUNDLE/Contents/Info.plist"
 install -m 0755 "$EXECUTABLE" "$STAGED_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"

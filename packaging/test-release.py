@@ -12,7 +12,7 @@ from pathlib import Path
 SPEC = importlib.util.spec_from_file_location("release_version", Path(__file__).with_name("release-version.py"))
 VERSION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERSION)
-ARTIFACT_SPEC = importlib.util.spec_from_file_location("release_artifacts", Path(__file__).with_name("release-artifacts-macos.py"))
+ARTIFACT_SPEC = importlib.util.spec_from_file_location("release_artifacts", Path(__file__).parent / "macos" / "release-assets.py")
 ARTIFACTS = importlib.util.module_from_spec(ARTIFACT_SPEC)
 ARTIFACT_SPEC.loader.exec_module(ARTIFACTS)
 PUBLISH_SPEC = importlib.util.spec_from_file_location("publish_release", Path(__file__).with_name("publish-release.py"))

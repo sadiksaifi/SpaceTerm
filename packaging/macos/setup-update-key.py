@@ -6,8 +6,7 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle-macos.py"))
+SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle.py"))
 SPARKLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SPARKLE)
 ACCOUNT = "io.github.sadiksaifi.spaceterm"
@@ -15,7 +14,7 @@ ACCOUNT = "io.github.sadiksaifi.spaceterm"
 
 def main():
     tool = SPARKLE.prepare() / "bin/generate_keys"
-    public_file = ROOT / "packaging/macos/update-public-key.txt"
+    public_file = Path(__file__).with_name("update-public-key.txt")
     public = subprocess.run([tool, "--account", ACCOUNT, "-p"], capture_output=True, text=True)
     if public.returncode:
         if public_file.exists():

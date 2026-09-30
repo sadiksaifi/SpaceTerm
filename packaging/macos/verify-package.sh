@@ -11,7 +11,7 @@ readonly ASKPASS_HELPER_TIMEOUT_SECONDS=5
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly REPO_ROOT
 readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 
@@ -253,7 +253,7 @@ verify_app_bundle() {
         [[ "$marketing_version" == "${RELEASE_TAG#v}" && "$build_number" == "${RELEASE_TAG#v}" ]] \
             || die "$label bundle version does not match its release tag"
         [[ "$executable_architectures" == "arm64" ]] || die "$label release must be arm64"
-        [[ "$(plist_value "$plist" SUPublicEDKey)" == "$(cat "$REPO_ROOT/packaging/macos/update-public-key.txt")" ]] \
+        [[ "$(plist_value "$plist" SUPublicEDKey)" == "$(cat "$SCRIPT_DIR/update-public-key.txt")" ]] \
             || die "$label update trust root does not match the release key"
         [[ "$(plist_value "$plist" SUFeedURL)" == "https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/appcast.xml" ]] \
             || die "$label update feed must be hosted in GitHub Releases"
@@ -308,11 +308,11 @@ require_command lipo
 require_command plutil
 [[ -x /usr/libexec/PlistBuddy ]] || die "required command not found: /usr/libexec/PlistBuddy"
 
-# Only a validated release tag may carry the SpaceTerm identity; see ADR 0009.
+# Only a validated release tag may carry the SpaceTerm identity; see ADR 0012.
 if [[ -n "$RELEASE_TAG" ]]; then
-    IDENTITY_PLIST="$REPO_ROOT/packaging/macos/Info.plist"
+    IDENTITY_PLIST="$SCRIPT_DIR/spaceterm/Info.plist"
 else
-    IDENTITY_PLIST="$REPO_ROOT/packaging/macos/Preflight-Info.plist"
+    IDENTITY_PLIST="$SCRIPT_DIR/preflight/Info.plist"
 fi
 readonly IDENTITY_PLIST
 APP_NAME="$(plist_value "$IDENTITY_PLIST" CFBundleName)"

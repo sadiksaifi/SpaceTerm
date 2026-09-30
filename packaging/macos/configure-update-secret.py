@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle-macos.py"))
+SPEC = importlib.util.spec_from_file_location("sparkle", Path(__file__).with_name("prepare-sparkle.py"))
 SPARKLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SPARKLE)
 
@@ -16,7 +16,7 @@ def main():
     tool = SPARKLE.prepare() / "bin/generate_keys"
     public = subprocess.run([tool, "--account", "io.github.sadiksaifi.spaceterm", "-p"],
                             check=True, capture_output=True, text=True).stdout.strip()
-    expected = (Path(__file__).resolve().parent.parent / "packaging/macos/update-public-key.txt").read_text().strip()
+    expected = Path(__file__).with_name("update-public-key.txt").read_text().strip()
     if public != expected:
         raise SystemExit("The Keychain signing key does not match the release public key")
     with tempfile.TemporaryDirectory(prefix="spaceterm-signing-") as temporary:

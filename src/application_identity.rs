@@ -80,8 +80,8 @@ impl ApplicationIdentity {
 mod tests {
     use super::*;
 
-    const PRODUCTION_INFO_PLIST: &str = include_str!("../packaging/macos/Info.plist");
-    const PREFLIGHT_INFO_PLIST: &str = include_str!("../packaging/macos/Preflight-Info.plist");
+    const PRODUCTION_INFO_PLIST: &str = include_str!("../packaging/macos/spaceterm/Info.plist");
+    const PREFLIGHT_INFO_PLIST: &str = include_str!("../packaging/macos/preflight/Info.plist");
     const IDENTITY_KEYS: [&str; 4] = [
         "CFBundleDisplayName",
         "CFBundleExecutable",
@@ -182,7 +182,7 @@ mod tests {
             ),
             (
                 ApplicationIdentity::development(),
-                include_str!("../packaging/macos/Development-Info.plist"),
+                include_str!("../packaging/macos/dev/Info.plist"),
                 "io.github.sadiksaifi.spaceterm-dev",
             ),
         ];

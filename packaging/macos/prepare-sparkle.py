@@ -10,13 +10,13 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def prepare():
     if sys.platform != "darwin":
         raise SystemExit("Sparkle packaging requires macOS")
-    pin = json.loads((ROOT / "packaging/macos/sparkle.json").read_text())
+    pin = json.loads(Path(__file__).with_name("sparkle.json").read_text())
     destination = ROOT / "target/sparkle" / pin["version"]
     marker = destination / ".verified-sha256"
     if marker.is_file() and marker.read_text().strip() == pin["sha256"]:

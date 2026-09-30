@@ -11,10 +11,10 @@ readonly MINIMUM_XCODE_MAJOR="26"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly REPO_ROOT
 readonly DIST_DIR="$REPO_ROOT/dist"
-readonly RELEASE_ICON_SOURCE="$REPO_ROOT/assets/macos/$ICON_NAME.icon"
+readonly RELEASE_ICON_SOURCE="$SCRIPT_DIR/spaceterm/$ICON_NAME.icon"
 readonly ICON_GLYPH="Assets/SVG Image 4.svg"
 readonly TERMINFO_SOURCE="$REPO_ROOT/assets/terminfo/xterm-spaceterm.terminfo"
 readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
@@ -168,15 +168,14 @@ require_command xcodebuild
 require_command xcrun
 require_packager
 require_xcode
-# Only a validated release tag may carry the SpaceTerm identity; see ADR 0009.
+# Only a validated release tag may carry the SpaceTerm identity; see ADR 0012.
 if [[ -n "$RELEASE_TAG" ]]; then
-    INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Info.plist"
-    ICON_SOURCE="$RELEASE_ICON_SOURCE"
+    IDENTITY_DIR="$SCRIPT_DIR/spaceterm"
 else
-    INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Preflight-Info.plist"
-    ICON_SOURCE="$REPO_ROOT/assets/macos/SpaceTerm Preflight.icon"
+    IDENTITY_DIR="$SCRIPT_DIR/preflight"
 fi
-readonly INFO_PLIST_SOURCE ICON_SOURCE
+readonly IDENTITY_DIR
+readonly INFO_PLIST_SOURCE="$IDENTITY_DIR/Info.plist"
 [[ -f "$INFO_PLIST_SOURCE" ]] || die "missing Info.plist template: $INFO_PLIST_SOURCE"
 APP_NAME="$(plutil -extract CFBundleName raw -o - "$INFO_PLIST_SOURCE")"
 readonly APP_NAME
@@ -186,6 +185,7 @@ BUNDLE_IDENTIFIER="$(plutil -extract CFBundleIdentifier raw -o - "$INFO_PLIST_SO
 readonly BUNDLE_IDENTIFIER
 readonly OUTPUT_APP="$DIST_DIR/$APP_NAME.app"
 readonly OUTPUT_DMG="$DIST_DIR/$APP_NAME.dmg"
+readonly ICON_SOURCE="$IDENTITY_DIR/$APP_NAME.icon"
 [[ -f "$ICON_SOURCE/icon.json" ]] || die "missing Icon Composer source: $ICON_SOURCE"
 cmp -s "$RELEASE_ICON_SOURCE/$ICON_GLYPH" "$ICON_SOURCE/$ICON_GLYPH" \
     || die "$APP_NAME icon glyph differs from the SpaceTerm icon glyph"
@@ -201,12 +201,12 @@ export MACOSX_DEPLOYMENT_TARGET=26.0
 # Leaves the SpaceTerm Dev identity; see ADR 0012.
 export SPACETERM_PACKAGED=1
 if [[ -n "$RELEASE_TAG" ]]; then
-    VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
+    VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
     export SPACETERM_RELEASE_TAG="$RELEASE_TAG"
-    SPACETERM_SPARKLE_DIR="$(python3 "$SCRIPT_DIR/prepare-sparkle-macos.py")"
+    SPACETERM_SPARKLE_DIR="$(python3 "$SCRIPT_DIR/prepare-sparkle.py")"
     export SPACETERM_SPARKLE_DIR
 else
-    VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --field bundle_version)"
+    VERSION="$(python3 "$REPO_ROOT/packaging/release-version.py" --field bundle_version)"
 fi
 readonly VERSION
 PACKAGE_VERSION="$VERSION"
@@ -231,7 +231,7 @@ METADATA_ARGS=(--version "$VERSION" --binaries "$BINARIES_DIR")
 if [[ -n "${SPACETERM_SPARKLE_DIR:-}" ]]; then
     METADATA_ARGS+=(--sparkle "$SPACETERM_SPARKLE_DIR")
 fi
-python3 "$SCRIPT_DIR/package-metadata-macos.py" "${METADATA_ARGS[@]}"
+python3 "$SCRIPT_DIR/package-metadata.py" "${METADATA_ARGS[@]}"
 
 TEMP_ROOT="$(mktemp -d "$DIST_DIR/.package.XXXXXX")"
 readonly TEMP_ROOT
@@ -253,7 +253,7 @@ VERIFY_ARGS=(--app "$STAGED_APP" --dmg "$STAGED_DMG")
 if [[ -n "$RELEASE_TAG" ]]; then
     VERIFY_ARGS+=(--release "$RELEASE_TAG")
 fi
-"$SCRIPT_DIR/verify-macos-package.sh" "${VERIFY_ARGS[@]}"
+"$SCRIPT_DIR/verify-package.sh" "${VERIFY_ARGS[@]}"
 
 rm -rf -- "$OUTPUT_APP"
 rm -f -- "$OUTPUT_DMG"
