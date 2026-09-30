@@ -151,14 +151,25 @@ released input.
 The Focused Pane presented alone while its Pane Layout remains intact.
 
 **Workspace Switcher**:
-The transient chooser for selecting an existing Workspace or naming a new Local Workspace or Remote Workspace.
+The transient chooser for selecting an existing Workspace or naming a new Workspace created with New
+Workspace, New Remote Workspace, Open Local Directory, or Open Remote Directory.
+
+**Open Local Directory**:
+The Command that chooses a local directory with the Directory Picker and creates a Local Workspace
+pinned to it. A Workspace already pinned to that directory is activated instead.
+
+**Open Remote Directory**:
+The Command that connects to an SSH Destination, chooses a directory there with the Directory
+Picker, and creates a Remote Workspace pinned to it. A Workspace already pinned to the same SSH
+Destination and Physical Directory Identity is activated instead, and dismissing the Directory
+Picker closes the connection.
 
 **Directory Picker**:
 The Command Palette chooser that browses one machine's directories to select a Workspace's Pinned
 Directory.
 
 **System Directory Selection**:
-The system chooser a Local Workspace's Directory Picker offers for selecting its Pinned Directory.
+The system chooser the Directory Picker offers on this machine for selecting a Pinned Directory.
 
 ## Workspace sources and remote identity
 
