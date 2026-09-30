@@ -355,6 +355,14 @@ impl ProgressBar {
         self.debug_selector = Some(selector.into());
         self
     }
+
+    /// Returns the installed track thickness at `size`, so an owner can reserve the bar's height.
+    pub(crate) fn thickness(size: ProgressSize, cx: &App) -> Pixels {
+        crate::floating_surface::hosted_progress_theme(cx)
+            .sizes
+            .metrics(size)
+            .bar_thickness
+    }
 }
 
 impl RenderOnce for ProgressBar {

@@ -2220,6 +2220,31 @@ fn replacing_items_should_keep_rows_above_a_visible_preferred_item_in_view(
 }
 
 #[gpui::test]
+fn loading_state_should_center_its_text_above_an_indeterminate_bar(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let area = cx.debug_bounds("command-palette-loading").unwrap();
+    let label = cx.debug_bounds("command-palette-loading-label").unwrap();
+    let bar = cx
+        .debug_bounds("command-palette-loading-progress-track")
+        .unwrap();
+    // A bar's track is a wide capsule; a ring's is square.
+    assert!(bar.size.width > bar.size.height * 4.0);
+    assert!(label.bottom() <= bar.top());
+    for center in [label.center().x, bar.center().x] {
+        assert!((center - panel.center().x).abs() <= px(0.5));
+    }
+    let above = label.top() - area.top();
+    let below = area.bottom() - bar.bottom();
+    assert!((above - below).abs() <= px(1.0));
+    assert!(bar.size.width < area.size.width);
+}
+
+#[gpui::test]
 fn loading_state_should_not_activate_a_hidden_stale_selection(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);

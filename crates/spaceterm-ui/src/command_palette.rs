@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::{
     ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
-    MenuPlacement, MenuPlacementConfig, ProgressRing, ProgressSize, ProgressState, TextInput,
+    MenuPlacement, MenuPlacementConfig, ProgressBar, ProgressSize, ProgressState, TextInput,
     TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
@@ -27,6 +27,8 @@ const COMMAND_PALETTE_ROLE: FloatingRole = FloatingRole::Command;
 const EMPTY_ACTION_SIZE: ButtonSize = ButtonSize::Regular;
 /// A description longer than this many lines is truncated rather than growing the panel.
 const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
+/// The loading state's visible text, which also names its progress bar.
+const LOADING_TEXT: &str = "Loading\u{2026}";
 
 actions!(
     spaceterm_command_palette,
@@ -1184,6 +1186,7 @@ pub struct CommandPaletteMetrics {
     empty_padding: Pixels,
     empty_line_gap: Pixels,
     empty_actions_gap: Pixels,
+    loading_bar_width: Pixels,
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
@@ -1223,6 +1226,7 @@ impl CommandPaletteMetrics {
             empty_padding: px(20.0),
             empty_line_gap: px(4.0),
             empty_actions_gap: px(14.0),
+            loading_bar_width: px(160.0),
             horizontal_padding: px(12.0),
             leading_width: px(18.0),
             gap: px(10.0),
@@ -1401,6 +1405,10 @@ impl CommandPaletteMetrics {
             empty_line_gap: crate::appearance::scale_metric(self.empty_line_gap, spacing_scale),
             empty_actions_gap: crate::appearance::scale_metric(
                 self.empty_actions_gap,
+                spacing_scale,
+            ),
+            loading_bar_width: crate::appearance::scale_metric(
+                self.loading_bar_width,
                 spacing_scale,
             ),
             horizontal_padding: crate::appearance::scale_metric(
@@ -3103,7 +3111,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .min((viewport.height - metrics.viewport_margin).max(px(0.0)));
 
         let content_height = if self.loading {
-            metrics.row_height
+            loading_state_height(metrics, cx)
         } else if self.matches.is_empty() {
             self.empty_state_height(panel_width, metrics, &font, window, cx)
         } else {
@@ -3410,7 +3418,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let paint = theme.paint;
         let metrics = theme.metrics;
         let content = if self.loading {
-            loading_row(metrics, paint).into_any_element()
+            loading_state(list_height, metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
             self.render_empty_state(theme, cx)
         } else {
@@ -3834,41 +3842,49 @@ fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl Into
         )
 }
 
-fn status_row(
-    text: impl Into<SharedString>,
-    debug_selector: &'static str,
-    metrics: CommandPaletteMetrics,
-    paint: CommandPalettePaint,
-) -> gpui::Div {
-    div()
-        .debug_selector(move || debug_selector.to_owned())
-        .w_full()
-        .h(metrics.row_height)
-        .px(metrics.content_leading_inset())
-        .flex()
-        .items_center()
-        .text_size(metrics.secondary_size)
-        .line_height(metrics.secondary_line_height)
-        .text_color(paint.muted)
-        .child(text.into())
+/// Measures the loading state: its text above a bar, with the empty state's padding and gap.
+fn loading_state_height(metrics: CommandPaletteMetrics, cx: &App) -> Pixels {
+    metrics.empty_padding * 2.0
+        + metrics.secondary_line_height
+        + metrics.empty_line_gap * 2.0
+        + ProgressBar::thickness(ProgressSize::Regular, cx)
 }
 
-/// Renders the status row shown while a caller's results are still arriving.
-///
-/// The label keeps the content edge the editor, the headings, the rows, and the no-results copy
-/// share, so the ring follows it at the row gap rather than pushing the words inward. The ring
-/// carries the activity and paints no words of its own, so the copy stays the row's only text.
-fn loading_row(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
-    status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
-        .gap(metrics.gap)
+/// Renders the state shown while a caller's results are still arriving: muted text above an
+/// indeterminate bar, centered in the results area. The bar is named by the visible text.
+fn loading_state(
+    height: Pixels,
+    metrics: CommandPaletteMetrics,
+    paint: CommandPalettePaint,
+) -> impl IntoElement {
+    div()
+        .debug_selector(|| "command-palette-loading".to_owned())
+        .w_full()
+        .h(height)
+        .px(metrics.content_leading_inset())
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(metrics.empty_line_gap * 2.0)
         .child(
-            ProgressRing::new(
-                "command-palette-loading-progress",
-                "Loading",
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector("command-palette-loading-progress"),
+            div()
+                .debug_selector(|| "command-palette-loading-label".to_owned())
+                .text_size(metrics.secondary_size)
+                .line_height(metrics.secondary_line_height)
+                .text_color(paint.muted)
+                .child(LOADING_TEXT),
+        )
+        .child(
+            div().w(metrics.loading_bar_width).max_w_full().child(
+                ProgressBar::new(
+                    "command-palette-loading-progress",
+                    LOADING_TEXT,
+                    ProgressState::Indeterminate,
+                )
+                .size(ProgressSize::Regular)
+                .debug_selector("command-palette-loading-progress"),
+            ),
         )
 }
 
