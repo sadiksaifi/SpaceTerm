@@ -541,6 +541,8 @@ shortcut_rows! {
     SwitchWorkspace => "switch-workspace",
     NewWorkspace => "new-workspace",
     NewRemoteWorkspace => "new-remote-workspace",
+    OpenLocalDirectory => "open-local-directory",
+    OpenRemoteDirectory => "open-remote-directory",
     CloseWorkspace => "close-workspace",
     ActivateWorkspace1 => "activate-workspace-1",
     ActivateWorkspace2 => "activate-workspace-2",

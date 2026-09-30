@@ -4061,8 +4061,8 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let workspace_id = manager.workspaces.active_workspace_id();
-            manager.transient.pin_target = Some(workspace_id);
-            manager.choose_local_pin_directory(workspace_id, window, cx);
+            manager.transient.pin_target = Some(PinTarget::Workspace(workspace_id));
+            manager.choose_local_pin_directory(PinTarget::Workspace(workspace_id), window, cx);
             // Selection validation retains its valid authority; activation independently fails.
             manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
                 crate::platform::local_filesystem::LocalFilesystemError::Capacity,
@@ -4125,6 +4125,170 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     assert_eq!(pinned, Some(project.clone()));
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
     fs::remove_dir_all(project).unwrap();
+}
+
+fn confirm_directory_picker_path(path: &str, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input(path);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+}
+
+fn active_local_pin(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> Option<PathBuf> {
+    manager.read_with(cx, |manager, _| {
+        match manager.workspaces.active_workspace().pinned_directory() {
+            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
+            _ => None,
+        }
+    })
+}
+
+#[gpui::test]
+fn open_local_directory_should_create_a_pinned_workspace_named_by_the_switcher_query(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_some()));
+    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
+        assert_eq!(manager.workspaces.active_workspace().name(), "fresh workspace");
+        assert!(manager.pin_picker.is_none());
+    });
+    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
+    let starts = records.starts();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts.last().unwrap().local_working_directory().unwrap().path(),
+        project.as_path()
+    );
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_directory(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local-existing");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
+    let path = format!("{}/", project.to_str().unwrap());
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&path, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
+        })
+    });
+
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&path, cx);
+
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
+    });
+    assert_eq!(records.starts().len(), 2);
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_create_nothing(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local-sidebar");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
+    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
+
+    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    let expected_name = project.file_name().unwrap().to_str().unwrap().to_owned();
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert_eq!(manager.workspaces.active_workspace().name(), expected_name);
+    });
+    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
+    assert_eq!(records.starts().len(), 2);
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    let flow = manager
+        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
+        .expect("Open Remote Directory should present the Remote Workspace flow");
+    assert_eq!(
+        flow.read_with(cx, |flow, _| (flow.stage(), flow.start())),
+        (
+            RemoteWorkspaceFlowStage::HostSelection,
+            RemoteWorkspaceStart::ChosenDirectory
+        )
+    );
+}
+
+#[gpui::test]
+fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_directory(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, cx) = workspace_manager(cx);
+    let mut closes = Vec::new();
+    for _ in 0..2 {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
+            })
+        });
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, completion_closes, _, _) =
+            remote_completion("work", "~/src", "/home/tester/src", true);
+        emit_remote_workspace_completion(&flow, completion.pinned_for_test(), cx);
+        closes.push(completion_closes);
+    }
+
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
+        assert!(manager.remote_workspace_flow.is_none());
+        assert_eq!(manager.remote_workspace_runtimes.len(), 1);
+        match manager.workspaces.active_workspace().pinned_directory() {
+            Some(PinnedDirectory::Remote { directory, identity }) => {
+                assert_eq!(directory.as_str(), "~/src");
+                assert_eq!(identity.as_str(), "/home/tester/src");
+            }
+            other => panic!("expected a Remote Pinned Directory, got {other:?}"),
+        }
+    });
+    let starts = records.starts();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts.last().unwrap().remote_launch_plan().unwrap().remote_directory().as_str(),
+        "~/src"
+    );
+    assert_eq!(closes[0].load(Ordering::Acquire), 0);
+    assert_eq!(closes[1].load(Ordering::Acquire), 1);
 }
 
 #[gpui::test]
@@ -6028,64 +6192,67 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
 
 /// The footer plus menu mirrors the switcher's creation rows.
 ///
-/// It opens as a button-triggered menu (not a filterable combo box) with the same labels the
-/// switcher offers, so the two creation paths cannot drift apart. Both surfaces build from the
-/// shared creation descriptors; disabled parity while Remote is unavailable is exercised by
-/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
+/// It opens as a button-triggered menu (not a filterable combo box) with the same rows in the same
+/// order the switcher offers, so the two creation paths cannot drift apart. Both surfaces build
+/// from the shared creation descriptors; disabled parity while Remote is unavailable is exercised
+/// by `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
 /// which rejects the Remote row on each surface.
 #[gpui::test]
 fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
     use crate::desktop_profile::testing_presentation;
-    use crate::ui::workspace_creation::{
-        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
-    };
-    use crate::ui::{NewRemoteWorkspace, NewWorkspace};
+    use crate::ui::workspace_creation::WorkspaceCreation;
 
     // The shared descriptor source both surfaces build from.
-    assert_eq!(LOCAL_WORKSPACE_LABEL, "Local Workspace");
-    assert_eq!(REMOTE_WORKSPACE_LABEL, "Remote Workspace");
     assert_eq!(
-        LOCAL_WORKSPACE_ICON,
-        spaceterm_ui::CustomIconName::RectangleStackBadgePlus
+        WorkspaceCreation::ALL.map(WorkspaceCreation::label),
+        [
+            "Local Workspace",
+            "Remote Workspace",
+            "Open Local Directory…",
+            "Open Remote Directory…",
+        ]
     );
+    let presentation = cx.update(|_| testing_presentation());
     assert_eq!(
-        REMOTE_WORKSPACE_ICON,
-        spaceterm_ui::CustomIconName::GlobePlus
+        WorkspaceCreation::ALL.map(|creation| creation.shortcut(&presentation)),
+        [
+            Some("Primary+N".into()),
+            Some("Primary+Shift+N".into()),
+            Some("Primary+O".into()),
+            Some("Primary+Shift+O".into()),
+        ]
     );
 
     let (_, _, cx) = workspace_manager(cx);
     open_workspace_switcher_for_creation(cx);
-    for selector in [
-        "workspace-switcher-create-local",
-        "workspace-switcher-create-remote",
-    ] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "missing switcher creation row: {selector}"
-        );
-    }
+    let switcher_rows = WorkspaceCreation::ALL.map(|creation| {
+        // Debug selectors are static; leaking four test strings is harmless.
+        let selector: &'static str = format!("workspace-switcher-{}", creation.selector()).leak();
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing switcher creation row: {selector}"))
+    });
+    assert!(switcher_rows.is_sorted_by_key(|row| row.top()));
+    assert!(
+        cx.debug_bounds("workspace-switcher-open-local-directory-group-separator")
+            .is_some(),
+        "the Open rows should start a separate switcher group"
+    );
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     click("new-workspace-button", cx);
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    for selector in [
-        "new-workspace-menu-create-local",
-        "new-workspace-menu-create-remote",
-    ] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "missing creation row: {selector}"
-        );
-    }
-    let presentation = cx.update(|_, _| testing_presentation());
-    assert_eq!(
-        presentation.shortcut(&NewWorkspace).as_deref(),
-        Some("Primary+N")
+    let [local, remote, open_local, open_remote] = WorkspaceCreation::ALL.map(|creation| {
+        // Debug selectors are static; leaking four test strings is harmless.
+        let selector: &'static str = format!("new-workspace-menu-{}", creation.selector()).leak();
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing creation row: {selector}"))
+    });
+    assert!([local, remote, open_local, open_remote].is_sorted_by_key(|row| row.top()));
+    assert!(
+        open_local.top() - remote.bottom() > remote.top() - local.bottom(),
+        "a separator should divide the New rows from the Open rows"
     );
-    assert_eq!(
-        presentation.shortcut(&NewRemoteWorkspace).as_deref(),
-        Some("Primary+Shift+N")
-    );
+    assert_eq!(open_remote.top() - open_local.bottom(), remote.top() - local.bottom());
 }
 
 #[gpui::test]
@@ -8403,7 +8570,9 @@ fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut T
         ("work", "fresh workspace"),
     ] {
         open_workspace_switcher_for_creation(cx);
-        click("workspace-switcher-create-remote", cx);
+        // The matching Workspaces push the creation rows below the switcher's visible rows.
+        cx.simulate_keystrokes("cmd-shift-n");
+        cx.run_until_parked();
         let flow = manager.read_with(cx, |manager, _| {
             manager.remote_workspace_flow.clone().unwrap()
         });

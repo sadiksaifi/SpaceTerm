@@ -51,7 +51,7 @@ macro_rules! commands {
         pub enum Command { $($command),+ }
 
         impl Command {
-            pub const ALL: [Self; 43] = [$(Self::$command),+];
+            pub const ALL: [Self; 45] = [$(Self::$command),+];
             pub const fn id(self) -> &'static str {
                 match self { $(Self::$command => $id),+ }
             }
@@ -78,6 +78,8 @@ commands! {
     SwitchWorkspace => ("switch_workspace", "Switch Workspace", Workspace, Application, crate::ui::SwitchWorkspace),
     NewWorkspace => ("new_workspace", "New Workspace", Workspace, Application, crate::ui::NewWorkspace),
     NewRemoteWorkspace => ("new_remote_workspace", "New Remote Workspace", Workspace, Application, crate::ui::NewRemoteWorkspace),
+    OpenLocalDirectory => ("open_local_directory", "Open Local Directory", Workspace, Application, crate::ui::OpenLocalDirectory),
+    OpenRemoteDirectory => ("open_remote_directory", "Open Remote Directory", Workspace, Application, crate::ui::OpenRemoteDirectory),
     CloseWorkspace => ("close_workspace", "Close Workspace", Workspace, Application, crate::ui::CloseWorkspace),
     ActivateWorkspace1 => ("activate_workspace1", "Workspace 1", Workspace, Workspace, crate::ui::ActivateWorkspace1),
     ActivateWorkspace2 => ("activate_workspace2", "Workspace 2", Workspace, Workspace, crate::ui::ActivateWorkspace2),

@@ -450,6 +450,12 @@
         "new_remote_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "open_local_directory": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "open_remote_directory": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "close_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },

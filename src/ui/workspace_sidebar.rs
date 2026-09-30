@@ -7,7 +7,8 @@ use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
-use super::{NewRemoteWorkspace, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
+use super::workspace_creation::WorkspaceCreation;
+use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{RemoteConnectionPhase, WorkspaceId};
@@ -42,8 +43,7 @@ pub(super) enum SidebarEvent {
         workspace_id: WorkspaceId,
         name: String,
     },
-    NewLocalWorkspace,
-    NewRemoteWorkspace,
+    Create(WorkspaceCreation),
     FocusChanged,
     LayoutChanged,
     FocusPane,
@@ -83,12 +83,6 @@ pub(super) enum WorkspaceMenuCommand {
 enum RowMenuCommand {
     Workspace(WorkspaceMenuCommand),
     Rename,
-}
-
-#[derive(Clone, Copy)]
-enum NewWorkspaceMenuCommand {
-    Local,
-    Remote,
 }
 
 struct WorkspaceRenameState {

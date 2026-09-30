@@ -496,9 +496,11 @@ pub(super) struct DirectoryPicker {
 impl EventEmitter<DirectoryPickerEvent> for DirectoryPicker {}
 
 impl DirectoryPicker {
-    /// Creates a closed picker for the machine `source` reaches.
+    /// Creates a closed picker for the machine `source` reaches, whose search line shows
+    /// `placeholder` until a path is typed.
     pub(super) fn new(
         source: Rc<dyn DirectorySource>,
+        placeholder: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -507,7 +509,7 @@ impl DirectoryPicker {
             .machine_name()
             .map(|machine| SharedString::from(format!("{machine}:")));
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new(placeholder, Vec::new(), window, cx);
             palette.set_query_prefix(prefix, cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
@@ -1346,6 +1348,8 @@ impl Render for DirectoryPicker {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
                     .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
+                    .capture_action(block_parent_action::<super::OpenLocalDirectory>)
+                    .capture_action(block_parent_action::<super::OpenRemoteDirectory>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)
@@ -1693,6 +1697,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 let picker = DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 );
@@ -2154,6 +2159,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 )
@@ -2196,6 +2202,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 )

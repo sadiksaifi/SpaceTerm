@@ -1,20 +1,89 @@
 //! Canonical descriptors for the Workspace creation rows.
 //!
-//! The sidebar footer menu and the Workspace switcher offer the same two rows
-//! (Local Workspace / Remote Workspace). Labels, icons, and shortcuts shared
-//! here cannot drift apart when one surface changes.
+//! The sidebar footer menu and the Workspace Switcher offer the same rows in the same order:
+//! the two New rows, then the two Open rows as a separate group. Labels, icons, selectors, and
+//! Commands shared here cannot drift apart when one surface changes.
 
-use gpui::SharedString;
+use gpui::{Action, SharedString};
 use spaceterm_ui::CustomIconName;
 
-/// Canonical label for the Local creation row on both surfaces.
-pub(crate) const LOCAL_WORKSPACE_LABEL: &str = "Local Workspace";
-/// Canonical label for the Remote creation row on both surfaces.
-pub(crate) const REMOTE_WORKSPACE_LABEL: &str = "Remote Workspace";
-/// Leading icon for the Local creation row on both surfaces.
-pub(crate) const LOCAL_WORKSPACE_ICON: CustomIconName = CustomIconName::RectangleStackBadgePlus;
-/// Leading icon for the Remote creation row on both surfaces.
-pub(crate) const REMOTE_WORKSPACE_ICON: CustomIconName = CustomIconName::GlobePlus;
+use crate::desktop_profile::DesktopPresentation;
+
+/// One way to create a Workspace from the sidebar footer menu or the Workspace Switcher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceCreation {
+    /// A Local Workspace at the local home directory.
+    Local,
+    /// A Remote Workspace at the remote home directory.
+    Remote,
+    /// A Local Workspace pinned to a directory chosen before creation.
+    OpenLocalDirectory,
+    /// A Remote Workspace pinned to a directory chosen after connecting.
+    OpenRemoteDirectory,
+}
+
+impl WorkspaceCreation {
+    /// Every creation row in presentation order.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Local,
+        Self::Remote,
+        Self::OpenLocalDirectory,
+        Self::OpenRemoteDirectory,
+    ];
+
+    /// The row label. Open rows end in an ellipsis because a chooser opens before creation.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local Workspace",
+            Self::Remote => "Remote Workspace",
+            Self::OpenLocalDirectory => "Open Local Directory…",
+            Self::OpenRemoteDirectory => "Open Remote Directory…",
+        }
+    }
+
+    pub(crate) const fn icon(self) -> CustomIconName {
+        match self {
+            Self::Local => CustomIconName::RectangleStackBadgePlus,
+            Self::Remote => CustomIconName::GlobePlus,
+            Self::OpenLocalDirectory => CustomIconName::FolderBadgePlus,
+            Self::OpenRemoteDirectory => CustomIconName::FolderBadgeGlobe,
+        }
+    }
+
+    /// Whether the row needs the Remote Workspace backend.
+    pub(crate) const fn is_remote(self) -> bool {
+        matches!(self, Self::Remote | Self::OpenRemoteDirectory)
+    }
+
+    /// Whether the row begins the Open group, separated from the New rows above it.
+    pub(crate) const fn starts_group(self) -> bool {
+        matches!(self, Self::OpenLocalDirectory)
+    }
+
+    /// The row's stable selector suffix, shared by both surfaces.
+    pub(crate) const fn selector(self) -> &'static str {
+        match self {
+            Self::Local => "create-local",
+            Self::Remote => "create-remote",
+            Self::OpenLocalDirectory => "open-local-directory",
+            Self::OpenRemoteDirectory => "open-remote-directory",
+        }
+    }
+
+    /// The displayed Shortcut of the Command that runs this row.
+    pub(crate) fn shortcut(self, presentation: &DesktopPresentation) -> Option<SharedString> {
+        presentation.shortcut(self.action().as_ref())
+    }
+
+    fn action(self) -> Box<dyn Action> {
+        match self {
+            Self::Local => Box::new(super::NewWorkspace),
+            Self::Remote => Box::new(super::NewRemoteWorkspace),
+            Self::OpenLocalDirectory => Box::new(super::OpenLocalDirectory),
+            Self::OpenRemoteDirectory => Box::new(super::OpenRemoteDirectory),
+        }
+    }
+}
 
 /// Trigger tooltip for the sidebar creation menu.
 ///

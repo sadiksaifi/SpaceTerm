@@ -57,6 +57,18 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "Open Local Directory…",
+        symbol: "folder",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
+        item: "Open Remote Directory…",
+        symbol: "network",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Switch Workspace",
         symbol: "magnifyingglass",
     },
@@ -319,6 +331,8 @@ fn file_menu() -> Menu {
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("New Remote Workspace", crate::ui::NewRemoteWorkspace),
+            MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
+            MenuItem::action("Open Remote Directory…", crate::ui::OpenRemoteDirectory),
             MenuItem::action("Switch Workspace", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
@@ -935,6 +949,8 @@ mod tests {
             [
                 NewWorkspace.name(),
                 crate::ui::NewRemoteWorkspace.name(),
+                crate::ui::OpenLocalDirectory.name(),
+                crate::ui::OpenRemoteDirectory.name(),
                 SwitchWorkspace.name(),
                 CreateTab.name(),
                 ClosePane.name(),
