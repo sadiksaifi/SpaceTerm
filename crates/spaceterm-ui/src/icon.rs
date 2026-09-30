@@ -518,6 +518,8 @@ fn text_alignment_offset_from_metrics(
 fn optical_artwork_size(source: IconSource, nominal_size: Pixels) -> Pixels {
     let scale = match source {
         IconSource::Lucide(IconName::PinOff) => 0.85,
+        IconSource::Lucide(IconName::Maximize2 | IconName::Minimize2) => 0.8,
+        IconSource::Lucide(IconName::Columns2 | IconName::Rows2) => 0.94,
         IconSource::Lucide(_) | IconSource::Custom(_) => 1.0,
     };
     gpui::px((f32::from(nominal_size) * scale).round())
@@ -785,15 +787,21 @@ mod tests {
     }
 
     #[test]
-    fn pin_off_optical_correction_preserves_the_nominal_layout_box() {
-        assert_eq!(
-            optical_artwork_size(IconSource::Lucide(IconName::PinOff), gpui::px(15.0)),
-            gpui::px(13.0)
-        );
-        assert_eq!(
-            optical_artwork_size(IconSource::Lucide(IconName::Pin), gpui::px(15.0)),
-            gpui::px(15.0)
-        );
+    fn optical_correction_preserves_the_nominal_layout_box() {
+        for (name, corrected) in [
+            (IconName::PinOff, 14.0),
+            (IconName::Maximize2, 13.0),
+            (IconName::Minimize2, 13.0),
+            (IconName::Columns2, 15.0),
+            (IconName::Rows2, 15.0),
+            (IconName::Pin, 16.0),
+            (IconName::X, 16.0),
+        ] {
+            assert_eq!(
+                optical_artwork_size(IconSource::Lucide(name), gpui::px(16.0)),
+                gpui::px(corrected)
+            );
+        }
     }
 
     #[test]

@@ -86,6 +86,11 @@ const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
 #[cfg(test)]
 const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
+/// How much narrower the gap before Close Pane is than every other Pane control gap.
+///
+/// The small Zoom Pane glyph and the open Close Pane glyph leave more air between their strokes, so
+/// the eye reads that gap as wider at the same measurement.
+const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
 #[cfg(test)]
@@ -206,7 +211,12 @@ impl CaptionLayout {
         let show_splits = width
             >= px(fixed_width
                 + PANE_CONTROL_LEADING_GAP * spacing_scale
-                + controls_width(full_control_count, control_size, spacing_scale));
+                + controls_width(
+                    full_control_count,
+                    has_multiple_panes,
+                    control_size,
+                    spacing_scale,
+                ));
         let control_count = usize::from(show_splits) * 2 + usize::from(has_multiple_panes) * 2;
         let leading_gap = if control_count == 0 {
             0.0
@@ -216,7 +226,12 @@ impl CaptionLayout {
         let available = (width
             - px(fixed_width
                 + leading_gap
-                + controls_width(control_count, control_size, spacing_scale)))
+                + controls_width(
+                    control_count,
+                    has_multiple_panes,
+                    control_size,
+                    spacing_scale,
+                )))
         .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
@@ -252,11 +267,13 @@ fn origin_account(user: &gpui::SharedString) -> gpui::SharedString {
     format!("{user}@").into()
 }
 
-const fn controls_width(count: usize, control_size: f32, spacing_scale: f32) -> f32 {
+const fn controls_width(count: usize, closes: bool, control_size: f32, spacing_scale: f32) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    count as f32 * control_size + (count - 1) as f32 * PANE_CONTROL_GAP * spacing_scale
+    let close_trim = if closes { PANE_CLOSE_OPTICAL_TRIM } else { 0.0 };
+    let gaps = (count - 1) as f32 * PANE_CONTROL_GAP - close_trim;
+    count as f32 * control_size + gaps * spacing_scale
 }
 
 fn measure_caption_segment(
@@ -277,8 +294,10 @@ fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
         + PANE_CONTROL_LEADING_GAP)
         * appearance.spacing_scale
         + f32::from(appearance.icons.metrics(IconRole::Status).glyph_size)
+        // A single Pane's two split controls have no Close Pane trim and set the wider minimum.
         + controls_width(
             2,
+            false,
             f32::from(
                 appearance
                     .icons
@@ -2106,31 +2125,38 @@ fn render_pane_caption_content(
         let host = host.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
         let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
-        controls = controls.child(
-            IconButton::new(
-                gpui::SharedString::from(id.clone()),
-                name,
-                move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
+        let button = IconButton::new(
+            gpui::SharedString::from(id.clone()),
+            name,
+            move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
+        )
+        .variant(ButtonVariant::Bare)
+        .disabled(!caption_action_available)
+        .contextual_style(control_style, gpui_color(paint.focus))
+        .size(ButtonSize::Compact)
+        .preserve_ancestor_hover()
+        .debug_selector(id.clone())
+        .tooltip(
+            Tooltip::new(gpui::SharedString::from(format!("{id}-tooltip")), name)
+                .keyboard_equivalent(shortcut.unwrap_or_default()),
+        )
+        .on_activate(move |_, window, cx| {
+            if !caption_action_available {
+                return;
+            }
+            let _ = host.update(cx, |host, cx| {
+                host.perform_caption_action(action, pane_id, window, cx);
+            });
+        });
+        controls = if matches!(action, PaneCaptionAction::Close) {
+            controls.child(
+                div()
+                    .ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
+                    .child(button),
             )
-            .variant(ButtonVariant::Bare)
-            .disabled(!caption_action_available)
-            .contextual_style(control_style, gpui_color(paint.focus))
-            .size(ButtonSize::Compact)
-            .preserve_ancestor_hover()
-            .debug_selector(id.clone())
-            .tooltip(
-                Tooltip::new(gpui::SharedString::from(format!("{id}-tooltip")), name)
-                    .keyboard_equivalent(shortcut.unwrap_or_default()),
-            )
-            .on_activate(move |_, window, cx| {
-                if !caption_action_available {
-                    return;
-                }
-                let _ = host.update(cx, |host, cx| {
-                    host.perform_caption_action(action, pane_id, window, cx);
-                });
-            }),
-        );
+        } else {
+            controls.child(button)
+        };
     }
     let mut caption_content = div()
         .flex_1()
@@ -3329,6 +3355,12 @@ mod tests {
             );
             assert!(caption.contains(&button.origin) && caption.contains(&button.bottom_right()));
         }
+        let zoom = cx.debug_bounds("pane-toggle-zoom-2").unwrap();
+        let close = cx.debug_bounds("pane-close-2").unwrap();
+        assert_eq!(
+            close.left() - zoom.right(),
+            px(PANE_CONTROL_GAP - PANE_CLOSE_OPTICAL_TRIM)
+        );
         click_caption_control("pane-toggle-zoom-2", cx);
         assert_eq!(
             host.read_with(cx, |host, _| host.zoom_state()),
@@ -3803,7 +3835,7 @@ mod tests {
             + PANE_CAPTION_RIGHT_PADDING
             + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
-            + controls_width(2, PANE_CONTROL_SIZE, 1.0);
+            + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
         let layout = |separator, host, directory, user, label| CaptionLayout {
             show_status_separator: separator,
             show_host: host,
@@ -3851,7 +3883,7 @@ mod tests {
             + PANE_CAPTION_RIGHT_PADDING
             + PANE_STATUS_WIDTH
             + PANE_CONTROL_LEADING_GAP
-            + controls_width(2, PANE_CONTROL_SIZE, 1.0);
+            + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
         let resolve = |width: f32| {
             CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
         };
