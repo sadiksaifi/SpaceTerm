@@ -135,7 +135,7 @@ unsafe extern "C" {
     fn CFRelease(value: *const c_void);
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) mod tests {
     use super::*;
     use crate::keybindings::{

@@ -185,7 +185,7 @@ impl SshProcessExitWait for NativeExitWait {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;

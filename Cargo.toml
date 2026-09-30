@@ -41,20 +41,20 @@ resolver = "2"
 [features]
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
 default = ["developer-tools"]
-macos-native-tests = []
+native-tests = []
 developer-tools = ["spaceterm-ui/control-preview"]
 
 [[test]]
 name = "macos_quick_look_ownership"
 path = "tests/macos_quick_look_ownership.rs"
 harness = false
-required-features = ["macos-native-tests"]
+required-features = ["native-tests"]
 
 [[test]]
 name = "macos_native_main_thread"
 path = "tests/macos_native_main_thread.rs"
 harness = false
-required-features = ["macos-native-tests"]
+required-features = ["native-tests"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

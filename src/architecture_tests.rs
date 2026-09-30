@@ -378,7 +378,7 @@ fn native_suite_gate(line: &str) -> bool {
         .collect();
     matches!(
         compact.as_str(),
-        "#[cfg(all(test,target_os=\"macos\",feature=\"macos-native-tests\"))]"
+        "#[cfg(all(test,target_os=\"macos\",feature=\"native-tests\"))]"
     )
 }
 
@@ -392,7 +392,7 @@ fn positive_macos_source_gate(line: &str) -> bool {
         "#[cfg(target_os=\"macos\")]"
             | "#[cfg(all(target_os=\"macos\",not(test)))]"
             | "#[cfg(all(target_os=\"macos\",test))]"
-            | "#[cfg(all(test,target_os=\"macos\",feature=\"macos-native-tests\"))]"
+            | "#[cfg(all(test,target_os=\"macos\",feature=\"native-tests\"))]"
     )
 }
 
@@ -486,16 +486,16 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         );
     }
     for wiring in [
-        "#[cfg(all(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
-        "#[cfg(all(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
     ] {
         assert!(native_verification_dependency(&portable_verification_source(wiring)).is_none());
     }
     for wiring in [
         "#[cfg(test)]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
         "#[cfg(target_os = \"macos\")]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
-        "#[cfg(all(target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
-        "#[cfg(any(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(any(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
     ] {
         assert!(native_verification_dependency(&portable_verification_source(wiring)).is_some());
     }
@@ -552,7 +552,7 @@ fn macos_source_modules_are_target_gated_while_portable_policy_is_not() {
         "#[cfg(not(target_os = \"macos\"))]",
         "#[cfg(any(target_os = \"macos\", test))]",
         "// target_os = \"macos\"",
-        "#[cfg(feature = \"macos-native-tests\")] // target_os = \"macos\"",
+        "#[cfg(feature = \"native-tests\")] // target_os = \"macos\"",
     ] {
         assert!(!positive_macos_source_gate(invalid), "accepted {invalid}");
     }
@@ -706,7 +706,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
     }
     let pasteboard = std::fs::read_to_string(root.join("platform/macos_pasteboard.rs")).unwrap();
     let production = pasteboard
-        .split("#[cfg(all(test, feature = \"macos-native-tests\"))]")
+        .split("#[cfg(all(test, feature = \"native-tests\"))]")
         .next()
         .unwrap();
     assert!(!production.contains("LocalPathSemantics::Posix"));
@@ -742,7 +742,7 @@ fn main_thread_runner_lists_every_native_platform_fixture() {
     for path in files {
         let source = std::fs::read_to_string(&path).unwrap();
         let Some((_, fixtures)) =
-            source.split_once("#[cfg(all(test, feature = \"macos-native-tests\"))]")
+            source.split_once("#[cfg(all(test, feature = \"native-tests\"))]")
         else {
             continue;
         };

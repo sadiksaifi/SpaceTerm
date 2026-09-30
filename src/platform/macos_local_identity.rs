@@ -35,7 +35,7 @@ impl LocalIdentitySource for MacosLocalIdentity {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
     use std::ffi::CString;

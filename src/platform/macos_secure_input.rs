@@ -34,7 +34,7 @@ unsafe extern "C" {
     fn DisableSecureEventInput() -> i32;
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
 

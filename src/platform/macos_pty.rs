@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ use crate::platform::native_pty::{
     NativePtyTermination, NativePtyWaitFailure,
 };
 use crate::platform::shell_launch::PreparedShellLaunch;
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 use crate::platform::shell_launch::ShellLaunchPlanner;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -28,16 +28,16 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 // Real PTY cases fork nested test executables and login shells while asserting subsecond process-
 // group cleanup. Serial execution keeps those OS-backed cases independent of runner scheduling.
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 static REAL_PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
     REAL_PTY_TEST_LOCK
         .lock()
         .expect("a previous real PTY test panicked while it owned OS process resources")
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn isolate_real_pty_test(test_name: &str) -> bool {
     const CHILD_TEST: &str = "SPACETERM_ISOLATED_REAL_PTY_TEST";
     if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
@@ -168,7 +168,7 @@ struct ChildTermination {
 }
 
 impl ChildTermination {
-    #[cfg(all(test, feature = "macos-native-tests"))]
+    #[cfg(all(test, feature = "native-tests"))]
     fn new(process_group: Option<i32>, fallback: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
             target: Mutex::new(Some(TerminationTarget {
@@ -939,7 +939,7 @@ fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
     command
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn conformance_initialization_observation() -> String {
     let launch = ShellLaunchPlanner::for_test(
         "/bin/zsh".into(),
@@ -979,7 +979,7 @@ pub(crate) fn conformance_initialization_observation() -> String {
     )
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn conformance_shutdown_observation() -> String {
     use std::sync::atomic::AtomicUsize;
 
@@ -1021,7 +1021,7 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use std::collections::HashMap;
     use std::env;

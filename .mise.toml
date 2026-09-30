@@ -304,7 +304,7 @@ run = "./scripts/test-cargo-artifacts.sh"
 
 [tasks."test:macos"]
 description = "Run native macOS Adapter tests"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked macos"
 
 [tasks."test:updater:macos"]
 description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"

@@ -193,14 +193,14 @@ pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
 
 pub(crate) mod locale;
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[path = "macos_adapter_tests/mod.rs"]
 pub(crate) mod macos_adapter_tests;
 
 #[cfg(test)]
 pub(crate) mod testing;
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[allow(dead_code)]
 pub(crate) mod native_main_thread_tests;
 

@@ -271,7 +271,7 @@ impl SecureFilesystem for RecordingFilesystem {
             .remove(&Self::path(directory)?.join(name));
         Ok(())
     }
-    #[cfg(feature = "macos-native-tests")]
+    #[cfg(feature = "native-tests")]
     fn create_private_artifact(
         &self,
         _: &SecureDirectory,

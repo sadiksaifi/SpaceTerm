@@ -2288,6 +2288,6 @@ fn join_worker(worker: JoinHandle<()>) {
 #[path = "session/tests.rs"]
 mod tests;
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 #[path = "../platform/macos_adapter_tests/session.rs"]
 mod macos_adapter_tests;
