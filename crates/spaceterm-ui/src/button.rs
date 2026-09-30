@@ -915,8 +915,15 @@ impl Button {
     }
 
     pub(crate) fn modal_focus_handle(mut self, focus_handle: FocusHandle) -> Self {
-        self.core.modal_focus_handle = Some(focus_handle);
+        self.core.injected_focus_handle = Some(focus_handle);
         self.core.tab_stop = true;
+        self
+    }
+
+    /// Tracks keyboard focus with `focus_handle`, which the button's owner retains across frames,
+    /// instead of a handle the button creates.
+    pub(crate) fn focus_handle(mut self, focus_handle: FocusHandle) -> Self {
+        self.core.injected_focus_handle = Some(focus_handle);
         self
     }
 
@@ -939,19 +946,6 @@ impl Button {
     pub(crate) fn joined_edge(mut self, edge: JoinedEdge) -> Self {
         self.core.joined_edge = edge;
         self
-    }
-
-    /// Whether the button holds keyboard focus, read from the state it keeps under its id, so a
-    /// control composing the button can paint the focused part last.
-    pub(crate) fn is_focused(&self, window: &mut Window, cx: &mut App) -> bool {
-        let modal_focus_handle = self.core.modal_focus_handle.clone();
-        window
-            .use_keyed_state(self.core.id.clone(), cx, move |window, cx| {
-                ButtonState::new(modal_focus_handle, window, cx)
-            })
-            .read(cx)
-            .focus_handle
-            .is_focused(window)
     }
 
     /// Adds leading noninteractive content rendered with the resolved foreground color.
@@ -1266,7 +1260,7 @@ struct ButtonCore {
     debug_selector: Option<String>,
     tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
-    modal_focus_handle: Option<FocusHandle>,
+    injected_focus_handle: Option<FocusHandle>,
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
     preserve_ancestor_hover: bool,
@@ -1293,7 +1287,7 @@ impl ButtonCore {
             debug_selector: None,
             tooltip: None,
             on_activate: None,
-            modal_focus_handle: None,
+            injected_focus_handle: None,
             modal_borderless: false,
             modal_press_owner: None,
             preserve_ancestor_hover: false,
@@ -1339,9 +1333,9 @@ impl ButtonCore {
     ) -> impl IntoElement {
         let font = crate::control_typography(cx).regular().clone();
         let enabled = !self.disabled && self.on_activate.is_some();
-        let modal_focus_handle = self.modal_focus_handle.clone();
+        let injected_focus_handle = self.injected_focus_handle.clone();
         let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
-            ButtonState::new(modal_focus_handle, window, cx)
+            ButtonState::new(injected_focus_handle, window, cx)
         });
         if !enabled && state.read(cx).focus_handle.is_focused(window) {
             window.blur(cx);

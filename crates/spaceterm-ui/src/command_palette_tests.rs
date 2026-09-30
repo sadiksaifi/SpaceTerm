@@ -1460,14 +1460,6 @@ fn a_primary_action_menu_should_join_the_button_and_report_its_choice(cx: &mut T
         cx.debug_bounds("primary-pin-keyboard-focus").is_some(),
         "the primary segment did not take focus"
     );
-    assert_eq!(
-        (
-            cx.debug_bounds("primary-pin"),
-            cx.debug_bounds("primary-pin-menu")
-        ),
-        (Some(button), Some(menu)),
-        "painting the focused segment last moved the segments"
-    );
 
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
@@ -1524,6 +1516,56 @@ fn down_on_the_focused_menu_segment_should_open_the_menu_and_keep_the_selection(
         palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
         Some(1),
         "Down moved the list selection"
+    );
+}
+
+#[gpui::test]
+fn disabling_the_focused_primary_action_should_keep_escape_cancellation(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("open", "Open").debug_selector("primary-open")),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("primary-open-keyboard-focus").is_some(),
+        "the primary action did not take focus"
+    );
+
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(
+                CommandPalettePrimaryAction::new("open", "Open")
+                    .debug_selector("primary-open")
+                    .disabled(true),
+            ),
+            cx,
+        );
+        palette.set_dismissible(false, cx);
+        palette.set_escape_cancellable(true, cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| {
+            palette
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }),
+        "the query did not take focus from the disabled primary action"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !palette.read_with(cx, |palette, _| palette.is_open()),
+        "Escape did not cancel the palette"
     );
 }
 

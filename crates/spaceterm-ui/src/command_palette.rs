@@ -1544,6 +1544,9 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     coordinator_registration: Option<CommandPaletteRegistration>,
     input: Entity<TextInput>,
     focus_scope: gpui::FocusHandle,
+    /// The primary action's focus, retained so a disabled primary action can return focus to the
+    /// query instead of leaving the window without a focused element.
+    primary_action_focus: gpui::FocusHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     restore_focus: Option<WeakFocusHandle>,
     restore_on_activation: Option<WeakFocusHandle>,
@@ -1962,6 +1965,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             coordinator_registration: None,
             input,
             focus_scope,
+            primary_action_focus: cx.focus_handle(),
             scrollbar,
             restore_focus: None,
             restore_on_activation: None,
@@ -3040,6 +3044,16 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         {
             return div().into_any_element();
         }
+        // A disabled button gives up focus. The query takes it, so the palette's keys, such as
+        // Escape during a cancellable operation, keep reaching the palette.
+        if self
+            .primary_action
+            .as_ref()
+            .is_some_and(|action| action.disabled)
+            && self.primary_action_focus.is_focused(window)
+        {
+            self.input.read(cx).focus_handle().focus(window, cx);
+        }
         let theme = command_palette_theme(cx);
         let collection_focused = self.focus_scope.contains_focused(window, cx);
         let metrics = theme.metrics;
@@ -3505,7 +3519,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 )
             })
             .when_some(self.primary_action.as_ref(), |editor, action| {
-                editor.child(render_primary_action(palette.clone(), action))
+                editor.child(render_primary_action(
+                    palette.clone(),
+                    action,
+                    self.primary_action_focus.clone(),
+                ))
             })
             .into_any_element()
     }
@@ -3699,6 +3717,7 @@ fn render_header_action<I: Clone + Eq + 'static>(
 fn render_primary_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     action: &CommandPalettePrimaryAction,
+    focus_handle: gpui::FocusHandle,
 ) -> AnyElement {
     let id = action.id.clone();
     let menu_palette = palette.clone();
@@ -3719,6 +3738,7 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     .size(ButtonSize::Small)
     .disabled(action.disabled)
     .menu_disabled(action.menu_disabled)
+    .focus_handle(focus_handle)
     .tab_stop(true)
     .placement(MenuPlacementConfig::new(
         MenuPlacement::Bottom,

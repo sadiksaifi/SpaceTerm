@@ -1290,6 +1290,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
 pub struct ComboButton<A: Clone + 'static> {
     button: Button,
     menu: MenuControl<A>,
+    focus_handle: Option<FocusHandle>,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1313,6 +1314,7 @@ impl<A: Clone + 'static> ComboButton<A> {
                 TriggerKind::Menu,
             ),
             button: Button::new(id, label),
+            focus_handle: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
@@ -1349,6 +1351,13 @@ impl<A: Clone + 'static> ComboButton<A> {
     /// Controls whether the menu segment can open, independently of the primary command.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu.disabled = disabled;
+        self
+    }
+
+    /// Tracks the primary segment's keyboard focus with `focus_handle`, which the owner retains
+    /// across frames, so the owner can tell when the segment holds focus.
+    pub(crate) fn focus_handle(mut self, focus_handle: FocusHandle) -> Self {
+        self.focus_handle = Some(focus_handle);
         self
     }
 
@@ -1394,6 +1403,9 @@ impl<A: Clone + 'static> ComboButton<A> {
 
 impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(focus_handle) = self.focus_handle.take() {
+            self.button = self.button.focus_handle(focus_handle);
+        }
         if self.menu.entries.is_empty() {
             return self.button.into_any_element();
         }
@@ -1437,18 +1449,15 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             ))
             .into_any_element();
         self.menu.button_segment = Some(style);
-        let primary_focused = self.button.is_focused(window, cx);
         let button = self.button.joined_edge(JoinedEdge::Trailing);
         let menu = self.menu.render(content, window, cx);
-        // A focus ring reaches past its segment's edge, so the focused segment paints last to keep
-        // its ring above the neighboring segment. Reversing the row keeps the visual order.
-        let row = div().flex().flex_shrink_0().items_center();
-        if primary_focused {
-            row.flex_row_reverse().child(menu).child(button)
-        } else {
-            row.child(button).child(menu)
-        }
-        .into_any_element()
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .child(button)
+            .child(menu)
+            .into_any_element()
     }
 }
 
