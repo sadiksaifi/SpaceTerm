@@ -36,11 +36,13 @@ fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
     )
     .unwrap();
     let runner = SshRemoteUtilityProcessRunner::new(MacOsSshProcessAdapter, environment);
+    let sessions = RemoteUtilitySessionLimit::new(1);
     let mut future = Box::pin(runner.run(
         command,
         Vec::new(),
         MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
         SshCancellationToken::default(),
+        block_on_external(sessions.acquire()),
     ));
     let mut context = Context::from_waker(Waker::noop());
 
@@ -62,17 +64,18 @@ fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
 
     drop(future);
 
-    let terminated = (0..100).any(|_| {
-        // SAFETY: signal zero checks process existence and dereferences no pointers.
-        let missing = unsafe { libc::kill(process, 0) } == -1
-            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        if !missing {
+    let released = (0..100).any(|_| {
+        let released = !sessions.available.is_empty();
+        if !released {
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
-        missing
+        released
     });
+    // SAFETY: signal zero checks process existence and dereferences no pointers.
+    let terminated = unsafe { libc::kill(process, 0) } == -1
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     let _ = fs::remove_file(pid_file);
-    assert!(terminated);
+    assert!(released && terminated);
 }
 
 #[test]
@@ -98,6 +101,7 @@ fn completed_native_utility_should_not_cancel_the_reusable_client_token() {
         b"printf ok\n".to_vec(),
         MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
         cancellation.clone(),
+        block_on_external(RemoteUtilitySessionLimit::new(1).acquire()),
     ))
     .unwrap();
 
@@ -522,6 +526,7 @@ fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
         Vec::new(),
         MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
         SshCancellationToken::default(),
+        block_on_external(RemoteUtilitySessionLimit::new(1).acquire()),
     ))
     .unwrap_err();
 

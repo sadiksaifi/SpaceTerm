@@ -23,6 +23,11 @@ const MAXIMUM_REMOTE_DIRECTORY_NAMES: usize = 1024;
 const MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED: usize = 1024;
 const MAXIMUM_REMOTE_PATH_BYTES: usize = 4096;
 const UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Concurrent utility sessions allowed on one Control Connection.
+///
+/// OpenSSH servers refuse sessions beyond `MaxSessions`, 10 by default, and Terminal Session
+/// Channels share that limit. Two sessions let a listing and an exact-path probe run together.
+pub(crate) const MAXIMUM_REMOTE_UTILITY_SESSIONS: usize = 2;
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
 
 /// Content-free exit status plus bounded untrusted stdout from one utility process.
@@ -64,13 +69,54 @@ pub(crate) enum RemoteUtilityRunError {
 /// termination and reaping, and never log, persist, or interpret untrusted remote bytes.
 pub(crate) trait SshRemoteUtilityRunner: Send + Sync + 'static {
     /// Runs one owned script with no TTY and a request-scoped cancellation token.
+    ///
+    /// The runner holds `session` until the process has exited and been reaped, including after
+    /// the returned future is dropped.
     fn run(
         &self,
         command: Arc<SshCommandSpec>,
         script: Vec<u8>,
         maximum_output_bytes: usize,
         cancellation: SshCancellationToken,
+        session: RemoteUtilitySession,
     ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send;
+}
+
+/// Admits at most [`MAXIMUM_REMOTE_UTILITY_SESSIONS`] utility processes on one Control Connection.
+///
+/// Waiting requests are admitted in arrival order. A dropped waiting request gives up its place.
+struct RemoteUtilitySessionLimit {
+    available: async_channel::Receiver<()>,
+    release: async_channel::Sender<()>,
+}
+
+impl RemoteUtilitySessionLimit {
+    fn new(maximum_sessions: usize) -> Self {
+        let (release, available) = async_channel::bounded(maximum_sessions);
+        for _ in 0..maximum_sessions {
+            let _ = release.try_send(());
+        }
+        Self { available, release }
+    }
+
+    async fn acquire(&self) -> RemoteUtilitySession {
+        // The limit owns a sender, so the channel stays open while anyone can wait on it.
+        let _ = self.available.recv().await;
+        RemoteUtilitySession {
+            release: self.release.clone(),
+        }
+    }
+}
+
+/// One admitted utility session. Dropping it frees the session for the next request.
+pub(crate) struct RemoteUtilitySession {
+    release: async_channel::Sender<()>,
+}
+
+impl Drop for RemoteUtilitySession {
+    fn drop(&mut self) {
+        let _ = self.release.try_send(());
+    }
 }
 
 /// A reusable utility channel command created only by the centralized SSH command policy.
@@ -147,6 +193,7 @@ impl<A: SshProcessAdapter> SshRemoteUtilityRunner for SshRemoteUtilityProcessRun
         script: Vec<u8>,
         maximum_output_bytes: usize,
         cancellation: SshCancellationToken,
+        session: RemoteUtilitySession,
     ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
     {
         let environment = self.environment.clone();
@@ -171,6 +218,7 @@ impl<A: SshProcessAdapter> SshRemoteUtilityRunner for SshRemoteUtilityProcessRun
                     )
                     .map(|output| RemoteUtilityProcessOutput::new(output.exit, output.stdout))
                     .map_err(map_captured_process_error);
+                    drop(session);
                     let _ = sender.send_blocking(result);
                 })
                 .map_err(|_| RemoteUtilityRunError::WorkerUnavailable)?;
@@ -301,10 +349,12 @@ pub(crate) enum RemoteDirectoryProbe {
 /// Each operation validates live control authority, request size, output size, UTF-8, frame
 /// version, field lengths, row counts, and operation kind. Raw output is never retained in errors.
 /// Session and request cancellation are linked before the runner receives process ownership.
+/// Requests beyond [`MAXIMUM_REMOTE_UTILITY_SESSIONS`] wait for an earlier process to exit.
 pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
     command: PreparedSshRemoteUtilityCommand,
     runner: Arc<R>,
     cancellation: SshCancellationToken,
+    sessions: RemoteUtilitySessionLimit,
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
@@ -318,6 +368,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             command,
             runner,
             cancellation,
+            sessions: RemoteUtilitySessionLimit::new(MAXIMUM_REMOTE_UTILITY_SESSIONS),
         }
     }
 
@@ -443,6 +494,10 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         if script.len() > MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES {
             return Err(RemoteUtilityError::RequestTooLarge);
         }
+        let session = self.sessions.acquire().await;
+        if self.cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+            return Err(RemoteUtilityError::Cancelled);
+        }
         let request_cancellation =
             SshCancellationToken::linked(&self.cancellation, &request_cancellation);
         let operation_cancellation = match &self.command.capability {
@@ -461,6 +516,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
                 script,
                 MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
                 operation_cancellation,
+                session,
             )
             .await
             .map_err(|error| match error {
@@ -1039,6 +1095,7 @@ mod tests {
             script: Vec<u8>,
             _maximum_output_bytes: usize,
             _cancellation: SshCancellationToken,
+            _session: RemoteUtilitySession,
         ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
         {
             let result = {

@@ -238,7 +238,8 @@ mod tests {
     use crate::ssh::command::{SshCommandContext, SshCommandSpec};
     use crate::ssh::process::ProcessExit;
     use crate::ssh::remote_utility::{
-        RemoteUtilityProcessOutput, RemoteUtilityRunError, SshRemoteUtilityRunner,
+        RemoteUtilityProcessOutput, RemoteUtilityRunError, RemoteUtilitySession,
+        SshRemoteUtilityRunner,
     };
 
     struct FakeRunner {
@@ -257,6 +258,7 @@ mod tests {
             _script: Vec<u8>,
             _maximum_output_bytes: usize,
             cancellation: SshCancellationToken,
+            _session: RemoteUtilitySession,
         ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
         {
             self.cancellations.lock().unwrap().push(cancellation);
@@ -289,6 +291,7 @@ mod tests {
             _script: Vec<u8>,
             _maximum_output_bytes: usize,
             _cancellation: SshCancellationToken,
+            _session: RemoteUtilitySession,
         ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
         {
             let output = self.outputs.lock().unwrap().pop_front().unwrap();
