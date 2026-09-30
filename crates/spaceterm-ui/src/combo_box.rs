@@ -3129,7 +3129,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         })
         .when_some(row_paint, |row, paint| {
             row.bg(paint.background)
-                .border(theme.metrics.border_width)
+                .border(row_border_width(theme))
                 .border_color(paint.border)
         })
         .when(!item.disabled, |row| {
@@ -3347,6 +3347,15 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     }
 }
 
+/// The border every row carries when the theme paints rows; it insets the row's content.
+fn row_border_width(theme: ComboBoxTheme) -> Pixels {
+    if theme.paint.rows.is_some() {
+        theme.metrics.border_width
+    } else {
+        px(0.0)
+    }
+}
+
 /// The font rows render keyboard equivalents in, shared with the width measurement so a
 /// row-driven panel is exactly as wide as its widest rendered row.
 fn combo_box_shortcut_font(typography: &crate::ControlTypography) -> &gpui::Font {
@@ -3380,6 +3389,7 @@ fn natural_menu_width<I, C>(
     };
     let fixed = theme.metrics.border_width * 2.0
         + theme.metrics.panel_padding * 2.0
+        + row_border_width(theme) * 2.0
         + theme.metrics.horizontal_padding * 2.0;
     let widest = items.iter().fold(px(0.0), |widest, item| {
         let leading = columns
@@ -3412,7 +3422,9 @@ fn natural_menu_width<I, C>(
         });
         widest.max(fixed + leading + text + accessory + shortcut)
     });
+    // Layout snaps to device pixels; round up so snapping never clips the widest label.
     widest
+        .ceil()
         .max(px(MENU_MINIMUM_WIDTH))
         .min(px(MENU_MAXIMUM_WIDTH))
 }

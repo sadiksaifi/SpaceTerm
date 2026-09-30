@@ -54,6 +54,7 @@ struct TestRoot {
     other_focus: FocusHandle,
     show_combo_box: bool,
     right_to_left: bool,
+    menu_with_filter_header: bool,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     underlay_presses: Rc<Cell<usize>>,
 }
@@ -108,6 +109,11 @@ impl Render for TestRoot {
                 window_was_open: window_combo_box_is_open(window, cx),
             });
         });
+        let combo_box = if self.menu_with_filter_header {
+            combo_box.menu_with_filter_header()
+        } else {
+            combo_box
+        };
 
         div()
             .relative()
@@ -873,6 +879,7 @@ fn combo_box_window(
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
         right_to_left: false,
+        menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
     });
@@ -902,6 +909,7 @@ fn command_combo_box_window(
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
         right_to_left: false,
+        menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
     });
@@ -1768,6 +1776,61 @@ fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigatio
             .iter()
             .all(|event| !matches!(event, RecordedEvent::Accepted { item_id: 1, .. })),
         "the painted preview must not make its disabled item navigable or acceptable",
+    );
+}
+
+#[gpui::test]
+fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
+    cx: &mut TestAppContext,
+) {
+    let label = "Open Remote Directory on Another Host…";
+    let items = vec![ComboBoxItem::new(1, label).shortcut("⇧⌘O")];
+    let (root, _, _, cx) = combo_box_window(cx, None, items, false);
+    let color = rgba(0x101010ff);
+    let row = crate::ListRowPaint::new(color, color, color, color, color, color);
+    let label_size = px(12.0);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                color, color, color, color, color, color, color, color, color,
+            )
+            .rows(crate::ListRowPaints::new(row, row, row, row, row)),
+            ComboBoxMetrics::new(px(240.0), px(40.0)).font_sizes(label_size, px(11.0)),
+        ));
+        window.refresh();
+    });
+    root.update(cx, |root, cx| {
+        root.menu_with_filter_header = true;
+        cx.notify();
+    });
+    open_by_pointer(cx);
+
+    let rendered = cx
+        .debug_bounds("combo-box-row-0-label")
+        .expect("the row label should render");
+    let natural = cx.update(|window, cx| {
+        let font = crate::control_typography(cx).regular().clone();
+        window
+            .text_system()
+            .shape_line(
+                label.into(),
+                label_size,
+                &[gpui::TextRun {
+                    len: label.len(),
+                    font,
+                    color: color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+    });
+    assert!(
+        rendered.size.width >= natural,
+        "the label has {:?} of its {natural:?} natural width",
+        rendered.size.width
     );
 }
 
