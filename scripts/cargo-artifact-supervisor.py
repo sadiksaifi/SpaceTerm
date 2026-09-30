@@ -15,7 +15,9 @@ import time
 
 BREACH_STATUS = 75
 MONITOR_INTERVAL_SECONDS = 1.0
+HEARTBEAT_INTERVAL_SECONDS = 60.0
 POLL_INTERVAL_SECONDS = 0.05
+POST_EXIT_GRACE_SECONDS = 2.0
 TERMINATE_GRACE_SECONDS = 1.0
 KILL_GRACE_SECONDS = 5.0
 MEASUREMENT_ATTEMPTS = 3
@@ -302,13 +304,20 @@ class Supervisor:
             return 2
 
         leader_status: int | None = None
+        post_exit_deadline: float | None = None
+        started_at = time.monotonic()
         next_measurement = 0.0
+        next_heartbeat = started_at + HEARTBEAT_INTERVAL_SECONDS
+        target_usage_kib = 0
         budget_breached = False
+        lingering_group = False
         termination_verified = True
 
         while True:
             if leader_status is None:
                 leader_status = process.poll()
+                if leader_status is not None:
+                    post_exit_deadline = time.monotonic() + POST_EXIT_GRACE_SECONDS
 
             if self.received_signal is not None:
                 termination_verified = self.terminate_active_group()
@@ -316,14 +325,29 @@ class Supervisor:
 
             now = time.monotonic()
             if now >= next_measurement:
-                if self.target_size_kib() > self.budget_kib:
+                target_usage_kib = self.target_size_kib()
+                if target_usage_kib > self.budget_kib:
                     budget_breached = True
                     termination_verified = self.terminate_active_group()
                     break
                 next_measurement = now + MONITOR_INTERVAL_SECONDS
 
-            if leader_status is not None and not self._group_has_live_processes():
-                break
+            if now >= next_heartbeat:
+                print(
+                    f"guarded command active for {int(now - started_at)}s; "
+                    f"target usage {target_usage_kib // 1024} MiB / {self.budget_kib // 1024} MiB",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
+
+            if leader_status is not None:
+                if not self._group_has_live_processes():
+                    break
+                if post_exit_deadline is not None and now >= post_exit_deadline:
+                    lingering_group = True
+                    termination_verified = self.terminate_active_group()
+                    break
             time.sleep(POLL_INTERVAL_SECONDS)
 
         if leader_status is None:
@@ -332,7 +356,8 @@ class Supervisor:
             leader_status = process.wait()
 
         signal_status = self.received_signal
-        self._clear_active()
+        if termination_verified:
+            self._clear_active()
 
         if signal_status is not None:
             if not termination_verified:
@@ -357,6 +382,11 @@ class Supervisor:
                 print("warning: guarded command termination could not be verified", file=sys.stderr)
             print("error: Cargo artifact budget exceeded; command stopped", file=sys.stderr)
             return BREACH_STATUS
+
+        if lingering_group:
+            print("error: guarded command left a lingering process group", file=sys.stderr)
+            status = self.shell_status(leader_status if leader_status is not None else 2)
+            return status if status != 0 else 2
 
         if self.received_signal is not None:
             return 128 + self.received_signal

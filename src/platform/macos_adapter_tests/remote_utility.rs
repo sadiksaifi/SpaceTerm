@@ -8,6 +8,7 @@ use std::fs;
 use std::future::Future;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
@@ -318,6 +319,23 @@ done
 
 #[test]
 fn listing_enumerator_should_be_terminated_and_waited_when_remote_shell_is_cancelled() {
+    struct ListingFixture {
+        child: std::process::Child,
+        root: PathBuf,
+        active: bool,
+    }
+
+    impl Drop for ListingFixture {
+        fn drop(&mut self) {
+            if self.active {
+                // SAFETY: the fixture shell owns its own process group.
+                unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
+                let _ = self.child.wait();
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     let test_root = PathBuf::from(format!(
         "/private/tmp/spaceterm-list-cancel-{}",
         std::process::id()
@@ -340,8 +358,19 @@ while :; do /bin/sleep 1; done
     )
     .unwrap();
     fs::set_permissions(&fake_find, fs::Permissions::from_mode(0o700)).unwrap();
-    let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
-    let mut child = Command::new("/bin/sh")
+    let script =
+        String::from_utf8(build_path_script("list", test_root.to_str().unwrap()).unwrap()).unwrap();
+    let paused = script.replacen(
+        "2>/dev/null &\nenumerator_pid=$!",
+        "2>/dev/null &\n/bin/sleep 1\nenumerator_pid=$!",
+        1,
+    );
+    assert_ne!(
+        paused, script,
+        "the fixture must cancel before PID assignment"
+    );
+    let child = Command::new("/bin/sh")
+        .process_group(0)
         .env_clear()
         .env("HOME", "/private/tmp")
         .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
@@ -354,7 +383,18 @@ while :; do /bin/sleep 1; done
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(&script).unwrap();
+    let mut fixture = ListingFixture {
+        child,
+        root: test_root,
+        active: true,
+    };
+    fixture
+        .child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(paused.as_bytes())
+        .unwrap();
     let readiness_deadline = Instant::now() + Duration::from_secs(10);
     while !ready_file.exists() && Instant::now() < readiness_deadline {
         thread::sleep(PROCESS_POLL_INTERVAL);
@@ -368,16 +408,16 @@ while :; do /bin/sleep 1; done
 
     // SAFETY: this signals only the child shell created by this test.
     assert_eq!(
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        unsafe { libc::kill(fixture.child.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    let status = child.wait().unwrap();
+    let status = fixture.child.wait().unwrap();
 
     assert!(!status.success());
     assert!(stopped_file.exists());
     // SAFETY: signal zero checks process existence and dereferences no pointers.
     assert_eq!(unsafe { libc::kill(enumerator, 0) }, -1);
-    fs::remove_dir_all(test_root).unwrap();
+    fixture.active = false;
 }
 
 #[test]
