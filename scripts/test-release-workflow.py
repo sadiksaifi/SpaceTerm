@@ -38,6 +38,10 @@ def main():
     # which would undo a job's partial install_args.
     jobs = re.split(r"(?m)^  ([\w-]+):\n", workflow.split("\njobs:\n", 1)[1])[1:]
     for name, body in zip(jobs[::2], jobs[1::2]):
+        # A floating label moves the release to a new image without a reviewed change.
+        assert not re.search(r"(?m)^    runs-on: \S+-latest$", body), (
+            f"{name} must pin an explicit runner image"
+        )
         if "install_args:" in body:
             assert 'MISE_TASK_RUN_AUTO_INSTALL: "false"' in body, (
                 f"{name} installs selected tools, so mise run must not install the rest"

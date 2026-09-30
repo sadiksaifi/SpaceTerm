@@ -14,7 +14,7 @@ concurrency:
 jobs:
   preflight:
     name: Validate release tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     # install_args selects this job's tools; keep mise run from installing the rest.
     env:
@@ -177,7 +177,7 @@ jobs:
   publish:
     name: Publish verified release
     needs: [preflight, validate, package]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       MISE_TASK_RUN_AUTO_INSTALL: "false"
