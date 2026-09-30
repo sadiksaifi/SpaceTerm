@@ -2895,6 +2895,7 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                             collection_focused,
                             theme,
                             label_font: typography.regular().clone(),
+                            shortcut_font: combo_box_shortcut_font(&typography).clone(),
                             icon_offset,
                         },
                     )
@@ -3047,6 +3048,7 @@ struct ComboBoxRowRenderContext {
     collection_focused: bool,
     theme: ComboBoxTheme,
     label_font: gpui::Font,
+    shortcut_font: gpui::Font,
     icon_offset: Pixels,
 }
 
@@ -3065,6 +3067,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         collection_focused,
         theme,
         label_font,
+        shortcut_font,
         icon_offset,
     } = context;
     let ComboBoxRowState {
@@ -3226,6 +3229,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                 .when_some(shortcut_gap, |shortcut, gap| shortcut.ml(gap))
                 .text_size(theme.metrics.secondary_size)
                 .line_height(theme.metrics.secondary_line_height)
+                .font(shortcut_font)
                 .text_color(secondary)
                 .child(shortcut),
         );
@@ -3343,6 +3347,12 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     }
 }
 
+/// The font rows render keyboard equivalents in, shared with the width measurement so a
+/// row-driven panel is exactly as wide as its widest rendered row.
+fn combo_box_shortcut_font(typography: &crate::ControlTypography) -> &gpui::Font {
+    typography.shortcut()
+}
+
 fn natural_menu_width<I, C>(
     items: &[Row<I, C>],
     columns: GroupColumns,
@@ -3397,7 +3407,7 @@ fn natural_menu_width<I, C>(
                 + measure(
                     shortcut,
                     theme.metrics.secondary_size,
-                    typography.shortcut(),
+                    combo_box_shortcut_font(typography),
                 )
         });
         widest.max(fixed + leading + text + accessory + shortcut)
@@ -3430,6 +3440,17 @@ fn resolve_row_paint(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combo_box_shortcuts_use_the_shortcut_font_slot() {
+        let regular = gpui::font("Regular");
+        let shortcut = gpui::font("Shortcut");
+        let typography =
+            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
+                .semantic_fonts(shortcut.clone(), regular.clone(), regular);
+
+        assert_eq!(super::combo_box_shortcut_font(&typography), &shortcut);
+    }
+
     use super::*;
 
     fn row_paint(seed: u32) -> crate::ListRowPaint {
