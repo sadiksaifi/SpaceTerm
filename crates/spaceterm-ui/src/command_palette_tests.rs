@@ -2340,6 +2340,31 @@ fn results_after_the_minimum_display_time_should_replace_loading_at_once(cx: &mu
 }
 
 #[gpui::test]
+fn a_reload_should_keep_the_results_height_and_clear_the_previous_rows(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    let settled_panel = cx.debug_bounds("command-palette-panel").unwrap();
+    assert!(cx.debug_bounds("row-open").is_some());
+
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("row-open").is_none());
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert_eq!(
+        cx.debug_bounds("command-palette-panel").unwrap(),
+        settled_panel
+    );
+
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    assert_eq!(
+        cx.debug_bounds("command-palette-panel").unwrap(),
+        settled_panel
+    );
+}
+
+#[gpui::test]
 fn loading_state_should_center_its_text_above_an_indeterminate_bar(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);

@@ -1563,6 +1563,8 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     loading_timer: Option<Task<()>>,
     /// Whether the panel has been visible since the palette opened.
     presented: bool,
+    /// The results area's height when results were last presented, kept during a reload.
+    results_height: Option<Pixels>,
     dismissible: bool,
     escape_cancellable: bool,
     open: bool,
@@ -2003,6 +2005,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             loading_presentation: LoadingPresentation::Settled,
             loading_timer: None,
             presented: false,
+            results_height: None,
             dismissible: true,
             escape_cancellable: false,
             open: false,
@@ -3085,6 +3088,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.loading = false;
         self.settle_loading_presentation();
         self.presented = false;
+        self.results_height = None;
         self.generation.0 = self.generation.0.wrapping_add(1);
         self.pointer_press = None;
         self.pointer_suppressed = false;
@@ -3200,12 +3204,21 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
 
         let panel_visible = self.panel_is_visible();
         self.presented |= panel_visible;
-        let content_height = if self.loading_presentation != LoadingPresentation::Settled {
-            loading_state_height(metrics, cx)
-        } else if self.matches.is_empty() {
-            self.empty_state_height(panel_width, metrics, &font, window, cx)
-        } else {
-            self.presented_results.total_height(metrics)
+        // A reload keeps the results area at its presented height, growing only to fit the
+        // loading state once it shows.
+        let content_height = match self.loading_presentation {
+            LoadingPresentation::Settled if self.matches.is_empty() => {
+                self.empty_state_height(panel_width, metrics, &font, window, cx)
+            }
+            LoadingPresentation::Settled => self.presented_results.total_height(metrics),
+            LoadingPresentation::Grace => self
+                .results_height
+                .unwrap_or_else(|| loading_state_height(metrics, cx)),
+            LoadingPresentation::Shown { .. } => {
+                let loading_height = loading_state_height(metrics, cx);
+                self.results_height
+                    .map_or(loading_height, |height| height.max(loading_height))
+            }
         };
         let chrome_height = chrome_height(metrics);
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
@@ -3233,6 +3246,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         };
         if std::mem::take(&mut self.selection_reveal_pending) {
             self.reveal_selected(metrics, list_height);
+        }
+        if panel_visible && self.loading_presentation == LoadingPresentation::Settled {
+            self.results_height = Some(list_height);
         }
         let panel_height = chrome_height + list_height;
 
