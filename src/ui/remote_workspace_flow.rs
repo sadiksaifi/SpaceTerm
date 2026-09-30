@@ -1291,6 +1291,15 @@ impl RemoteWorkspaceFlow {
             }
             ConnectionErrorAction::Back => {
                 self.return_to_hosts();
+                // Preparing home dismissed host selection; reopen it after the alert closes.
+                cx.defer_in(window, move |flow, window, cx| {
+                    if flow.action_generation == generation
+                        && flow.stage() == RemoteWorkspaceFlowStage::HostSelection
+                    {
+                        flow.host_picker
+                            .update(cx, |picker, cx| picker.open(window, cx));
+                    }
+                });
                 self.publish(cx);
             }
             ConnectionErrorAction::Cancel => self.cancel_flow(window, cx),
@@ -2961,6 +2970,33 @@ mod tests {
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
         assert!(events.borrow().completions.is_empty());
+    }
+
+    #[gpui::test]
+    fn choose_another_host_after_failed_activation_should_reopen_host_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let (_, flow, events, cx) = flow_window(backend, cx);
+        select_destination(&flow, "work", cx);
+        let handle = events.borrow().completions[0].clone();
+        let returned = handle.take().unwrap();
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                assert!(flow.activation_failed(&handle, returned, window, cx).is_ok());
+            })
+        });
+        cx.run_until_parked();
+        assert!(!flow.read_with(cx, |flow, cx| flow.host_picker.read(cx).is_open()));
+
+        click("modal-action-remote-workspace-back-to-hosts", cx);
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::HostSelection
+        );
+        assert!(flow.read_with(cx, |flow, cx| flow.host_picker.read(cx).is_open()));
     }
 
     #[gpui::test]
