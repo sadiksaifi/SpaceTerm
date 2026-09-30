@@ -541,6 +541,9 @@ impl Drop for ConnectionAttempt {
 
 struct PendingActivation {
     handle: RemoteWorkspaceFlowCompletionHandle,
+    /// The Directory Picker that chose the starting directory. It stays open until activation
+    /// settles so a failed activation can return to it over the same connection.
+    picker: Option<Entity<DirectoryPicker>>,
 }
 
 /// A connected, prepared host whose starting directory the Directory Picker is choosing.
@@ -665,6 +668,9 @@ impl RemoteWorkspaceFlowState {
             }
             Self::AwaitingActivation(pending) => {
                 drop(pending.handle.take());
+                if let Some(picker) = pending.picker.take() {
+                    picker.update(cx, |picker, cx| picker.cancel(window, cx));
+                }
             }
             _ => {}
         }
@@ -741,6 +747,7 @@ impl RemoteWorkspaceFlow {
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
         self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
             handle: handle.clone(),
+            picker: None,
         });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
@@ -1480,14 +1487,21 @@ impl RemoteWorkspaceFlow {
                 terminal_channels,
                 lifecycle,
             },
+            None,
             cx,
         );
     }
 
-    fn complete(&mut self, completion: RemoteWorkspaceFlowCompletion, cx: &mut Context<Self>) {
+    fn complete(
+        &mut self,
+        completion: RemoteWorkspaceFlowCompletion,
+        picker: Option<Entity<DirectoryPicker>>,
+        cx: &mut Context<Self>,
+    ) {
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
         self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
             handle: handle.clone(),
+            picker,
         });
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
@@ -1562,9 +1576,6 @@ impl RemoteWorkspaceFlow {
                     lifecycle,
                     picker,
                 } = *choice;
-                window.defer(cx, move |window, cx| {
-                    picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
-                });
                 self.complete(
                     RemoteWorkspaceFlowCompletion {
                         session: connection.session,
@@ -1576,6 +1587,7 @@ impl RemoteWorkspaceFlow {
                         terminal_channels,
                         lifecycle,
                     },
+                    Some(picker),
                     cx,
                 );
             }
@@ -1593,13 +1605,19 @@ impl RemoteWorkspaceFlow {
     pub(crate) fn activation_succeeded(
         &mut self,
         handle: &RemoteWorkspaceFlowCompletionHandle,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.owns_activation(handle) {
             return false;
         }
-        self.state = RemoteWorkspaceFlowState::Completed;
+        let state = std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Completed);
+        if let RemoteWorkspaceFlowState::AwaitingActivation(mut pending) = state
+            && let Some(picker) = pending.picker.take()
+        {
+            // The activated Workspace owns focus now; the picker must not restore its own.
+            picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
+        }
         self.action_generation = self.action_generation.wrapping_add(1);
         self.publish(cx);
         true
@@ -1615,6 +1633,27 @@ impl RemoteWorkspaceFlow {
     ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
         if !self.owns_activation(handle) {
             return Err(Box::new(completion));
+        }
+        if let RemoteWorkspaceFlowState::AwaitingActivation(pending) = &mut self.state
+            && let Some(picker) = pending.picker.take()
+        {
+            // The connection still works; offer another directory on it.
+            let (session, destination, _, _, account, terminal_channels, lifecycle) =
+                completion.into_parts();
+            self.state = RemoteWorkspaceFlowState::ChoosingDirectory(Box::new(DirectoryChoice {
+                connection: ConnectedHost {
+                    destination,
+                    session,
+                    retained_lifecycle: None,
+                },
+                account,
+                terminal_channels,
+                lifecycle,
+                picker: picker.clone(),
+            }));
+            picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
+            self.publish(cx);
+            return Ok(());
         }
         let destination = completion.destination().clone();
         drop(completion);
@@ -1679,6 +1718,7 @@ impl Render for RemoteWorkspaceFlow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let directory_picker = match &self.state {
             RemoteWorkspaceFlowState::ChoosingDirectory(choice) => Some(choice.picker.clone()),
+            RemoteWorkspaceFlowState::AwaitingActivation(pending) => pending.picker.clone(),
             _ => None,
         };
         div()
@@ -2970,6 +3010,106 @@ mod tests {
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
         assert!(events.borrow().completions.is_empty());
+    }
+
+    fn confirm_directory(path: &str, cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input(path);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+    }
+
+    fn directory_picker_is_open(
+        flow: &Entity<RemoteWorkspaceFlow>,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        flow.read_with(cx, |flow, cx| match &flow.state {
+            RemoteWorkspaceFlowState::ChoosingDirectory(choice) => {
+                choice.picker.read(cx).is_open()
+            }
+            RemoteWorkspaceFlowState::AwaitingActivation(pending) => pending
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.read(cx).is_open()),
+            _ => false,
+        })
+    }
+
+    #[gpui::test]
+    fn failed_chosen_directory_activation_should_return_to_the_picker_on_the_same_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let (_, flow, events, cx) =
+            flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
+        select_destination(&flow, "work", cx);
+        confirm_directory("~/gone/", cx);
+        assert!(directory_picker_is_open(&flow, cx));
+        let first = events.borrow().completions[0].clone();
+        let returned = first.take().unwrap();
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                assert!(flow.activation_failed(&first, returned, window, cx).is_ok());
+            })
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::ChoosingDirectory
+        );
+        assert!(directory_picker_is_open(&flow, cx));
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+
+        confirm_directory("~/src/", cx);
+        let second = events.borrow().completions[1].clone();
+        let completion = second.take().unwrap();
+        assert_eq!(completion.initial_directory().as_str(), "~/src/");
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                assert!(flow.activation_succeeded(&second, window, cx));
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Completed
+        );
+        assert!(!directory_picker_is_open(&flow, cx));
+        drop(completion);
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn dismissing_the_picker_after_failed_activation_should_close_the_connection_and_restore_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let (harness, flow, events, cx) =
+            flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
+        select_destination(&flow, "work", cx);
+        confirm_directory("~/gone/", cx);
+        let handle = events.borrow().completions[0].clone();
+        let returned = handle.take().unwrap();
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                assert!(flow.activation_failed(&handle, returned, window, cx).is_ok());
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(events.borrow().cancelled, 1);
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
     }
 
     #[gpui::test]

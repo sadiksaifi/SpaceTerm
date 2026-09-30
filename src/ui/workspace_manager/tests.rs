@@ -4250,6 +4250,80 @@ fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
 }
 
 #[gpui::test]
+fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_then_create(
+    cx: &mut TestAppContext,
+) {
+    let provider = Arc::new(TestRemoteProvider::connected(
+        crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
+    ));
+    let (session, closes, _, _, _) = reconnect_session_with_provider_and_revalidation(
+        "work",
+        provider,
+        VecDeque::from([gpui::Task::ready(Err(
+            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
+        ))]),
+    );
+    let backend =
+        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    let flow = manager.read_with(cx, |manager, _| manager.remote_workspace_flow.clone().unwrap());
+    cx.update(|window, cx| {
+        flow.update(cx, |flow, cx| {
+            flow.select_destination_for_test(
+                crate::domain::SshDestination::new("work".to_owned()).unwrap(),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        flow.read_with(cx, |flow, _| flow.stage()),
+        RemoteWorkspaceFlowStage::ChoosingDirectory
+    );
+
+    confirm_directory_picker_path("~/src/", cx);
+
+    assert_eq!(
+        flow.read_with(cx, |flow, _| flow.stage()),
+        RemoteWorkspaceFlowStage::ChoosingDirectory
+    );
+    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+    assert_eq!(closes.load(Ordering::Acquire), 0);
+
+    confirm_directory_picker_path("~/src/", cx);
+
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert!(manager.remote_workspace_flow.is_none());
+        match manager.workspaces.active_workspace().pinned_directory() {
+            Some(PinnedDirectory::Remote { directory, identity }) => {
+                assert_eq!(directory.as_str(), "~/src/");
+                assert_eq!(identity.as_str(), "/home/tester/src");
+            }
+            other => panic!("expected a Remote Pinned Directory, got {other:?}"),
+        }
+    });
+    assert!(cx.debug_bounds("command-palette-panel").is_none());
+    assert_eq!(records.starts().len(), 2);
+    assert_eq!(closes.load(Ordering::Acquire), 0);
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+}
+
+#[gpui::test]
 fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_directory(
     cx: &mut TestAppContext,
 ) {
