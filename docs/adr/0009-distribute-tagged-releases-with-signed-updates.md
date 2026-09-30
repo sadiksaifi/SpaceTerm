@@ -1,6 +1,6 @@
 # Distribute tagged releases with signed updates
 
-Annotated stable `v<version>` Git tags are SpaceTerm's only release version authority. Builds derive application identity, bundle metadata, artifact names, and update metadata from the validated tag. Development builds identify their commit and cannot update a release installation.
+Annotated stable `v<version>` Git tags are SpaceTerm's only release version authority. Builds derive application identity, bundle metadata, artifact names, and update metadata from the validated tag. Development builds identify their commit and cannot update a release installation. Only a validated release tag carries the SpaceTerm application identity; an untagged optimized build packages as SpaceTerm Preflight with its own bundle identifier and application directories, so it installs beside a release without replacing it or sharing its Settings.
 
 GitHub Releases hosts the complete Apple Silicon DMG and signed Sparkle feed. SpaceTerm uses ad hoc macOS signatures and an independent Ed25519 update key because distribution must incur no Apple membership fees. First installation therefore requires the user's Gatekeeper exception; update authenticity depends on retaining the private update key. The application owns update presentation and restart authorization, while a narrow macOS adapter lets Sparkle verify, stage, replace, and relaunch the bundle. Ordinary quit may finish an already verified installer without requesting termination or relaunch; restarting a running application requires confirmation.
 

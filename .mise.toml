@@ -367,6 +367,7 @@ bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-dev
 shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
 python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/prepare-sparkle-macos.py scripts/setup-update-key-macos.py scripts/package-metadata-macos.py scripts/release-artifacts-macos.py scripts/configure-update-secret-macos.py scripts/test-updater-macos.py
 plutil -lint packaging/macos/Info.plist
+plutil -lint packaging/macos/Preflight-Info.plist
 plutil -lint packaging/macos/Development-Info.plist
 plutil -lint packaging/macos/AppearanceExerciser-Info.plist
 plutil -lint packaging/macos/Entitlements.plist
@@ -392,36 +393,36 @@ arg "[interval]" help="Sampling interval in seconds" default="1"
 run = 'python3 scripts/measure-macos-terminal-resources.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
 
 [tasks."package:macos"]
-description = "Build and verify the macOS app and disk image"
+description = "Build and verify SpaceTerm Preflight, the optimized macOS app and disk image"
 run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh'
 
 [tasks."package:macos:install"]
-description = "Build, verify, and install the macOS app"
+description = "Build, verify, and install SpaceTerm Preflight beside a SpaceTerm release"
 run = [
   { task = "package:macos" },
-  "rm -rf -- /Applications/SpaceTerm.app",
-  "/usr/bin/ditto dist/SpaceTerm.app /Applications/SpaceTerm.app",
+  "rm -rf -- '/Applications/SpaceTerm Preflight.app'",
+  "/usr/bin/ditto 'dist/SpaceTerm Preflight.app' '/Applications/SpaceTerm Preflight.app'",
 ]
 
 [tasks."package:macos:verify"]
-description = "Verify existing macOS artifacts"
+description = "Verify existing SpaceTerm Preflight artifacts"
 run = "./scripts/verify-macos-package.sh"
 
 [tasks."package:macos:open"]
-description = "Open the packaged macOS application"
-run = "open -n dist/SpaceTerm.app"
+description = "Open the packaged SpaceTerm Preflight application"
+run = "open -n 'dist/SpaceTerm Preflight.app'"
 
 [tasks."package:macos:open-dmg"]
-description = "Open the macOS installer disk image"
-run = "open dist/SpaceTerm.dmg"
+description = "Open the SpaceTerm Preflight installer disk image"
+run = "open 'dist/SpaceTerm Preflight.dmg'"
 
 [tasks."package:macos:info"]
-description = "Show macOS package metadata, architectures, signature, and sizes"
+description = "Show SpaceTerm Preflight metadata, architectures, signature, and sizes"
 run = [
-  "plutil -p dist/SpaceTerm.app/Contents/Info.plist",
-  "lipo -archs dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
-  "codesign --display --verbose=2 dist/SpaceTerm.app",
-  "ls -lh dist/SpaceTerm.dmg dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
+  "plutil -p 'dist/SpaceTerm Preflight.app/Contents/Info.plist'",
+  "lipo -archs 'dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight'",
+  "codesign --display --verbose=2 'dist/SpaceTerm Preflight.app'",
+  "ls -lh 'dist/SpaceTerm Preflight.dmg' 'dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight'",
 ]
 
 [tasks."deps:metal:macos"]

@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SPACETERM_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=SPACETERM_SPARKLE_DIR");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");
+    println!("cargo:rustc-check-cfg=cfg(spaceterm_release)");
     // Watch source changes as well as refs so development identity cannot retain a release label.
     for path in [
         "src",
@@ -15,10 +16,11 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
+    let release_tag = env::var("SPACETERM_RELEASE_TAG").ok();
     let mut version = Command::new("python3");
     version.args(["scripts/release-version.py", "--cargo"]);
-    if let Ok(tag) = env::var("SPACETERM_RELEASE_TAG") {
-        version.args(["--tag", &tag, "--require-clean"]);
+    if let Some(tag) = &release_tag {
+        version.args(["--tag", tag, "--require-clean"]);
     }
     let result = version
         .output()
@@ -31,6 +33,14 @@ fn main() {
         "{}",
         String::from_utf8(result.stdout).expect("build identity is UTF-8")
     );
+    if release_tag.is_some() {
+        assert!(
+            env::var_os("CARGO_FEATURE_DEVELOPMENT_APP").is_none()
+                && env::var_os("CARGO_FEATURE_APPEARANCE_EXERCISER").is_none(),
+            "a release build must carry the SpaceTerm application identity"
+        );
+        println!("cargo:rustc-cfg=spaceterm_release");
+    }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;

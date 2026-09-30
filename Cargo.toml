@@ -3,13 +3,12 @@ name = "spaceterm"
 publish = false
 edition = "2024"
 
+# scripts/package-metadata-macos.py supplies the product name, identifier, and binary from the
+# selected Info.plist template.
 [package.metadata.packager]
-product-name = "SpaceTerm"
-identifier = "io.github.sadiksaifi.spaceterm"
 formats = ["app", "dmg"]
 out-dir = "dist"
 category = "DeveloperTool"
-binaries = [{ path = "SpaceTerm", main = true }]
 icons = ["target/package-macos/SpaceTerm.icns"]
 resources = [
     { src = "target/package-macos/Assets.car", target = "Assets.car" },

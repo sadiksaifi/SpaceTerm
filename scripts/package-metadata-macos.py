@@ -19,6 +19,11 @@ def main():
     args = parser.parse_args()
     stage = ROOT / "target/package-macos"
     config = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["packager"]
+    # The staged Info.plist is the one source of the bundle's name and identifier.
+    identity = plistlib.loads((stage / "Info.plist").read_bytes())
+    config["product-name"] = identity["CFBundleName"]
+    config["identifier"] = identity["CFBundleIdentifier"]
+    config["binaries"] = [{"path": identity["CFBundleExecutable"], "main": True}]
     config["version"] = args.version
     config["binaries-dir"] = str(args.binaries)
     if args.sparkle:

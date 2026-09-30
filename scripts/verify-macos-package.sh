@@ -4,8 +4,7 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 
-readonly APP_NAME="SpaceTerm"
-readonly BUNDLE_IDENTIFIER="io.github.sadiksaifi.spaceterm"
+readonly ICON_NAME="SpaceTerm"
 readonly MINIMUM_MACOS_VERSION="26.0"
 readonly ASKPASS_HELPER_MODE="broker-v1"
 readonly ASKPASS_HELPER_TIMEOUT_SECONDS=5
@@ -16,8 +15,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
 readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 
-APP_PATH="$REPO_ROOT/dist/$APP_NAME.app"
-DMG_PATH="$REPO_ROOT/dist/$APP_NAME.dmg"
+APP_PATH=""
+DMG_PATH=""
 TEMP_ROOT=""
 DMG_MOUNTED=0
 MOUNT_POINT=""
@@ -30,10 +29,12 @@ usage() {
     cat <<EOF
 Usage: $(basename -- "$0") [--app PATH] [--dmg PATH] [--release TAG]
 
-Verify the SpaceTerm application bundle and installer disk image.
+Verify the SpaceTerm Preflight application bundle and installer disk image.
 
-  --app PATH   Application bundle to verify (default: dist/SpaceTerm.app).
-  --dmg PATH   Disk image to verify (default: dist/SpaceTerm.dmg).
+  --app PATH   Application bundle to verify (default: dist/<name>.app).
+  --dmg PATH   Disk image to verify (default: dist/<name>.dmg).
+  --release TAG
+               Verify a SpaceTerm release of an annotated tag instead.
   -h, --help   Show this help.
 EOF
 }
@@ -142,10 +143,10 @@ verify_app_bundle() {
     microphone_usage_description="$(plist_value "$plist" NSMicrophoneUsageDescription)"
     [[ "$executable_name" == "$APP_NAME" ]] \
         || die "$label CFBundleExecutable must be $APP_NAME, got: $executable_name"
-    [[ "$icon_file" == "$APP_NAME" ]] \
-        || die "$label CFBundleIconFile must be $APP_NAME, got: $icon_file"
-    [[ "$icon_name" == "$APP_NAME" ]] \
-        || die "$label CFBundleIconName must be $APP_NAME, got: $icon_name"
+    [[ "$icon_file" == "$ICON_NAME" ]] \
+        || die "$label CFBundleIconFile must be $ICON_NAME, got: $icon_file"
+    [[ "$icon_name" == "$ICON_NAME" ]] \
+        || die "$label CFBundleIconName must be $ICON_NAME, got: $icon_name"
     [[ "$package_type" == "APPL" ]] \
         || die "$label CFBundlePackageType must be APPL, got: $package_type"
     [[ "$bundle_identifier" == "$BUNDLE_IDENTIFIER" ]] \
@@ -174,7 +175,7 @@ verify_app_bundle() {
     fi
 
     executable="$app/Contents/MacOS/$executable_name"
-    icon_path="$app/Contents/Resources/$APP_NAME.icns"
+    icon_path="$app/Contents/Resources/$ICON_NAME.icns"
     asset_catalog="$app/Contents/Resources/Assets.car"
     [[ -x "$executable" ]] || die "$label executable is missing or not executable: $executable"
     executable_description="$(file "$executable")"
@@ -192,8 +193,8 @@ verify_app_bundle() {
         || die "$label layered icon asset catalog is missing: $asset_catalog"
     assetutil --info "$asset_catalog" >"$asset_info" \
         || die "$label layered icon asset catalog is invalid: $asset_catalog"
-    grep -Eq '"Name"[[:space:]]*:[[:space:]]*"SpaceTerm"' "$asset_info" \
-        || die "$label layered icon asset catalog does not contain SpaceTerm"
+    grep -Eq "\"Name\"[[:space:]]*:[[:space:]]*\"$ICON_NAME\"" "$asset_info" \
+        || die "$label layered icon asset catalog does not contain $ICON_NAME"
     grep -Eq '"AssetType"[[:space:]]*:[[:space:]]*"Icon Image"' "$asset_info" \
         || die "$label layered icon asset catalog contains no icon image"
     grep -Eq '"PixelWidth"[[:space:]]*:[[:space:]]*1024' "$asset_info" \
@@ -306,6 +307,21 @@ require_command infocmp
 require_command lipo
 require_command plutil
 [[ -x /usr/libexec/PlistBuddy ]] || die "required command not found: /usr/libexec/PlistBuddy"
+
+# Only a validated release tag may carry the SpaceTerm identity; see ADR 0009.
+if [[ -n "$RELEASE_TAG" ]]; then
+    IDENTITY_PLIST="$REPO_ROOT/packaging/macos/Info.plist"
+else
+    IDENTITY_PLIST="$REPO_ROOT/packaging/macos/Preflight-Info.plist"
+fi
+readonly IDENTITY_PLIST
+APP_NAME="$(plist_value "$IDENTITY_PLIST" CFBundleName)"
+readonly APP_NAME
+BUNDLE_IDENTIFIER="$(plist_value "$IDENTITY_PLIST" CFBundleIdentifier)"
+readonly BUNDLE_IDENTIFIER
+APP_PATH="${APP_PATH:-$REPO_ROOT/dist/$APP_NAME.app}"
+DMG_PATH="${DMG_PATH:-$REPO_ROOT/dist/$APP_NAME.dmg}"
+readonly APP_PATH DMG_PATH
 [[ -f "$DMG_PATH" ]] || die "disk image is missing: $DMG_PATH"
 
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-verify.XXXXXX")"
