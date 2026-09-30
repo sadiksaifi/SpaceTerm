@@ -1554,6 +1554,16 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let awaiting_activation = matches!(&self.state,
+            RemoteWorkspaceFlowState::AwaitingActivation(pending)
+                if pending.picker.as_ref() == Some(picker));
+        if awaiting_activation {
+            // Another palette replaced the picker while the Workspace was being created.
+            if matches!(event, DirectoryPickerEvent::Dismissed) {
+                self.cancel_flow(window, cx);
+            }
+            return;
+        }
         if !matches!(&self.state, RemoteWorkspaceFlowState::ChoosingDirectory(choice)
             if choice.picker == *picker)
         {
@@ -3110,6 +3120,34 @@ mod tests {
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
         assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn replacing_the_picker_during_activation_should_cancel_and_close_the_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let (_, flow, events, cx) =
+            flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
+        select_destination(&flow, "work", cx);
+        confirm_directory("~/src/", cx);
+        let picker = flow.read_with(cx, |flow, _| match &flow.state {
+            RemoteWorkspaceFlowState::AwaitingActivation(pending) => pending.picker.clone(),
+            _ => None,
+        });
+        let picker = picker.expect("the picker should stay open while activation is pending");
+
+        cx.update(|window, cx| picker.update(cx, |picker, cx| picker.cancel(window, cx)));
+        cx.run_until_parked();
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert_eq!(events.borrow().cancelled, 1);
+        assert!(events.borrow().completions[0].take().is_none());
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[gpui::test]
