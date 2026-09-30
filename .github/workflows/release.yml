@@ -16,6 +16,9 @@ jobs:
     name: Validate release tag
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # install_args selects this job's tools; keep mise run from installing the rest.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
@@ -176,6 +179,8 @@ jobs:
     needs: [preflight, validate, package]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
     permissions:
       contents: write
     steps:
