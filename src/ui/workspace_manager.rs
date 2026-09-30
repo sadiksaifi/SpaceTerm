@@ -228,6 +228,22 @@ enum PinTarget {
     NewLocalWorkspace { name: String },
 }
 
+/// How applying a chosen directory to a pin target ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PinApplication {
+    Applied,
+    /// The directory could not be applied; the chooser that supplied it can retry.
+    Failed,
+    /// The attempt ended with an alert already presented to the user.
+    Reported,
+}
+
+impl PinApplication {
+    const fn from_applied(applied: bool) -> Self {
+        if applied { Self::Applied } else { Self::Failed }
+    }
+}
+
 /// The outcome of one System Directory Selection for a local pin.
 enum LocalPinSelection {
     Chosen(Result<ValidatedLocalDirectory, LocalFilesystemError>),
@@ -1036,24 +1052,25 @@ impl WorkspaceManager {
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> PinApplication {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
-            return false;
+            return PinApplication::Failed;
         };
-        if self.local_home_directory().is_err() {
-            // The failure is not about the chosen directory, so end the attempt before alerting.
-            if let Some(picker) = self.pin_picker.take() {
-                picker.update(cx, |picker, cx| picker.cancel(window, cx));
-            }
-            self.transient.pin_target = None;
-            Self::show_home_directory_unavailable(window, cx);
-            return false;
-        }
         let opened = match self
             .workspaces
             .local_workspace_pinned_to(&directory.identity())
         {
             Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
+            None if self.local_home_directory().is_err() => {
+                // The failure is not about the chosen directory, so end the attempt before
+                // alerting.
+                if let Some(picker) = self.pin_picker.take() {
+                    picker.update(cx, |picker, cx| picker.cancel(window, cx));
+                }
+                self.transient.pin_target = None;
+                Self::show_home_directory_unavailable(window, cx);
+                return PinApplication::Reported;
+            }
             None => self.create_pinned_local_workspace(Some(name), Some(directory), window, cx),
         };
         // A failure keeps the operation current so the still-open picker can retry.
@@ -1061,7 +1078,7 @@ impl WorkspaceManager {
             self.pin_operation = self.pin_operation.wrapping_add(1);
             self.transient.pin_target = None;
         }
-        opened
+        PinApplication::from_applied(opened)
     }
 
     /// Pins a validated local directory to `target`, creating the Workspace a new target names.
@@ -1071,11 +1088,11 @@ impl WorkspaceManager {
         directory: ValidatedLocalDirectory,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> PinApplication {
         match target {
-            PinTarget::Workspace(workspace_id) => {
-                self.apply_validated_local_pin(workspace_id, directory, window, cx)
-            }
+            PinTarget::Workspace(workspace_id) => PinApplication::from_applied(
+                self.apply_validated_local_pin(workspace_id, directory, window, cx),
+            ),
             PinTarget::NewLocalWorkspace { name } => {
                 self.open_local_directory_workspace(directory, name, window, cx)
             }
@@ -1223,15 +1240,27 @@ impl WorkspaceManager {
                                             && runtime.session.is_some()
                                     })
                             });
-                        let applied = current
-                            && match (pinned.clone(), target.clone()) {
-                                (PinnedDirectory::Local(directory), target) => {
-                                    manager.apply_local_pin_target(target, directory, window, cx)
-                                }
-                                (remote, PinTarget::Workspace(workspace_id)) => manager
-                                    .apply_directory_pin(workspace_id, Some(remote), window, cx),
-                                (_, PinTarget::NewLocalWorkspace { .. }) => false,
-                            };
+                        let application = match (current, pinned.clone(), target.clone()) {
+                            (false, _, _) | (_, PinnedDirectory::Remote { .. }, PinTarget::NewLocalWorkspace { .. }) => {
+                                PinApplication::Failed
+                            }
+                            (true, PinnedDirectory::Local(directory), target) => {
+                                manager.apply_local_pin_target(target, directory, window, cx)
+                            }
+                            (true, remote, PinTarget::Workspace(workspace_id)) => {
+                                PinApplication::from_applied(manager.apply_directory_pin(
+                                    workspace_id,
+                                    Some(remote),
+                                    window,
+                                    cx,
+                                ))
+                            }
+                        };
+                        // A reported failure already closed the picker.
+                        if application == PinApplication::Reported {
+                            return;
+                        }
+                        let applied = application == PinApplication::Applied;
                         let picker = picker.clone();
                         let owner = cx.entity();
                         window.defer(cx, move |window, cx| {
@@ -1362,12 +1391,14 @@ impl WorkspaceManager {
             LocalPinSelection::Chosen(Ok(directory)) => {
                 Some(self.apply_local_pin_target(target, directory, window, cx))
             }
-            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => Some(false),
+            LocalPinSelection::Chosen(Err(_)) | LocalPinSelection::Failed => {
+                Some(PinApplication::Failed)
+            }
         };
         // The Directory Picker handed off without restoring focus, so focus returns to the
         // Workspace on every outcome, before an error alert that restores it on dismissal.
         self.focus(window, cx);
-        if pinned == Some(false) {
+        if pinned == Some(PinApplication::Failed) {
             Self::show_pin_error(window, cx);
         }
         cx.notify();

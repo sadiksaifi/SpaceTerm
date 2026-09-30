@@ -4205,27 +4205,28 @@ fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_dire
 }
 
 #[gpui::test]
-fn open_local_directory_should_keep_the_picker_usable_after_a_directory_disappears(
+fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     cx: &mut TestAppContext,
 ) {
-    let root = temporary_directory("open-local-retry");
-    let gone = root.join("gone");
-    let project = root.join("project");
-    fs::create_dir_all(&gone).unwrap();
+    let project = temporary_directory("open-local-retry");
     fs::create_dir_all(&project).unwrap();
     let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
+    manager.update(cx, |manager, _| {
+        manager.workspaces.set_next_workspace_id_for_test(u64::MAX);
+    });
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
-    let validated = manager.read_with(cx, |manager, _| {
-        manager.local_filesystem.validate_directory(&gone).unwrap()
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 1);
+        assert!(manager.pin_picker.is_some());
     });
-    fs::remove_dir_all(&gone).unwrap();
-    assert!(!cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.open_local_directory_workspace(validated, String::new(), window, cx)
-        })
-    }));
 
+    manager.update(cx, |manager, _| {
+        manager
+            .workspaces
+            .set_next_workspace_id_for_test(2);
+    });
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
     manager.read_with(cx, |manager, _| {
@@ -4233,7 +4234,79 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_directory_disappea
         assert!(manager.pin_picker.is_none());
     });
     assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    fs::remove_dir_all(root).unwrap();
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    }));
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_should_activate_the_pinned_workspace_when_home_is_unavailable(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local-reuse-missing-home");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+    let pinned = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    manager.update(cx, |manager, _| {
+        manager.local_home_directory_path =
+            temporary_directory("open-local-reuse-missing-home-directory");
+    });
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
+        })
+    });
+
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.len(), 2);
+        assert_eq!(manager.workspaces.active_workspace_id(), pinned);
+        assert!(manager.pin_picker.is_none());
+    });
+    assert_eq!(records.starts().len(), 2);
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_should_alert_once_when_system_selection_meets_an_unavailable_home(
+    cx: &mut TestAppContext,
+) {
+    let project = temporary_directory("open-local-system-missing-home");
+    fs::create_dir_all(&project).unwrap();
+    let (manager, _, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
+    manager.update(cx, |manager, _| {
+        manager.local_home_directory_path =
+            temporary_directory("open-local-system-missing-home-directory");
+    });
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    click("directory-picker-confirm-menu", cx);
+    click(
+        "command-palette-primary-menu-directory-picker-system-selection",
+        cx,
+    );
+
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    click("modal-action-workspace-home-error-ok", cx);
+
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    manager.read_with(cx, |manager, _| assert_eq!(manager.workspaces.len(), 1));
+    fs::remove_dir_all(project).unwrap();
 }
 
 #[gpui::test]

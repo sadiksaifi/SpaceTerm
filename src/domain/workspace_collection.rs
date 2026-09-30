@@ -561,6 +561,12 @@ impl<T> WorkspaceCollection<T> {
             .begin_close())
     }
 
+    /// Sets the next Workspace ID; `u64::MAX` makes every creation fail with an exhausted ID space.
+    #[cfg(test)]
+    pub(crate) fn set_next_workspace_id_for_test(&mut self, next_workspace_id: u64) {
+        self.next_workspace_id = next_workspace_id;
+    }
+
     #[cfg(test)]
     pub(crate) fn create_local_workspace_unchecked(
         &mut self,
