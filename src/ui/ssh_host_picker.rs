@@ -431,7 +431,8 @@ impl SshHostPicker {
                     cx.notify();
                 }
             }
-            CommandPaletteEvent::HeaderAction(action) | CommandPaletteEvent::EmptyAction(action)
+            CommandPaletteEvent::HeaderAction(action)
+            | CommandPaletteEvent::EmptyAction(action)
                 if action.as_ref() == ADD_HOST_ACTION =>
             {
                 cx.emit(SshHostPickerEvent::RequestAddHost);
@@ -949,7 +950,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pending_discovery_should_show_loading_instead_of_the_empty_state(cx: &mut TestAppContext) {
+    fn pending_discovery_should_not_show_the_empty_state(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let provider: Arc<dyn HostDiscoveryProvider> = Arc::new(
@@ -967,7 +968,9 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
-        assert!(cx.debug_bounds("command-palette-loading").is_some());
+        // Discovery is still pending within the palette's loading grace period, which presents
+        // neither the loading state nor a premature empty state.
+        assert!(cx.debug_bounds("command-palette-loading").is_none());
         assert!(cx.debug_bounds("command-palette-empty").is_none());
     }
 

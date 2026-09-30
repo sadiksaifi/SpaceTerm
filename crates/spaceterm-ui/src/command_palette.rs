@@ -1,17 +1,17 @@
-use std::{cell::Cell, ops::Range, rc::Rc};
+use std::{cell::Cell, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, EventEmitter, Global,
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
     Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div,
-    list, prelude::FluentBuilder as _, px,
+    Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
+    div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
-    MenuPlacement, MenuPlacementConfig, ProgressRing, ProgressSize, ProgressState, TextInput,
+    MenuPlacement, MenuPlacementConfig, ProgressBar, ProgressSize, ProgressState, TextInput,
     TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
@@ -27,6 +27,12 @@ const COMMAND_PALETTE_ROLE: FloatingRole = FloatingRole::Command;
 const EMPTY_ACTION_SIZE: ButtonSize = ButtonSize::Regular;
 /// A description longer than this many lines is truncated rather than growing the panel.
 const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
+/// How long a load may run before the palette shows its loading state.
+const LOADING_GRACE_PERIOD: Duration = Duration::from_millis(100);
+/// How long a shown loading state stays before results replace it, so it never flickers.
+const LOADING_MINIMUM_DISPLAY: Duration = Duration::from_millis(400);
+/// The loading state's visible text, which also names its progress bar.
+const LOADING_TEXT: &str = "Loading\u{2026}";
 
 actions!(
     spaceterm_command_palette,
@@ -1184,6 +1190,7 @@ pub struct CommandPaletteMetrics {
     empty_padding: Pixels,
     empty_line_gap: Pixels,
     empty_actions_gap: Pixels,
+    loading_bar_width: Pixels,
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
@@ -1223,6 +1230,7 @@ impl CommandPaletteMetrics {
             empty_padding: px(20.0),
             empty_line_gap: px(4.0),
             empty_actions_gap: px(14.0),
+            loading_bar_width: px(160.0),
             horizontal_padding: px(12.0),
             leading_width: px(18.0),
             gap: px(10.0),
@@ -1403,6 +1411,10 @@ impl CommandPaletteMetrics {
                 self.empty_actions_gap,
                 spacing_scale,
             ),
+            loading_bar_width: crate::appearance::scale_metric(
+                self.loading_bar_width,
+                spacing_scale,
+            ),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
@@ -1544,7 +1556,15 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     preferred: Option<I>,
     query: String,
     generation: CommandPaletteGeneration,
+    /// Whether the caller's results are still arriving.
     loading: bool,
+    loading_presentation: LoadingPresentation,
+    /// Advances `loading_presentation` when its current phase ends.
+    loading_timer: Option<Task<()>>,
+    /// Whether the panel has been visible since the palette opened.
+    presented: bool,
+    /// The results area's height when results were last presented, kept during a reload.
+    results_height: Option<Pixels>,
     dismissible: bool,
     escape_cancellable: bool,
     open: bool,
@@ -1572,6 +1592,22 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     _input_subscription: Subscription,
     _focus_subscription: Subscription,
     _scrollbar_subscription: Subscription,
+}
+
+/// How the palette presents results that are still loading.
+///
+/// A load that finishes within [`LOADING_GRACE_PERIOD`] never shows a loading state, so a fast
+/// load appears fully drawn instead of flashing a short panel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoadingPresentation {
+    /// The current results are presented.
+    Settled,
+    /// A load is within its grace period. A palette that has not been visible since it opened
+    /// stays hidden, and no results are presented.
+    Grace,
+    /// The loading state is presented. It stays until [`LOADING_MINIMUM_DISPLAY`] has elapsed,
+    /// even when results arrive sooner.
+    Shown { minimum_elapsed: bool },
 }
 
 struct CommandPalettePanelLayout {
@@ -1966,6 +2002,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             query: String::new(),
             generation: CommandPaletteGeneration::default(),
             loading: false,
+            loading_presentation: LoadingPresentation::Settled,
+            loading_timer: None,
+            presented: false,
+            results_height: None,
             dismissible: true,
             escape_cancellable: false,
             open: false,
@@ -2363,7 +2403,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.selected = None;
         }
         self.items = unique_items(items).into();
-        self.loading = false;
+        self.set_loading_state(false, cx);
         self.recompute_matches();
         cx.notify();
     }
@@ -2371,9 +2411,66 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     /// Sets the current loading presentation without changing items or generation.
     pub fn set_loading(&mut self, loading: bool, cx: &mut gpui::Context<Self>) {
         if self.loading != loading {
-            self.loading = loading;
+            self.set_loading_state(loading, cx);
             cx.notify();
         }
+    }
+
+    fn set_loading_state(&mut self, loading: bool, cx: &mut gpui::Context<Self>) {
+        self.loading = loading;
+        match (loading, self.loading_presentation) {
+            (true, LoadingPresentation::Settled) => {
+                self.loading_presentation = LoadingPresentation::Grace;
+                self.loading_timer = Some(cx.spawn(async move |palette, cx| {
+                    cx.background_executor().timer(LOADING_GRACE_PERIOD).await;
+                    let _ = palette.update(cx, |palette, cx| palette.finish_loading_grace(cx));
+                }));
+            }
+            (
+                false,
+                LoadingPresentation::Grace
+                | LoadingPresentation::Shown {
+                    minimum_elapsed: true,
+                },
+            ) => self.settle_loading_presentation(),
+            _ => {}
+        }
+    }
+
+    fn finish_loading_grace(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.loading_presentation != LoadingPresentation::Grace {
+            return;
+        }
+        self.loading_presentation = LoadingPresentation::Shown {
+            minimum_elapsed: false,
+        };
+        self.loading_timer = Some(cx.spawn(async move |palette, cx| {
+            cx.background_executor()
+                .timer(LOADING_MINIMUM_DISPLAY)
+                .await;
+            let _ = palette.update(cx, |palette, cx| palette.finish_loading_minimum(cx));
+        }));
+        cx.notify();
+    }
+
+    fn finish_loading_minimum(&mut self, cx: &mut gpui::Context<Self>) {
+        if !matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
+            return;
+        }
+        if self.loading {
+            self.loading_presentation = LoadingPresentation::Shown {
+                minimum_elapsed: true,
+            };
+            self.loading_timer = None;
+        } else {
+            self.settle_loading_presentation();
+            cx.notify();
+        }
+    }
+
+    fn settle_loading_presentation(&mut self) {
+        self.loading_presentation = LoadingPresentation::Settled;
+        self.loading_timer = None;
     }
 
     /// Allows explicit Escape cancellation while outside clicks and focus loss remain blocked.
@@ -2399,7 +2496,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     /// Requests a refresh for the current query and returns its new generation.
     pub fn refresh(&mut self, cx: &mut gpui::Context<Self>) -> CommandPaletteGeneration {
-        self.loading = true;
+        self.set_loading_state(true, cx);
         let generation = self.request_refresh(cx);
         cx.notify();
         generation
@@ -2448,7 +2545,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         }
         self.query = query;
-        self.loading = false;
+        self.set_loading_state(false, cx);
         self.recompute_matches();
         self.request_refresh(cx);
         cx.notify();
@@ -2808,7 +2905,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        if self.loading {
+        if self.loading_presentation != LoadingPresentation::Settled {
             return;
         }
         if self.matches.is_empty() {
@@ -2989,6 +3086,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             cx,
         );
         self.loading = false;
+        self.settle_loading_presentation();
+        self.presented = false;
+        self.results_height = None;
         self.generation.0 = self.generation.0.wrapping_add(1);
         self.pointer_press = None;
         self.pointer_suppressed = false;
@@ -3102,12 +3202,23 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .top_offset
             .min((viewport.height - metrics.viewport_margin).max(px(0.0)));
 
-        let content_height = if self.loading {
-            metrics.row_height
-        } else if self.matches.is_empty() {
-            self.empty_state_height(panel_width, metrics, &font, window, cx)
-        } else {
-            self.presented_results.total_height(metrics)
+        let panel_visible = self.panel_is_visible();
+        self.presented |= panel_visible;
+        // A reload keeps the results area at its presented height, growing only to fit the
+        // loading state once it shows.
+        let content_height = match self.loading_presentation {
+            LoadingPresentation::Settled if self.matches.is_empty() => {
+                self.empty_state_height(panel_width, metrics, &font, window, cx)
+            }
+            LoadingPresentation::Settled => self.presented_results.total_height(metrics),
+            LoadingPresentation::Grace => self
+                .results_height
+                .unwrap_or_else(|| loading_state_height(metrics, cx)),
+            LoadingPresentation::Shown { .. } => {
+                let loading_height = loading_state_height(metrics, cx);
+                self.results_height
+                    .map_or(loading_height, |height| height.max(loading_height))
+            }
         };
         let chrome_height = chrome_height(metrics);
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
@@ -3116,7 +3227,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .min(available_height);
         let list_height = (panel_height - chrome_height).max(px(0.0));
         let mut fitted = px(0.0);
-        if !self.loading && !self.matches.is_empty() {
+        if self.loading_presentation == LoadingPresentation::Settled && !self.matches.is_empty() {
             for index in 0..self.presented_results.len() {
                 let Some(row) = self.presented_results.row(index) else {
                     break;
@@ -3135,6 +3246,9 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         };
         if std::mem::take(&mut self.selection_reveal_pending) {
             self.reveal_selected(metrics, list_height);
+        }
+        if panel_visible && self.loading_presentation == LoadingPresentation::Settled {
+            self.results_height = Some(list_height);
         }
         let panel_height = chrome_height + list_height;
 
@@ -3172,7 +3286,15 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .track_focus(&self.focus_scope)
             .tab_group()
             .child(outside)
-            .child(div().absolute().left(left).top(top).child(panel))
+            .child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(top)
+                    // A hidden panel keeps its focus and key handling, so typing is not lost.
+                    .when(!panel_visible, |panel| panel.opacity(0.0))
+                    .child(panel),
+            )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|palette, _: &MoveUp, window, cx| {
                 palette.move_selection(-1, window, cx);
@@ -3226,9 +3348,13 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
 }
 
 impl<I: Clone + Eq + 'static> CommandPalette<I> {
+    fn panel_is_visible(&self) -> bool {
+        self.presented || self.loading_presentation != LoadingPresentation::Grace
+    }
+
     /// Returns the empty-state actions while the empty state is the presented content.
     fn presented_empty_actions(&self) -> &[CommandPaletteEmptyAction] {
-        if self.loading || !self.matches.is_empty() {
+        if self.loading_presentation != LoadingPresentation::Settled || !self.matches.is_empty() {
             return &[];
         }
         &self.empty.actions
@@ -3409,8 +3535,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         } = layout;
         let paint = theme.paint;
         let metrics = theme.metrics;
-        let content = if self.loading {
-            loading_row(metrics, paint).into_any_element()
+        let content = if self.loading_presentation == LoadingPresentation::Grace {
+            div().into_any_element()
+        } else if matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
+            loading_state(list_height, metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
             self.render_empty_state(theme, cx)
         } else {
@@ -3834,41 +3962,49 @@ fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl Into
         )
 }
 
-fn status_row(
-    text: impl Into<SharedString>,
-    debug_selector: &'static str,
-    metrics: CommandPaletteMetrics,
-    paint: CommandPalettePaint,
-) -> gpui::Div {
-    div()
-        .debug_selector(move || debug_selector.to_owned())
-        .w_full()
-        .h(metrics.row_height)
-        .px(metrics.content_leading_inset())
-        .flex()
-        .items_center()
-        .text_size(metrics.secondary_size)
-        .line_height(metrics.secondary_line_height)
-        .text_color(paint.muted)
-        .child(text.into())
+/// Measures the loading state: its text above a bar, with the empty state's padding and gap.
+fn loading_state_height(metrics: CommandPaletteMetrics, cx: &App) -> Pixels {
+    metrics.empty_padding * 2.0
+        + metrics.secondary_line_height
+        + metrics.empty_line_gap * 2.0
+        + ProgressBar::thickness(ProgressSize::Regular, cx)
 }
 
-/// Renders the status row shown while a caller's results are still arriving.
-///
-/// The label keeps the content edge the editor, the headings, the rows, and the no-results copy
-/// share, so the ring follows it at the row gap rather than pushing the words inward. The ring
-/// carries the activity and paints no words of its own, so the copy stays the row's only text.
-fn loading_row(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
-    status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
-        .gap(metrics.gap)
+/// Renders the state shown while a caller's results are still arriving: muted text above an
+/// indeterminate bar, centered in the results area. The bar is named by the visible text.
+fn loading_state(
+    height: Pixels,
+    metrics: CommandPaletteMetrics,
+    paint: CommandPalettePaint,
+) -> impl IntoElement {
+    div()
+        .debug_selector(|| "command-palette-loading".to_owned())
+        .w_full()
+        .h(height)
+        .px(metrics.content_leading_inset())
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(metrics.empty_line_gap * 2.0)
         .child(
-            ProgressRing::new(
-                "command-palette-loading-progress",
-                "Loading",
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector("command-palette-loading-progress"),
+            div()
+                .debug_selector(|| "command-palette-loading-label".to_owned())
+                .text_size(metrics.secondary_size)
+                .line_height(metrics.secondary_line_height)
+                .text_color(paint.muted)
+                .child(LOADING_TEXT),
+        )
+        .child(
+            div().w(metrics.loading_bar_width).max_w_full().child(
+                ProgressBar::new(
+                    "command-palette-loading-progress",
+                    LOADING_TEXT,
+                    ProgressState::Indeterminate,
+                )
+                .size(ProgressSize::Regular)
+                .debug_selector("command-palette-loading-progress"),
+            ),
         )
 }
 

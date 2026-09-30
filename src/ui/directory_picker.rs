@@ -2297,6 +2297,9 @@ mod tests {
             picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
         });
         cx.run_until_parked();
+        // Past the palette's loading grace period.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
 
         assert!(cx.debug_bounds("command-palette-loading").is_some());
         assert!(cx.debug_bounds("command-palette-empty").is_none());

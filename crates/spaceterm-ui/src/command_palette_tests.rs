@@ -2219,17 +2219,182 @@ fn replacing_items_should_keep_rows_above_a_visible_preferred_item_in_view(
     assert!(cx.debug_bounds("row-0").is_some());
 }
 
+fn open_palette_loading(
+    root: &Entity<TestRoot>,
+    palette: &Entity<CommandPalette<u8>>,
+    cx: &mut VisualTestContext,
+) {
+    let prior = root.read_with(cx, |root, _| root.other_focus.clone());
+    cx.update(|window, cx| prior.focus(window, cx));
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| {
+            palette.open(window, cx);
+            palette.set_loading(true, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// Starts a load on the open palette and waits until its loading state is shown.
+fn show_loading(palette: &Entity<CommandPalette<u8>>, cx: &mut VisualTestContext) {
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.run_until_parked();
+}
+
+fn panel_is_visible(palette: &Entity<CommandPalette<u8>>, cx: &VisualTestContext) -> bool {
+    palette.read_with(cx, |palette, _| palette.panel_is_visible())
+}
+
+#[gpui::test]
+fn a_load_that_finishes_within_the_grace_period_should_appear_fully_drawn(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    let settled_panel = cx.debug_bounds("command-palette-panel").unwrap();
+    cx.update(|window, cx| palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
+    cx.run_until_parked();
+
+    open_palette_loading(&root, &palette, cx);
+    assert!(!panel_is_visible(&palette, cx));
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD / 2);
+    cx.run_until_parked();
+    assert!(!panel_is_visible(&palette, cx));
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert!(panel_is_visible(&palette, cx));
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert_eq!(
+        cx.debug_bounds("command-palette-panel").unwrap(),
+        settled_panel
+    );
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+}
+
+#[gpui::test]
+fn a_slow_load_should_show_loading_only_after_the_grace_period(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette_loading(&root, &palette, cx);
+
+    cx.executor()
+        .advance_clock(LOADING_GRACE_PERIOD - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(!panel_is_visible(&palette, cx));
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(panel_is_visible(&palette, cx));
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+}
+
+#[gpui::test]
+fn a_shown_loading_state_should_stay_for_its_minimum_display_time(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    open_palette_loading(&root, &palette, cx);
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(50));
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    assert!(cx.debug_bounds("row-open").is_none());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
+    );
+
+    cx.executor()
+        .advance_clock(LOADING_MINIMUM_DISPLAY - Duration::from_millis(51));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert!(cx.debug_bounds("row-open").is_some());
+}
+
+#[gpui::test]
+fn results_after_the_minimum_display_time_should_replace_loading_at_once(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    show_loading(&palette, cx);
+    cx.executor().advance_clock(LOADING_MINIMUM_DISPLAY * 2);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+
+    palette.update(cx, |palette, cx| palette.set_items(items(), cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert!(cx.debug_bounds("row-open").is_some());
+}
+
+#[gpui::test]
+fn a_reload_should_keep_the_results_height_and_clear_the_previous_rows(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    let settled_panel = cx.debug_bounds("command-palette-panel").unwrap();
+    assert!(cx.debug_bounds("row-open").is_some());
+
+    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("row-open").is_none());
+    assert!(cx.debug_bounds("command-palette-loading").is_none());
+    assert_eq!(
+        cx.debug_bounds("command-palette-panel").unwrap(),
+        settled_panel
+    );
+
+    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+    assert_eq!(
+        cx.debug_bounds("command-palette-panel").unwrap(),
+        settled_panel
+    );
+}
+
+#[gpui::test]
+fn loading_state_should_center_its_text_above_an_indeterminate_bar(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    show_loading(&palette, cx);
+
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let area = cx.debug_bounds("command-palette-loading").unwrap();
+    let label = cx.debug_bounds("command-palette-loading-label").unwrap();
+    let bar = cx
+        .debug_bounds("command-palette-loading-progress-track")
+        .unwrap();
+    // A bar's track is a wide capsule; a ring's is square.
+    assert!(bar.size.width > bar.size.height * 4.0);
+    assert!(label.bottom() <= bar.top());
+    for center in [label.center().x, bar.center().x] {
+        assert!((center - panel.center().x).abs() <= px(0.5));
+    }
+    let above = label.top() - area.top();
+    let below = area.bottom() - bar.bottom();
+    assert!((above - below).abs() <= px(1.0));
+    assert!(bar.size.width < area.size.width);
+}
+
 #[gpui::test]
 fn loading_state_should_not_activate_a_hidden_stale_selection(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
-    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
-    cx.run_until_parked();
+    show_loading(&palette, cx);
 
-    assert!(
-        cx.debug_bounds("command-palette-loading-progress-activity")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2695,8 +2860,7 @@ fn palette_wheel_events_should_not_reach_the_underlay(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*underlay.borrow(), 0);
 
-    palette.update(cx, |palette, cx| palette.set_loading(true, cx));
-    cx.run_until_parked();
+    show_loading(&palette, cx);
     let status = cx
         .debug_bounds("command-palette-loading")
         .unwrap_or_default();
