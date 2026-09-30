@@ -496,9 +496,11 @@ pub(super) struct DirectoryPicker {
 impl EventEmitter<DirectoryPickerEvent> for DirectoryPicker {}
 
 impl DirectoryPicker {
-    /// Creates a closed picker for the machine `source` reaches.
+    /// Creates a closed picker for the machine `source` reaches, whose search line shows
+    /// `placeholder` until a path is typed.
     pub(super) fn new(
         source: Rc<dyn DirectorySource>,
+        placeholder: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -507,7 +509,7 @@ impl DirectoryPicker {
             .machine_name()
             .map(|machine| SharedString::from(format!("{machine}:")));
         let palette = cx.new(|cx| {
-            let mut palette = CommandPalette::new("Pin to Directory", Vec::new(), window, cx);
+            let mut palette = CommandPalette::new(placeholder, Vec::new(), window, cx);
             palette.set_query_prefix(prefix, cx);
             palette.set_matching(CommandPaletteMatching::Caller, cx);
             palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
@@ -1151,9 +1153,15 @@ impl DirectoryPicker {
 
     /// Returns the search line's action that opens the exact path, creating it when missing, with
     /// System Directory Selection in its menu when offered.
-    fn confirm_action(&self) -> CommandPalettePrimaryAction {
-        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open")
-            .disabled(!self.can_confirm())
+    fn confirm_action(&self, cx: &App) -> CommandPalettePrimaryAction {
+        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open");
+        let action = match crate::desktop_profile::DesktopPresentation::get(cx)
+            .shortcut(&spaceterm_ui::CommandPaletteConfirm)
+        {
+            Some(shortcut) => action.shortcut(shortcut),
+            None => action,
+        }
+        .disabled(!self.can_confirm())
             .menu_disabled(self.busy.is_some())
             .debug_selector(CONFIRM_ACTION);
         match &self.system_selection {
@@ -1278,7 +1286,7 @@ impl DirectoryPicker {
             .iter()
             .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
             .map(|item| item.id().clone());
-        let confirm_action = self.confirm_action();
+        let confirm_action = self.confirm_action(cx);
         let query_note = (self.status == DirectoryPickerStatus::Missing)
             .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
@@ -1346,6 +1354,8 @@ impl Render for DirectoryPicker {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
                     .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
+                    .capture_action(block_parent_action::<super::OpenLocalDirectory>)
+                    .capture_action(block_parent_action::<super::OpenRemoteDirectory>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)
@@ -1693,6 +1703,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 let picker = DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 );
@@ -2154,6 +2165,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 )
@@ -2196,6 +2208,7 @@ mod tests {
             let picker = cx.new(|cx| {
                 DirectoryPicker::new(
                     Rc::new(RemoteDirectorySource::new(injected, "orb")),
+                    "Pin to Directory",
                     window,
                     cx,
                 )
@@ -2373,6 +2386,27 @@ mod tests {
 
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
         assert!(cx.debug_bounds("directory-picker-confirm-menu").is_none());
+    }
+
+    #[gpui::test]
+    fn the_open_action_should_show_the_confirm_shortcut(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(ExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (_, _, cx) = directory_picker(provider, cx);
+
+        let shortcut = cx.update(|_, cx| {
+            crate::desktop_profile::DesktopPresentation::get(cx)
+                .shortcut(&spaceterm_ui::CommandPaletteConfirm)
+        });
+        assert!(shortcut.is_some(), "the Confirm key has no displayed Shortcut");
+        assert!(
+            cx.debug_bounds("directory-picker-confirm-shortcut").is_some(),
+            "the Open action did not show its Shortcut"
+        );
     }
 
     #[gpui::test]

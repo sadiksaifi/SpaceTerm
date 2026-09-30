@@ -153,6 +153,8 @@ ctrl-cmd-space	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::ShowC
 cmd-shift-k	None	terminal::SwitchWorkspace
 cmd-n	None	terminal::NewWorkspace
 cmd-shift-n	None	terminal::NewRemoteWorkspace
+cmd-o	None	terminal::OpenLocalDirectory
+cmd-shift-o	None	terminal::OpenRemoteDirectory
 ctrl-1	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace1
 ctrl-2	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace2
 ctrl-3	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace3

@@ -455,8 +455,6 @@ impl WorkspaceSidebar {
         let appearance = crate::ui::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let footer_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
-        let new_local_shortcut = presentation.shortcut(&crate::ui::NewWorkspace);
-        let new_remote_shortcut = presentation.shortcut(&NewRemoteWorkspace);
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
         let mut rows = div()
@@ -496,7 +494,7 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
-            new_workspace_menu_entries(new_local_shortcut, new_remote_shortcut, remote_disabled),
+            new_workspace_menu_entries(presentation, remote_disabled),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -523,22 +521,22 @@ impl WorkspaceSidebar {
             });
         })
         .on_activate(move |activation, window, cx| match *activation.action() {
-            NewWorkspaceMenuCommand::Local => {
+            WorkspaceCreation::Local => {
                 let _ = menu_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::NewLocalWorkspace);
+                    cx.emit(SidebarEvent::Create(WorkspaceCreation::Local));
                 });
             }
-            NewWorkspaceMenuCommand::Remote => {
+            creation => {
                 let sidebar = menu_sidebar.clone();
                 let _ = menu_sidebar.update(cx, |sidebar, cx| {
                     sidebar.dismiss_editing(window, cx);
                 });
-                // The flow opens after this menu closes so it captures Terminal Input
+                // A chooser opens after this menu closes so it captures Terminal Input
                 // Focus (not the menu) to restore on cancel, matching the switcher's
                 // creation rows.
                 cx.defer(move |cx| {
                     let _ = sidebar.update(cx, |_, cx| {
-                        cx.emit(SidebarEvent::NewRemoteWorkspace);
+                        cx.emit(SidebarEvent::Create(creation));
                     });
                 });
             }
@@ -676,38 +674,29 @@ impl WorkspaceSidebar {
 /// labels, leading icons, and trailing shortcuts, presented as a button-triggered menu.
 /// Labels and icons come from the shared creation descriptors so the two surfaces cannot drift.
 fn new_workspace_menu_entries(
-    local_shortcut: Option<SharedString>,
-    remote_shortcut: Option<SharedString>,
+    presentation: &crate::desktop_profile::DesktopPresentation,
     remote_disabled: bool,
-) -> Vec<MenuEntry<NewWorkspaceMenuCommand>> {
-    use crate::ui::workspace_creation::{
-        LOCAL_WORKSPACE_ICON, LOCAL_WORKSPACE_LABEL, REMOTE_WORKSPACE_ICON, REMOTE_WORKSPACE_LABEL,
-    };
-    vec![
-        {
-            let entry = MenuEntry::action(LOCAL_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Local);
-            match local_shortcut {
-                Some(shortcut) => entry.shortcut(shortcut),
-                None => entry,
-            }
+) -> Vec<MenuEntry<WorkspaceCreation>> {
+    let mut entries = Vec::new();
+    for creation in WorkspaceCreation::ALL {
+        if creation.starts_group() {
+            entries.push(MenuEntry::separator());
         }
-        .icon(|foreground, size| {
-            Icon::custom(LOCAL_WORKSPACE_ICON, size, foreground).into_any_element()
-        })
-        .debug_selector("new-workspace-menu-create-local"),
-        {
-            let entry = MenuEntry::action(REMOTE_WORKSPACE_LABEL, NewWorkspaceMenuCommand::Remote);
-            match remote_shortcut {
-                Some(shortcut) => entry.shortcut(shortcut),
-                None => entry,
-            }
-        }
-        .icon(|foreground, size| {
-            Icon::custom(REMOTE_WORKSPACE_ICON, size, foreground).into_any_element()
-        })
-        .disabled(remote_disabled)
-        .debug_selector("new-workspace-menu-create-remote"),
-    ]
+        let entry = MenuEntry::action(creation.label(), creation);
+        let entry = match creation.shortcut(presentation) {
+            Some(shortcut) => entry.shortcut(shortcut),
+            None => entry,
+        };
+        entries.push(
+            entry
+                .icon(move |foreground, size| {
+                    Icon::custom(creation.icon(), size, foreground).into_any_element()
+                })
+                .disabled(remote_disabled && creation.is_remote())
+                .debug_selector(format!("new-workspace-menu-{}", creation.selector())),
+        );
+    }
+    entries
 }
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.

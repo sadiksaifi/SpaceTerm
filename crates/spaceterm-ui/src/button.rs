@@ -882,6 +882,7 @@ pub struct Button {
     label: SharedString,
     leading: Option<ContentBuilder>,
     trailing: Option<ContentBuilder>,
+    shortcut: Option<SharedString>,
     full_width: bool,
     multiline: bool,
 }
@@ -909,6 +910,7 @@ impl Button {
             label,
             leading: None,
             trailing: None,
+            shortcut: None,
             full_width: false,
             multiline: false,
         }
@@ -951,6 +953,13 @@ impl Button {
     /// Squares the corners on `edge`, where a neighboring segment of the same control joins.
     pub(crate) fn joined_edge(mut self, edge: JoinedEdge) -> Self {
         self.core.joined_edge = edge;
+        self
+    }
+
+    /// Shows the displayed Shortcut that activates the button after its label, in the shortcut
+    /// font. The owner binds the keystroke; the Shortcut stays out of the accessibility name.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = Some(shortcut.into());
         self
     }
 
@@ -1040,6 +1049,11 @@ impl RenderOnce for Button {
         let multiline = self.multiline;
         let has_leading = self.leading.is_some();
         let has_trailing = self.trailing.is_some();
+        let shortcut_font = crate::control_typography(cx).shortcut().clone();
+        let shortcut_selector = match &self.core.debug_selector {
+            Some(selector) => format!("{selector}-shortcut"),
+            None => format!("{}-shortcut", self.label),
+        };
         let icon_offset = if has_leading || has_trailing {
             style.icon_baseline_center.map(|center| {
                 crate::icon::text_alignment_offset(
@@ -1080,6 +1094,16 @@ impl RenderOnce for Button {
                         .when(multiline, |label| label.whitespace_normal().text_center())
                         .child(self.label),
                 )
+                .when_some(self.shortcut, |content, shortcut| {
+                    content.child(
+                        div()
+                            .debug_selector(move || shortcut_selector)
+                            .flex_none()
+                            .font(shortcut_font)
+                            .line_height(gpui::relative(style.single_line_height))
+                            .child(shortcut),
+                    )
+                })
                 .when(full_width && has_trailing, |content| {
                     content.child(div().flex_grow(1.0))
                 })

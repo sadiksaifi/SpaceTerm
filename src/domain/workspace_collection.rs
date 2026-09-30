@@ -1,6 +1,8 @@
 mod naming;
 
-use super::remote_workspace::{RemoteConnectionReduction, RemoteConnectionState};
+use super::remote_workspace::{
+    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+};
 use crate::close_confirmation::{
     CloseContinuation, CloseWorkspaceOutcome, FinalTabCloseOutcome, HierarchyClose,
 };
@@ -507,6 +509,45 @@ impl<T> WorkspaceCollection<T> {
         Ok(self.remote_connection_state_mut(workspace_id)?.reduce(next))
     }
 
+    /// Finds the Local Workspace pinned to the directory `identity` names, whatever its spelling.
+    pub(crate) fn local_workspace_pinned_to(
+        &self,
+        identity: &LocalDirectoryIdentity,
+    ) -> Option<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .find(|workspace| {
+                matches!(&workspace.pinned_directory,
+                    Some(PinnedDirectory::Local(directory)) if directory.identity == *identity)
+            })
+            .map(WorkspaceEntry::id)
+    }
+
+    /// Finds the open Remote Workspace on `destination` pinned to the directory `identity` names.
+    pub(crate) fn remote_workspace_pinned_to(
+        &self,
+        destination: &SshDestination,
+        identity: &RemoteDirectoryIdentity,
+    ) -> Option<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .find(|workspace| {
+                let WorkspaceLocation::Remote {
+                    key,
+                    connection_state,
+                    ..
+                } = &workspace.location
+                else {
+                    return false;
+                };
+                key.destination() == destination
+                    && connection_state.phase() != RemoteConnectionPhase::Closing
+                    && matches!(&workspace.pinned_directory,
+                        Some(PinnedDirectory::Remote { identity: pinned, .. }) if pinned == identity)
+            })
+            .map(WorkspaceEntry::id)
+    }
+
     /// Begins terminal shutdown without advancing the current Connection Generation.
     ///
     /// Closing is terminal: delayed readiness, failure, disconnect, and reconnect observations
@@ -518,6 +559,12 @@ impl<T> WorkspaceCollection<T> {
         Ok(self
             .remote_connection_state_mut(workspace_id)?
             .begin_close())
+    }
+
+    /// Sets the next Workspace ID; `u64::MAX` makes every creation fail with an exhausted ID space.
+    #[cfg(test)]
+    pub(crate) fn set_next_workspace_id_for_test(&mut self, next_workspace_id: u64) {
+        self.next_workspace_id = next_workspace_id;
     }
 
     #[cfg(test)]
@@ -1454,6 +1501,80 @@ mod tests {
         assert_eq!(
             workspaces.workspace(second).unwrap().pinned_directory(),
             Some(&pin)
+        );
+    }
+
+    #[test]
+    fn pinned_workspace_lookup_should_match_the_directory_identity_on_the_same_machine() {
+        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let local = WorkspaceId::new(1);
+        let identity = remote_identity("/srv/app");
+        let pin = |directory: &str| PinnedDirectory::Remote {
+            directory: remote_directory(directory),
+            identity: identity.clone(),
+        };
+        let mut create_remote = |destination: &str| {
+            workspaces
+                .create_remote_workspace(
+                    remote_key(destination, "/home/me"),
+                    remote_user("me"),
+                    remote_directory("~/"),
+                    remote_identity("/home/me"),
+                    RemoteConnectionState::connected(1),
+                    |_| (),
+                )
+                .unwrap()
+        };
+        let server = create_remote("server");
+        let other = create_remote("other");
+        assert_eq!(
+            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(2)),
+            None
+        );
+        assert_eq!(
+            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
+            None
+        );
+
+        workspaces
+            .set_pinned_directory(
+                local,
+                Some(PinnedDirectory::Local(validated("/link/to/app", 2))),
+            )
+            .unwrap();
+        workspaces
+            .set_pinned_directory(other, Some(pin("/srv/app")))
+            .unwrap();
+        workspaces
+            .set_pinned_directory(server, Some(pin("~/../../srv/app")))
+            .unwrap();
+
+        assert_eq!(
+            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(2)),
+            Some(local)
+        );
+        assert_eq!(
+            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(3)),
+            None
+        );
+        assert_eq!(
+            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
+            Some(server)
+        );
+        assert_eq!(
+            workspaces.remote_workspace_pinned_to(&ssh_destination("other"), &identity),
+            Some(other)
+        );
+        assert_eq!(
+            workspaces.remote_workspace_pinned_to(&ssh_destination("third"), &identity),
+            None
+        );
+
+        workspaces.begin_remote_close(server).unwrap();
+        assert_eq!(
+            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
+            None,
+            "a closing Workspace must not be reused"
         );
     }
 

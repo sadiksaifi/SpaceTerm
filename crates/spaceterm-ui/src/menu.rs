@@ -1352,6 +1352,12 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
+    /// Shows the displayed Shortcut that runs the primary command after its label.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.button = self.button.shortcut(shortcut);
+        self
+    }
+
     /// Controls whether the menu segment can open, independently of the primary command.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu.disabled = disabled;

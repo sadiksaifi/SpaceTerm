@@ -54,6 +54,7 @@ struct TestRoot {
     other_focus: FocusHandle,
     show_combo_box: bool,
     right_to_left: bool,
+    menu_with_filter_header: bool,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     underlay_presses: Rc<Cell<usize>>,
 }
@@ -108,6 +109,11 @@ impl Render for TestRoot {
                 window_was_open: window_combo_box_is_open(window, cx),
             });
         });
+        let combo_box = if self.menu_with_filter_header {
+            combo_box.menu_with_filter_header()
+        } else {
+            combo_box
+        };
 
         div()
             .relative()
@@ -873,6 +879,7 @@ fn combo_box_window(
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
         right_to_left: false,
+        menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
     });
@@ -902,6 +909,7 @@ fn command_combo_box_window(
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
         right_to_left: false,
+        menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
     });
@@ -1772,6 +1780,64 @@ fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigatio
 }
 
 #[gpui::test]
+fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
+    cx: &mut TestAppContext,
+) {
+    let label = "Open Remote Directory on Another Host…";
+    let items = vec![ComboBoxItem::new(1, label).shortcut("⌘O")];
+    let (root, _, _, cx) = combo_box_window(cx, None, items, false);
+    let color = rgba(0x101010ff);
+    let row = crate::ListRowPaint::new(color, color, color, color, color, color);
+    let label_size = px(13.0);
+    cx.update(|window, cx| {
+        cx.set_global(ComboBoxTheme::new(
+            ComboBoxPaint::new(
+                color, color, color, color, color, color, color, color, color,
+            )
+            .rows(crate::ListRowPaints::new(row, row, row, row, row)),
+            ComboBoxMetrics::new(px(240.0), px(40.0))
+                .spacing(px(8.0), px(18.0), px(6.0))
+                .row_gutters(px(16.0), px(18.0), px(4.0), px(6.0))
+                .font_sizes(label_size, px(11.0)),
+        ));
+        window.refresh();
+    });
+    root.update(cx, |root, cx| {
+        root.menu_with_filter_header = true;
+        cx.notify();
+    });
+    open_by_pointer(cx);
+
+    let rendered = cx
+        .debug_bounds("combo-box-row-0-label")
+        .expect("the row label should render");
+    let natural = cx.update(|window, cx| {
+        let font = crate::control_typography(cx).regular().clone();
+        window
+            .text_system()
+            .shape_line(
+                label.into(),
+                label_size,
+                &[gpui::TextRun {
+                    len: label.len(),
+                    font,
+                    color: color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+    });
+    assert!(
+        rendered.size.width >= natural,
+        "the label has {:?} of its {natural:?} natural width",
+        rendered.size.width
+    );
+}
+
+#[gpui::test]
 fn navigation_should_remain_provisional_until_acceptance(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
     open_by_pointer(cx);
@@ -2455,6 +2521,38 @@ fn page_navigation_should_include_the_command_group_separator(cx: &mut TestAppCo
             "{keys} must include the separator height"
         );
     }
+}
+
+#[gpui::test]
+fn a_command_that_starts_a_group_should_be_separated_from_the_commands_before_it(
+    cx: &mut TestAppContext,
+) {
+    let choices = vec![ComboBoxItem::new(1, "Workspace 1")];
+    let (root, _, _, cx) = combo_box_window(cx, Some(1), choices, false);
+    root.update(cx, |root, cx| {
+        root.commands = Some(Rc::new(|_| {
+            vec![
+                ComboBoxCommand::new(100, "Local Workspace").debug_selector("local"),
+                ComboBoxCommand::new(101, "Remote Workspace").debug_selector("remote"),
+                ComboBoxCommand::new(102, "Open Local Directory")
+                    .starts_group()
+                    .debug_selector("open-local"),
+            ]
+        }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+
+    assert!(cx.debug_bounds("local-group-separator").is_some());
+    assert!(cx.debug_bounds("remote-group-separator").is_none());
+    let remote = cx.debug_bounds("remote").unwrap();
+    let separator = cx
+        .debug_bounds("open-local-group-separator")
+        .expect("a command that starts a group must draw a separator before it");
+    let open_local = cx.debug_bounds("open-local").unwrap();
+    assert!(remote.bottom() <= separator.top());
+    assert!(separator.bottom() <= open_local.top());
 }
 
 #[gpui::test]

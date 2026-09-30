@@ -225,6 +225,7 @@ pub struct ComboBoxItem<I> {
     leading_icon: Option<IconBuilder>,
     trailing: Option<ComboBoxAccessory>,
     shortcut: Option<SharedString>,
+    starts_group: bool,
     debug_selector: Option<String>,
     #[cfg(feature = "appearance-exerciser")]
     preview_selected: bool,
@@ -242,6 +243,7 @@ impl<I> ComboBoxItem<I> {
             leading_icon: None,
             trailing: None,
             shortcut: None,
+            starts_group: false,
             debug_selector: None,
             #[cfg(feature = "appearance-exerciser")]
             preview_selected: false,
@@ -334,6 +336,7 @@ impl<I> ComboBoxItem<I> {
             leading_icon: self.leading_icon,
             trailing: self.trailing,
             shortcut: self.shortcut,
+            starts_group: self.starts_group,
             debug_selector: self.debug_selector,
             #[cfg(feature = "appearance-exerciser")]
             preview_selected: self.preview_selected,
@@ -386,6 +389,12 @@ impl<C> ComboBoxCommand<C> {
     /// Adds a display-only keyboard equivalent after any trailing accessory.
     pub fn shortcut(self, shortcut: impl Into<SharedString>) -> Self {
         Self(self.0.shortcut(shortcut))
+    }
+
+    /// Starts a new command group, separated from the commands before it.
+    pub fn starts_group(mut self) -> Self {
+        self.0.starts_group = true;
+        self
     }
 
     /// Adds a stable selector used by GPUI interaction tests.
@@ -2190,11 +2199,10 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             self.matches.iter().take(position).enumerate().fold(
                 px(0.0),
                 |top, (position, index)| {
+                    let item = self.presented_items.get(*index);
                     top + metrics.list_item_height(
-                        self.presented_items
-                            .get(*index)
-                            .is_some_and(|item| item.description.is_some()),
-                        group_separator_before(position, self.choice_match_count),
+                        item.is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, self.choice_match_count, item),
                     )
                 },
             )
@@ -2654,6 +2662,7 @@ fn same_model<I: Eq>(current: &[ComboBoxItem<I>], next: &[ComboBoxItem<I>]) -> b
                 && current.disabled == next.disabled
                 && current.trailing == next.trailing
                 && current.shortcut == next.shortcut
+                && current.starts_group == next.starts_group
         })
 }
 
@@ -2691,8 +2700,14 @@ fn match_items<I>(items: &[ComboBoxItem<I>], query: &str) -> Vec<(usize, ComboBo
     .collect()
 }
 
-fn group_separator_before(position: usize, choice_match_count: usize) -> bool {
-    choice_match_count > 0 && position == choice_match_count
+/// A separator precedes the first command after matching choices and each later command group.
+fn group_separator_before<I>(
+    position: usize,
+    choice_match_count: usize,
+    item: Option<&ComboBoxItem<I>>,
+) -> bool {
+    (choice_match_count > 0 && position == choice_match_count)
+        || (position > 0 && item.is_some_and(|item| item.starts_group))
 }
 
 fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
@@ -2718,13 +2733,11 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
             .iter()
             .enumerate()
             .fold(px(0.0), |height, (position, index)| {
+                let item = snapshot.presented_items.get(*index);
                 height
                     + theme.metrics.list_item_height(
-                        snapshot
-                            .presented_items
-                            .get(*index)
-                            .is_some_and(|item| item.description.is_some()),
-                        group_separator_before(position, snapshot.choice_match_count),
+                        item.is_some_and(|item| item.description.is_some()),
+                        group_separator_before(position, snapshot.choice_match_count, item),
                     )
             })
     };
@@ -2871,13 +2884,18 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                         },
                         ComboBoxRowRenderContext {
                             columns: group_columns.of(&item.id),
-                            separator_before: group_separator_before(position, choice_match_count),
+                            separator_before: group_separator_before(
+                                position,
+                                choice_match_count,
+                                Some(item),
+                            ),
                             shortcut_gap: menu_with_filter_header.then_some(
                                 (px(MENU_SHORTCUT_GAP) - theme.metrics.gap).max(px(0.0)),
                             ),
                             collection_focused,
                             theme,
                             label_font: typography.regular().clone(),
+                            shortcut_font: combo_box_shortcut_font(&typography).clone(),
                             icon_offset,
                         },
                     )
@@ -3030,6 +3048,7 @@ struct ComboBoxRowRenderContext {
     collection_focused: bool,
     theme: ComboBoxTheme,
     label_font: gpui::Font,
+    shortcut_font: gpui::Font,
     icon_offset: Pixels,
 }
 
@@ -3048,6 +3067,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         collection_focused,
         theme,
         label_font,
+        shortcut_font,
         icon_offset,
     } = context;
     let ComboBoxRowState {
@@ -3109,7 +3129,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         })
         .when_some(row_paint, |row, paint| {
             row.bg(paint.background)
-                .border(theme.metrics.border_width)
+                .border(row_border_width(theme))
                 .border_color(paint.border)
         })
         .when(!item.disabled, |row| {
@@ -3209,6 +3229,7 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                 .when_some(shortcut_gap, |shortcut, gap| shortcut.ml(gap))
                 .text_size(theme.metrics.secondary_size)
                 .line_height(theme.metrics.secondary_line_height)
+                .font(shortcut_font)
                 .text_color(secondary)
                 .child(shortcut),
         );
@@ -3326,6 +3347,21 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     }
 }
 
+/// The border every row carries when the theme paints rows; it insets the row's content.
+fn row_border_width(theme: ComboBoxTheme) -> Pixels {
+    if theme.paint.rows.is_some() {
+        theme.metrics.border_width
+    } else {
+        px(0.0)
+    }
+}
+
+/// The font rows render keyboard equivalents in, shared with the width measurement so a
+/// row-driven panel is exactly as wide as its widest rendered row.
+fn combo_box_shortcut_font(typography: &crate::ControlTypography) -> &gpui::Font {
+    typography.shortcut()
+}
+
 fn natural_menu_width<I, C>(
     items: &[Row<I, C>],
     columns: GroupColumns,
@@ -3350,9 +3386,13 @@ fn natural_menu_width<I, C>(
                 None,
             )
             .width
+            // Layout snaps each text element to whole pixels; rounding each one up keeps a
+            // shortcut that snaps wider from taking width the label needs.
+            .ceil()
     };
     let fixed = theme.metrics.border_width * 2.0
         + theme.metrics.panel_padding * 2.0
+        + row_border_width(theme) * 2.0
         + theme.metrics.horizontal_padding * 2.0;
     let widest = items.iter().fold(px(0.0), |widest, item| {
         let leading = columns
@@ -3380,12 +3420,14 @@ fn natural_menu_width<I, C>(
                 + measure(
                     shortcut,
                     theme.metrics.secondary_size,
-                    typography.shortcut(),
+                    combo_box_shortcut_font(typography),
                 )
         });
         widest.max(fixed + leading + text + accessory + shortcut)
     });
+    // Scaled metrics can be fractional; round up so the panel snaps no narrower than its rows.
     widest
+        .ceil()
         .max(px(MENU_MINIMUM_WIDTH))
         .min(px(MENU_MAXIMUM_WIDTH))
 }
@@ -3413,6 +3455,17 @@ fn resolve_row_paint(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combo_box_shortcuts_use_the_shortcut_font_slot() {
+        let regular = gpui::font("Regular");
+        let shortcut = gpui::font("Shortcut");
+        let typography =
+            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
+                .semantic_fonts(shortcut.clone(), regular.clone(), regular);
+
+        assert_eq!(super::combo_box_shortcut_font(&typography), &shortcut);
+    }
+
     use super::*;
 
     fn row_paint(seed: u32) -> crate::ListRowPaint {
