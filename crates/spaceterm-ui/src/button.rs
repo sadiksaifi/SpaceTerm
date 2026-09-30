@@ -1050,10 +1050,16 @@ impl RenderOnce for Button {
         let has_leading = self.leading.is_some();
         let has_trailing = self.trailing.is_some();
         let shortcut_font = crate::control_typography(cx).shortcut().clone();
-        let shortcut_selector = match &self.core.debug_selector {
-            Some(selector) => format!("{selector}-shortcut"),
-            None => format!("{}-shortcut", self.label),
+        let selector = match &self.core.debug_selector {
+            Some(selector) => selector.clone(),
+            None => self.label.to_string(),
         };
+        let label_selector = format!("{selector}-label");
+        let shortcut_selector = format!("{selector}-shortcut");
+        // A Shortcut at a joined edge sits as far from the joining segment as from its label.
+        let trailing_padding = (self.shortcut.is_some()
+            && self.core.joined_edge == JoinedEdge::Trailing)
+            .then_some(style.gap);
         let icon_offset = if has_leading || has_trailing {
             style.icon_baseline_center.map(|center| {
                 crate::icon::text_alignment_offset(
@@ -1085,6 +1091,7 @@ impl RenderOnce for Button {
                 })
                 .child(
                     div()
+                        .debug_selector(move || label_selector)
                         .min_w_0()
                         .line_height(gpui::relative(if multiline {
                             style.multiline_line_height
@@ -1124,6 +1131,7 @@ impl RenderOnce for Button {
                 icon_only: false,
                 full_width,
                 multiline,
+                trailing_padding,
             },
             content,
             window,
@@ -1263,6 +1271,7 @@ impl RenderOnce for IconButton {
                 icon_only: true,
                 full_width: false,
                 multiline: false,
+                trailing_padding: None,
             },
             move |_, icon_foreground| (self.icon)(icon_foreground),
             window,
@@ -1276,6 +1285,8 @@ struct ButtonLayout {
     icon_only: bool,
     full_width: bool,
     multiline: bool,
+    /// Replaces the horizontal padding at the trailing edge.
+    trailing_padding: Option<Pixels>,
 }
 
 struct ButtonCore {
@@ -1522,7 +1533,9 @@ impl ButtonCore {
                 button.h(style.icon_button_size).w(style.icon_button_size)
             })
             .when(!layout.icon_only, |button| {
-                button.px(style.horizontal_padding)
+                button
+                    .pl(style.horizontal_padding)
+                    .pr(layout.trailing_padding.unwrap_or(style.horizontal_padding))
             })
             .when(layout.full_width, |button| button.w_full())
             .rounded_tl(corner_radii.top_left)
