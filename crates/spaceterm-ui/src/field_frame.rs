@@ -7,7 +7,7 @@ use crate::Ringed;
 /// Caller-owned validation and availability, independent of keyboard focus.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FieldState {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_focused: bool,
     disabled: bool,
     invalid: bool,
@@ -15,7 +15,7 @@ pub struct FieldState {
 
 impl FieldState {
     /// Pins focus decoration without acquiring keyboard focus in the development gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_focus(mut self, focused: bool) -> Self {
         self.preview_focused = focused;
         self
@@ -129,9 +129,9 @@ pub(crate) fn themed_field_frame(
 ) -> Ringed<Stateful<Div>> {
     let id = id.into();
     let ring_id = crate::focus_ring::ring_id(&id);
-    #[cfg(not(feature = "appearance-exerciser"))]
+    #[cfg(not(feature = "control-preview"))]
     let pinned = false;
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     let pinned = state.preview_focused;
     let frame = themed_field_surface(theme, id, state)
         .rounded(corner_radius)

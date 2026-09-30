@@ -1,7 +1,7 @@
 //! Owns committed preferences, preview lifetime, and serialized identity-aware writes.
 
 #![cfg_attr(
-    not(any(test, feature = "appearance-exerciser")),
+    not(any(test, feature = "developer-tools")),
     allow(
         dead_code,
         reason = "the Settings Window edits through a draft and the preview transaction, so the direct-commit, field-reset, and recoverable-candidate operations remain available but unused"

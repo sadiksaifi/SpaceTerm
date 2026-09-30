@@ -490,7 +490,7 @@ fn window_activity_selects_an_immutable_prepared_variant_without_changing_settin
     });
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values(
     cx: &mut TestAppContext,

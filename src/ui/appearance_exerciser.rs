@@ -1,6 +1,6 @@
 //! Development-only exerciser for the production Appearance and User Settings Interfaces.
 
-#[cfg(all(test, feature = "appearance-exerciser"))]
+#[cfg(all(test, feature = "developer-tools"))]
 #[path = "appearance_exerciser_tests.rs"]
 mod tests;
 

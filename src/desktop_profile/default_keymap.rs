@@ -199,7 +199,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
     ];
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     let bindings = bindings
         .into_iter()
         .chain([

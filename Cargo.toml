@@ -39,10 +39,10 @@ default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
 resolver = "2"
 
 [features]
-default = []
+# Every build outside the packaging script is SpaceTerm Dev and carries its developer tools.
+default = ["developer-tools"]
 macos-native-tests = []
-appearance-exerciser = ["spaceterm-ui/appearance-exerciser"]
-development-app = []
+developer-tools = ["spaceterm-ui/control-preview"]
 
 [[test]]
 name = "macos_quick_look_ownership"

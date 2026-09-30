@@ -85,7 +85,7 @@ build_native_binary() {
     local output="$1"
     local binary="$BUILD_TARGET_DIR/release/$BINARY_NAME"
 
-    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release --locked \
+    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release --locked --no-default-features \
         --manifest-path "$REPO_ROOT/Cargo.toml"
     [[ -x "$binary" ]] || die "release binary was not produced: $binary"
     if [[ -e "$output" && "$binary" -ef "$output" ]]; then
@@ -198,6 +198,8 @@ cmp -s "$RELEASE_ICON_SOURCE/$ICON_GLYPH" "$ICON_SOURCE/$ICON_GLYPH" \
 
 unset SPACETERM_RELEASE_TAG SPACETERM_SPARKLE_DIR
 export MACOSX_DEPLOYMENT_TARGET=26.0
+# Leaves the SpaceTerm Dev identity; see ADR 0012.
+export SPACETERM_PACKAGED=1
 if [[ -n "$RELEASE_TAG" ]]; then
     VERSION="$(python3 "$SCRIPT_DIR/release-version.py" --tag "$RELEASE_TAG" --require-clean --field version)"
     export SPACETERM_RELEASE_TAG="$RELEASE_TAG"

@@ -481,7 +481,7 @@ impl std::error::Error for SegmentedBuildError {}
 /// then carries no previous value.
 #[derive(IntoElement)]
 pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     accessibility_name: SharedString,
@@ -499,7 +499,7 @@ pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
 
 impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
     /// Pins only segment presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.preview_state = Some(state);
         self
@@ -525,7 +525,7 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         }
         let selected = options.iter().position(|option| &option.value == current);
         Ok(Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             id: id.into(),
             accessibility_name: accessibility_name.into(),
@@ -646,7 +646,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             state.synchronize(enabled, self.tab_stop, cx);
         });
         let focused = focus_handle.is_focused(window) && state.read(cx).focus_visible;
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
         let selector = self
             .debug_selector
@@ -701,7 +701,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 } else {
                     style.paints.disabled.resolve(selected)
                 };
-                #[cfg(feature = "appearance-exerciser")]
+                #[cfg(feature = "control-preview")]
                 let paint = self
                     .preview_state
                     .filter(|_| option_enabled)
@@ -716,7 +716,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                         paints.resolve(selected)
                     });
                 let refine_interaction = option_enabled;
-                #[cfg(feature = "appearance-exerciser")]
+                #[cfg(feature = "control-preview")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
                 // Selection changes the chip, never the label's glyphs or advance widths.
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {

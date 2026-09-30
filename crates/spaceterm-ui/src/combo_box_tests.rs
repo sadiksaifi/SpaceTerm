@@ -1716,7 +1716,7 @@ fn disabled_command_should_render_without_becoming_provisional(cx: &mut TestAppC
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "control-preview")]
 #[gpui::test]
 fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigation(
     cx: &mut TestAppContext,

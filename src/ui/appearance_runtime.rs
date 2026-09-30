@@ -27,7 +27,7 @@ use super::appearance::{ChromeAppearance, InstalledChrome, settings};
 pub(crate) struct InstalledAppearance(pub(crate) Arc<ResolvedAppearance>);
 impl Global for InstalledAppearance {}
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AccessibilityPreviewFact {
     ReduceTransparency,
@@ -37,7 +37,7 @@ pub(crate) enum AccessibilityPreviewFact {
     DifferentiateWithoutColor,
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AccessibilityPreviewOverride {
     reduce_transparency: Option<bool>,
@@ -47,7 +47,7 @@ struct AccessibilityPreviewOverride {
     differentiate_without_color: Option<bool>,
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 impl AccessibilityPreviewOverride {
     fn apply(self, mut capabilities: CompositionCapabilities) -> CompositionCapabilities {
         capabilities.reduce_transparency = self
@@ -84,7 +84,7 @@ pub(crate) struct AppearanceRuntime {
     fonts: AvailableFonts,
     pending_font_names: Option<Vec<String>>,
     control_motion: spaceterm_ui::ControlMotion,
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     accessibility_preview: AccessibilityPreviewOverride,
     _tasks: Vec<Task<()>>,
     _observation: Option<Box<dyn SystemAppearanceSubscription>>,
@@ -135,7 +135,7 @@ pub(crate) fn install(
         fonts,
         pending_font_names,
         control_motion: spaceterm_ui::ControlMotion::Standard,
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         accessibility_preview: AccessibilityPreviewOverride::default(),
         _tasks: tasks,
         _observation: observation,
@@ -171,7 +171,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         reduce_motion: platform.prefers_reduced_motion(),
         differentiate_without_color: accessibility.differentiate_without_color,
     };
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     let capabilities = cx
         .global::<AppearanceRuntime>()
         .accessibility_preview
@@ -272,7 +272,7 @@ pub(crate) fn control_motion(cx: &App) -> spaceterm_ui::ControlMotion {
         })
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 pub(crate) fn set_accessibility_preview(
     fact: AccessibilityPreviewFact,
     enabled: bool,
@@ -291,7 +291,7 @@ pub(crate) fn set_accessibility_preview(
     Ok(())
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 pub(crate) fn reset_accessibility_preview(cx: &mut App) -> Result<(), SettingsError> {
     let previous = {
         let runtime = cx.global_mut::<AppearanceRuntime>();
@@ -424,7 +424,7 @@ pub(crate) fn complete_font_catalog(cx: &mut App) {
 }
 
 /// Classify all fonts only for explicit font reloads.
-#[cfg(any(test, feature = "appearance-exerciser"))]
+#[cfg(any(test, feature = "developer-tools"))]
 fn capture_fonts(cx: &App) -> AvailableFonts {
     let text = cx.text_system();
     base_fonts(
@@ -435,7 +435,7 @@ fn capture_fonts(cx: &App) -> AvailableFonts {
     )
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
     let fonts = capture_fonts(cx);
     cx.global_mut::<AppearanceRuntime>().fonts = fonts;

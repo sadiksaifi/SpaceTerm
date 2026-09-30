@@ -1942,7 +1942,7 @@ fn render_pane_caption(
     gpui::canvas(
         move |bounds, window, cx| {
             let mut caption = caption;
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "developer-tools")]
             {
                 caption.text = super::appearance_exerciser::caption_fixture(cx)
                     .map(PaneCaptionText::from_facts)

@@ -3804,7 +3804,7 @@ impl Render for TerminalPane {
         let link_preview_text = active_hovered_link
             .as_ref()
             .map(|link| link.target.value.clone());
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         let link_preview_text = link_preview_text.or_else(|| {
             // The development fixture exercises this readout without granting hover or
             // activation authority to its synthetic text.

@@ -1,5 +1,5 @@
 pub(crate) mod appearance;
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 pub(crate) mod appearance_exerciser;
 pub(crate) mod appearance_runtime;
 mod button_theme;

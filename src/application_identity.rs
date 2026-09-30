@@ -1,29 +1,33 @@
+/// Where an identity receives application updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpdateSource {
+    /// The signed release feed; see ADR 0009.
+    SignedFeed,
+    /// A scripted preview of the update interface that installs nothing.
+    Simulation,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
     directory_name: &'static str,
+    update_source: UpdateSource,
+    microphone_access: bool,
 }
 
 impl ApplicationIdentity {
     pub(crate) const fn current() -> Self {
-        Self::for_build(
-            cfg!(feature = "appearance-exerciser"),
-            cfg!(feature = "development-app"),
-            cfg!(spaceterm_release),
-        )
+        Self::for_build(cfg!(spaceterm_packaged), cfg!(spaceterm_release))
     }
 
-    /// Only a validated release tag selects the production identity, so an untagged build can
-    /// never replace or share state with a release installation.
-    const fn for_build(appearance_exerciser: bool, development_app: bool, release: bool) -> Self {
-        if appearance_exerciser {
-            Self::appearance()
-        } else if development_app {
-            Self::development()
-        } else if release {
-            Self::production()
-        } else {
-            Self::preflight()
+    /// Only the packaging script leaves SpaceTerm Dev, and only a validated release tag selects
+    /// SpaceTerm, so no other build can replace or share state with a release installation.
+    const fn for_build(packaged: bool, release: bool) -> Self {
+        match (packaged, release) {
+            (false, _) => Self::development(),
+            (true, false) => Self::preflight(),
+            (true, true) => Self::production(),
         }
     }
 
@@ -35,17 +39,21 @@ impl ApplicationIdentity {
         self.directory_name
     }
 
+    pub(crate) const fn update_source(self) -> UpdateSource {
+        self.update_source
+    }
+
+    /// SpaceTerm Dev is re-signed ad hoc on every build, so privacy grants would not persist.
+    pub(crate) const fn microphone_access(self) -> bool {
+        self.microphone_access
+    }
+
     const fn production() -> Self {
         Self {
             display_name: "SpaceTerm",
             directory_name: "spaceterm",
-        }
-    }
-
-    const fn development() -> Self {
-        Self {
-            display_name: "SpaceTerm Dev",
-            directory_name: "spaceterm-dev",
+            update_source: UpdateSource::SignedFeed,
+            microphone_access: true,
         }
     }
 
@@ -53,13 +61,17 @@ impl ApplicationIdentity {
         Self {
             display_name: "SpaceTerm Preflight",
             directory_name: "spaceterm-preflight",
+            update_source: UpdateSource::Unavailable,
+            microphone_access: true,
         }
     }
 
-    const fn appearance() -> Self {
+    const fn development() -> Self {
         Self {
-            display_name: "SpaceTerm Appearance",
-            directory_name: "spaceterm-appearance-exerciser",
+            display_name: "SpaceTerm Dev",
+            directory_name: "spaceterm-dev",
+            update_source: UpdateSource::Simulation,
+            microphone_access: false,
         }
     }
 }
@@ -109,7 +121,6 @@ mod tests {
             ApplicationIdentity::production(),
             ApplicationIdentity::preflight(),
             ApplicationIdentity::development(),
-            ApplicationIdentity::appearance(),
         ];
 
         assert_eq!(
@@ -118,27 +129,40 @@ mod tests {
                 ("SpaceTerm", "spaceterm"),
                 ("SpaceTerm Preflight", "spaceterm-preflight"),
                 ("SpaceTerm Dev", "spaceterm-dev"),
-                ("SpaceTerm Appearance", "spaceterm-appearance-exerciser")
             ]
         );
     }
 
     #[test]
-    fn build_inputs_should_select_one_identity() {
+    fn only_packaging_should_leave_the_development_identity() {
         assert_eq!(
             [
-                ApplicationIdentity::for_build(false, false, true),
-                ApplicationIdentity::for_build(false, false, false),
-                ApplicationIdentity::for_build(false, true, false),
-                ApplicationIdentity::for_build(true, false, false),
-                ApplicationIdentity::for_build(true, true, false),
+                ApplicationIdentity::for_build(false, false),
+                ApplicationIdentity::for_build(true, false),
+                ApplicationIdentity::for_build(true, true),
             ],
             [
-                ApplicationIdentity::production(),
-                ApplicationIdentity::preflight(),
                 ApplicationIdentity::development(),
-                ApplicationIdentity::appearance(),
-                ApplicationIdentity::appearance(),
+                ApplicationIdentity::preflight(),
+                ApplicationIdentity::production(),
+            ]
+        );
+    }
+
+    #[test]
+    fn application_identities_should_own_their_distribution_policy() {
+        let identities = [
+            ApplicationIdentity::production(),
+            ApplicationIdentity::preflight(),
+            ApplicationIdentity::development(),
+        ];
+
+        assert_eq!(
+            identities.map(|identity| (identity.update_source(), identity.microphone_access())),
+            [
+                (UpdateSource::SignedFeed, true),
+                (UpdateSource::Unavailable, true),
+                (UpdateSource::Simulation, false),
             ]
         );
     }
@@ -160,11 +184,6 @@ mod tests {
                 ApplicationIdentity::development(),
                 include_str!("../packaging/macos/Development-Info.plist"),
                 "io.github.sadiksaifi.spaceterm-dev",
-            ),
-            (
-                ApplicationIdentity::appearance(),
-                include_str!("../packaging/macos/AppearanceExerciser-Info.plist"),
-                "io.github.sadiksaifi.spaceterm.appearance-exerciser",
             ),
         ];
 

@@ -1008,7 +1008,7 @@ fn open_initial_workspace(
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
     crate::ui::settings_recovery::offer_at_launch(workspace, cx);
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     crate::ui::appearance_exerciser::open(workspace, cx)
         .map_err(|_| RuntimeError::Initialization)?;
     Ok(workspace)

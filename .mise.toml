@@ -140,7 +140,7 @@ run = "python3 scripts/run-development-app.py dev"
 
 [tasks."dev:macos"]
 description = "Run SpaceTerm Dev from a source-built macOS application bundle"
-run = "exec bash scripts/run-development-app-macos.sh dev"
+run = "exec bash scripts/run-development-app-macos.sh"
 
 [tasks."dev:macos:updates"]
 description = "Preview the real update UI in SpaceTerm Dev with a simulated updater"
@@ -155,20 +155,12 @@ esac
 echo "Update preview: ${usage_scenario}. Choose SpaceTerm Dev > Check for Updates…"
 echo "Downloads and installation are simulated. Nothing will be installed or restarted."
 export SPACETERM_UPDATE_PREVIEW="${usage_scenario}"
-exec bash scripts/run-development-app-macos.sh dev
+exec bash scripts/run-development-app-macos.sh
 '''
-
-[tasks."dev:appearance"]
-description = "Run the appearance exerciser with isolated retained settings"
-run = "python3 scripts/run-development-app.py appearance"
 
 [tasks.check]
 description = "Check every target and feature"
 run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
-
-[tasks."dev:appearance:macos"]
-description = "Run the source appearance exerciser as a separate inspectable macOS app"
-run = "exec bash scripts/run-development-app-macos.sh appearance"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
@@ -369,7 +361,6 @@ python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(),
 plutil -lint packaging/macos/Info.plist
 plutil -lint packaging/macos/Preflight-Info.plist
 plutil -lint packaging/macos/Development-Info.plist
-plutil -lint packaging/macos/AppearanceExerciser-Info.plist
 plutil -lint packaging/macos/Entitlements.plist
 '''
 

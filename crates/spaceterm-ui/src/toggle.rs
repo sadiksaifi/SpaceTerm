@@ -422,7 +422,7 @@ pub struct Checkbox {
 
 impl Checkbox {
     /// Pins only presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.core.preview_state = Some(state);
         self
@@ -536,7 +536,7 @@ pub struct Switch {
 
 impl Switch {
     /// Pins only presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.core.preview_state = Some(state);
         self
@@ -637,7 +637,7 @@ enum ToggleKind {
 }
 
 struct ToggleCore {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     label: SharedString,
@@ -655,7 +655,7 @@ struct ToggleCore {
 impl ToggleCore {
     fn new(id: ElementId, label: SharedString) -> Self {
         Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             id,
             label,
@@ -700,9 +700,9 @@ impl ToggleCore {
         } else {
             style.normal
         };
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let paint = self.preview_state.map_or(paint, |state| {
             crate::floating_surface::hosted_toggle_theme(cx).paint(
                 on,
@@ -711,7 +711,7 @@ impl ToggleCore {
                 state.pressed(),
             )
         });
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let keyboard_pressed = keyboard_pressed || self.preview_state.is_some();
         let selector = self
             .debug_selector

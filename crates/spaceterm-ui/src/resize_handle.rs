@@ -315,7 +315,7 @@ type ResizeHandler = Rc<dyn Fn(&ResizeHandleEvent, &mut Window, &mut App) -> Opt
 /// callers. It does not yet publish a separator node to the native accessibility tree.
 #[derive(IntoElement)]
 pub struct ResizeHandle {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     accessibility_name: SharedString,
@@ -335,7 +335,7 @@ pub struct ResizeHandle {
 
 impl ResizeHandle {
     /// Pins only divider presentation without owning pointer or keyboard interaction.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.preview_state = Some(state);
         self
@@ -349,7 +349,7 @@ impl ResizeHandle {
         current_value: f32,
     ) -> Self {
         Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             id: id.into(),
             accessibility_name: accessibility_name.into(),
@@ -504,7 +504,7 @@ impl RenderOnce for ResizeHandle {
             }
         }
         let focused = focus_handle.is_focused(window);
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let (hovered, active, focused) = self
             .preview_state
             .map(|state| (state.hovered(), state.pressed(), state.focused()))

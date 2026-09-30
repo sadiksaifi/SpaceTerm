@@ -1,8 +1,10 @@
+//! The signed release feed, linked only into builds that carry Sparkle.
+#![cfg(spaceterm_sparkle)]
+
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent};
 
 #[derive(Default)]
 pub(crate) struct MacosUpdates {
-    #[cfg(spaceterm_sparkle)]
     session: std::cell::RefCell<Option<native::Session>>,
 }
 
@@ -12,24 +14,6 @@ impl MacosUpdates {
     }
 }
 
-#[cfg(not(spaceterm_sparkle))]
-impl UpdateAdapter for MacosUpdates {
-    fn start(&self, _: async_channel::Sender<UpdateEvent>) -> Result<(), UpdateError> {
-        Err(UpdateError::Unavailable)
-    }
-    fn check(&self) -> Result<(), UpdateError> {
-        Err(UpdateError::Unavailable)
-    }
-    fn download(&self) -> Result<(), UpdateError> {
-        Err(UpdateError::Unavailable)
-    }
-    fn cancel(&self) {}
-    fn install(&self) -> Result<(), UpdateError> {
-        Err(UpdateError::Unavailable)
-    }
-}
-
-#[cfg(spaceterm_sparkle)]
 mod native {
     use super::*;
     use std::ffi::{CStr, c_char, c_void};
@@ -145,11 +129,7 @@ mod native {
 
     impl UpdateAdapter for MacosUpdates {
         fn start(&self, sender: async_channel::Sender<UpdateEvent>) -> Result<(), UpdateError> {
-            if cfg!(any(
-                feature = "development-app",
-                feature = "appearance-exerciser"
-            )) || objc2::MainThreadMarker::new().is_none()
-                || self.session.borrow().is_some()
+            if objc2::MainThreadMarker::new().is_none() || self.session.borrow().is_some()
             {
                 return Err(UpdateError::Unavailable);
             }

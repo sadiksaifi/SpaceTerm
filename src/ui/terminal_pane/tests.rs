@@ -5549,7 +5549,7 @@ fn stationary_link_hover_updates_when_the_platform_modifier_changes(cx: &mut Tes
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     cx: &mut TestAppContext,

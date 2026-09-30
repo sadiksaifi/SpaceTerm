@@ -364,7 +364,7 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         let expected = {
             use gpui::Action as _;
             let mut expected = expected;

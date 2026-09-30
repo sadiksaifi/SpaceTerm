@@ -8,32 +8,12 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
 
-PROFILE="${1:-}"
-case "$PROFILE" in
-    dev)
-        INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Development-Info.plist"
-        CARGO_ARGUMENTS=(
-            --manifest-path "$REPO_ROOT/Cargo.toml"
-            --features development-app
-            --locked
-        )
-        APPLICATION_COMMAND=(env)
-        ;;
-    appearance)
-        INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/AppearanceExerciser-Info.plist"
-        CARGO_ARGUMENTS=(
-            --manifest-path "$REPO_ROOT/Cargo.toml"
-            --features appearance-exerciser
-            --locked
-        )
-        APPLICATION_COMMAND=(env SPACETERM_APPEARANCE_EXERCISER=1)
-        ;;
-    *)
-        echo "usage: $(basename -- "$0") dev|appearance" >&2
-        exit 2
-        ;;
-esac
-readonly PROFILE INFO_PLIST_SOURCE
+[[ $# -eq 0 ]] || {
+    echo "usage: $(basename -- "$0")" >&2
+    exit 2
+}
+readonly INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Development-Info.plist"
+readonly CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
 plist_value() {
     local key="$1"
@@ -89,5 +69,4 @@ mv -- "$STAGED_BUNDLE" "$BUNDLE"
 rmdir -- "$STAGING_ROOT"
 STAGING_ROOT=""
 
-APPLICATION_COMMAND+=("$BUNDLE/Contents/MacOS/$EXECUTABLE_NAME")
-exec "${APPLICATION_COMMAND[@]}"
+exec "$BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"

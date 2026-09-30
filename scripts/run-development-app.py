@@ -6,7 +6,6 @@ import sys
 
 MACOS_TASK_BY_PROFILE = {
     "dev": "dev:macos",
-    "appearance": "dev:appearance:macos",
 }
 
 
