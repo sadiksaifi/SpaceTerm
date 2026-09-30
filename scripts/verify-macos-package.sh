@@ -25,7 +25,6 @@ EXPECTED_MARKETING_VERSION=""
 RELEASE_TAG=""
 EXPECTED_BUILD_NUMBER=""
 HELPER_PID=""
-HELPER_WATCHDOG_PID=""
 
 usage() {
     cat <<EOF
@@ -50,10 +49,6 @@ require_command() {
 
 cleanup() {
     local exit_status=$?
-    if [[ -n "$HELPER_WATCHDOG_PID" ]]; then
-        kill -KILL "$HELPER_WATCHDOG_PID" >/dev/null 2>&1 || true
-        wait "$HELPER_WATCHDOG_PID" 2>/dev/null || true
-    fi
     if [[ -n "$HELPER_PID" ]]; then
         kill -KILL "$HELPER_PID" >/dev/null 2>&1 || true
         wait "$HELPER_PID" 2>/dev/null || true
@@ -79,8 +74,7 @@ verify_askpass_helper_mode() {
     local label="$2"
     local stdout_path="$TEMP_ROOT/$label.askpass.stdout"
     local stderr_path="$TEMP_ROOT/$label.askpass.stderr"
-    local timeout_path="$TEMP_ROOT/$label.askpass.timeout"
-    local helper_exit helper_pid
+    local helper_exit helper_pid deadline
 
     : > "$stdout_path"
     : > "$stderr_path"
@@ -91,31 +85,21 @@ verify_askpass_helper_mode() {
     HELPER_PID=$!
     helper_pid="$HELPER_PID"
 
-    (
-        sleep "$ASKPASS_HELPER_TIMEOUT_SECONDS"
-        if kill -0 "$helper_pid" >/dev/null 2>&1; then
-            : > "$timeout_path"
-            kill -TERM "$helper_pid" >/dev/null 2>&1 || true
-            sleep 1
-            kill -KILL "$helper_pid" >/dev/null 2>&1 || true
-        fi
-    ) &
-    HELPER_WATCHDOG_PID=$!
-
+    # Poll in the foreground: a background timer would outlive this script
+    # and fail the Cargo artifact guard's lingering-process check.
+    deadline=$((SECONDS + ASKPASS_HELPER_TIMEOUT_SECONDS))
+    while kill -0 "$helper_pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
+        sleep 0.1
+    done
+    ! kill -0 "$helper_pid" >/dev/null 2>&1 \
+        || die "$label AskPass helper mode exceeded its ${ASKPASS_HELPER_TIMEOUT_SECONDS}s deadline"
     if wait "$helper_pid"; then
         helper_exit=0
     else
         helper_exit=$?
     fi
     HELPER_PID=""
-    kill -TERM "$HELPER_WATCHDOG_PID" >/dev/null 2>&1 || true
-    wait "$HELPER_WATCHDOG_PID" 2>/dev/null || true
-    HELPER_WATCHDOG_PID=""
 
-    [[ ! -e "$timeout_path" ]] \
-        || die "$label AskPass helper mode exceeded its ${ASKPASS_HELPER_TIMEOUT_SECONDS}s deadline"
-    ! kill -0 "$helper_pid" >/dev/null 2>&1 \
-        || die "$label AskPass helper process remained alive after its bounded invocation"
     [[ "$helper_exit" == "2" ]] \
         || die "$label AskPass helper mode must reject missing transport inputs with exit 2, got: $helper_exit"
     [[ ! -s "$stdout_path" ]] \
