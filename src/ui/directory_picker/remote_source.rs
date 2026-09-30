@@ -13,6 +13,8 @@ use crate::ssh::remote_account::RemoteWorkspaceAccount;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteDirectoryProviderError {
     ConnectionLost,
+    /// The server refused a session on a Control Connection that is still live.
+    SessionUnavailable,
     Missing,
     NotDirectory,
     PermissionDenied,
@@ -129,6 +131,9 @@ fn resolve<T: 'static>(task: Task<Result<T, RemoteDirectoryProviderError>>) -> S
 const fn source_error(error: RemoteDirectoryProviderError) -> DirectorySourceError {
     match error {
         RemoteDirectoryProviderError::ConnectionLost => DirectorySourceError::ConnectionLost,
+        RemoteDirectoryProviderError::SessionUnavailable => {
+            DirectorySourceError::SessionUnavailable
+        }
         RemoteDirectoryProviderError::Missing => DirectorySourceError::Missing,
         RemoteDirectoryProviderError::NotDirectory => DirectorySourceError::NotDirectory,
         RemoteDirectoryProviderError::PermissionDenied => DirectorySourceError::PermissionDenied,

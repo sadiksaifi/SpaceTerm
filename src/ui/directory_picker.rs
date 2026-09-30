@@ -55,6 +55,9 @@ const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
     EmptyNotice::new(IconName::TriangleAlert, "SSH connection lost");
+const SESSION_UNAVAILABLE_NOTICE: EmptyNotice =
+    EmptyNotice::new(IconName::TriangleAlert, "SSH server refused a new session")
+        .description("Close a Pane on this connection or edit the path to try again.");
 const UNSUPPORTED_LOGIN_SHELL_NOTICE: EmptyNotice =
     EmptyNotice::new(IconName::TriangleAlert, "Unsupported login shell")
         .description(UNSUPPORTED_LOGIN_SHELL_MESSAGE);
@@ -86,6 +89,8 @@ impl EmptyNotice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectorySourceError {
     ConnectionLost,
+    /// The machine refused a new session on a connection that is still live.
+    SessionUnavailable,
     Missing,
     NotDirectory,
     PermissionDenied,
@@ -415,6 +420,7 @@ enum DirectoryPickerStatus {
     NotDirectory,
     PermissionDenied,
     ConnectionLost,
+    SessionUnavailable,
     UnsupportedLoginShell,
     Other,
     Invalid(PickerPathError),
@@ -1162,8 +1168,8 @@ impl DirectoryPicker {
             None => action,
         }
         .disabled(!self.can_confirm())
-            .menu_disabled(self.busy.is_some())
-            .debug_selector(CONFIRM_ACTION);
+        .menu_disabled(self.busy.is_some())
+        .debug_selector(CONFIRM_ACTION);
         match &self.system_selection {
             Some(label) => action.menu_item(SYSTEM_SELECTION_ACTION, label.clone()),
             None => action,
@@ -1226,6 +1232,7 @@ impl DirectoryPicker {
                     .description("Your account can\u{2019}t open this directory.");
             }
             DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
+            DirectoryPickerStatus::SessionUnavailable => return SESSION_UNAVAILABLE_NOTICE,
             DirectoryPickerStatus::UnsupportedLoginShell => {
                 return UNSUPPORTED_LOGIN_SHELL_NOTICE;
             }
@@ -1247,6 +1254,7 @@ impl DirectoryPicker {
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
+            Some(DirectorySourceError::SessionUnavailable) => SESSION_UNAVAILABLE_NOTICE,
             Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
@@ -1437,6 +1445,7 @@ fn child_directory_item(
 fn status_for_source_error(error: DirectorySourceError) -> DirectoryPickerStatus {
     match error {
         DirectorySourceError::ConnectionLost => DirectoryPickerStatus::ConnectionLost,
+        DirectorySourceError::SessionUnavailable => DirectoryPickerStatus::SessionUnavailable,
         DirectorySourceError::Missing => DirectoryPickerStatus::Missing,
         DirectorySourceError::NotDirectory => DirectoryPickerStatus::NotDirectory,
         DirectorySourceError::PermissionDenied => DirectoryPickerStatus::PermissionDenied,
@@ -1453,6 +1462,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use gpui::{
         BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
@@ -1460,6 +1470,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
+    use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
     use crate::ssh::remote_account::RemoteWorkspaceAccount;
 
     #[test]
@@ -1675,7 +1686,7 @@ mod tests {
     }
 
     fn directory_picker(
-        provider: Arc<ScriptedRemoteDirectoryProvider>,
+        provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
         cx: &mut TestAppContext,
     ) -> (
         gpui::Entity<DirectoryPicker>,
@@ -1686,7 +1697,7 @@ mod tests {
     }
 
     fn directory_picker_offering<'a>(
-        provider: Arc<ScriptedRemoteDirectoryProvider>,
+        injected: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
         system_selection: Option<&'static str>,
         cx: &'a mut TestAppContext,
     ) -> (
@@ -1696,7 +1707,6 @@ mod tests {
     ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
@@ -1741,7 +1751,7 @@ mod tests {
             [],
             [],
         );
-        let (picker, _, cx) = directory_picker(Arc::clone(&provider), cx);
+        let (picker, _, cx) = directory_picker(provider.clone(), cx);
 
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.row_names()),
@@ -1796,7 +1806,7 @@ mod tests {
             [],
             [Ok(identity.clone())],
         );
-        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(provider.clone(), cx);
         assert!(matches!(
             picker.read_with(cx, |picker, cx| picker
                 .palette
@@ -1829,7 +1839,7 @@ mod tests {
             [],
             [Ok(identity)],
         );
-        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(provider.clone(), cx);
         assert!(cx.debug_bounds(ENCLOSING_ROW).is_some());
         assert!(
             cx.debug_bounds("command-palette-results-note").is_some(),
@@ -1869,7 +1879,7 @@ mod tests {
             [],
             [],
         );
-        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(provider.clone(), cx);
         assert!(cx.debug_bounds(CONFIRM_ACTION).is_some());
         assert!(!picker.read_with(cx, |picker, _| picker.can_confirm()));
 
@@ -1907,7 +1917,7 @@ mod tests {
             [Ok(())],
             [Ok(identity.clone())],
         );
-        let (picker, events, cx) = directory_picker(Arc::clone(&provider), cx);
+        let (picker, events, cx) = directory_picker(provider.clone(), cx);
         set_remote_input(&picker, "~/Projects/new", cx);
 
         cx.update(|window, cx| {
@@ -2194,6 +2204,72 @@ mod tests {
     }
 
     #[gpui::test]
+    fn rapid_remote_path_input_should_settle_within_the_connection_session_limit(
+        cx: &mut TestAppContext,
+    ) {
+        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
+        server.open_terminal_session_channels(8);
+        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+
+        let path = "~/Projects/SpaceTerm/crates/";
+        for end in 1..=path.len() {
+            cx.update(|_, cx| {
+                picker.update(cx, |picker, cx| {
+                    picker
+                        .palette
+                        .update(cx, |palette, cx| palette.set_query(&path[..end], cx));
+                });
+            });
+            cx.executor().advance_clock(Duration::from_millis(2));
+            cx.run_until_parked();
+            picker.read_with(cx, |picker, _| {
+                assert_ne!(picker.status, DirectoryPickerStatus::ConnectionLost);
+                assert_ne!(
+                    picker.listing_error,
+                    Some(DirectorySourceError::ConnectionLost)
+                );
+            });
+        }
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+
+        picker.read_with(cx, |picker, _| {
+            assert_eq!(picker.status, DirectoryPickerStatus::Readable);
+            assert!(picker.can_confirm());
+            assert_eq!(picker.row_names(), ["Documents", "Projects", "srv"]);
+        });
+        assert_eq!(server.refused_sessions(), 0);
+        assert!(server.peak_utility_sessions() <= 2);
+    }
+
+    #[gpui::test]
+    fn a_server_that_keeps_refusing_sessions_should_not_report_a_lost_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
+        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        server.open_terminal_session_channels(10);
+
+        set_remote_input(&picker, "~/Projects/", cx);
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+
+        picker.read_with(cx, |picker, _| {
+            assert_eq!(picker.status, DirectoryPickerStatus::SessionUnavailable);
+            assert_eq!(
+                picker.empty_notice().title,
+                SESSION_UNAVAILABLE_NOTICE.title
+            );
+            assert!(!picker.can_confirm());
+        });
+        assert!(server.refused_sessions() > 2);
+    }
+
+    #[gpui::test]
     fn a_pending_listing_should_present_loading_instead_of_an_empty_directory(
         cx: &mut TestAppContext,
     ) {
@@ -2402,9 +2478,13 @@ mod tests {
             crate::desktop_profile::DesktopPresentation::get(cx)
                 .shortcut(&spaceterm_ui::CommandPaletteConfirm)
         });
-        assert!(shortcut.is_some(), "the Confirm key has no displayed Shortcut");
         assert!(
-            cx.debug_bounds("directory-picker-confirm-shortcut").is_some(),
+            shortcut.is_some(),
+            "the Confirm key has no displayed Shortcut"
+        );
+        assert!(
+            cx.debug_bounds("directory-picker-confirm-shortcut")
+                .is_some(),
             "the Open action did not show its Shortcut"
         );
     }
