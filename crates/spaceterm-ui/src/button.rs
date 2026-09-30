@@ -956,6 +956,13 @@ impl Button {
         self
     }
 
+    /// Insets the content from each edge by the label gap, so the edges, the label, and the
+    /// Shortcut are evenly spaced.
+    pub(crate) fn even_spacing(mut self) -> Self {
+        self.core.even_spacing = true;
+        self
+    }
+
     /// Shows the displayed Shortcut that activates the button after its label, in the shortcut
     /// font. The owner binds the keystroke; the Shortcut stays out of the accessibility name.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
@@ -1049,6 +1056,7 @@ impl RenderOnce for Button {
         let multiline = self.multiline;
         let has_leading = self.leading.is_some();
         let has_trailing = self.trailing.is_some();
+        let even_spacing = self.core.even_spacing;
         let shortcut_font = crate::control_typography(cx).shortcut().clone();
         let selector = match &self.core.debug_selector {
             Some(selector) => selector.clone(),
@@ -1056,10 +1064,6 @@ impl RenderOnce for Button {
         };
         let label_selector = format!("{selector}-label");
         let shortcut_selector = format!("{selector}-shortcut");
-        // A Shortcut at a joined edge sits as far from the joining segment as from its label.
-        let trailing_padding = (self.shortcut.is_some()
-            && self.core.joined_edge == JoinedEdge::Trailing)
-            .then_some(style.gap);
         let icon_offset = if has_leading || has_trailing {
             style.icon_baseline_center.map(|center| {
                 crate::icon::text_alignment_offset(
@@ -1099,7 +1103,14 @@ impl RenderOnce for Button {
                             style.single_line_height
                         }))
                         .when(multiline, |label| label.whitespace_normal().text_center())
-                        .child(self.label),
+                        .map(|label| {
+                            // Evenly spaced content measures its spacing to the label's ink.
+                            if even_spacing && !multiline {
+                                label.child(crate::optical_text::OpticalText::new(self.label))
+                            } else {
+                                label.child(self.label)
+                            }
+                        }),
                 )
                 .when_some(self.shortcut, |content, shortcut| {
                     content.child(
@@ -1131,7 +1142,6 @@ impl RenderOnce for Button {
                 icon_only: false,
                 full_width,
                 multiline,
-                trailing_padding,
             },
             content,
             window,
@@ -1271,7 +1281,6 @@ impl RenderOnce for IconButton {
                 icon_only: true,
                 full_width: false,
                 multiline: false,
-                trailing_padding: None,
             },
             move |_, icon_foreground| (self.icon)(icon_foreground),
             window,
@@ -1285,8 +1294,6 @@ struct ButtonLayout {
     icon_only: bool,
     full_width: bool,
     multiline: bool,
-    /// Replaces the horizontal padding at the trailing edge.
-    trailing_padding: Option<Pixels>,
 }
 
 struct ButtonCore {
@@ -1311,6 +1318,7 @@ struct ButtonCore {
     icon_button_size: Option<Pixels>,
     corner_radius: Option<Pixels>,
     joined_edge: JoinedEdge,
+    even_spacing: bool,
     #[cfg(feature = "appearance-exerciser")]
     preview_state: Option<crate::ControlPreviewState>,
 }
@@ -1339,6 +1347,7 @@ impl ButtonCore {
             icon_button_size: None,
             corner_radius: None,
             joined_edge: JoinedEdge::None,
+            even_spacing: false,
             #[cfg(feature = "appearance-exerciser")]
             preview_state: None,
         }
@@ -1533,9 +1542,11 @@ impl ButtonCore {
                 button.h(style.icon_button_size).w(style.icon_button_size)
             })
             .when(!layout.icon_only, |button| {
-                button
-                    .pl(style.horizontal_padding)
-                    .pr(layout.trailing_padding.unwrap_or(style.horizontal_padding))
+                button.px(if self.even_spacing {
+                    style.gap
+                } else {
+                    style.horizontal_padding
+                })
             })
             .when(layout.full_width, |button| button.w_full())
             .rounded_tl(corner_radii.top_left)

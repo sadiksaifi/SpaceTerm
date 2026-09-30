@@ -1485,11 +1485,15 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             .target(ring_target.clone())
             .debug_selector(focus_selector)
         });
+        // The chevron's ink sits about one label gap from each edge of the square menu segment.
+        // The primary segment spaces its edges, label, and Shortcut by the same gap, so every
+        // space across the control reads alike.
         let button = self
             .button
             .focus_handle(focus_handle)
             .parent_draws_focus_ring()
-            .joined_edge(JoinedEdge::Trailing);
+            .joined_edge(JoinedEdge::Trailing)
+            .even_spacing();
         let menu = self.menu.render(content, window, cx);
         let row = div()
             .flex()

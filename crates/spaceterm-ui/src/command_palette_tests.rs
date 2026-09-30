@@ -1445,7 +1445,7 @@ fn the_primary_action_shortcut_should_follow_its_label_inside_the_button(cx: &mu
 }
 
 #[gpui::test]
-fn the_primary_action_shortcut_should_sit_as_far_from_its_label_as_from_the_menu_divider(
+fn the_primary_action_label_and_shortcut_should_be_evenly_spaced_between_the_segment_edges(
     cx: &mut TestAppContext,
 ) {
     let (root, palette, _, _, cx) = palette_window(cx);
@@ -1475,13 +1475,19 @@ fn the_primary_action_shortcut_should_sit_as_far_from_its_label_as_from_the_menu
         .debug_bounds("primary-open-menu")
         .expect("the menu segment was not rendered")
         .left();
+    let menu = cx
+        .debug_bounds("primary-open-menu")
+        .expect("the menu segment was not rendered");
     let gap = shortcut.left() - label.right();
     assert!(gap > px(0.0));
+    assert_eq!(divider - shortcut.right(), gap);
+    // The leading edge also carries the segment border.
+    let leading = label.left() - segment.left();
+    assert!(leading >= gap && leading - gap <= px(1.0));
     assert!(
-        gap < label.left() - segment.left(),
-        "the shortcut did not stay grouped with its label"
+        gap < menu.size.width / 2.0,
+        "the primary segment is inset more than the menu segment's chevron"
     );
-    assert_eq!(gap, divider - shortcut.right());
     assert_eq!(divider, segment.right());
 }
 
