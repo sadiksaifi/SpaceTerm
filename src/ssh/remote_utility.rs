@@ -29,6 +29,8 @@ const UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Channels share that limit. Two sessions let a listing and an exact-path probe run together.
 pub(crate) const MAXIMUM_REMOTE_UTILITY_SESSIONS: usize = 2;
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
+/// The status `ssh` exits with for its own failures, including a refused session.
+const SSH_FAILURE_STATUS: i32 = 255;
 
 /// Content-free exit status plus bounded untrusted stdout from one utility process.
 pub(crate) struct RemoteUtilityProcessOutput {
@@ -254,6 +256,10 @@ pub(crate) enum RemoteUtilityError {
     CommandFailed(Option<i32>),
     #[error("remote utility transport failed")]
     Transport,
+    /// `ssh` failed while its Control Connection stayed live, usually because the server refused
+    /// a session above its limit.
+    #[error("remote utility session was unavailable")]
+    SessionUnavailable,
     #[error("remote utility returned an invalid response")]
     InvalidResponse,
     #[error("the configured remote login shell cannot start in login mode")]
@@ -526,6 +532,13 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
                 | RemoteUtilityRunError::Process(_)
                 | RemoteUtilityRunError::WorkerUnavailable => RemoteUtilityError::Transport,
             })?;
+        if output.exit.code() == Some(SSH_FAILURE_STATUS) {
+            return Err(if self.connection_is_live() {
+                RemoteUtilityError::SessionUnavailable
+            } else {
+                RemoteUtilityError::Transport
+            });
+        }
         if !output.exit.is_success() {
             return Err(RemoteUtilityError::CommandFailed(output.exit.code()));
         }
@@ -533,6 +546,15 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             return Err(RemoteUtilityError::OutputTooLarge);
         }
         Ok(output.stdout)
+    }
+
+    fn connection_is_live(&self) -> bool {
+        !self.cancellation.is_cancelled()
+            && self
+                .command
+                .capability
+                .as_ref()
+                .is_none_or(|capability| capability.authorize().is_ok())
     }
 }
 
@@ -1401,14 +1423,25 @@ mod tests {
     #[gpui::test]
     fn remote_command_failure_and_cancellation_should_remain_typed(cx: &mut TestAppContext) {
         let (failed, _) = client([Ok(RemoteUtilityProcessOutput::new(
-            ProcessExit::unsuccessful(Some(255)),
+            ProcessExit::unsuccessful(Some(1)),
             Vec::new(),
         ))]);
         assert_eq!(
             cx.foreground_executor()
                 .block_test(failed.probe_exact_path(remote_directory("/srv")))
                 .unwrap_err(),
-            RemoteUtilityError::CommandFailed(Some(255))
+            RemoteUtilityError::CommandFailed(Some(1))
+        );
+
+        let (refused, _) = client([Ok(RemoteUtilityProcessOutput::new(
+            ProcessExit::unsuccessful(Some(255)),
+            Vec::new(),
+        ))]);
+        assert_eq!(
+            cx.foreground_executor()
+                .block_test(refused.probe_exact_path(remote_directory("/srv")))
+                .unwrap_err(),
+            RemoteUtilityError::SessionUnavailable
         );
 
         let cancellation = SshCancellationToken::default();

@@ -20,12 +20,21 @@ use crate::ui::directory_picker::{
 };
 
 const REMOTE_DIRECTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Waits before each new attempt after the server refuses a session on a live connection.
+const SESSION_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+    Duration::from_millis(1600),
+];
 
 /// Picker-facing provider backed by one live SSH remote utility client.
 ///
 /// Every operation receives its own cancellation scope and fixed wall deadline. Dropping or
 /// superseding the returned task cancels the underlying utility process rather than merely
-/// ignoring its result. Only typed, validated protocol values cross into picker state.
+/// ignoring its result. A session refused on a live connection is retried with backoff before
+/// the operation reports it. Only typed, validated protocol values cross into picker state.
 pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
     client: Arc<SshRemoteUtilityClient<R>>,
     executor: BackgroundExecutor,
@@ -51,7 +60,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
     ) -> Task<Result<T, RemoteDirectoryProviderError>>
     where
         T: Send + 'static,
-        F: FnOnce(Arc<SshRemoteUtilityClient<R>>, SshCancellationToken) -> Fut + Send + 'static,
+        F: Fn(Arc<SshRemoteUtilityClient<R>>, SshCancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, RemoteDirectoryProviderError>> + Send + 'static,
     {
         let client = Arc::clone(&self.client);
@@ -59,7 +68,11 @@ impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
         self.executor.spawn(async move {
             let cancellation = SshCancellationToken::default();
             let mut cancel_on_drop = CancelOperationOnDrop::new(cancellation.clone());
-            let operation = operation(client, cancellation.clone());
+            let attempt_cancellation = cancellation.clone();
+            let operation = retry_unavailable_sessions(
+                move || operation(Arc::clone(&client), attempt_cancellation.clone()),
+                &timer_executor,
+            );
             let timeout = timer_executor.timer(REMOTE_DIRECTORY_OPERATION_TIMEOUT);
             let result = race_operation_with_timeout(operation, timeout, &cancellation).await;
             cancel_on_drop.disarm();
@@ -97,18 +110,21 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
         &self,
         directory: RemoteDirectory,
     ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
-        self.spawn_operation(move |client, cancellation| async move {
-            let listing = client
-                .list_directories_with_cancellation(directory, cancellation)
-                .await
-                .map_err(map_error)?;
-            let rows = listing
-                .names()
-                .iter()
-                .map(|name| DirectoryRow::new(name.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
-            Ok(DirectoryListing::bounded(rows, listing.is_truncated()))
+        self.spawn_operation(move |client, cancellation| {
+            let directory = directory.clone();
+            async move {
+                let listing = client
+                    .list_directories_with_cancellation(directory, cancellation)
+                    .await
+                    .map_err(map_error)?;
+                let rows = listing
+                    .names()
+                    .iter()
+                    .map(|name| DirectoryRow::new(name.clone()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)?;
+                Ok(DirectoryListing::bounded(rows, listing.is_truncated()))
+            }
         })
     }
 
@@ -116,15 +132,20 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
         &self,
         directory: RemoteDirectory,
     ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
-        self.spawn_operation(move |client, cancellation| async move {
-            client
-                .probe_exact_path_with_cancellation(directory, cancellation)
-                .await
-                .map(|state| match state {
-                    RemoteDirectoryProbe::ReadableDirectory => ExactPathState::ReadableDirectory,
-                    RemoteDirectoryProbe::Missing => ExactPathState::Missing,
-                })
-                .map_err(map_error)
+        self.spawn_operation(move |client, cancellation| {
+            let directory = directory.clone();
+            async move {
+                client
+                    .probe_exact_path_with_cancellation(directory, cancellation)
+                    .await
+                    .map(|state| match state {
+                        RemoteDirectoryProbe::ReadableDirectory => {
+                            ExactPathState::ReadableDirectory
+                        }
+                        RemoteDirectoryProbe::Missing => ExactPathState::Missing,
+                    })
+                    .map_err(map_error)
+            }
         })
     }
 
@@ -132,11 +153,14 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
         &self,
         directory: RemoteDirectory,
     ) -> Task<Result<(), RemoteDirectoryProviderError>> {
-        self.spawn_operation(move |client, cancellation| async move {
-            client
-                .create_directory_recursively_with_cancellation(directory, cancellation)
-                .await
-                .map_err(map_error)
+        self.spawn_operation(move |client, cancellation| {
+            let directory = directory.clone();
+            async move {
+                client
+                    .create_directory_recursively_with_cancellation(directory, cancellation)
+                    .await
+                    .map_err(map_error)
+            }
         })
     }
 
@@ -144,14 +168,35 @@ impl<R: SshRemoteUtilityRunner> RemoteDirectoryProvider for SshRemoteDirectoryPr
         &self,
         directory: RemoteDirectory,
     ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
-        self.spawn_operation(move |client, cancellation| async move {
-            let physical = client
-                .resolve_physical_directory_with_cancellation(directory, cancellation)
-                .await
-                .map_err(map_error)?;
-            RemoteDirectoryIdentity::new(physical)
-                .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)
+        self.spawn_operation(move |client, cancellation| {
+            let directory = directory.clone();
+            async move {
+                let physical = client
+                    .resolve_physical_directory_with_cancellation(directory, cancellation)
+                    .await
+                    .map_err(map_error)?;
+                RemoteDirectoryIdentity::new(physical)
+                    .map_err(|_| RemoteDirectoryProviderError::InvalidResponse)
+            }
         })
+    }
+}
+
+async fn retry_unavailable_sessions<T, Fut>(
+    mut attempt: impl FnMut() -> Fut,
+    executor: &BackgroundExecutor,
+) -> Result<T, RemoteDirectoryProviderError>
+where
+    Fut: Future<Output = Result<T, RemoteDirectoryProviderError>>,
+{
+    let mut delays = SESSION_RETRY_DELAYS.into_iter();
+    loop {
+        match (attempt().await, delays.next()) {
+            (Err(RemoteDirectoryProviderError::SessionUnavailable), Some(delay)) => {
+                executor.timer(delay).await;
+            }
+            (result, _) => return result,
+        }
     }
 }
 
@@ -206,9 +251,7 @@ fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
         RemoteUtilityError::Cancelled | RemoteUtilityError::Transport => {
             RemoteDirectoryProviderError::ConnectionLost
         }
-        RemoteUtilityError::CommandFailed(Some(255)) => {
-            RemoteDirectoryProviderError::ConnectionLost
-        }
+        RemoteUtilityError::SessionUnavailable => RemoteDirectoryProviderError::SessionUnavailable,
         RemoteUtilityError::Missing => RemoteDirectoryProviderError::Missing,
         RemoteUtilityError::NotDirectory => RemoteDirectoryProviderError::NotDirectory,
         RemoteUtilityError::PermissionDenied => RemoteDirectoryProviderError::PermissionDenied,
@@ -236,6 +279,7 @@ mod tests {
     use super::*;
     use crate::domain::SshDestination;
     use crate::ssh::command::{SshCommandContext, SshCommandSpec};
+    use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
     use crate::ssh::process::ProcessExit;
     use crate::ssh::remote_utility::{
         RemoteUtilityProcessOutput, RemoteUtilityRunError, RemoteUtilitySession,
@@ -495,6 +539,44 @@ mod tests {
 
         assert_eq!(listing.rows()[0].name(), "safe");
         assert!(listing.is_truncated());
+    }
+
+    #[gpui::test]
+    fn a_refused_session_on_a_live_connection_should_be_retried(cx: &mut TestAppContext) {
+        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
+        server.open_terminal_session_channels(10);
+        let provider = server.provider();
+
+        let probe = provider.probe_exact_path(directory("/srv"));
+        cx.run_until_parked();
+        assert_eq!(server.refused_sessions(), 1);
+        server.open_terminal_session_channels(9);
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.foreground_executor().block_test(probe),
+            Ok(ExactPathState::ReadableDirectory)
+        );
+    }
+
+    #[gpui::test]
+    fn a_session_that_fails_after_the_connection_ends_should_report_a_lost_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
+        let provider = server.provider();
+
+        let probe = provider.probe_exact_path(directory("/srv"));
+        cx.run_until_parked();
+        server.end_connection();
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.foreground_executor().block_test(probe),
+            Err(RemoteDirectoryProviderError::ConnectionLost)
+        );
     }
 
     #[gpui::test]
