@@ -169,7 +169,8 @@ impl WorkbenchSection {
     }
 }
 
-/// A simulated system setting the toolbar's Simulate menu toggles.
+/// A simulated system setting the toolbar's Simulate menu toggles. System Settings ends every
+/// simulation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Simulation {
     InactiveWindow,
@@ -282,7 +283,7 @@ pub(crate) fn open_or_activate(section: Option<WorkbenchSection>, cx: &mut App) 
             cx.set_global(OpenWorkbench(handle));
             cx.activate(true);
         }
-        Err(error) => eprintln!("failed to open the Developer Workbench window: {error}"),
+        Err(_) => eprintln!("failed to open the Developer Workbench window"),
     }
 }
 
@@ -310,7 +311,6 @@ pub(crate) struct DeveloperWorkbench {
     scroll: ScrollHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     preview: AppearancePreview,
-    committing: bool,
     status: SharedString,
     /// Renders this window as though another window were key, without leaving it.
     simulate_inactive: bool,
@@ -381,10 +381,11 @@ impl DeveloperWorkbench {
         .detach();
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
-        // Accessibility simulation is application-wide, so it ends with the window that offers
-        // it. The preview ends with it too, when the preview is dropped.
+        // Accessibility simulation and the terminal fixtures are application-wide, so they end
+        // with the window that offers them. The preview ends with it too, when it is dropped.
         cx.on_release(|_, cx| {
             let _ = appearance_runtime::reset_accessibility_preview(cx);
+            terminal::reset_fixtures(cx);
         })
         .detach();
         let settings = cx.global::<AppearanceRuntime>().settings.clone();
@@ -425,7 +426,6 @@ impl DeveloperWorkbench {
             scroll: ScrollHandle::new(),
             scrollbar,
             preview,
-            committing: false,
             status: SharedString::from("No preview. Edits preview without saving."),
             simulate_inactive: false,
             palette,
@@ -505,8 +505,9 @@ impl DeveloperWorkbench {
                 }
             }
             Simulation::SystemSettings => {
+                self.simulate_inactive = false;
                 if appearance_runtime::reset_accessibility_preview(cx).is_ok() {
-                    "Accessibility follows System Settings.".to_owned()
+                    "Simulations are off. Accessibility follows System Settings.".to_owned()
                 } else {
                     "Accessibility could not return to System Settings.".to_owned()
                 }
@@ -523,33 +524,18 @@ impl DeveloperWorkbench {
         self.report(status, cx);
     }
 
-    /// Saves the preview. The write runs off the UI thread; the preview stays open until it ends.
+    /// Saves the preview. The document is small, so the write runs synchronously, as the Settings
+    /// Window's close does: no save is still running when the window closes or the application
+    /// quits.
     fn commit(&mut self, cx: &mut Context<Self>) {
-        let job = match self.preview.commit() {
-            Ok(job) => job,
-            Err(error) => return self.report(error.message(), cx),
+        let status = match self.preview.commit() {
+            Ok(outcome) if outcome.reload_required => {
+                "Saved. Reload the settings file before the next save."
+            }
+            Ok(_) => "Saved.",
+            Err(error) => error.message(),
         };
-        self.committing = true;
-        self.report("Saving the preview.", cx);
-        cx.spawn(async move |workbench, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { job.run() })
-                .await;
-            let _ = workbench.update(cx, |workbench, cx| {
-                workbench.committing = false;
-                workbench.preview.finish_commit(result.is_ok());
-                let status = match result {
-                    Ok(outcome) if outcome.reload_required => {
-                        "Saved. Reload the settings file before the next save."
-                    }
-                    Ok(_) => "Saved.",
-                    Err(_) => "The save failed. The preview remains open.",
-                };
-                workbench.report(status, cx);
-            });
-        })
-        .detach();
+        self.report(status, cx);
     }
 
     fn show_workspace(&mut self, cx: &mut Context<Self>) {
@@ -931,7 +917,7 @@ impl DeveloperWorkbench {
     /// The preview's state and the two operations that end it.
     fn render_footer(&self, surface: &SettingsAppearance, cx: &mut Context<Self>) -> AnyElement {
         let appearance = &surface.chrome;
-        let open = self.preview.is_open() && !self.committing;
+        let open = self.preview.is_open();
         let button = |selector: &'static str,
                       label: &'static str,
                       operation: fn(&mut Self, &mut Context<Self>)| {

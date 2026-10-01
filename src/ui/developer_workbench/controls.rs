@@ -47,7 +47,13 @@ const FIELD_STATES: [&str; 5] = [
     "Disabled",
     "Invalid and focused",
 ];
+/// The value each non-empty field fixture holds, and the empty one's placeholder. Each fits the
+/// narrowest field, so no field clips its text or scrolls it to keep the caret in view.
+pub(super) const FIELD_SAMPLE: &str = "Sample text";
+pub(super) const FIELD_PLACEHOLDER: &str = "Placeholder";
 const LABEL_WIDTH: f32 = 112.0;
+/// The widest a state column grows. Columns share narrower rows equally, so a larger density still
+/// fits the card.
 const COLUMN_WIDTH: f32 = 142.0;
 const COLUMN_GAP: f32 = 8.0;
 
@@ -67,11 +73,11 @@ impl ControlStates {
                     TextInput::new(
                         SharedString::from(format!("workbench-field-{index}")),
                         "Field state fixture",
-                        if index == 0 { "" } else { "Selected glyph sample" },
+                        if index == 0 { "" } else { FIELD_SAMPLE },
                         window,
                         cx,
                     )
-                    .placeholder("Readable placeholder")
+                    .placeholder(FIELD_PLACEHOLDER)
                     .debug_selector(format!("workbench-field-{index}"))
                     .enabled(index != DISABLED_COLUMN)
                 })
@@ -285,6 +291,8 @@ impl StateMatrix {
         let matrix = div()
             .flex()
             .flex_col()
+            .w_full()
+            .min_w_0()
             .gap(appearance.spacing(10.0))
             .child(self.header)
             .children(self.rows);
@@ -313,8 +321,17 @@ fn header<const N: usize>(labels: [&'static str; N], appearance: &ChromeAppearan
         .children(
             labels
                 .into_iter()
-                .map(|label| div().w(px(COLUMN_WIDTH)).flex_none().child(label)),
+                .map(|label| column().truncate().child(label)),
         )
+}
+
+/// One state column. Header and state rows use the same columns, so their cells stay aligned.
+fn column() -> Div {
+    div()
+        .flex_1()
+        .flex_basis(px(0.0))
+        .min_w_0()
+        .max_w(px(COLUMN_WIDTH))
 }
 
 fn cells(
@@ -333,7 +350,7 @@ fn cells(
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .child(label),
         )
-        .children(cells.map(|cell| div().w(px(COLUMN_WIDTH)).flex_none().child(cell)))
+        .children(cells.map(|cell| column().child(cell)))
 }
 
 fn state_row(

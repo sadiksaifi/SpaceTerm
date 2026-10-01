@@ -34,6 +34,14 @@ pub(crate) fn set_link_preview_fixture(enabled: bool, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Ends every fixture, so Workspace windows show host facts again.
+pub(super) fn reset_fixtures(cx: &mut App) {
+    if cx.has_global::<TerminalFixtures>() {
+        cx.remove_global::<TerminalFixtures>();
+        cx.refresh_windows();
+    }
+}
+
 /// Display text only; this fixture never supplies a terminal hyperlink target.
 pub(crate) fn link_preview_fixture(cx: &App) -> Option<&'static str> {
     fixtures(cx)

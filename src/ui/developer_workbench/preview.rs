@@ -9,7 +9,7 @@ use crate::appearance::{
     AppearanceMode, ChromeDensity, ResetTarget, SettingsDocument, TerminalFontFamily,
     parse_settings,
 };
-use crate::settings::{CommitJob, PreviewToken, ThemeImport, UserSettings};
+use crate::settings::{CommitOutcome, PreviewToken, ThemeImport, UserSettings};
 
 /// The terminal typography the alternate-typography switch previews.
 const ALTERNATE_FONT_FAMILY: &str = "Menlo";
@@ -34,6 +34,8 @@ pub(super) enum PreviewError {
     PreviewOpen,
     /// The settings file could not be read.
     ReloadFailed,
+    /// The settings file could not be written.
+    SaveFailed,
 }
 
 impl PreviewError {
@@ -46,6 +48,7 @@ impl PreviewError {
             Self::NoPreview => "There is no preview to commit.",
             Self::PreviewOpen => "Cancel or commit the preview before reloading.",
             Self::ReloadFailed => "Reload failed. The last saved settings remain.",
+            Self::SaveFailed => "The save failed. The preview remains open.",
         }
     }
 }
@@ -199,21 +202,17 @@ impl AppearancePreview {
         Ok(())
     }
 
-    /// Captures the preview for saving. The caller runs the job off the UI thread and then calls
-    /// [`Self::finish_commit`].
-    pub(super) fn commit(&self) -> Result<CommitJob, PreviewError> {
+    /// Saves the preview and closes it. A failed save keeps the preview open under the same
+    /// token, so the developer can retry or cancel.
+    pub(super) fn commit(&mut self) -> Result<CommitOutcome, PreviewError> {
         let token = self.token.as_ref().ok_or(PreviewError::NoPreview)?;
-        self.settings
+        let job = self
+            .settings
             .commit_preview(token)
-            .map_err(|_| PreviewError::Busy)
-    }
-
-    /// Records a finished commit. A saved preview is closed; a failed save reopens it under the
-    /// same token, so the developer can retry or cancel.
-    pub(super) fn finish_commit(&mut self, saved: bool) {
-        if saved {
-            self.token = None;
-        }
+            .map_err(|_| PreviewError::Busy)?;
+        let outcome = job.run().map_err(|_| PreviewError::SaveFailed)?;
+        self.token = None;
+        Ok(outcome)
     }
 
     pub(super) fn reload(&self) -> Result<(), PreviewError> {
@@ -237,6 +236,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::settings::storage::StorageError;
+    use crate::ui::settings_window::test_support::MemoryStorage;
 
     fn preview() -> AppearancePreview {
         AppearancePreview::new(UserSettings::load(Arc::new(
@@ -297,6 +298,38 @@ mod tests {
         );
         assert!(!preview.is_open());
         assert_eq!(preview.commit().err(), Some(PreviewError::NoPreview));
+    }
+
+    #[test]
+    fn commit_saves_the_preview_and_closes_it() {
+        let storage = MemoryStorage::with_document(&SettingsDocument::default());
+        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        preview.set_mode(AppearanceMode::Light).unwrap();
+
+        assert!(preview.commit().is_ok());
+
+        assert!(!preview.is_open());
+        assert_eq!(storage.writes(), 1);
+        assert_eq!(
+            storage.document().unwrap().preferences.mode,
+            AppearanceMode::Light
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_keeps_the_preview_open() {
+        let storage = MemoryStorage::with_document(&SettingsDocument::default());
+        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        preview.set_mode(AppearanceMode::Light).unwrap();
+        storage.fail_writes(Some(StorageError::Unavailable));
+
+        assert_eq!(preview.commit().err(), Some(PreviewError::SaveFailed));
+
+        assert!(preview.is_open());
+        assert_eq!(preview.document().preferences.mode, AppearanceMode::Light);
+        storage.fail_writes(None);
+        assert!(preview.commit().is_ok());
+        assert!(!preview.is_open());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
 
 use super::*;
-use crate::appearance::{Appearance, AppearanceMode};
+use crate::appearance::{Appearance, AppearanceMode, ChromeDensity};
 use crate::platform::appearance::AppearancePlatform as _;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -225,7 +225,7 @@ fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn accessibility_simulation_applies_and_returns_to_system_settings(cx: &mut TestAppContext) {
+fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
     let (_, platform) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     let reduce_transparency = |cx: &mut VisualTestContext| {
@@ -251,19 +251,21 @@ fn accessibility_simulation_applies_and_returns_to_system_settings(cx: &mut Test
     assert!(status(&workbench, cx).contains("System Settings are unchanged"));
 
     workbench.update(cx, |workbench, cx| {
+        workbench.simulate(Simulation::InactiveWindow, cx);
         workbench.simulate(Simulation::SystemSettings, cx);
     });
     cx.run_until_parked();
 
     assert!(!reduce_transparency(cx));
+    assert!(cx.update(|_, cx| !workbench.read(cx).simulate_inactive));
     assert_eq!(
         status(&workbench, cx),
-        "Accessibility follows System Settings."
+        "Simulations are off. Accessibility follows System Settings."
     );
 }
 
 #[gpui::test]
-fn closing_the_workbench_ends_its_preview_and_simulations(cx: &mut TestAppContext) {
+fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut TestAppContext) {
     let (settings, _) = install(cx);
     let window = cx.add_window(DeveloperWorkbench::new);
     window
@@ -273,8 +275,15 @@ fn closing_the_workbench_ends_its_preview_and_simulations(cx: &mut TestAppContex
                 Simulation::Accessibility(AccessibilityPreviewFact::IncreaseContrast),
                 cx,
             );
+            terminal::set_caption_fixture(true, cx);
+            terminal::set_link_preview_fixture(true, cx);
         })
         .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert!(caption_fixture(cx).is_some());
+        assert!(link_preview_fixture(cx).is_some());
+    });
     cx.run_until_parked();
 
     window
@@ -286,6 +295,8 @@ fn closing_the_workbench_ends_its_preview_and_simulations(cx: &mut TestAppContex
         let current = appearance_runtime::current(cx);
         assert_eq!(current.chrome.appearance, Appearance::Dark);
         assert!(!current.chrome.composition.capabilities.increase_contrast);
+        assert!(caption_fixture(cx).is_none());
+        assert!(link_preview_fixture(cx).is_none());
     });
     let revision = settings.snapshot().committed.revision;
     assert!(settings.begin_preview(revision).is_ok());
@@ -548,4 +559,50 @@ fn single_line_fields_center_their_text_in_the_frame(cx: &mut TestAppContext) {
         (field.center().y - frame.center().y).abs() < px(0.5),
         "field {field:?} must be centered in frame {frame:?}"
     );
+}
+
+#[gpui::test]
+fn state_matrices_and_their_text_fit_the_default_window_at_every_density(cx: &mut TestAppContext) {
+    install(cx);
+    let (workbench, cx) = open_workbench_window(cx);
+    cx.simulate_resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+    click("workbench-navigation-workbench-section-controls", cx);
+
+    for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+        workbench.update(cx, |workbench, cx| {
+            workbench.apply(|preview| preview.set_density(density), "Density changed", cx);
+        });
+        cx.run_until_parked();
+
+        let card = cx.debug_bounds("workbench-group-buttons-card").unwrap();
+        let first = cx.debug_bounds("workbench-button-0-0").unwrap();
+        let last = cx.debug_bounds("workbench-button-0-4").unwrap();
+        assert!(
+            last.right() <= card.right(),
+            "{density:?}: the last column {last:?} must stay inside the card {card:?}"
+        );
+        assert!(
+            card.right() - last.right() < px(40.0),
+            "{density:?}: the columns {first:?} to {last:?} must span the card {card:?}"
+        );
+        let frame = cx.debug_bounds("workbench-field-frame-4").unwrap();
+        assert_eq!(
+            (frame.left(), frame.size.width),
+            (last.left(), last.size.width),
+            "{density:?}: every matrix must share one set of columns"
+        );
+        let field = cx.debug_bounds("workbench-field-4").unwrap();
+        for text in [controls::FIELD_SAMPLE, controls::FIELD_PLACEHOLDER] {
+            let width = cx.update(|window, cx| {
+                crate::ui::appearance::settings::shared(cx)
+                    .chrome
+                    .typography
+                    .measure(TextRole::Body, text, window)
+            });
+            assert!(
+                width <= field.size.width,
+                "{density:?}: {text:?} ({width:?}) must fit the field {field:?}"
+            );
+        }
+    }
 }

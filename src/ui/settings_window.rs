@@ -182,7 +182,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             cx.set_global(OpenSettingsWindow(handle));
             cx.activate(true);
         }
-        Err(error) => eprintln!("failed to open the SpaceTerm Settings window: {error}"),
+        Err(_) => eprintln!("failed to open the SpaceTerm Settings window"),
     }
 }
 
