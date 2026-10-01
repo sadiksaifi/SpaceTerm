@@ -124,13 +124,28 @@ impl FullscreenEscapeSequence {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 enum StatusIntent {
     #[default]
     Information,
     Success,
     Warning,
     Error,
+}
+
+impl StatusIntent {
+    /// The glyph that leads a notice of this intent.
+    ///
+    /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
+    /// Color an error takes the circle a critical Alert uses.
+    const fn glyph(self, differentiate_without_color: bool) -> IconName {
+        match self {
+            Self::Information => IconName::Info,
+            Self::Success => IconName::Check,
+            Self::Error if differentiate_without_color => IconName::CircleAlert,
+            Self::Warning | Self::Error => IconName::TriangleAlert,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3843,17 +3858,23 @@ impl Render for TerminalPane {
         let floating_colors = &appearance.floating_colors;
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
-        let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => {
-                (floating_control_colors.error, IconName::TriangleAlert)
-            }
-            PaneTerminalState::Exited(_) => (floating_colors.text_muted, IconName::Square),
-            PaneTerminalState::Running => match self.status_intent {
-                StatusIntent::Information => (floating_control_colors.info, IconName::Info),
-                StatusIntent::Success => (floating_control_colors.success, IconName::Check),
-                StatusIntent::Warning => (floating_control_colors.warning, IconName::TriangleAlert),
-                StatusIntent::Error => (floating_control_colors.error, IconName::TriangleAlert),
-            },
+        // A failed Terminal Session reads as an error notice.
+        let status_intent = match self.pane_state {
+            PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
+            PaneTerminalState::Exited(_) => None,
+            PaneTerminalState::Running => Some(self.status_intent),
+        };
+        let (status_color, status_icon) = match status_intent {
+            None => (floating_colors.text_muted, IconName::Square),
+            Some(intent) => (
+                match intent {
+                    StatusIntent::Information => floating_control_colors.info,
+                    StatusIntent::Success => floating_control_colors.success,
+                    StatusIntent::Warning => floating_control_colors.warning,
+                    StatusIntent::Error => floating_control_colors.error,
+                },
+                intent.glyph(appearance.capabilities.differentiate_without_color),
+            ),
         };
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
