@@ -77,16 +77,15 @@ require_xcode() {
 
 build_native_binary() {
     local output="$1"
-    local binary="$BUILD_TARGET_DIR/release/$BINARY_NAME"
+    local artifact_path="$PACKAGE_STAGE_DIR/executable-path"
+    local binary
 
-    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release --locked --no-default-features \
+    CARGO_TARGET_DIR="$BUILD_TARGET_DIR" python3 "$REPO_ROOT/scripts/build-cargo-executable.py" \
+        --output "$artifact_path" --bin "$BINARY_NAME" -- --release --locked --no-default-features \
         --manifest-path "$REPO_ROOT/Cargo.toml"
+    binary="$(<"$artifact_path")"
     [[ -x "$binary" ]] || die "release binary was not produced: $binary"
-    if [[ -e "$output" && "$binary" -ef "$output" ]]; then
-        chmod 0755 "$binary"
-    else
-        install -m 0755 "$binary" "$output"
-    fi
+    install -m 0755 "$binary" "$output"
 }
 
 prepare_info_plist() {
@@ -180,9 +179,10 @@ echo "Compiling xterm-spaceterm terminfo"
 tic -x -o "$STAGED_TERMINFO" "$TERMINFO_SOURCE"
 
 echo "Building Apple Silicon release executable"
-build_native_binary "$BUILD_TARGET_DIR/release/$EXECUTABLE_NAME"
+readonly BINARIES_DIR="$PACKAGE_STAGE_DIR/binaries"
+mkdir -p -- "$BINARIES_DIR"
+build_native_binary "$BINARIES_DIR/$EXECUTABLE_NAME"
 readonly DMG_ARCH="aarch64"
-readonly BINARIES_DIR="$BUILD_TARGET_DIR/release"
 METADATA_ARGS=(--version "$VERSION" --binaries "$BINARIES_DIR")
 if [[ -n "${SPACETERM_SPARKLE_DIR:-}" ]]; then
     METADATA_ARGS+=(--sparkle "$SPACETERM_SPARKLE_DIR")

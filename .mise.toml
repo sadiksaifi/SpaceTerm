@@ -303,6 +303,10 @@ run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-
 description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
 run = "python3 packaging/macos/test-updater.py"
 
+[tasks."test:package:macos"]
+description = "Test package artifact selection and compiled application identity"
+run = "python3 packaging/macos/test-package.py"
+
 [tasks.lint]
 description = "Run shared linters"
 run = [
@@ -383,6 +387,7 @@ run = [
   { task = "fmt:check:macos" },
   { task = "test:macos" },
   { task = "lint:scripts:macos" },
+  { task = "test:package:macos" },
   { task = "test:updater:macos" },
 ]
 

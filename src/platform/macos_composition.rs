@@ -13,12 +13,9 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
-    let code = match super::macos_askpass_transport::dispatch_helper_from_environment() {
-        Some(code) => code,
-        None => crate::app::launch(capture_startup_dependencies(identity), |startup| {
-            compose(startup, identity)
-        }),
-    };
+    let code = crate::app::launch(capture_startup_dependencies(identity), |startup| {
+        compose(startup, identity)
+    });
     if code != 0 {
         std::process::exit(code);
     }

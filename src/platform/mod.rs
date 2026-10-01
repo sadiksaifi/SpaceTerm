@@ -172,6 +172,8 @@ pub(crate) mod services_registration;
 pub(crate) mod window_movement;
 #[cfg(target_os = "macos")]
 pub(crate) use macos_composition::main;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_askpass_transport::dispatch_helper_from_environment;
 
 pub(crate) mod locale;
 
