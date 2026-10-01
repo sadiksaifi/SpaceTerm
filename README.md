@@ -60,14 +60,20 @@ Cmd+C copies SpaceTerm's Selection. With no Selection, applications that enable 
 keyboard protocol receive Cmd+C. Cmd+V follows SpaceTerm's paste handling, including bracketed
 paste. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
 
-For Neovim, select its OSC 52 provider explicitly:
+For Neovim over SSH, select its OSC 52 provider before clipboard providers initialize:
 
 ```lua
-vim.g.clipboard = 'osc52'
+if vim.env.SSH_TTY or vim.env.SSH_CONNECTION then
+  vim.g.clipboard = 'osc52'
+end
 vim.opt.clipboard = 'unnamedplus'
 ```
 
-Yanks use the system clipboard. Pasting through Neovim's OSC 52 provider also requires enabling
+On a remote Mac, Neovim otherwise prefers `pbcopy` and `pbpaste`, which access that Mac's
+clipboard. The SSH configuration above routes `y` and `yy` to the local clipboard through
+SpaceTerm. Restart Neovim after changing its provider.
+
+Pasting with `p` through Neovim's OSC 52 provider also requires enabling
 clipboard reading in SpaceTerm. Denied or unavailable reads return empty text.
 
 For tmux, allow application clipboard writes in `~/.tmux.conf`:
