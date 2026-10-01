@@ -180,10 +180,12 @@ impl AppearancePreview {
     /// Installs a Zed theme family into the preview without selecting any of its themes.
     pub(super) fn install_theme_family(&mut self, text: &str) -> Result<usize, PreviewError> {
         let settings = self.settings.clone();
+        // Opening the preview retires the catalog revision, so it is read after the preview opens.
+        let token = self.token()?;
         let catalog_revision = settings.snapshot().catalog_revision;
         settings
             .import_preview(
-                self.token()?,
+                token,
                 catalog_revision,
                 ThemeImport::ZedFamily(text.as_bytes()),
             )
@@ -330,6 +332,17 @@ mod tests {
         storage.fail_writes(None);
         assert!(preview.commit().is_ok());
         assert!(!preview.is_open());
+    }
+
+    #[test]
+    fn a_theme_family_installs_without_an_open_preview() {
+        let mut preview = preview();
+        let family = r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;
+
+        assert_eq!(preview.install_theme_family(family), Ok(1));
+
+        assert!(preview.is_open());
+        assert_eq!(preview.document().terminal_themes.len(), 1);
     }
 
     #[test]
