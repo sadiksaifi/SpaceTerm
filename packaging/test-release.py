@@ -139,6 +139,15 @@ class HomebrewCaskTests(unittest.TestCase):
         self.assertIn(f'NOTARIZATION_NOTICE="{CASK.NOTARIZATION_NOTICE}"', installer)
         self.assertIn(f'caveats "{CASK.NOTARIZATION_NOTICE}"', CASK.render("v0.3.0", f"{self.DIGEST}  SpaceTerm-0.3.0-darwin-arm64.dmg\n"))
 
+    def test_an_older_release_never_replaces_a_newer_cask(self):
+        cask = CASK.render("v0.4.0", f"{self.DIGEST}  SpaceTerm-0.4.0-darwin-arm64.dmg\n")
+        self.assertFalse(CASK.supersedes("v0.3.0", cask))
+        self.assertFalse(CASK.supersedes("v0.3.10", CASK.render("v0.10.0", f"{self.DIGEST}  SpaceTerm-0.10.0-darwin-arm64.dmg\n")))
+        self.assertTrue(CASK.supersedes("v0.4.0", cask))
+        self.assertTrue(CASK.supersedes("v0.10.0", cask))
+        with self.assertRaises(ValueError):
+            CASK.supersedes("v0.5.0", "cask \"spaceterm\" do\nend\n")
+
     def test_cask_rejects_unstable_tags_and_missing_or_ambiguous_checksums(self):
         entry = f"{self.DIGEST}  SpaceTerm-0.3.0-darwin-arm64.dmg\n"
         for tag, checksums in (("0.3.0", entry), ("v0.3.0-beta.1", entry), ("v0.3.0", ""),

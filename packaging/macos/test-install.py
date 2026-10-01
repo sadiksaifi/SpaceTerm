@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -20,7 +21,8 @@ class InstallTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="spaceterm-install-test-")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.applications = self.root / "Applications with spaces"
+        # Brackets and spaces are literal path characters, not process-match syntax.
+        self.applications = self.root / "Applications [personal]"
         self.temporary = self.root / "tmp"
         self.temporary.mkdir()
         self.served = {}
@@ -40,6 +42,13 @@ source = json.loads(os.environ["SERVED"]).get(url)
 if source is None:
     sys.exit(22)
 shutil.copyfile(source, arguments[arguments.index("--output") + 1])
+if url.endswith(".dmg") and os.environ.get("LAUNCH_DURING_DOWNLOAD"):
+    import subprocess
+    process = subprocess.Popen([os.environ["LAUNCH_DURING_DOWNLOAD"]], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    with open(os.environ["LAUNCHED"], "w") as record:
+        record.write(str(process.pid))
 """)
         (self.bin / "curl").chmod(0o755)
 
@@ -50,7 +59,8 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
     def application(self, path, version):
         executable = path / "Contents/MacOS/SpaceTerm"
         executable.parent.mkdir(parents=True)
-        executable.write_text("#!/bin/sh\nexec sleep 30\n")
+        # Keep the shell, and so the bundle path in its arguments, alive like a native executable.
+        executable.write_text("#!/bin/sh\nwhile :; do sleep 1; done\n")
         executable.chmod(0o755)
         (path / "Contents/version").write_text(version)
 
@@ -72,10 +82,11 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
     def serve(self, path, source):
         self.served[f"{RELEASES}/{path}"] = str(source)
 
-    def install(self):
+    def install(self, **extra):
         environment = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
                        "SERVED": json.dumps(self.served), "REQUESTS": str(self.requests),
-                       "SPACETERM_INSTALL_DIR": str(self.applications), "TMPDIR": str(self.temporary)}
+                       "SPACETERM_INSTALL_DIR": str(self.applications), "TMPDIR": str(self.temporary),
+                       **extra}
         return subprocess.run(["sh", str(INSTALLER)], env=environment, capture_output=True, text=True,
                               timeout=120)
 
@@ -120,6 +131,37 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         self.assertIn("quit SpaceTerm", result.stderr)
         self.assertEqual(self.requested(), [])
         self.assertEqual(self.installed_version(), "0.2.0")
+
+    def test_installer_refuses_an_application_started_during_the_download(self):
+        self.application(self.applications / "SpaceTerm.app", "0.2.0")
+        launched = self.root / "launched.pid"
+        def stop():
+            if launched.exists():
+                os.kill(int(launched.read_text()), signal.SIGKILL)
+        self.addCleanup(stop)
+        result = self.install(LAUNCH_DURING_DOWNLOAD=str(self.applications / "SpaceTerm.app/Contents/MacOS/SpaceTerm"),
+                              LAUNCHED=str(launched))
+        self.assertTrue(launched.exists())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("quit SpaceTerm", result.stderr)
+        self.assertEqual(self.installed_version(), "0.2.0")
+        self.assert_no_leftovers()
+
+    def test_installer_restores_the_existing_application_when_replacement_fails(self):
+        self.application(self.applications / "SpaceTerm.app", "0.2.0")
+        # Fail only the rename that moves the staged release into place.
+        (self.bin / "mv").write_text(f"""#!/bin/sh
+case "$1" in
+    */.SpaceTerm.install.*/SpaceTerm.app) exit 1 ;;
+esac
+exec /bin/mv "$@"
+""")
+        (self.bin / "mv").chmod(0o755)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not install SpaceTerm.app", result.stderr)
+        self.assertEqual(self.installed_version(), "0.2.0")
+        self.assert_no_leftovers()
 
 
 if __name__ == "__main__":

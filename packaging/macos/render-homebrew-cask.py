@@ -44,11 +44,25 @@ end
 """
 
 
-def render(tag, checksums):
+def release_version(tag):
     match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
     if not match:
         raise ValueError("the release tag must be a stable v<version> tag")
-    version = match.group(1)
+    return match.group(1)
+
+
+def supersedes(tag, cask):
+    """Whether the tag's release is at least as new as the version an existing cask installs."""
+    match = re.search(r'^  version "(\d+\.\d+\.\d+)"$', cask, re.MULTILINE)
+    if not match:
+        raise ValueError("the existing cask has no stable version")
+    def parse(version):
+        return tuple(int(part) for part in version.split("."))
+    return parse(release_version(tag)) >= parse(match.group(1))
+
+
+def render(tag, checksums):
+    version = release_version(tag)
     archive = f"SpaceTerm-{version}-darwin-arm64.dmg"
     digests = [line.split("  ", 1)[0] for line in checksums.splitlines() if line.endswith(f"  {archive}")]
     if len(digests) != 1 or not re.fullmatch(r"[0-9a-f]{64}", digests[0]):
@@ -62,6 +76,10 @@ def main():
     parser.add_argument("output", type=Path, help="cask file to write")
     args = parser.parse_args()
     try:
+        # Re-running an older release's job must not roll the tap back.
+        if args.output.exists() and not supersedes(args.tag, args.output.read_text()):
+            print(f"The cask already installs a release newer than SpaceTerm {args.tag}.")
+            return
         cask = render(args.tag, (ROOT / "dist/release/SHA256SUMS").read_text())
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")

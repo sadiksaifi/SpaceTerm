@@ -30,6 +30,10 @@ cleanup() {
         hdiutil detach "$volume" -force >/dev/null 2>&1 || true
     fi
     if [ -n "$staging" ]; then
+        # Restore the previous installation when the replacement did not finish.
+        if [ -e "$staging/previous.app" ] && [ ! -e "$target" ]; then
+            mv "$staging/previous.app" "$target" || true
+        fi
         rm -rf "$staging"
     fi
     if [ -n "$work" ]; then
@@ -39,6 +43,15 @@ cleanup() {
 
 download() {
     curl --fail --location --proto '=https' --tlsv1.2 "$@"
+}
+
+# Replacing the bundle of a running application breaks it.
+ensure_not_running() {
+    processes="$(ps -axww -o args=)"
+    # A quoted pattern matches the install path literally, whatever characters it contains.
+    case "$processes" in
+        *"$target/Contents/MacOS/SpaceTerm"*) die "quit SpaceTerm, then run the installer again" ;;
+    esac
 }
 
 trap cleanup EXIT
@@ -51,7 +64,7 @@ trap 'exit 143' TERM
 macos_major="$(sw_vers -productVersion | cut -d . -f 1)"
 [ "$macos_major" -ge "$MINIMUM_MACOS_MAJOR" ] \
     || die "SpaceTerm requires macOS $MINIMUM_MACOS_MAJOR or newer"
-for command in curl ditto hdiutil pgrep shasum; do
+for command in curl ditto hdiutil ps shasum; do
     command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
@@ -63,10 +76,7 @@ else
     install_dir="$HOME/Applications"
 fi
 target="$install_dir/SpaceTerm.app"
-# Replacing the bundle of a running application breaks it, so check before downloading.
-if pgrep -f "$target/Contents/MacOS/SpaceTerm" >/dev/null 2>&1; then
-    die "quit SpaceTerm, then run the installer again"
-fi
+ensure_not_running
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-install.XXXXXX")"
 
@@ -102,8 +112,12 @@ mkdir -p "$install_dir" || die "could not create $install_dir"
 staging="$(mktemp -d "$install_dir/.SpaceTerm.install.XXXXXX")" \
     || die "could not write to $install_dir"
 ditto "$volume/SpaceTerm.app" "$staging/SpaceTerm.app"
-rm -rf "$target"
-mv "$staging/SpaceTerm.app" "$target"
+# SpaceTerm may have started during the download.
+ensure_not_running
+if [ -e "$target" ]; then
+    mv "$target" "$staging/previous.app" || die "could not move the existing SpaceTerm.app aside"
+fi
+mv "$staging/SpaceTerm.app" "$target" || die "could not install SpaceTerm.app"
 
 step "Installed SpaceTerm $version to $target"
 printf '%s\n' "$NOTARIZATION_NOTICE"
