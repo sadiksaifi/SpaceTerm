@@ -1,10 +1,43 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::App;
+use gpui::{App, ClipboardItem};
 
 use super::{PasteIntakeError, PastePayload};
 use crate::terminal::{SelectionCopy, TerminalLocalFileCapabilities};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ClipboardPreferences {
+    pub(crate) allow_write: bool,
+    pub(crate) allow_read: bool,
+}
+
+impl Default for ClipboardPreferences {
+    fn default() -> Self {
+        Self {
+            allow_write: true,
+            allow_read: false,
+        }
+    }
+}
+
+/// Plain text only. This Interface carries no local file authority.
+pub(crate) trait TextClipboard {
+    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError>;
+    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError>;
+}
+
+pub(crate) struct GpuiTextClipboard;
+impl TextClipboard for GpuiTextClipboard {
+    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError> {
+        Ok(cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError> {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        Ok(())
+    }
+}
 
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
 pub(crate) const HTML_MIME: &str = "text/html;charset=utf-8";

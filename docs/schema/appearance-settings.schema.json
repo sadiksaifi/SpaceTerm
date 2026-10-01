@@ -33,6 +33,9 @@
     },
     "keybindings": {
       "$ref": "#/$defs/keybindings"
+    },
+    "clipboard": {
+      "$ref": "#/$defs/clipboard"
     }
   },
   "$defs": {
@@ -602,6 +605,20 @@
             "daily"
           ],
           "default": "two_hours"
+        }
+      }
+    },
+    "clipboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_write": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_read": {
+          "type": "boolean",
+          "default": false
         }
       }
     }

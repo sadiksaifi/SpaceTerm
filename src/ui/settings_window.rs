@@ -7,6 +7,7 @@
 
 mod advanced;
 mod catalog;
+mod clipboard;
 mod editor;
 mod import;
 mod keybindings;
@@ -288,6 +289,7 @@ impl SidebarOwner for SettingsWindow {
 enum RowReset {
     Appearance(ResetTarget),
     Update,
+    Clipboard,
     Shortcut(crate::keybindings::Command),
 }
 
@@ -618,6 +620,9 @@ impl SettingsWindow {
         if let Some(differs) = self.update_preference_differs(row) {
             return differs.then_some(RowReset::Update);
         }
+        if let Some(differs) = self.clipboard_preference_differs(row) {
+            return differs.then_some(RowReset::Clipboard);
+        }
         let target = row.reset_target(self.fixed_appearance())?;
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
         // the document would copy the whole installed theme catalog to answer a question about
@@ -653,6 +658,7 @@ impl SettingsWindow {
                     let _ = owner.update(cx, |settings, cx| match reset {
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
+                        RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
                         RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
                     });
                 },
@@ -1012,6 +1018,9 @@ impl SettingsWindow {
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
+            SettingsRowId::ClipboardWrites | SettingsRowId::ClipboardReads => {
+                self.render_clipboard_preference(row, cx)
+            }
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -1020,11 +1029,16 @@ impl SettingsWindow {
             SettingsRowId::SettingsFile => self.render_settings_file(appearance, cx),
             SettingsRowId::ExportSettings => {
                 let owner = cx.weak_entity();
-                action_button("settings-document-export", "Export…", true, move |window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.begin_document_export(window, cx);
-                    });
-                })
+                action_button(
+                    "settings-document-export",
+                    "Export…",
+                    true,
+                    move |window, cx| {
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.begin_document_export(window, cx);
+                        });
+                    },
+                )
                 .into_any_element()
             }
             SettingsRowId::ImportSettings => {
@@ -1887,12 +1901,18 @@ impl SettingsWindow {
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }
+            SettingsRowId::ClipboardWrites => Some(
+                "Programs in the focused pane can replace your clipboard text, including over SSH.",
+            ),
+            SettingsRowId::ClipboardReads => Some(
+                "Programs in the focused pane can retrieve your clipboard text, including programs on remote machines.",
+            ),
             SettingsRowId::ExportSettings => {
                 Some("Save every setting, keyboard shortcut, and installed theme to a file.")
             }
-            SettingsRowId::ImportSettings => {
-                Some("Replace every setting, keyboard shortcut, and installed theme with an exported file.")
-            }
+            SettingsRowId::ImportSettings => Some(
+                "Replace every setting, keyboard shortcut, and installed theme with an exported file.",
+            ),
             SettingsRowId::ResetAllSettings => Some(
                 "Return every setting and keyboard shortcut to its default and remove installed themes.",
             ),

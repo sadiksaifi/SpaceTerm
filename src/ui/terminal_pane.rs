@@ -1,4 +1,3 @@
-use crate::ui::appearance::gpui_color;
 use super::pane_lifecycle::PaneLifecycleDependencies;
 #[cfg(test)]
 use super::terminal_focus::TerminalFocusBlocker;
@@ -6,6 +5,7 @@ pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
 #[cfg(test)]
 use crate::terminal::RemoteChannelUnavailable;
+use crate::ui::appearance::gpui_color;
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -135,12 +135,8 @@ pub(super) enum StatusIntent {
 
 impl StatusIntent {
     #[cfg(any(test, feature = "developer-tools"))]
-    pub(super) const ALL: [Self; 4] = [
-        Self::Information,
-        Self::Success,
-        Self::Warning,
-        Self::Error,
-    ];
+    pub(super) const ALL: [Self; 4] =
+        [Self::Information, Self::Success, Self::Warning, Self::Error];
 
     #[cfg(feature = "developer-tools")]
     pub(super) const fn label(self) -> &'static str {
@@ -306,6 +302,7 @@ struct PaneSessionLifecycle {
     native_service_session_identity: u64,
     _event_task: Option<Task<()>>,
     _accessibility_task: Option<Task<()>>,
+    _clipboard_task: Option<Task<()>>,
 }
 
 impl PaneSessionLifecycle {
@@ -331,6 +328,7 @@ impl PaneSessionLifecycle {
             native_service_session_identity: 0,
             _event_task: None,
             _accessibility_task: None,
+            _clipboard_task: None,
         }
     }
 
@@ -347,6 +345,10 @@ impl PaneSessionLifecycle {
         self.session_epoch = self.session_epoch.wrapping_add(1);
         self._event_task.take();
         self._accessibility_task.take();
+        self._clipboard_task.take();
+        if let Some(session) = &self.session {
+            session.focus(false);
+        }
     }
 
     fn suspend(&mut self) {
@@ -381,6 +383,7 @@ impl PaneSessionLifecycle {
     fn attach(
         &mut self,
         started: crate::terminal::StartedTerminalSession,
+        window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<TerminalPane>,
     ) {
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
@@ -388,6 +391,27 @@ impl PaneSessionLifecycle {
         let receiver = started.events;
         let accessibility_receiver = started.accessibility;
         let session_epoch = self.session_epoch;
+        let clipboard_receiver = started.clipboard;
+        self._clipboard_task = Some(cx.spawn(async move |this, cx| {
+            while let Ok(request) = clipboard_receiver.recv().await {
+                if cx
+                    .update_window(window_handle, |_, window, cx| {
+                        this.update(cx, |pane, cx| {
+                            let focused = pane.terminal_session.session_epoch == session_epoch
+                                && pane.synchronize_terminal_input_focus(window, cx);
+                            let preferences = cx
+                                .try_global::<super::appearance_runtime::AppearanceRuntime>()
+                                .map(|runtime| runtime.settings.snapshot().candidate.clipboard)
+                                .unwrap_or_default();
+                            request.perform(preferences, pane.text_clipboard.as_ref(), focused, cx);
+                        })
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         self._event_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 let mut events = vec![event];
@@ -476,6 +500,8 @@ impl Drop for PaneSessionLifecycle {
 
 pub(crate) struct TerminalPane {
     terminal_session: PaneSessionLifecycle,
+    window_handle: gpui::AnyWindowHandle,
+    text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
@@ -746,6 +772,8 @@ impl TerminalPane {
 
         Self {
             terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
+            window_handle: window.window_handle(),
+            text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
             screen_session_epoch: 0,
@@ -1899,7 +1927,8 @@ impl TerminalPane {
                         .handle
                         .set_find_query(self.find_generation, input.read(cx).value().to_owned());
                 }
-                self.terminal_session.attach(started, cx);
+                self.terminal_session
+                    .attach(started, self.window_handle, cx);
                 self.flush_pending_file_insertion(cx);
             }
             Err(failure) => {
@@ -2722,8 +2751,11 @@ impl TerminalPane {
     }
 
     fn edit_copy(&mut self, _: &EditCopy, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus_handle.is_focused(window) {
-            self.copy_selection_with_recovery(None, window, cx);
+        if self.synchronize_terminal_input_focus(window, cx)
+            && let Some(session) = self.terminal_session.session.as_ref()
+        {
+            let result = session.copy_or_forward();
+            self.publish_selection_copy(result, None, cx);
         }
     }
 

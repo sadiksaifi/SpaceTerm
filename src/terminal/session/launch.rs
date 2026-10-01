@@ -206,6 +206,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             initial_appearance,
         )?;
         Ok(StartedTerminalSession {
+            clipboard: session.clipboard_requests.clone(),
             handle: Box::new(session),
             events,
             accessibility,
@@ -313,6 +314,8 @@ impl TerminalSession {
     ) -> Result<StartedSession, SessionError> {
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
+        let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
+        let clipboard_authority = Arc::clone(&clipboard.authority);
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = SessionMetadataState::default();
@@ -365,6 +368,7 @@ impl TerminalSession {
                     reader_transport,
                     worker_schedule_input,
                     TerminalWorkerPublishers {
+                        clipboard,
                         metadata_state: worker_metadata_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
@@ -381,6 +385,8 @@ impl TerminalSession {
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
                 schedule_input,
+                clipboard_requests,
+                clipboard_authority,
             },
             event_rx,
             accessibility_rx,
@@ -406,6 +412,8 @@ impl TerminalSession {
         let terminal_name = identity::TERM_FALLBACK;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
+        let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
+        let clipboard_authority = Arc::clone(&clipboard.authority);
         let native_pty_close = NativePtyCloseHandle::default();
         let native_pty = start_native_pty(
             pty_size(geometry),
@@ -440,6 +448,7 @@ impl TerminalSession {
                     reader_transport,
                     worker_schedule_input,
                     TerminalWorkerPublishers {
+                        clipboard,
                         metadata_state: worker_metadata_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
@@ -457,6 +466,8 @@ impl TerminalSession {
                     worker: Some(worker),
                     native_pty_close: Some(native_pty_close),
                     schedule_input,
+                    clipboard_requests,
+                    clipboard_authority,
                 },
                 event_rx,
                 accessibility_rx,

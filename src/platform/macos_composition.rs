@@ -152,6 +152,7 @@ fn compose(
                 super::macos_accessibility::MacosTerminalAccessibilityAdapterFactory,
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
+        text_clipboard: Rc::new(crate::terminal::native_services::clipboard::GpuiTextClipboard),
                 selection_clipboard: Rc::new(super::macos_pasteboard::MacosSelectionClipboard),
                 file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
                     paths,

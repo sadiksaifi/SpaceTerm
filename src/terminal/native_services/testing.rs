@@ -38,6 +38,7 @@ impl FilePreviewFactory for UnavailablePreview {
 
 pub(crate) fn adapters() -> NativeServiceAdapters {
     NativeServiceAdapters {
+        text_clipboard: Rc::new(crate::terminal::native_services::clipboard::GpuiTextClipboard),
         selection_clipboard: Rc::new(TestSelectionClipboard),
         file_insertion:
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),

@@ -1022,6 +1022,7 @@ fn native_factory_should_report_pty_spawn_failures_through_session_events() {
         handle: session,
         events,
         accessibility: _,
+        clipboard: _,
     } = native_terminal_session_factory()
         .start(
             test_geometry(),
@@ -1080,6 +1081,7 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
         handle: session,
         events,
         accessibility: _,
+        clipboard: _,
     } = native_terminal_session_factory()
         .start(
             test_geometry(),
@@ -1465,17 +1467,25 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
+            clipboard: WorkerClipboard::default(),
         };
         let output = [b"\x1b[?1004h".as_slice(), operation, b"\x1b[5n"].concat();
 
         assert!(worker.process_output_chunks(vec![output]));
-        assert_eq!(records.snapshot().written, b"\x1b[I\x1b[0n");
+        assert_eq!(
+            records.snapshot().written,
+            if operation.contains(&b'?') {
+                b"\x1b[I\x1b]52;c;\x07\x1b[0n".as_slice()
+            } else {
+                b"\x1b[I\x1b[0n"
+            }
+        );
         worker.finish();
     }
 }
 
 #[test]
-fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered() {
+fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -1495,13 +1505,14 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.process_output_chunks(vec![
         b"before\x1b]52;c;?\x07".to_vec(),
         b"\x1b]52;c;c2VjcmV0\x1b\\".to_vec(),
     ]));
-    assert!(records.snapshot().written.is_empty());
+    assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07");
     assert!(matches!(
         worker.receive_next_command(),
         Some(Command::PublishPendingScreen)
@@ -1514,7 +1525,10 @@ fn osc52_is_discarded_without_replies_and_later_terminal_output_remains_ordered(
     assert!(receiver.try_recv().is_err());
 
     assert!(worker.process_output_chunks(vec![b"after\x1b[5n\r\nlater\x1b[6n".to_vec(),]));
-    assert_eq!(records.snapshot().written, b"\x1b[0n\x1b[2;6R");
+    assert_eq!(
+        records.snapshot().written,
+        b"\x1b]52;c;\x07\x1b[0n\x1b[2;6R"
+    );
     assert!(worker.publish_screen());
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("ordinary terminal output must continue after denied clipboard operations");
@@ -1557,6 +1571,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.process_reader_events());
@@ -1601,6 +1616,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker
         .schedules
@@ -1646,6 +1662,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.schedules.request_presentation();
     worker.schedules.update_accessibility(true);
@@ -1693,6 +1710,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(now + Duration::from_secs(30), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     let activity = worker.emulator.compression_activity().unwrap();
     worker
@@ -1734,6 +1752,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -1799,6 +1818,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.schedules.set_presentable(false, Instant::now());
 
@@ -1849,6 +1869,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker
         .schedules
@@ -1901,6 +1922,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
+            clipboard: WorkerClipboard::default(),
         };
         worker
             .schedules
@@ -1971,6 +1993,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.emulator.feed(b"seed");
     assert!(worker.publish_screen());
@@ -2020,6 +2043,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.emulator.feed(b"visible state");
     assert!(worker.publish_screen());
@@ -2066,6 +2090,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.emulator.feed(b"unobserved");
     let generation = worker.emulator.presentation_generation();
@@ -2098,6 +2123,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -2167,6 +2193,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
             osc52_filter: Osc52Filter::default(),
+            clipboard: WorkerClipboard::default(),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -2241,6 +2268,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.process_output_chunks(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
@@ -2282,6 +2310,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.publish_screen());
@@ -2327,6 +2356,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.process_command(Command::SetPresentable(false)));
@@ -2375,6 +2405,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
 
     assert!(worker.publish_screen());
@@ -2414,6 +2445,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -2704,9 +2736,11 @@ fn unchanged_pty_winsize_does_not_clear_the_idle_prompt() {
             b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07".to_vec(),
         ))
         .unwrap();
-    let before = receive_event(&events, "the idle prompt", |event| {
-        matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("QA_RESIZE_MARKER") && screen_text(screen).contains("> "))
-    });
+    let before = receive_event(
+        &events,
+        "the idle prompt",
+        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("QA_RESIZE_MARKER") && screen_text(screen).contains("> ")),
+    );
     let SessionEvent::Screen(before) = before else {
         unreachable!()
     };
@@ -2837,6 +2871,8 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
         worker: None,
         native_pty_close: None,
         schedule_input,
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
     let pixel_only = TerminalGeometry::from_grid(
         CellGridSize::new(80, 24),
@@ -2870,6 +2906,8 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
         worker: None,
         native_pty_close: None,
         schedule_input,
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
 
     session.set_find_query(FindQueryGeneration::test(1), "n".to_owned());
@@ -2899,6 +2937,8 @@ fn find_close_should_supersede_a_pending_query_update() {
         worker: None,
         native_pty_close: None,
         schedule_input,
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
 
     session.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
@@ -3429,6 +3469,8 @@ fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
         worker: None,
         native_pty_close: None,
         schedule_input: schedule_input.clone(),
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
     let sender = session.accessibility_demand_sender().unwrap();
     let latest = Instant::now() + Duration::from_millis(1);
@@ -3492,6 +3534,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         held_keys: HeldKeys::default(),
         schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
         osc52_filter: Osc52Filter::default(),
+        clipboard: WorkerClipboard::default(),
     };
     worker.emulator.feed("a😀b".as_bytes());
     let _ = worker.emulator.snapshot().unwrap();
@@ -3512,6 +3555,8 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         worker: None,
         native_pty_close: None,
         schedule_input: ScheduleInput::default(),
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
     let handle: &dyn TerminalSessionHandle = &session;
     let sender = handle.accessibility_selection_sender().unwrap();
@@ -3593,6 +3638,8 @@ fn stopped_session_returns_an_error_for_selection_requests() {
         worker: None,
         native_pty_close: None,
         schedule_input: ScheduleInput::default(),
+        clipboard_requests: async_channel::bounded(1).1,
+        clipboard_authority: Arc::default(),
     };
 
     assert_eq!(
@@ -3628,6 +3675,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
                 held_keys: HeldKeys::default(),
                 schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
                 osc52_filter: Osc52Filter::default(),
+                clipboard: WorkerClipboard::default(),
             };
             worker.emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
             let pointer = |phase, position, modifiers, generation| {
@@ -3713,6 +3761,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
             osc52_filter: Osc52Filter::default(),
+            clipboard: WorkerClipboard::default(),
         };
         for row in 0..40 {
             worker.emulator.feed(format!("row {row:02}\r\n").as_bytes());
@@ -3866,4 +3915,161 @@ fn hidden_input_transitions_are_reported_on_output_and_focus_during_idle_backoff
         matches!(event, SessionEvent::HiddenInputChanged(true))
     });
     session.shutdown_and_join();
+}
+
+fn clipboard_worker() -> (
+    TerminalWorker,
+    ScriptedPtyRecords,
+    async_channel::Receiver<ClipboardRequest>,
+    mpsc::SyncSender<NativePtyOutput>,
+    CommandSender<Command>,
+) {
+    let (command_tx, commands) = mpsc::channel();
+    let (reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, _) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _) = async_channel::bounded(1);
+    let (clipboard, requests) = WorkerClipboard::connect(command_tx.clone());
+    clipboard.authority.focus(true);
+    (
+        TerminalWorker {
+            metadata_state: SessionMetadataState::default(),
+            native_pty: direct_native_pty(records.clone()),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events,
+            events,
+            accessibility,
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+            osc52_filter: Osc52Filter::default(),
+            clipboard,
+        },
+        records,
+        requests,
+        reader_tx,
+        command_tx,
+    )
+}
+
+#[test]
+fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
+    let (mut worker, records, requests, reader_tx, commands) = clipboard_worker();
+    // Keep presentation channels open while checking terminal completion.
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    reader_tx
+        .send(NativePtyOutput::Bytes(
+            b"before\x1b]52;c;?\x07after\x1b[5n".to_vec(),
+        ))
+        .unwrap();
+    reader_tx.send(NativePtyOutput::Stopped(None)).unwrap();
+    commands.send(Command::ReaderReady).unwrap();
+    assert!(worker.process_reader_events());
+    assert!(worker.clipboard.pending());
+    assert!(records.snapshot().written.is_empty());
+    drop(requests.try_recv().unwrap());
+    let command = worker.commands.recv().unwrap();
+    assert!(!worker.process_command(command));
+    assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07\x1b[0n");
+    worker.finish();
+}
+
+#[test]
+fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_replies() {
+    let (mut worker, records, requests, _reader_tx, _commands) = clipboard_worker();
+    assert!(worker.process_output_chunks(vec![b"before\x1b]52;p;?\x1b\\after\x1b[5n".to_vec()]));
+    assert!(worker.clipboard.pending());
+    let (reply, selection) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::SelectionCopy(None, reply)));
+    assert_eq!(selection.try_recv().unwrap().unwrap(), None);
+    assert!(records.snapshot().written.is_empty());
+    let request = requests.try_recv().unwrap();
+    // Exercise the portable completion path without accessing the native clipboard.
+    drop(request);
+    assert!(worker.process_command(worker.commands.recv().unwrap()));
+    assert_eq!(records.snapshot().written, b"\x1b]52;p;\x1b\\\x1b[0n");
+    worker.finish();
+}
+
+#[test]
+fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert!(records.snapshot().written.is_empty());
+    worker.emulator.feed(b"\x1b[?1049h\x1b[>11u");
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
+    let mut release = KeyInput::text_input("c");
+    release.action = KeyAction::Release;
+    release.physical_key = PhysicalKey::C;
+    release.unshifted_codepoint = Some('c');
+    release.modifiers.platform = true;
+    release.text = None;
+    assert!(worker.process_command(Command::Key(release)));
+    assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
+    worker.finish();
+}
+
+#[test]
+fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    worker
+        .emulator
+        .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>11u\x1b[?2004hselected");
+    let pointer = |generation, phase, x, shift| PointerInput {
+        generation,
+        phase,
+        button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+        position: SurfacePosition { x, y: 1.0 },
+        modifiers: InputModifiers {
+            shift,
+            ..InputModifiers::default()
+        },
+        shift_selection: ShiftSelectionPolicy::default(),
+    };
+    let generation = worker.emulator.presentation_generation();
+    assert!(worker.process_command(Command::Pointer(pointer(
+        generation,
+        PointerPhase::Press,
+        1.0,
+        false
+    ))));
+    assert!(worker.process_command(Command::Pointer(pointer(
+        generation,
+        PointerPhase::Release,
+        1.0,
+        false
+    ))));
+    let mouse_bytes = records.snapshot().written;
+    assert_eq!(mouse_bytes, b"\x1b[<0;1;1M\x1b[<0;1;1m");
+    for (phase, x) in [
+        (PointerPhase::Press, 1.0),
+        (PointerPhase::Motion, 63.0),
+        (PointerPhase::Release, 63.0),
+    ] {
+        let generation = worker.emulator.presentation_generation();
+        assert!(worker.process_command(Command::Pointer(pointer(generation, phase, x, true))));
+    }
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert_eq!(
+        result.recv().unwrap().unwrap().unwrap().plain_text,
+        "selected"
+    );
+    assert_eq!(records.snapshot().written, mouse_bytes);
+    worker.finish();
 }

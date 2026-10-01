@@ -12,6 +12,7 @@ pub(in crate::terminal) enum Osc52Access {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::terminal) enum Osc52Target {
+    Default,
     Standard,
     Selection,
     Primary,
@@ -104,6 +105,7 @@ enum FilterState {
     Prefix,
     Osc52 { escape_pending: bool },
     DiscardOversized { escape_pending: bool },
+    OtherString { bell: bool, escape_pending: bool },
 }
 
 pub(in crate::terminal) struct Osc52Filter {
@@ -154,17 +156,65 @@ impl Osc52Filter {
                             };
                         }
                     } else {
-                        terminal.extend(mem::take(&mut self.candidate));
-                        self.state = FilterState::Ground;
+                        let candidate = mem::take(&mut self.candidate);
+                        self.state = if matches!(byte, 0x18 | 0x1a)
+                            || (candidate.starts_with(b"\x1b]") && byte == 0x07)
+                        {
+                            FilterState::Ground
+                        } else if candidate.starts_with(b"\x1b]") {
+                            FilterState::OtherString {
+                                bell: true,
+                                escape_pending: byte == 0x1b,
+                            }
+                        } else if candidate
+                            .get(1)
+                            .is_some_and(|byte| matches!(*byte, b'P' | b'_' | b'^' | b'X'))
+                        {
+                            FilterState::OtherString {
+                                bell: false,
+                                escape_pending: byte == 0x1b,
+                            }
+                        } else {
+                            FilterState::Ground
+                        };
+                        if matches!(self.state, FilterState::Ground) && byte == 0x1b {
+                            terminal.extend_from_slice(&candidate[..candidate.len() - 1]);
+                            self.candidate.push(byte);
+                            self.state = FilterState::Prefix;
+                        } else {
+                            terminal.extend(candidate);
+                        }
                     }
                 }
+                FilterState::OtherString {
+                    bell,
+                    escape_pending,
+                } => {
+                    terminal.push(byte);
+                    self.state = if (bell && byte == 0x07)
+                        || (escape_pending && byte == b'\\')
+                        || matches!(byte, 0x18 | 0x1a)
+                    {
+                        FilterState::Ground
+                    } else {
+                        FilterState::OtherString {
+                            bell,
+                            escape_pending: byte == 0x1b,
+                        }
+                    };
+                }
                 FilterState::Osc52 { mut escape_pending } => {
+                    if matches!(byte, 0x18 | 0x1a) {
+                        self.candidate.clear();
+                        self.state = FilterState::Ground;
+                        effects.push(Osc52Effect::Rejected(Osc52Rejection::Malformed));
+                        continue;
+                    }
                     self.candidate.push(byte);
                     let complete = byte == 0x07 || (escape_pending && byte == b'\\');
                     escape_pending = byte == 0x1b;
                     if complete {
                         let raw = mem::take(&mut self.candidate);
-                        effects.push(Osc52Effect::Terminal(raw.clone()));
                         effects.push(match parse_osc52(&raw) {
                             Ok(operation) => Osc52Effect::Operation(operation),
                             Err(rejection) => Osc52Effect::Rejected(rejection),
@@ -178,7 +228,9 @@ impl Osc52Filter {
                     }
                 }
                 FilterState::DiscardOversized { mut escape_pending } => {
-                    let complete = byte == 0x07 || (escape_pending && byte == b'\\');
+                    let complete = byte == 0x07
+                        || (escape_pending && byte == b'\\')
+                        || matches!(byte, 0x18 | 0x1a);
                     escape_pending = byte == 0x1b;
                     if complete {
                         effects.push(Osc52Effect::Rejected(Osc52Rejection::Oversized));
@@ -217,7 +269,8 @@ fn parse_osc52(raw: &[u8]) -> Result<Osc52Operation, Osc52Rejection> {
         .position(|byte| *byte == b';')
         .ok_or(Osc52Rejection::Malformed)?;
     let target = match &body[..separator] {
-        b"" | b"c" => Osc52Target::Standard,
+        b"" => Osc52Target::Default,
+        b"c" => Osc52Target::Standard,
         b"s" => Osc52Target::Selection,
         b"p" => Osc52Target::Primary,
         _ => return Err(Osc52Rejection::UnsupportedTarget),
@@ -235,6 +288,46 @@ fn parse_osc52(raw: &[u8]) -> Result<Osc52Operation, Osc52Rejection> {
     }
     let text = String::from_utf8(decoded).map_err(|_| Osc52Rejection::InvalidUtf8)?;
     Ok(Osc52Operation::Write { target, text })
+}
+
+pub(in crate::terminal) fn read_response(
+    target: Osc52Target,
+    terminator: Osc52Terminator,
+    text: &str,
+) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let selector: &[u8] = match target {
+        Osc52Target::Default => b"",
+        Osc52Target::Standard => b"c",
+        Osc52Target::Selection => b"s",
+        Osc52Target::Primary => b"p",
+    };
+    let mut response = Vec::with_capacity(text.len().div_ceil(3) * 4 + 10);
+    response.extend_from_slice(b"\x1b]52;");
+    response.extend_from_slice(selector);
+    response.push(b';');
+    for chunk in text.as_bytes().chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        response.push(ALPHABET[usize::from(a >> 2)]);
+        response.push(ALPHABET[usize::from(((a & 3) << 4) | (b >> 4))]);
+        response.push(if chunk.len() > 1 {
+            ALPHABET[usize::from(((b & 15) << 2) | (c >> 6))]
+        } else {
+            b'='
+        });
+        response.push(if chunk.len() > 2 {
+            ALPHABET[usize::from(c & 63)]
+        } else {
+            b'='
+        });
+    }
+    response.extend_from_slice(match terminator {
+        Osc52Terminator::Bell => b"\x07",
+        Osc52Terminator::StringTerminator => b"\x1b\\",
+    });
+    response
 }
 
 fn decode_base64(input: &[u8]) -> Result<Vec<u8>, Osc52Rejection> {
@@ -296,6 +389,87 @@ fn base64_value(byte: u8) -> Result<u8, Osc52Rejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_sequence_is_consumed_once_without_reaching_the_emulator() {
+        let mut filter = Osc52Filter::default();
+        assert_eq!(
+            filter.feed(b"before\x1b]52;c;aGVsbG8=\x07after"),
+            vec![
+                Osc52Effect::Terminal(b"before".to_vec()),
+                Osc52Effect::Operation(Osc52Operation::Write {
+                    target: Osc52Target::Standard,
+                    text: "hello".to_owned(),
+                }),
+                Osc52Effect::Terminal(b"after".to_vec()),
+            ],
+        );
+    }
+
+    #[test]
+    fn unrelated_empty_osc_does_not_hide_next_clipboard_operation() {
+        let mut filter = Osc52Filter::default();
+        assert_eq!(
+            operations(&filter.feed(b"\x1b]\x07\x1b]52;c;?\x07")).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn clipboard_inside_other_control_strings_is_not_executed() {
+        for prefix in [b"\x1bP".as_slice(), b"\x1b_", b"\x1b]0;"] {
+            let raw = [prefix, b"\x1b]52;c;c2VjcmV0\x07\x1b\\"].concat();
+            let mut filter = Osc52Filter::default();
+            assert!(operations(&filter.feed(&raw)).is_empty());
+        }
+    }
+
+    #[test]
+    fn every_selector_and_terminator_round_trips_unicode_and_base64_padding() {
+        for target in [
+            Osc52Target::Default,
+            Osc52Target::Standard,
+            Osc52Target::Primary,
+            Osc52Target::Selection,
+        ] {
+            for terminator in [Osc52Terminator::Bell, Osc52Terminator::StringTerminator] {
+                for text in ["", "a", "ab", "abc", "😀 text"] {
+                    let response = read_response(target, terminator, text);
+                    assert_eq!(
+                        parse_osc52(&response),
+                        Ok(Osc52Operation::Write {
+                            target,
+                            text: text.into()
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_text_limit_accepts_boundary_and_rejects_next_byte() {
+        for (size, accepted) in [
+            (MAX_OSC52_CONTENT_BYTES, true),
+            (MAX_OSC52_CONTENT_BYTES + 1, false),
+        ] {
+            let sequence = read_response(
+                Osc52Target::Standard,
+                Osc52Terminator::Bell,
+                &"x".repeat(size),
+            );
+            let mut filter = Osc52Filter::default();
+            let effects = filter.feed(&sequence);
+            if accepted {
+                assert_eq!(operations(&effects)[0].byte_len(), size);
+            } else {
+                assert_eq!(
+                    effects,
+                    vec![Osc52Effect::Rejected(Osc52Rejection::Oversized)]
+                );
+            }
+        }
+    }
 
     fn operations(effects: &[Osc52Effect]) -> Vec<Osc52Operation> {
         effects

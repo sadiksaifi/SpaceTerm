@@ -49,6 +49,43 @@ flowchart TB
 SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
 one or more Panes through its Pane Layout.
 
+## Terminal clipboard
+
+Programs in the Pane with Terminal Input Focus can copy plain text through OSC 52, including over
+SSH and in fullscreen terminal interfaces. Settings > Privacy > Clipboard controls copying and
+reading separately. Copying is enabled by default. Reading is disabled by default; enabling it
+lets the focused terminal program read your system clipboard. Requests are limited to 1 MiB of text.
+
+Cmd+C copies SpaceTerm's Selection. With no Selection, applications that enable the enhanced
+keyboard protocol receive Cmd+C. Cmd+V follows SpaceTerm's paste handling, including bracketed
+paste. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
+
+For Neovim, select its OSC 52 provider explicitly:
+
+```lua
+vim.g.clipboard = 'osc52'
+vim.opt.clipboard = 'unnamedplus'
+```
+
+Yanks use the system clipboard. Pasting through Neovim's OSC 52 provider also requires enabling
+clipboard reading in SpaceTerm. Denied or unavailable reads return empty text.
+
+For tmux, allow application clipboard writes in `~/.tmux.conf`:
+
+```tmux
+set -s set-clipboard on
+```
+
+SpaceTerm advertises the `Ms` terminal capability. In tmux 3.7c and newer, forwarding application
+clipboard reads also requires `set -s get-clipboard request`. Enable `set -g mouse on` if you want
+tmux to route mouse input to fullscreen applications. Reload the configuration or restart tmux
+after changing these settings. Nested multiplexers must forward OSC 52 at every layer.
+
+[Neovim clipboard provider](https://neovim.io/doc/user/provider/#clipboard-osc52) and
+[tmux clipboard configuration](https://github.com/tmux/tmux/wiki/Clipboard) describe program setup.
+Codex CLI, Claude Code, pi, and Herdr can use their own Selection and copy commands when they emit
+OSC 52. Their paste behavior also depends on the program and multiplexer configuration.
+
 ## Built with
 
 Rust powers the application, GPUI provides the native GPU-rendered interface, and `libghostty-vt`

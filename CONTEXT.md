@@ -228,7 +228,11 @@ A bounded text insertion candidate retained until accepted or cancelled.
 Time-bounded authorization for one unsafe Paste Payload while Terminal Input Focus remains valid.
 
 **OSC 52 Filtering**:
-Bounded recognition and unconditional denial of terminal clipboard read and write escape sequences.
+Bounded recognition of terminal clipboard escape sequences before Terminal Emulation, producing ordered plain-text requests.
+
+**Terminal Clipboard Access**:
+Session-scoped permission to consult the system text clipboard while the originating Pane retains Terminal Input Focus.
+Copying is enabled by default; reading requires the Privacy Setting.
 
 **Terminal Local File Capabilities**:
 Session-scoped authority for local path actions in a Local Pane.
