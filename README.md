@@ -28,7 +28,37 @@ Or install with Homebrew:
 brew install --cask sadiksaifi/tap/spaceterm
 ```
 
+## Workspace hierarchy
+
+```mermaid
+flowchart TB
+    SpaceTerm["SpaceTerm"]
+
+    SpaceTerm --> W1["Workspace 1"]
+    SpaceTerm --> W2["Workspace 2"]
+    SpaceTerm --> W3["Workspace 3"]
+
+    W1 --> W1T1["Tab 1"]
+    W1 --> W1T2["Tab 2"]
+    W2 --> W2T1["Tab 1"]
+    W2 --> W2T2["Tab 2"]
+    W3 --> W3T1["Tab 1"]
+    W3 --> W3T2["Tab 2"]
+
+    W1T1 --> W1T1P1["Pane"]
+    W1T1 --> W1T1P2["Pane"]
+    W1T2 --> W1T2P1["Pane"]
+    W2T1 --> W2T1P1["Pane"]
+    W2T2 --> W2T2P1["Pane"]
+    W2T2 --> W2T2P2["Pane"]
+    W3T1 --> W3T1P1["Pane"]
+    W3T1 --> W3T1P2["Pane"]
+    W3T2 --> W3T2P1["Pane"]
+```
+
+SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
+one or more Panes through its Pane Layout.
+
 ## Documentation
 
-See the [SpaceTerm guide](docs/guide.md) for the Workspace hierarchy, terminal clipboard setup,
-and source builds.
+See the [SpaceTerm guide](docs/guide.md) for terminal clipboard setup and source builds.
