@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{App, ClipboardItem};
+use gpui::App;
 
 use super::{PasteIntakeError, PastePayload};
 use crate::terminal::{SelectionCopy, TerminalLocalFileCapabilities};
@@ -26,17 +26,6 @@ impl Default for ClipboardPreferences {
 pub(crate) trait TextClipboard {
     fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError>;
     fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError>;
-}
-
-pub(crate) struct GpuiTextClipboard;
-impl TextClipboard for GpuiTextClipboard {
-    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError> {
-        Ok(cx.read_from_clipboard().and_then(|item| item.text()))
-    }
-    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError> {
-        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
-        Ok(())
-    }
 }
 
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -77,6 +66,7 @@ pub(crate) fn selection_representations<'a>(
 pub(crate) enum ClipboardError {
     Unavailable,
     InvalidFiles,
+    InvalidText,
 }
 
 /// Publishes all Selection representations synchronously before returning.

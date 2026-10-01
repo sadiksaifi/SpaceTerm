@@ -4,9 +4,20 @@ use std::rc::Rc;
 use gpui::{App, ClipboardItem};
 
 use super::NativeServiceAdapters;
-use super::clipboard::{ClipboardError, FileClipboard, SelectionClipboard};
+use super::clipboard::{ClipboardError, FileClipboard, SelectionClipboard, TextClipboard};
 use super::file_preview::{FilePreviewError, FilePreviewFactory, FilePreviewPanel};
 use crate::terminal::SelectionCopy;
+
+struct TestTextClipboard;
+impl TextClipboard for TestTextClipboard {
+    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError> {
+        Ok(cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError> {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        Ok(())
+    }
+}
 
 struct TestSelectionClipboard;
 impl SelectionClipboard for TestSelectionClipboard {
@@ -38,7 +49,7 @@ impl FilePreviewFactory for UnavailablePreview {
 
 pub(crate) fn adapters() -> NativeServiceAdapters {
     NativeServiceAdapters {
-        text_clipboard: Rc::new(crate::terminal::native_services::clipboard::GpuiTextClipboard),
+        text_clipboard: Rc::new(TestTextClipboard),
         selection_clipboard: Rc::new(TestSelectionClipboard),
         file_insertion:
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
