@@ -61,6 +61,11 @@ pub enum SystemReservation {
     Contrast,
     VoiceOver,
     AccessibilityShortcuts,
+    /// SpaceTerm Development's Develop menu owns these, so no Command can shadow them.
+    #[cfg(feature = "developer-tools")]
+    DeveloperWorkbench,
+    #[cfg(feature = "developer-tools")]
+    AppearancePreview,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

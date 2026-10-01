@@ -387,6 +387,38 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn develop_menu_chords_are_system_reserved_and_block_retained_overrides() {
+        use crate::keybindings::{
+            Command, KeybindingState, Reservation, Shortcut, SystemReservation,
+        };
+
+        let profile = default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            testing_reserved_shortcuts(),
+        )
+        .unwrap();
+        let workbench = Shortcut::parse("cmd-alt-a").unwrap();
+        assert_eq!(
+            profile.check(&workbench),
+            Err(Reservation::System(SystemReservation::DeveloperWorkbench))
+        );
+        assert_eq!(
+            profile.check(&Shortcut::parse("cmd-alt-c").unwrap()),
+            Err(Reservation::System(SystemReservation::AppearancePreview))
+        );
+
+        let preferences: KeybindingPreferences =
+            serde_json::from_str(r#"{"new_workspace":"cmd-alt-a"}"#).unwrap();
+        let resolved = profile.resolve(&preferences);
+        assert_eq!(
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Blocked(SystemReservation::DeveloperWorkbench)
+        );
+        assert!(resolved.shortcuts(Command::NewWorkspace).is_empty());
+    }
+
     #[gpui::test]
     fn presentation_refresh_follows_installed_bindings_and_clears_removed_hints(
         cx: &mut gpui::TestAppContext,
