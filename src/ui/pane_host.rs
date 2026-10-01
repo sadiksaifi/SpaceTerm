@@ -1,7 +1,7 @@
-use crate::ui::appearance::gpui_color;
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::drag_and_drop::{DragPreview, drag_end_observer};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -9,6 +9,7 @@ use super::terminal_status::{
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
+use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
 
 use thiserror::Error;
@@ -44,8 +45,8 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
 use crate::domain::{
-    ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
+    ClosePaneOutcome, FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneTreeRef,
+    SplitAxis, SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
@@ -54,7 +55,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    Render, Window, div, px, relative,
+    Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
@@ -92,6 +93,8 @@ const PANE_CONTROL_GAP: f32 = 2.0;
 /// the eye reads that gap as wider at the same measurement.
 const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
+/// The share of the accent color that fills the half of a Pane a dragged Pane would take.
+const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
 #[cfg(test)]
 const PANE_STATUS_WIDTH: f32 = 13.0 + PANE_STATUS_ICON_GAP;
@@ -324,6 +327,19 @@ impl std::fmt::Debug for PaneHostEvent {
     }
 }
 
+/// The value a Pane drag carries, scoped to the Pane Layout that owns the Pane.
+struct DraggedPane {
+    pane_id: PaneId,
+    owner: gpui::EntityId,
+}
+
+/// A Pane lifted by its caption, and the edge of another Pane it takes if released now.
+#[derive(Clone, Copy)]
+struct PaneDrag {
+    pane_id: PaneId,
+    drop_target: Option<(PaneId, PaneEdge)>,
+}
+
 pub(crate) struct PaneHost {
     terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
@@ -335,6 +351,7 @@ pub(crate) struct PaneHost {
     pane_captions: BTreeMap<PaneId, PaneCaptionText>,
     pane_attention: BTreeMap<PaneId, u32>,
     resizing_split_id: Option<SplitId>,
+    pane_drag: Option<PaneDrag>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -413,6 +430,7 @@ impl PaneHost {
             pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             resizing_split_id: None,
+            pane_drag: None,
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1067,6 +1085,104 @@ impl PaneHost {
         }
     }
 
+    /// Lifts a Pane by its caption so it can split another Pane in this Tab.
+    fn begin_pane_drag(&mut self, pane_id: PaneId, cx: &mut Context<Self>) -> DragPreview {
+        self.pane_drag = Some(PaneDrag {
+            pane_id,
+            drop_target: None,
+        });
+        cx.notify();
+        let label = self
+            .pane_captions
+            .get(&pane_id)
+            .map(|caption| caption.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Terminal".into());
+        DragPreview::new(label, None)
+    }
+
+    fn drag_pane_to(&mut self, pane_id: PaneId, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+        let drop_target = self.drop_target(pane_id, pointer, pane_gap(cx));
+        let Some(drag) = self
+            .pane_drag
+            .as_mut()
+            .filter(|drag| drag.pane_id == pane_id)
+        else {
+            return;
+        };
+        if drag.drop_target != drop_target {
+            drag.drop_target = drop_target;
+            cx.notify();
+        }
+    }
+
+    /// Ends a Pane drag, moving the Pane onto the edge of the Pane under `pointer`, if any.
+    fn finish_pane_drag(
+        &mut self,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.pane_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let gap = pane_gap(cx);
+        let Some((target_pane_id, edge)) = self.drop_target(drag.pane_id, pointer, gap) else {
+            return;
+        };
+        let Some(target_size) = self.split_target_size(target_pane_id, gap) else {
+            return;
+        };
+        match self
+            .terminal_tab
+            .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
+        {
+            Ok(true) => {
+                self.advance_native_service_hierarchy_generation(cx);
+                self.split_bounds.clear();
+                self.sync_terminal_focus(cx);
+                cx.emit(PaneHostEvent::PresentationChanged {
+                    tab_id: self.terminal_tab.id(),
+                });
+                if let Some(terminal) = self.terminal_tab.terminal(drag.pane_id) {
+                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                }
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to move Pane: {error}"),
+        }
+    }
+
+    /// The Pane under `pointer` that can take the dragged Pane, and the edge it would take.
+    ///
+    /// A Pane offers no target to itself, while zoomed, or when it is too small to split along
+    /// the edge's axis.
+    fn drop_target(
+        &self,
+        pane_id: PaneId,
+        pointer: Point<Pixels>,
+        gap: f32,
+    ) -> Option<(PaneId, PaneEdge)> {
+        if matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_)) {
+            return None;
+        }
+        let mut panes = Vec::new();
+        collect_pane_order(self.terminal_tab.root(), &mut panes);
+        let (target_pane_id, bounds) = panes
+            .into_iter()
+            .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
+            .find(|(_, bounds)| bounds.contains(&pointer))?;
+        if target_pane_id == pane_id {
+            return None;
+        }
+        let edge = drop_edge(bounds, pointer);
+        let target_size = self.split_target_size(target_pane_id, gap)?;
+        self.terminal_tab
+            .can_receive_pane(target_pane_id, edge, target_size, gap)
+            .then_some((target_pane_id, edge))
+    }
+
     fn split_pane_with_prepared_launch(
         &mut self,
         target_pane_id: PaneId,
@@ -1508,6 +1624,10 @@ impl PaneHost {
             .unwrap_or_default();
         let pane_group = format!("pane-group-{}", pane_id.get());
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
+        let drop_edge = self
+            .pane_drag
+            .and_then(|drag| drag.drop_target)
+            .and_then(|(target_pane_id, edge)| (target_pane_id == pane_id).then_some(edge));
         let measure_host = host.clone();
         let focus_host = host.clone();
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
@@ -1601,6 +1721,9 @@ impl PaneHost {
             .child(render_pane_corner_surface(pane_id, frame, appearance))
             // The hairline paints last so the caption, Terminal and corner mask never cover it.
             .child(pane_rim)
+            .when_some(drop_edge, |leaf, edge| {
+                leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
+            })
             .into_any_element()
     }
 
@@ -1777,7 +1900,27 @@ impl Render for PaneHost {
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
+            .on_drag_move::<DraggedPane>({
+                let host = cx.entity().downgrade();
+                let owner = cx.entity_id();
+                move |event, _, cx| {
+                    let dragged = event.drag(cx);
+                    if dragged.owner != owner {
+                        return;
+                    }
+                    let pane_id = dragged.pane_id;
+                    let pointer = event.event.position;
+                    let _ = host.update(cx, |host, cx| host.drag_pane_to(pane_id, pointer, cx));
+                }
+            })
             .child(content)
+            .when(self.pane_drag.is_some(), |root| {
+                let host = cx.entity().downgrade();
+                root.child(drag_end_observer(move |window, cx| {
+                    let pointer = window.mouse_position();
+                    let _ = host.update(cx, |host, cx| host.finish_pane_drag(pointer, window, cx));
+                }))
+            })
     }
 }
 
@@ -2061,6 +2204,7 @@ fn render_pane_caption_content(
     // behavior is unchanged.
     let caption_action_available = focused || appearance.active;
     let focus_host = host.clone();
+    let drag_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
         .debug_selector(move || {
@@ -2264,6 +2408,16 @@ fn render_pane_caption_content(
             });
             cx.stop_propagation();
         })
+        // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
+        .when(has_multiple_panes && !zoomed, |row| {
+            let owner = drag_host.entity_id();
+            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, _, cx| {
+                let preview = drag_host
+                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, cx))
+                    .unwrap_or_else(|_| DragPreview::new("", None));
+                cx.new(|_| preview)
+            })
+        })
         .child(caption_content)
         .child(controls)
         .into_any_element()
@@ -2378,6 +2532,34 @@ fn render_pane_corner_surface(
         .into_any_element()
 }
 
+/// Shows the half of a target Pane that a dragged Pane takes when it is released.
+fn render_pane_drop_target(
+    pane_id: PaneId,
+    edge: PaneEdge,
+    radius: Pixels,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let accent = appearance.colors.primary_background;
+    let half = div()
+        .debug_selector(move || {
+            format!("pane-drop-target-{}-{edge:?}", pane_id.get()).to_lowercase()
+        })
+        .absolute()
+        .bg(gpui_color(
+            accent.multiply_opacity(PANE_DROP_TARGET_FILL_OPACITY),
+        ))
+        .border_2()
+        .border_color(gpui_color(accent))
+        .rounded(radius);
+    match edge {
+        PaneEdge::Left => half.top_0().bottom_0().left_0().w(relative(0.5)),
+        PaneEdge::Right => half.top_0().bottom_0().right_0().w(relative(0.5)),
+        PaneEdge::Top => half.left_0().right_0().top_0().h(relative(0.5)),
+        PaneEdge::Bottom => half.left_0().right_0().bottom_0().h(relative(0.5)),
+    }
+    .into_any_element()
+}
+
 fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoElement {
     let child = div()
         .flex_basis(DefiniteLength::Fraction(ratio))
@@ -2459,6 +2641,26 @@ fn restored_leaf_size(
     }
 }
 
+/// The edge of a Pane nearest `point`, measured relative to the Pane's own proportions.
+///
+/// The Pane's diagonals divide it into four triangles, one per edge, so a wide Pane and a tall
+/// Pane each offer every edge an equal share of their area.
+fn drop_edge(bounds: Bounds<Pixels>, point: Point<Pixels>) -> PaneEdge {
+    let center = bounds.center();
+    let horizontal = f32::from(point.x - center.x) / f32::from(bounds.size.width).max(f32::EPSILON);
+    let vertical = f32::from(point.y - center.y) / f32::from(bounds.size.height).max(f32::EPSILON);
+    match (
+        horizontal.abs() > vertical.abs(),
+        horizontal < 0.0,
+        vertical < 0.0,
+    ) {
+        (true, true, _) => PaneEdge::Left,
+        (true, false, _) => PaneEdge::Right,
+        (false, _, true) => PaneEdge::Top,
+        (false, _, false) => PaneEdge::Bottom,
+    }
+}
+
 fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSizeError> {
     PaneSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height))
 }
@@ -2483,7 +2685,6 @@ fn split_ratio_for_offset(
         .is_finite()
         .then_some(requested_offset / content_extent)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2541,11 +2742,7 @@ mod tests {
             let appearance =
                 prepared_appearance(crate::appearance::Appearance::Light, transparency);
             let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
-            for terminal in [
-                Color::BLACK,
-                Color::rgb(0xfafafa),
-                Color::rgb(0x38658a),
-            ] {
+            for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let host = appearance.pane_surface(terminal).source_over(window);
                 let edge = appearance.pane_rim_on(terminal).source_over(host);
                 let contrast = edge.contrast_ratio(host);
@@ -2561,11 +2758,7 @@ mod tests {
     fn dark_pane_rim_uses_the_accepted_terminal_surface_as_its_host() {
         for transparency in [0.0, 0.35, 1.0] {
             let appearance = prepared_appearance(crate::appearance::Appearance::Dark, transparency);
-            for terminal in [
-                Color::BLACK,
-                Color::rgb(0xfafafa),
-                Color::rgb(0x38658a),
-            ] {
+            for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
                 let host = appearance.pane_surface(terminal).source_over(window);
                 let edge = appearance.pane_rim_on(terminal).source_over(host);
@@ -2987,6 +3180,111 @@ mod tests {
         cx.run_until_parked();
 
         (host, cx)
+    }
+
+    /// Presses a Pane's caption beside its name and moves the pointer along `path`.
+    fn drag_pane_caption(
+        caption: Bounds<Pixels>,
+        path: &[Point<Pixels>],
+        cx: &mut VisualTestContext,
+    ) {
+        let from = point(caption.left() + px(24.0), caption.center().y);
+        cx.simulate_mouse_move(from, None, Modifiers::none());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        for position in [from + point(px(8.0), px(8.0))].iter().chain(path) {
+            cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn dropping_a_pane_on_an_edge_of_another_should_split_it_there(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(caption, &[near_left_edge], cx);
+        let during = (
+            cx.debug_bounds("pane-drop-target-1-left")
+                .map(|overlay| (overlay.origin, f32::from(overlay.size.width).round())),
+            cx.debug_bounds("drag-preview").is_some(),
+        );
+        cx.simulate_mouse_up(near_left_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            during,
+            (
+                Some((target.origin, (f32::from(target.size.width) / 2.0).round())),
+                true
+            )
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| (
+                host.layout_signature(),
+                host.focused_pane_id(),
+                host.pane_count(),
+                host.pane_drag.is_some(),
+            )),
+            (
+                "split:1:Horizontal:0.5(split:2:Vertical:0.5(split:4:Horizontal:0.5(pane:4,pane:1),pane:3),pane:2)"
+                    .to_owned(),
+                PaneId::new(4),
+                4,
+                false,
+            )
+        );
+        assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
+    }
+
+    #[gpui::test]
+    fn releasing_a_pane_over_itself_should_leave_the_layout_unchanged(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
+
+        drag_pane_caption(caption, &[own_pane.center()], cx);
+        let offered_target = host.read_with(cx, |host, _| {
+            host.pane_drag.and_then(|drag| drag.drop_target)
+        });
+        cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                offered_target,
+                host.read_with(cx, |host, _| (
+                    host.layout_signature(),
+                    host.pane_drag.is_some()
+                )),
+            ),
+            (None, (before, false))
+        );
+    }
+
+    #[test]
+    fn drop_edge_should_divide_a_pane_along_its_diagonals() {
+        let pane = bounds(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)));
+
+        assert_eq!(
+            [
+                point(px(60.0), px(50.0)),
+                point(px(340.0), px(50.0)),
+                point(px(200.0), px(10.0)),
+                point(px(200.0), px(90.0)),
+                point(px(120.0), px(20.0)),
+            ]
+            .map(|pointer| drop_edge(pane, pointer)),
+            [
+                PaneEdge::Left,
+                PaneEdge::Right,
+                PaneEdge::Top,
+                PaneEdge::Bottom,
+                PaneEdge::Top,
+            ]
+        );
     }
 
     #[gpui::test]

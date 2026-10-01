@@ -2591,6 +2591,10 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
+        // Motion during a Tab, Workspace, or Pane drag belongs to that drag, not to the program.
+        if cx.has_active_drag() {
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
@@ -4460,7 +4464,6 @@ fn ime_candidate_bounds(
         size(cell_width, line_height),
     )
 }
-
 
 /// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
 /// how far along it reports being.
