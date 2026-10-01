@@ -10,11 +10,12 @@ use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
 use crate::ui::sidebar_window::form::action_button;
 use super::{SettingsRowId, SettingsWindow};
 use crate::appearance::SettingsDocument;
+use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
 
 /// The status row's label names the running build, so the page answers "which version" first.
-pub(super) const CURRENT_VERSION_LABEL: &str = concat!("SpaceTerm ", env!("SPACETERM_VERSION"));
+pub(super) const CURRENT_VERSION_LABEL: &str = ApplicationIdentity::current().version_label();
 
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
 pub(super) const DOWNLOAD_SELECTOR: &str = "settings-update-download";

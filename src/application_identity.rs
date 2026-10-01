@@ -8,9 +8,21 @@ pub(crate) enum UpdateSource {
     Unavailable,
 }
 
+/// Expands one display name into the name and the version label that repeats it, so the two cannot
+/// disagree.
+macro_rules! named {
+    ($display_name:literal) => {
+        (
+            $display_name,
+            concat!($display_name, " ", env!("SPACETERM_VERSION")),
+        )
+    };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
+    version_label: &'static str,
     directory_name: &'static str,
     update_source: UpdateSource,
     microphone_access: bool,
@@ -35,6 +47,11 @@ impl ApplicationIdentity {
         self.display_name
     }
 
+    /// The display name followed by the build's version, as Settings presents the running build.
+    pub(crate) const fn version_label(self) -> &'static str {
+        self.version_label
+    }
+
     pub(crate) const fn directory_name(self) -> &'static str {
         self.directory_name
     }
@@ -50,8 +67,10 @@ impl ApplicationIdentity {
     }
 
     const fn production() -> Self {
+        let (display_name, version_label) = named!("SpaceTerm");
         Self {
-            display_name: "SpaceTerm",
+            display_name,
+            version_label,
             directory_name: "spaceterm",
             update_source: UpdateSource::SignedFeed,
             microphone_access: true,
@@ -59,8 +78,10 @@ impl ApplicationIdentity {
     }
 
     const fn preflight() -> Self {
+        let (display_name, version_label) = named!("SpaceTerm Preflight");
         Self {
-            display_name: "SpaceTerm Preflight",
+            display_name,
+            version_label,
             directory_name: "spaceterm-preflight",
             update_source: UpdateSource::Unavailable,
             microphone_access: true,
@@ -68,8 +89,10 @@ impl ApplicationIdentity {
     }
 
     const fn development() -> Self {
+        let (display_name, version_label) = named!("SpaceTerm Development");
         Self {
-            display_name: "SpaceTerm Development",
+            display_name,
+            version_label,
             directory_name: "spaceterm-development",
             update_source: UpdateSource::Simulation,
             microphone_access: false,
@@ -130,6 +153,24 @@ mod tests {
                 ("SpaceTerm", "spaceterm"),
                 ("SpaceTerm Preflight", "spaceterm-preflight"),
                 ("SpaceTerm Development", "spaceterm-development"),
+            ]
+        );
+    }
+
+    #[test]
+    fn version_labels_should_name_their_own_identity() {
+        let identities = [
+            ApplicationIdentity::production(),
+            ApplicationIdentity::preflight(),
+            ApplicationIdentity::development(),
+        ];
+
+        assert_eq!(
+            identities.map(ApplicationIdentity::version_label),
+            [
+                concat!("SpaceTerm ", env!("SPACETERM_VERSION")),
+                concat!("SpaceTerm Preflight ", env!("SPACETERM_VERSION")),
+                concat!("SpaceTerm Development ", env!("SPACETERM_VERSION")),
             ]
         );
     }
