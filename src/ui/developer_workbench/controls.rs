@@ -22,6 +22,9 @@ use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::form::{FormGroup, FormRow, FormRowLayout};
+use crate::ui::terminal_pane::StatusIntent;
+use crate::ui::terminal_status::{StatusColors, StatusGlyph, TerminalProgress};
+use crate::ui::workspace_chrome::{WorkspaceChromeStatus, WorkspaceChromeStatusHosts};
 
 /// The state columns. Disabled pins the normal paint of a disabled control.
 const STATES: [(&str, ControlPreviewState); 5] = [
@@ -255,6 +258,7 @@ impl ControlStates {
             .render(surface, window, cx),
         );
         groups.push(progress_group(surface, window, cx));
+        groups.push(status_group(surface, window, cx));
         groups.push(lists_group(palette, icon_size, surface, window, cx));
         groups
     }
@@ -450,6 +454,109 @@ fn progress_group(surface: &SettingsAppearance, window: &Window, cx: &App) -> An
     .render(surface, window, cx)
 }
 
+/// Every status mark that carries a semantic color, so Differentiate Without Color shows each
+/// family's non-color cue.
+fn status_group(surface: &SettingsAppearance, window: &Window, cx: &App) -> AnyElement {
+    let appearance = &surface.chrome;
+    let host = appearance.control_host_background(spaceterm_ui::ControlHost::Card);
+    let differentiate_without_color = appearance.capabilities.differentiate_without_color;
+    let caption = |mark: AnyElement, label: &'static str| {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(appearance.spacing(4.0))
+            .child(mark)
+            .child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_center()
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .child(label),
+            )
+            .into_any_element()
+    };
+    let hosts = WorkspaceChromeStatusHosts::new(host, host);
+    let workspace = WorkspaceChromeStatus::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| {
+            caption(
+                div()
+                    .debug_selector(move || format!("workbench-status-workspace-{index}"))
+                    .child(status.mark(appearance, hosts, "workbench-status-workspace"))
+                    .into_any_element(),
+                status.label(),
+            )
+        });
+    let status_colors = appearance.colors.status(host);
+    let glyph_size = appearance.icons.metrics(IconRole::Status).glyph_size;
+    let terminal = [
+        ("Idle", TerminalProgress::None),
+        ("Known", TerminalProgress::Normal(40)),
+        ("Unknown", TerminalProgress::Indeterminate),
+        ("Error", TerminalProgress::Error(40)),
+        ("Paused", TerminalProgress::Paused(40)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (label, progress))| {
+        caption(
+            div()
+                .text_color(gpui_color(appearance.colors.text))
+                .child(
+                    StatusGlyph {
+                        icon: IconName::Terminal,
+                        reported: None,
+                        size: glyph_size,
+                        progress,
+                        attention: false,
+                        id: ("workbench-status-terminal", index).into(),
+                        selector_prefix: format!("workbench-status-terminal-{index}"),
+                        colors: StatusColors {
+                            host: gpui_color(host),
+                            attention: gpui_color(status_colors.attention),
+                            busy: gpui_color(status_colors.busy),
+                            error: gpui_color(status_colors.error),
+                            paused: gpui_color(status_colors.paused),
+                        },
+                        differentiate_without_color,
+                    }
+                    .render(),
+                )
+                .into_any_element(),
+            label,
+        )
+    });
+    let notices = StatusIntent::ALL.into_iter().enumerate().map(|(index, intent)| {
+        caption(
+            div()
+                .debug_selector(move || format!("workbench-status-notice-{index}"))
+                .child(Icon::new(
+                    intent.glyph(differentiate_without_color),
+                    glyph_size,
+                    gpui_color(intent.color(&appearance.colors)),
+                ))
+                .into_any_element(),
+            intent.label(),
+        )
+    });
+    StateMatrix::new(
+        "workbench-group-status",
+        "workbench-row-status",
+        "Status",
+        div(),
+        vec![
+            cells("Workspace", appearance, workspace),
+            cells("Terminal", appearance, terminal),
+            cells("Notice", appearance, notices),
+        ],
+    )
+    .render(surface, window, cx)
+}
+
 fn lists_group(
     palette: &Entity<CommandPalette<u8>>,
     icon_size: gpui::Pixels,
@@ -624,15 +731,26 @@ pub(super) fn control_diagnostics(appearance: &ChromeAppearance) -> Option<Div> 
             .flex_col()
             .px(crate::ui::sidebar_window::form::row_horizontal_inset(appearance))
             .children(lines.into_iter().map(|(message, severe)| {
+                // Under Differentiate Without Color a severe line also leads with the error glyph.
+                let glyph = (severe && appearance.capabilities.differentiate_without_color)
+                    .then(|| {
+                        div().flex_none().child(Icon::inherited(
+                            IconName::CircleAlert,
+                            appearance.icons.metrics(IconRole::Status).glyph_size,
+                        ))
+                    });
                 div()
+                    .flex()
+                    .items_start()
+                    .gap(appearance.spacing(6.0))
                     .chrome_text(appearance.typography.style(TextRole::Secondary))
                     .text_color(gpui_color(if severe {
                         appearance.colors.error
                     } else {
                         appearance.colors.text_muted
                     }))
-                    .whitespace_normal()
-                    .child(message)
+                    .children(glyph)
+                    .child(div().min_w_0().flex_1().whitespace_normal().child(message))
             }))
     })
 }

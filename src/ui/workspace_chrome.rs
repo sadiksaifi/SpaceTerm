@@ -36,6 +36,16 @@ const PIN_NAME_GAP: f32 = 5.0;
 /// Diameter of the collapsed identity's status dot.
 const STATUS_DOT_SIZE: f32 = 6.0;
 
+/// The width of the collapsed identity's status mark: a dot, or a caption glyph under
+/// Differentiate Without Color.
+fn status_mark_size(appearance: &ChromeAppearance) -> Pixels {
+    if appearance.capabilities.differentiate_without_color {
+        appearance.icons.metrics(IconRole::Caption).glyph_size
+    } else {
+        appearance.spacing(STATUS_DOT_SIZE)
+    }
+}
+
 /// The air the top-left chrome keeps at its trailing edge.
 ///
 /// It is the Workspace frame's one measurement, the same margin a selected sidebar row's chip keeps
@@ -86,9 +96,9 @@ impl WorkspaceChromeLayout {
         } else {
             px(0.0)
         };
-        // The status dot never gives up its room: a long name truncates before it.
+        // The status mark never gives up its room: a long name truncates before it.
         let status_width = if identity.status.is_some() {
-            appearance.spacing(SWITCHER_IDENTITY_GAP + STATUS_DOT_SIZE)
+            appearance.spacing(SWITCHER_IDENTITY_GAP) + status_mark_size(appearance)
         } else {
             px(0.0)
         };
@@ -194,6 +204,16 @@ pub(super) enum WorkspaceChromeStatus {
 }
 
 impl WorkspaceChromeStatus {
+    #[cfg(any(test, feature = "developer-tools"))]
+    pub(super) const ALL: [Self; 6] = [
+        Self::Unavailable,
+        Self::Connected,
+        Self::Reconnecting,
+        Self::Disconnected,
+        Self::Closing,
+        Self::Failed,
+    ];
+
     pub(super) fn resolve(
         available: bool,
         remote_connection_phase: Option<RemoteConnectionPhase>,
@@ -210,7 +230,7 @@ impl WorkspaceChromeStatus {
         })
     }
 
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Unavailable => "Directory unavailable",
             Self::Connected => "Connected remote",
@@ -232,6 +252,20 @@ impl WorkspaceChromeStatus {
         }
     }
 
+    /// The glyph that replaces the dot under Differentiate Without Color.
+    ///
+    /// Each status color has its own shape. Disconnected and Closing share a color, so they share
+    /// a glyph too.
+    const fn glyph(self) -> IconName {
+        match self {
+            Self::Unavailable => IconName::TriangleAlert,
+            Self::Connected => IconName::Check,
+            Self::Reconnecting => IconName::RotateCw,
+            Self::Disconnected | Self::Closing => IconName::Minus,
+            Self::Failed => IconName::CircleAlert,
+        }
+    }
+
     fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
         match self {
             Self::Unavailable => colors.warning,
@@ -239,6 +273,42 @@ impl WorkspaceChromeStatus {
             Self::Reconnecting => colors.info,
             Self::Disconnected | Self::Closing => colors.icon_muted,
             Self::Failed => colors.error,
+        }
+    }
+
+    /// The status mark: a dot, or the status's own glyph under Differentiate Without Color.
+    ///
+    /// The mark takes its hovered paint while the pointer is over `hover_group`.
+    pub(super) fn mark(
+        self,
+        appearance: &ChromeAppearance,
+        hosts: WorkspaceChromeStatusHosts,
+        hover_group: &'static str,
+    ) -> gpui::Div {
+        let paint = self.paint(appearance, hosts);
+        let normal = gpui_color(paint.normal);
+        let hovered = gpui_color(if appearance.active {
+            paint.hovered
+        } else {
+            paint.normal
+        });
+        let size = status_mark_size(appearance);
+        let mark = div()
+            .debug_selector(move || self.selector().to_owned())
+            .flex_none()
+            .size(size);
+        if appearance.capabilities.differentiate_without_color {
+            mark.text_color(normal)
+                .group_hover(hover_group, move |style| style.text_color(hovered))
+                .child(
+                    div()
+                        .debug_selector(|| "workspace-switcher-status-glyph".to_owned())
+                        .child(Icon::inherited(self.glyph(), size)),
+                )
+        } else {
+            mark.rounded(size / 2.0)
+                .bg(normal)
+                .group_hover(hover_group, move |style| style.bg(hovered))
         }
     }
 
@@ -267,10 +337,11 @@ pub(super) struct WorkspaceChromeIdentity {
 }
 
 impl WorkspaceChromeIdentity {
-    /// Renders the collapsed identity: the Workspace glyph, its name, and a trailing status dot.
+    /// Renders the collapsed identity: the Workspace glyph, its name, and a trailing status mark.
     ///
-    /// The glyph and name keep the title bar's own paint in every state. Only the dot carries the
-    /// status, so the identity reads the same for a Local Workspace and a healthy Remote one.
+    /// The glyph and name keep the title bar's own paint in every state. Only the mark carries the
+    /// status, so the identity reads the same for a Local Workspace and a healthy Remote one. The
+    /// mark is a dot, or the status's own glyph under Differentiate Without Color.
     pub(super) fn render(
         self,
         switcher_color: Rgba,
@@ -278,20 +349,9 @@ impl WorkspaceChromeIdentity {
         status_hosts: WorkspaceChromeStatusHosts,
     ) -> AnyElement {
         let status_group = "workspace-chrome-status";
-        let active = appearance.active;
-        let status_dot = self.status.map(|status| {
-            let paint = status.paint(appearance, status_hosts);
-            let normal = gpui_color(paint.normal);
-            let hovered = gpui_color(if active { paint.hovered } else { paint.normal });
-            let size = appearance.spacing(STATUS_DOT_SIZE);
-            div()
-                .debug_selector(move || status.selector().to_owned())
-                .flex_none()
-                .size(size)
-                .rounded(size / 2.0)
-                .bg(normal)
-                .group_hover(status_group, move |style| style.bg(hovered))
-        });
+        let status_mark = self
+            .status
+            .map(|status| status.mark(appearance, status_hosts, status_group));
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
@@ -343,7 +403,7 @@ impl WorkspaceChromeIdentity {
                     )),
             )
             .child(chip)
-            .children(status_dot)
+            .children(status_mark)
             .into_any_element()
     }
 
@@ -373,15 +433,6 @@ mod tests {
         );
     }
 
-    const STATUSES: [WorkspaceChromeStatus; 6] = [
-        WorkspaceChromeStatus::Unavailable,
-        WorkspaceChromeStatus::Connected,
-        WorkspaceChromeStatus::Reconnecting,
-        WorkspaceChromeStatus::Disconnected,
-        WorkspaceChromeStatus::Closing,
-        WorkspaceChromeStatus::Failed,
-    ];
-
     #[test]
     fn status_dot_should_be_readable_on_each_title_bar_host() {
         for colors in [
@@ -396,7 +447,7 @@ mod tests {
                 appearance.colors.title_bar_background,
                 appearance.colors.title_bar_inactive_background,
             ] {
-                for status in STATUSES {
+                for status in WorkspaceChromeStatus::ALL {
                     let paint =
                         status.paint(&appearance, WorkspaceChromeStatusHosts::new(host, host));
                     assert!(paint.normal.contrast_ratio(host) >= 3.0, "{status:?}");
@@ -441,6 +492,26 @@ mod tests {
 
         assert!(paint.normal.contrast_ratio(painted_normal) >= 3.0);
         assert!(paint.hovered.contrast_ratio(painted_hovered) >= 3.0);
+    }
+
+    #[test]
+    fn differentiate_without_color_gives_each_status_color_its_own_glyph() {
+        for colors in [
+            builtin_chrome_base(Appearance::Dark),
+            builtin_chrome_base(Appearance::Light),
+        ] {
+            for (index, status) in WorkspaceChromeStatus::ALL.into_iter().enumerate() {
+                for other in WorkspaceChromeStatus::ALL.into_iter().skip(index + 1) {
+                    if status.color(&colors) != other.color(&colors) {
+                        assert_ne!(
+                            std::mem::discriminant(&status.glyph()),
+                            std::mem::discriminant(&other.glyph()),
+                            "{status:?} and {other:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

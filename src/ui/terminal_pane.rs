@@ -124,13 +124,56 @@ impl FullscreenEscapeSequence {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-enum StatusIntent {
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum StatusIntent {
     #[default]
     Information,
     Success,
     Warning,
     Error,
+}
+
+impl StatusIntent {
+    #[cfg(any(test, feature = "developer-tools"))]
+    pub(super) const ALL: [Self; 4] = [
+        Self::Information,
+        Self::Success,
+        Self::Warning,
+        Self::Error,
+    ];
+
+    #[cfg(feature = "developer-tools")]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Information => "Information",
+            Self::Success => "Success",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+        }
+    }
+
+    /// The intent's semantic color among `colors`.
+    pub(super) const fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
+        match self {
+            Self::Information => colors.info,
+            Self::Success => colors.success,
+            Self::Warning => colors.warning,
+            Self::Error => colors.error,
+        }
+    }
+
+    /// The glyph that leads a notice of this intent.
+    ///
+    /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
+    /// Color an error takes the circle a critical Alert uses.
+    pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
+        match self {
+            Self::Information => IconName::Info,
+            Self::Success => IconName::Check,
+            Self::Error if differentiate_without_color => IconName::CircleAlert,
+            Self::Warning | Self::Error => IconName::TriangleAlert,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3843,17 +3886,18 @@ impl Render for TerminalPane {
         let floating_colors = &appearance.floating_colors;
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
-        let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => {
-                (floating_control_colors.error, IconName::TriangleAlert)
-            }
-            PaneTerminalState::Exited(_) => (floating_colors.text_muted, IconName::Square),
-            PaneTerminalState::Running => match self.status_intent {
-                StatusIntent::Information => (floating_control_colors.info, IconName::Info),
-                StatusIntent::Success => (floating_control_colors.success, IconName::Check),
-                StatusIntent::Warning => (floating_control_colors.warning, IconName::TriangleAlert),
-                StatusIntent::Error => (floating_control_colors.error, IconName::TriangleAlert),
-            },
+        // A failed Terminal Session reads as an error notice.
+        let status_intent = match self.pane_state {
+            PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
+            PaneTerminalState::Exited(_) => None,
+            PaneTerminalState::Running => Some(self.status_intent),
+        };
+        let (status_color, status_icon) = match status_intent {
+            None => (floating_colors.text_muted, IconName::Square),
+            Some(intent) => (
+                intent.color(floating_control_colors),
+                intent.glyph(appearance.capabilities.differentiate_without_color),
+            ),
         };
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
@@ -4142,11 +4186,20 @@ impl Render for TerminalPane {
                                                 .flex()
                                                 .items_start()
                                                 .gap(appearance.spacing(8.0))
-                                                .child(Icon::new(
-                                                    status_icon,
-                                                    status_icon_size,
-                                                    gpui_color(status_color),
-                                                ))
+                                                .child(
+                                                    div()
+                                                        .debug_selector(move || {
+                                                            format!(
+                                                                "terminal-status-glyph-{status_icon:?}"
+                                                            )
+                                                        })
+                                                        .flex_none()
+                                                        .child(Icon::new(
+                                                            status_icon,
+                                                            status_icon_size,
+                                                            gpui_color(status_color),
+                                                        )),
+                                                )
                                                 .child(
                                                     div()
                                                         .debug_selector(|| {

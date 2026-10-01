@@ -265,6 +265,42 @@ fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
+    cx: &mut TestAppContext,
+) {
+    install(cx);
+    let (workbench, cx) = open_workbench_window(cx);
+    click("workbench-navigation-workbench-section-controls", cx);
+    let shapes = |cx: &mut VisualTestContext| {
+        (
+            cx.debug_bounds("workspace-switcher-status-glyph").is_some(),
+            cx.debug_bounds("workbench-status-terminal-1-progress-track").is_some(),
+        )
+    };
+    assert!(cx.debug_bounds("workbench-status-workspace-0").is_some());
+    assert_eq!(shapes(cx), (false, false));
+
+    workbench.update(cx, |workbench, cx| {
+        workbench.simulate(
+            Simulation::Accessibility(AccessibilityPreviewFact::DifferentiateWithoutColor),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(shapes(cx), (true, true));
+    // Every Workspace mark shares the glyph selector; the last one rendered is Failed's.
+    let glyph = cx.debug_bounds("workspace-switcher-status-glyph").unwrap();
+    let mark = cx.debug_bounds("workbench-status-workspace-5").unwrap();
+    assert!(mark.contains(&glyph.center()), "{glyph:?} must sit in {mark:?}");
+
+    workbench.update(cx, |workbench, cx| {
+        workbench.simulate(Simulation::SystemSettings, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(shapes(cx), (false, false));
+}
+
+#[gpui::test]
 fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut TestAppContext) {
     let (settings, _) = install(cx);
     let window = cx.add_window(DeveloperWorkbench::new);
