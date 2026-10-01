@@ -179,7 +179,7 @@ pub(crate) struct StatusGlyph {
     /// Keys the attention blink's clock so it survives across frames.
     pub(crate) id: ElementId,
     /// Names the glyph as `{prefix}-{progress state}`, its attention state as
-    /// `{prefix}-attention`, and the settled additive mark as `{prefix}-attention-badge`.
+    /// `{prefix}-attention`, and the additive badge as `{prefix}-attention-badge`.
     pub(crate) selector_prefix: String,
     pub(crate) colors: StatusColors,
     /// Gives known-percentage work the determinate ring, so busy is not told by color alone.
@@ -193,7 +193,8 @@ impl StatusGlyph {
     /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors:
     /// work with a known percentage keeps the glyph in the busy color, and work whose completion is
     /// unknown takes the frame spinner. Attention blinks the mark, then settles as an additive badge
-    /// so the work shape remains.
+    /// so the work shape remains. Under Differentiate Without Color, known-percentage work takes the
+    /// determinate ring and the attention badge shows from the first blink.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -236,7 +237,9 @@ impl StatusGlyph {
             .child(Stepped::new(id, BLINK_STEP, BLINKS * 2, move |step| {
                 let state_selector = selector.clone();
                 let badge_selector = format!("{selector}-badge");
-                let settled = step.is_none();
+                // The blink is a color change, so under Differentiate Without Color the badge
+                // shows from the first step rather than only once the blink settles.
+                let badged = step.is_none() || differentiate_without_color;
                 let blinked = step.is_some_and(|step| step % 2 == 0);
                 let badge_size = attention_badge_size(size);
                 div()
@@ -247,7 +250,7 @@ impl StatusGlyph {
                     .items_center()
                     .justify_center()
                     .child(mark.render(blinked))
-                    .when(settled, |glyph| {
+                    .when(badged, |glyph| {
                         glyph.child(
                             div()
                                 .debug_selector(move || badge_selector)
@@ -567,6 +570,46 @@ mod tests {
         }
         assert_eq!(steps, [Some(0), Some(1), Some(2), None, None, None, None]);
         assert_eq!(notifications.get(), 3);
+    }
+
+    #[gpui::test]
+    fn attention_badges_from_its_first_blink_only_under_differentiate_without_color(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Probe;
+        impl gpui::Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let glyph = |prefix: &str, differentiate_without_color| {
+                    StatusGlyph {
+                        icon: IconName::Terminal,
+                        reported: None,
+                        size: px(14.0),
+                        progress: TerminalProgress::None,
+                        attention: true,
+                        id: ElementId::Name(prefix.to_owned().into()),
+                        selector_prefix: prefix.to_owned(),
+                        colors: StatusColors {
+                            host: gpui::rgba(0x000000ff),
+                            attention: gpui::rgba(0xffcc00ff),
+                            busy: gpui::rgba(0x3399ffff),
+                            error: gpui::rgba(0xff3333ff),
+                            paused: gpui::rgba(0x888888ff),
+                        },
+                        differentiate_without_color,
+                    }
+                    .render()
+                };
+                div()
+                    .child(glyph("color", false))
+                    .child(glyph("shape", true))
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Probe);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("color-attention").is_some());
+        assert!(cx.debug_bounds("color-attention-badge").is_none());
+        assert!(cx.debug_bounds("shape-attention-badge").is_some());
     }
 
     /// A program's own glyph leaves the title and takes the Session's glyph slot instead.
