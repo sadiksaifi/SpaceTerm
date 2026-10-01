@@ -725,10 +725,14 @@ struct ReaderTransport {
 }
 
 impl ReaderTransport {
-    fn new(commands: CommandSender<Command>) -> Self {
+    fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
         let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
-            output: Arc::new(SessionNativePtyOutputSink { commands, events }),
+            output: Arc::new(SessionNativePtyOutputSink {
+                commands,
+                events,
+                clipboard_authority,
+            }),
             event_rx,
         }
     }
@@ -739,6 +743,7 @@ impl ReaderTransport {
 }
 
 struct SessionNativePtyOutputSink {
+    clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
     events: mpsc::SyncSender<NativePtyOutput>,
 }
@@ -746,12 +751,13 @@ struct SessionNativePtyOutputSink {
 impl NativePtyOutputSink for SessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
-        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady).is_ok()
+        let epoch = self.clipboard_authority.grant();
+        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady(epoch)).is_ok()
     }
 }
 
 struct ReaderEventBatch {
-    chunks: Vec<Vec<u8>>,
+    chunks: Vec<(Vec<u8>, Option<u64>)>,
     reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
@@ -794,14 +800,14 @@ enum Command {
     GraphicsBudgetAvailable,
     SetPresentable(bool),
     AppearanceChanged,
-    ReaderReady,
+    ReaderReady(Option<u64>),
     CompressScrollback,
     Shutdown,
     PollHiddenInput,
     CopyOrForward(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
     CompleteClipboard(u64, ClipboardCompletion),
     ClipboardExpired,
-    ResumeOutput,
+    ResumeOutput(Option<u64>),
 }
 
 impl Command {
@@ -848,14 +854,14 @@ impl fmt::Debug for Command {
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
             Self::AppearanceChanged => "AppearanceChanged",
-            Self::ReaderReady => "ReaderReady",
+            Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
             Self::CopyOrForward(..) => "CopyOrForward",
             Self::CompleteClipboard(..) => "CompleteClipboard",
             Self::ClipboardExpired => "ClipboardExpired",
-            Self::ResumeOutput => "ResumeOutput",
+            Self::ResumeOutput(_) => "ResumeOutput",
         };
         formatter.write_str(name)
     }
@@ -874,7 +880,7 @@ struct TerminalWorker {
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
     schedules: WorkerSchedules,
-    osc52_filter: Osc52Filter,
+    osc52_filter: Osc52Filter<Option<u64>>,
     clipboard: WorkerClipboard,
 }
 
@@ -1100,7 +1106,7 @@ impl TerminalWorker {
             let postpone_compression = matches!(
                 &command,
                 Command::Key(..)
-                    | Command::ReaderReady
+                    | Command::ReaderReady(_)
                     | Command::RequestPaste(..)
                     | Command::ResolvePaste(..)
                     | Command::Focus(..)
@@ -1138,9 +1144,10 @@ impl TerminalWorker {
         if let Some(command) = self.pending_command.take() {
             return Some(self.note_normal_command(command));
         }
-        if !self.clipboard.pending() && self.clipboard.deferred_readers > 0 {
-            self.clipboard.deferred_readers -= 1;
-            return Some(Command::ResumeOutput);
+        if !self.clipboard.pending()
+            && let Some(epoch) = self.clipboard.deferred_readers.pop_front()
+        {
+            return Some(Command::ResumeOutput(epoch));
         }
         if self.schedules.must_continue_accessibility() {
             return self.take_accessibility_continuation();
@@ -1259,12 +1266,12 @@ impl TerminalWorker {
                 self.apply_emulator_action(action)
             }
             Command::Focus(focused) => self.process_focus(focused),
-            Command::ReaderReady if self.clipboard.pending() => {
-                self.clipboard.deferred_readers += 1;
+            Command::ReaderReady(epoch) if self.clipboard.pending() => {
+                self.clipboard.deferred_readers.push_back(epoch);
                 true
             }
-            Command::ReaderReady => self.process_reader_events(),
-            Command::ResumeOutput => self.process_reader_events_limit(1),
+            Command::ReaderReady(epoch) => self.process_reader_events(epoch),
+            Command::ResumeOutput(epoch) => self.process_reader_events_limit(1, epoch),
             Command::CompleteClipboard(id, completion) => {
                 self.complete_clipboard(Some(id), completion)
             }
@@ -1617,12 +1624,12 @@ impl TerminalWorker {
         }
     }
 
-    fn process_reader_events(&mut self) -> bool {
-        self.process_reader_events_limit(PTY_OUTPUT_QUEUE_CAPACITY)
+    fn process_reader_events(&mut self, epoch: Option<u64>) -> bool {
+        self.process_reader_events_limit(PTY_OUTPUT_QUEUE_CAPACITY, epoch)
     }
 
-    fn process_reader_events_limit(&mut self, limit: usize) -> bool {
-        let (batch, commands_open) = match self.receive_reader_batch(limit) {
+    fn process_reader_events_limit(&mut self, limit: usize, epoch: Option<u64>) -> bool {
+        let (batch, commands_open) = match self.receive_reader_batch(limit, epoch) {
             Ok(batch) => batch,
             Err(message) => {
                 self.send_runtime_failure(message);
@@ -1668,7 +1675,11 @@ impl TerminalWorker {
         false
     }
 
-    fn receive_reader_batch(&mut self, limit: usize) -> Result<(ReaderEventBatch, bool), String> {
+    fn receive_reader_batch(
+        &mut self,
+        limit: usize,
+        mut epoch: Option<u64>,
+    ) -> Result<(ReaderEventBatch, bool), String> {
         let mut batch = ReaderEventBatch {
             chunks: Vec::with_capacity(limit),
             reader_stopped: None,
@@ -1677,7 +1688,7 @@ impl TerminalWorker {
 
         for index in 0..limit {
             match self.reader_events.recv() {
-                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push(bytes),
+                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push((bytes, epoch)),
                 Ok(NativePtyOutput::Stopped(read_error)) => {
                     batch.reader_stopped = Some(read_error);
                     break;
@@ -1693,7 +1704,9 @@ impl TerminalWorker {
                 break;
             }
             match self.commands.try_recv() {
-                Ok(Command::ReaderReady) => {}
+                Ok(Command::ReaderReady(next_epoch)) => {
+                    epoch = next_epoch;
+                }
                 Ok(command) => {
                     self.pending_command = Some(command);
                     break;
@@ -1709,17 +1722,16 @@ impl TerminalWorker {
         Ok((batch, commands_open))
     }
 
-    fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
+    fn process_output_chunks(&mut self, chunks: Vec<(Vec<u8>, Option<u64>)>) -> bool {
         let previous_metadata = self.emulator.metadata();
         let received_output = !chunks.is_empty() || !self.clipboard.effects.is_empty();
-        for bytes in chunks {
+        for (bytes, epoch) in chunks {
             self.clipboard
-                .effects
-                .extend(self.osc52_filter.feed(&bytes));
+                .enqueue(self.osc52_filter.feed_with_context(&bytes, epoch));
         }
         let mut focus_reports = Vec::new();
         while !self.clipboard.pending() {
-            let Some(effect) = self.clipboard.effects.pop_front() else {
+            let Some((effect, epoch)) = self.clipboard.effects.pop_front() else {
                 break;
             };
             let continued = match effect {
@@ -1731,7 +1743,7 @@ impl TerminalWorker {
                         return false;
                     }
                     self.clipboard
-                        .begin(operation)
+                        .begin(operation, epoch)
                         .is_none_or(|bytes| self.write_pty(&bytes))
                 }
                 Osc52Effect::Rejected(_) => true,

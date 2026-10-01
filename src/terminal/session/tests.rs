@@ -1180,6 +1180,7 @@ fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
     let (attempted, attempts) = mpsc::channel();
     let (completed, completions) = mpsc::channel();
     let output = SessionNativePtyOutputSink {
+        clipboard_authority: Arc::default(),
         commands: command_tx.clone(),
         events: reader_events,
     };
@@ -1209,7 +1210,7 @@ fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
 
     command_tx.send(Command::Shutdown).unwrap();
     for _ in 0..PTY_OUTPUT_QUEUE_CAPACITY {
-        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
+        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady(_)));
     }
     assert!(matches!(commands.recv().unwrap(), Command::Shutdown));
     assert!(matches!(
@@ -1471,7 +1472,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
         };
         let output = [b"\x1b[?1004h".as_slice(), operation, b"\x1b[5n"].concat();
 
-        assert!(worker.process_output_chunks(vec![output]));
+        assert!(worker.feed_test_output(vec![output]));
         assert_eq!(
             records.snapshot().written,
             if operation.contains(&b'?') {
@@ -1508,7 +1509,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         clipboard: WorkerClipboard::default(),
     };
 
-    assert!(worker.process_output_chunks(vec![
+    assert!(worker.feed_test_output(vec![
         b"before\x1b]52;c;?\x07".to_vec(),
         b"\x1b]52;c;c2VjcmV0\x1b\\".to_vec(),
     ]));
@@ -1524,7 +1525,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
     assert!(screen_text(&screen).contains("before"));
     assert!(receiver.try_recv().is_err());
 
-    assert!(worker.process_output_chunks(vec![b"after\x1b[5n\r\nlater\x1b[6n".to_vec(),]));
+    assert!(worker.feed_test_output(vec![b"after\x1b[5n\r\nlater\x1b[6n".to_vec(),]));
     assert_eq!(
         records.snapshot().written,
         b"\x1b]52;c;\x07\x1b[0n\x1b[2;6R"
@@ -1547,12 +1548,13 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (command_tx, commands) = mpsc::channel();
     let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let output = SessionNativePtyOutputSink {
+        clipboard_authority: Arc::default(),
         commands: command_tx,
         events: reader_events,
     };
     assert!(output.publish(NativePtyOutput::Bytes(b"first".to_vec())));
     assert!(output.publish(NativePtyOutput::Bytes(b" second".to_vec())));
-    assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
+    assert!(matches!(commands.recv().unwrap(), Command::ReaderReady(_)));
 
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -1574,7 +1576,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         clipboard: WorkerClipboard::default(),
     };
 
-    assert!(worker.process_reader_events());
+    assert!(worker.process_reader_events(Some(3)));
     assert!(worker.pending_command.is_none());
     assert!(receiver.try_recv().is_err());
     assert!(matches!(
@@ -1623,9 +1625,9 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         .mark_presented(Instant::now() + Duration::from_secs(1));
 
     for index in 0..64 {
-        assert!(worker.process_output_chunks(vec![format!("line {index}\r\n").into_bytes()]));
+        assert!(worker.feed_test_output(vec![format!("line {index}\r\n").into_bytes()]));
     }
-    assert!(worker.process_output_chunks(vec![b"\x1b[5n".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"\x1b[5n".to_vec()]));
 
     assert_eq!(records.snapshot().written, b"\x1b[0n");
     assert!(receiver.try_recv().is_err());
@@ -1822,8 +1824,8 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     };
     worker.schedules.set_presentable(false, Instant::now());
 
-    assert!(worker.process_output_chunks(vec![b"hidden one\r\n".to_vec()]));
-    assert!(worker.process_output_chunks(vec![b"hidden latest".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"hidden one\r\n".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"hidden latest".to_vec()]));
     assert!(receiver.try_recv().is_err());
     assert!(accessibility_receiver.try_recv().is_err());
 
@@ -2199,8 +2201,8 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         let _ = receiver.try_recv().unwrap();
         assert!(worker.process_command(Command::SetPresentable(false)));
         let generation = worker.emulator.presentation_generation();
-        assert!(worker.process_output_chunks(vec![b"\x1b]7;file:///srv/alpha\x07".to_vec()]));
-        assert!(worker.process_output_chunks(vec![b"\x1b]7;file:///srv/latest\x07".to_vec()]));
+        assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/alpha\x07".to_vec()]));
+        assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/latest\x07".to_vec()]));
         // Overflow the production-sized queue before the UI can consume the directory wake.
         assert!(worker.send_terminal_event(SessionEvent::HiddenInputChanged(true)));
         assert!(worker.send_terminal_event(SessionEvent::HiddenInputChanged(false)));
@@ -2226,10 +2228,10 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         );
         assert_eq!(worker.emulator.presentation_generation(), generation);
         assert!(receiver.try_recv().is_err());
-        assert!(worker.process_output_chunks(vec![b"ordinary hidden output".to_vec()]));
+        assert!(worker.feed_test_output(vec![b"ordinary hidden output".to_vec()]));
         assert!(receiver.try_recv().is_err());
         // A hidden Session's title and progress reach its Tab through the same retained facts.
-        assert!(worker.process_output_chunks(vec![b"\x1b]2;agent\x07\x1b]9;4;2\x07".to_vec()]));
+        assert!(worker.feed_test_output(vec![b"\x1b]2;agent\x07\x1b]9;4;2\x07".to_vec()]));
         assert!(matches!(
             receiver.try_recv().unwrap(),
             SessionEvent::MetadataChanged(_)
@@ -2271,7 +2273,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         clipboard: WorkerClipboard::default(),
     };
 
-    assert!(worker.process_output_chunks(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
+    assert!(worker.feed_test_output(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
     assert!(matches!(
         receiver.try_recv().unwrap(),
         SessionEvent::Attention(_)
@@ -2315,7 +2317,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
 
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
-    assert!(worker.process_output_chunks(vec![b"\x1b]2;latest title\x07".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"\x1b]2;latest title\x07".to_vec()]));
     assert!(receiver.try_recv().is_err());
 
     assert!(worker.process_command(Command::SetPresentable(false)));
@@ -2360,8 +2362,8 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
     };
 
     assert!(worker.process_command(Command::SetPresentable(false)));
-    assert!(worker.process_output_chunks(vec![b"\x07\x1b]2;first\x07".to_vec()]));
-    assert!(worker.process_output_chunks(vec![b"\x1b]2;latest\x07".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"\x07\x1b]2;first\x07".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"\x1b]2;latest\x07".to_vec()]));
 
     assert!(matches!(
         receiver.try_recv().unwrap(),
@@ -2411,7 +2413,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
     assert!(worker.process_command(Command::SetPresentable(false)));
-    assert!(worker.process_output_chunks(vec![b"\x1b]133;A\x07".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"\x1b]133;A\x07".to_vec()]));
 
     assert!(matches!(
         receiver.try_recv().unwrap(),
@@ -3969,8 +3971,8 @@ fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
         ))
         .unwrap();
     reader_tx.send(NativePtyOutput::Stopped(None)).unwrap();
-    commands.send(Command::ReaderReady).unwrap();
-    assert!(worker.process_reader_events());
+    commands.send(Command::ReaderReady(Some(3))).unwrap();
+    assert!(worker.process_reader_events(Some(3)));
     assert!(worker.clipboard.pending());
     assert!(records.snapshot().written.is_empty());
     drop(requests.try_recv().unwrap());
@@ -3983,7 +3985,7 @@ fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
 #[test]
 fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_replies() {
     let (mut worker, records, requests, _reader_tx, _commands) = clipboard_worker();
-    assert!(worker.process_output_chunks(vec![b"before\x1b]52;p;?\x1b\\after\x1b[5n".to_vec()]));
+    assert!(worker.feed_test_output(vec![b"before\x1b]52;p;?\x1b\\after\x1b[5n".to_vec()]));
     assert!(worker.clipboard.pending());
     let (reply, selection) = mpsc::sync_channel(1);
     assert!(worker.process_command(Command::SelectionCopy(None, reply)));
@@ -3995,6 +3997,67 @@ fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_repl
     assert!(worker.process_command(worker.commands.recv().unwrap()));
     assert_eq!(records.snapshot().written, b"\x1b]52;p;\x1b\\\x1b[0n");
     worker.finish();
+}
+
+#[test]
+fn queued_clipboard_operations_never_acquire_a_later_focus_grant() {
+    for queued_while_focused in [true, false] {
+        let (mut worker, records, requests, _reader, _commands) = clipboard_worker();
+        assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07".to_vec()]));
+        let first = requests.try_recv().unwrap();
+        if !queued_while_focused {
+            worker.clipboard.authority.focus(false);
+        }
+        assert!(worker.feed_test_output(vec![
+            b"\x1b]52;p;?\x1b\\\x1b]52;c;Y29waWVk\x07\x1b[5n".to_vec(),
+        ]));
+        worker.clipboard.authority.focus(false);
+        worker.clipboard.authority.focus(true);
+        drop(first);
+        assert!(worker.process_command(worker.commands.recv().unwrap()));
+        assert!(requests.try_recv().is_err());
+        assert!(!worker.clipboard.pending());
+        assert_eq!(
+            records.snapshot().written,
+            b"\x1b]52;c;\x07\x1b]52;p;\x1b\\\x1b[0n"
+        );
+        worker.finish();
+    }
+}
+
+#[test]
+fn deferred_reader_output_never_acquires_a_later_clipboard_focus_grant() {
+    let (mut worker, records, requests, reader_tx, _commands) = clipboard_worker();
+    assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07".to_vec()]));
+    let first = requests.try_recv().unwrap();
+    reader_tx
+        .send(NativePtyOutput::Bytes(b"\x1b]52;p;?\x07".to_vec()))
+        .unwrap();
+    assert!(worker.process_command(Command::ReaderReady(Some(3))));
+    worker.clipboard.authority.focus(false);
+    worker.clipboard.authority.focus(true);
+    drop(first);
+    assert!(worker.process_command(worker.commands.recv().unwrap()));
+    let resume = worker.receive_next_command().unwrap();
+    assert!(worker.process_command(resume));
+    assert!(requests.try_recv().is_err());
+    assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07\x1b]52;p;\x07");
+    worker.finish();
+}
+
+#[test]
+fn fragmented_clipboard_operations_keep_their_initial_focus_grant() {
+    for prefix_len in 1..b"\x1b]52;c;?\x07".len() {
+        let (mut worker, records, requests, _reader, _commands) = clipboard_worker();
+        let bytes = b"\x1b]52;c;?\x07";
+        assert!(worker.feed_test_output(vec![bytes[..prefix_len].to_vec()]));
+        worker.clipboard.authority.focus(false);
+        worker.clipboard.authority.focus(true);
+        assert!(worker.feed_test_output(vec![bytes[prefix_len..].to_vec()]));
+        assert!(requests.try_recv().is_err());
+        assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07");
+        worker.finish();
+    }
 }
 
 #[test]
@@ -4072,4 +4135,11 @@ fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority()
     );
     assert_eq!(records.snapshot().written, mouse_bytes);
     worker.finish();
+}
+
+impl TerminalWorker {
+    fn feed_test_output(&mut self, chunks: Vec<Vec<u8>>) -> bool {
+        let epoch = self.clipboard.authority.grant();
+        self.process_output_chunks(chunks.into_iter().map(|bytes| (bytes, epoch)).collect())
+    }
 }

@@ -108,12 +108,13 @@ enum FilterState {
     OtherString { bell: bool, escape_pending: bool },
 }
 
-pub(in crate::terminal) struct Osc52Filter {
+pub(in crate::terminal) struct Osc52Filter<Context = ()> {
     state: FilterState,
     candidate: Vec<u8>,
+    context: Context,
 }
 
-impl fmt::Debug for Osc52Filter {
+impl<Context> fmt::Debug for Osc52Filter<Context> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Osc52Filter")
@@ -122,17 +123,23 @@ impl fmt::Debug for Osc52Filter {
     }
 }
 
-impl Default for Osc52Filter {
+impl<Context: Default> Default for Osc52Filter<Context> {
     fn default() -> Self {
         Self {
             state: FilterState::Ground,
             candidate: Vec::new(),
+            context: Context::default(),
         }
     }
 }
 
-impl Osc52Filter {
-    pub(in crate::terminal) fn feed(&mut self, bytes: &[u8]) -> Vec<Osc52Effect> {
+impl<Context: Copy> Osc52Filter<Context> {
+    /// Retains the caller's receipt context from the initial ESC through frame completion.
+    pub(in crate::terminal) fn feed_with_context(
+        &mut self,
+        bytes: &[u8],
+        context: Context,
+    ) -> Vec<(Osc52Effect, Context)> {
         let mut effects = Vec::new();
         let mut terminal = Vec::with_capacity(bytes.len());
 
@@ -140,8 +147,9 @@ impl Osc52Filter {
             match self.state {
                 FilterState::Ground => {
                     if byte == 0x1b {
-                        flush_terminal(&mut effects, &mut terminal);
+                        flush_terminal(&mut effects, &mut terminal, context);
                         self.candidate.push(byte);
+                        self.context = context;
                         self.state = FilterState::Prefix;
                     } else {
                         terminal.push(byte);
@@ -180,6 +188,7 @@ impl Osc52Filter {
                         if matches!(self.state, FilterState::Ground) && byte == 0x1b {
                             terminal.extend_from_slice(&candidate[..candidate.len() - 1]);
                             self.candidate.push(byte);
+                            self.context = context;
                             self.state = FilterState::Prefix;
                         } else {
                             terminal.extend(candidate);
@@ -207,7 +216,10 @@ impl Osc52Filter {
                     if matches!(byte, 0x18 | 0x1a) {
                         self.candidate.clear();
                         self.state = FilterState::Ground;
-                        effects.push(Osc52Effect::Rejected(Osc52Rejection::Malformed));
+                        effects.push((
+                            Osc52Effect::Rejected(Osc52Rejection::Malformed),
+                            self.context,
+                        ));
                         continue;
                     }
                     self.candidate.push(byte);
@@ -215,10 +227,13 @@ impl Osc52Filter {
                     escape_pending = byte == 0x1b;
                     if complete {
                         let raw = mem::take(&mut self.candidate);
-                        effects.push(match parse_osc52(&raw) {
-                            Ok(operation) => Osc52Effect::Operation(operation),
-                            Err(rejection) => Osc52Effect::Rejected(rejection),
-                        });
+                        effects.push((
+                            match parse_osc52(&raw) {
+                                Ok(operation) => Osc52Effect::Operation(operation),
+                                Err(rejection) => Osc52Effect::Rejected(rejection),
+                            },
+                            self.context,
+                        ));
                         self.state = FilterState::Ground;
                     } else if self.candidate.len() > MAX_OSC52_ENCODED_BYTES + 16 {
                         self.candidate.clear();
@@ -233,7 +248,10 @@ impl Osc52Filter {
                         || matches!(byte, 0x18 | 0x1a);
                     escape_pending = byte == 0x1b;
                     if complete {
-                        effects.push(Osc52Effect::Rejected(Osc52Rejection::Oversized));
+                        effects.push((
+                            Osc52Effect::Rejected(Osc52Rejection::Oversized),
+                            self.context,
+                        ));
                         self.state = FilterState::Ground;
                     } else {
                         self.state = FilterState::DiscardOversized { escape_pending };
@@ -242,14 +260,18 @@ impl Osc52Filter {
             }
         }
 
-        flush_terminal(&mut effects, &mut terminal);
+        flush_terminal(&mut effects, &mut terminal, context);
         effects
     }
 }
 
-fn flush_terminal(effects: &mut Vec<Osc52Effect>, terminal: &mut Vec<u8>) {
+fn flush_terminal<Context: Copy>(
+    effects: &mut Vec<(Osc52Effect, Context)>,
+    terminal: &mut Vec<u8>,
+    context: Context,
+) {
     if !terminal.is_empty() {
-        effects.push(Osc52Effect::Terminal(mem::take(terminal)));
+        effects.push((Osc52Effect::Terminal(mem::take(terminal)), context));
     }
 }
 
@@ -388,6 +410,16 @@ fn base64_value(byte: u8) -> Result<u8, Osc52Rejection> {
 
 #[cfg(test)]
 mod tests {
+
+    impl Osc52Filter {
+        pub(in crate::terminal) fn feed(&mut self, bytes: &[u8]) -> Vec<Osc52Effect> {
+            self.feed_with_context(bytes, ())
+                .into_iter()
+                .map(|(effect, ())| effect)
+                .collect()
+        }
+    }
+
     use super::*;
 
     #[test]

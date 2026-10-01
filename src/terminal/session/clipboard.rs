@@ -21,7 +21,7 @@ impl ClipboardAuthority {
                     .then_some((old.wrapping_add(2) & !1) | u64::from(focused))
             });
     }
-    fn grant(&self) -> Option<u64> {
+    pub(super) fn grant(&self) -> Option<u64> {
         let epoch = self.0.load(Ordering::Acquire);
         (epoch & 1 == 1).then_some(epoch)
     }
@@ -134,8 +134,8 @@ pub(super) struct WorkerClipboard {
     pub(super) authority: Arc<ClipboardAuthority>,
     pending: Option<PendingClipboard>,
     next_id: u64,
-    pub(super) effects: VecDeque<Osc52Effect>,
-    pub(super) deferred_readers: usize,
+    pub(super) effects: VecDeque<(Osc52Effect, Option<u64>)>,
+    pub(super) deferred_readers: VecDeque<Option<u64>>,
     pub(super) reader_stop: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
@@ -165,7 +165,18 @@ impl WorkerClipboard {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    pub(super) fn begin(&mut self, operation: Osc52Operation) -> Option<Vec<u8>> {
+    pub(super) fn enqueue(
+        &mut self,
+        effects: impl IntoIterator<Item = (Osc52Effect, Option<u64>)>,
+    ) {
+        self.effects.extend(effects);
+    }
+
+    pub(super) fn begin(
+        &mut self,
+        operation: Osc52Operation,
+        epoch: Option<u64>,
+    ) -> Option<Vec<u8>> {
         let read = match &operation {
             Osc52Operation::Read { target, terminator } => Some((*target, *terminator)),
             Osc52Operation::Write { .. } => None,
@@ -175,9 +186,11 @@ impl WorkerClipboard {
                 crate::terminal::osc52::read_response(target, terminator, "")
             })
         };
-        let (Some(requests), Some(commands), Some(epoch)) =
-            (&self.requests, &self.commands, self.authority.grant())
-        else {
+        let (Some(requests), Some(commands), Some(epoch)) = (
+            &self.requests,
+            &self.commands,
+            epoch.filter(|epoch| self.authority.permits(*epoch)),
+        ) else {
             return denied();
         };
         self.next_id = self.next_id.wrapping_add(1);
@@ -299,7 +312,7 @@ mod tests {
         let (mut worker, requests, commands) = connected();
         let clipboard = RecordingClipboard::default();
         *clipboard.text.borrow_mut() = Some("secret".into());
-        worker.begin(read());
+        worker.begin(read(), worker.authority.grant());
         cx.update(|cx| {
             requests.try_recv().unwrap().perform(
                 ClipboardPreferences::default(),
@@ -314,10 +327,13 @@ mod tests {
             b"\x1b]52;p;\x1b\\"
         );
 
-        worker.begin(Osc52Operation::Write {
-            target: Osc52Target::Standard,
-            text: "copied".into(),
-        });
+        worker.begin(
+            Osc52Operation::Write {
+                target: Osc52Target::Standard,
+                text: "copied".into(),
+            },
+            worker.authority.grant(),
+        );
         cx.update(|cx| {
             requests.try_recv().unwrap().perform(
                 ClipboardPreferences::default(),
@@ -329,7 +345,7 @@ mod tests {
         complete(&mut worker, &commands);
         assert_eq!(&*clipboard.writes.borrow(), &["copied"]);
 
-        worker.begin(read());
+        worker.begin(read(), worker.authority.grant());
         cx.update(|cx| {
             requests.try_recv().unwrap().perform(
                 ClipboardPreferences {
@@ -352,10 +368,13 @@ mod tests {
         for case in 0..4 {
             let (mut worker, requests, commands) = connected();
             let clipboard = RecordingClipboard::default();
-            worker.begin(Osc52Operation::Write {
-                target: Osc52Target::Standard,
-                text: "secret".into(),
-            });
+            worker.begin(
+                Osc52Operation::Write {
+                    target: Osc52Target::Standard,
+                    text: "secret".into(),
+                },
+                worker.authority.grant(),
+            );
             let mut request = requests.try_recv().unwrap();
             if case == 0 {
                 worker.authority.focus(false);
@@ -380,7 +399,7 @@ mod tests {
             let clipboard = RecordingClipboard::default();
             clipboard.unavailable.set(unavailable);
             *clipboard.text.borrow_mut() = Some("x".repeat(MAX_OSC52_CONTENT_BYTES + 1));
-            worker.begin(read());
+            worker.begin(read(), worker.authority.grant());
             cx.update(|cx| {
                 requests.try_recv().unwrap().perform(
                     ClipboardPreferences {
@@ -402,7 +421,7 @@ mod tests {
     #[test]
     fn clipboard_timeout_and_dropped_requests_complete_once() {
         let (mut worker, requests, commands) = connected();
-        worker.begin(read());
+        worker.begin(read(), worker.authority.grant());
         let request = requests.try_recv().unwrap();
         worker.pending.as_mut().unwrap().deadline = Instant::now();
         assert!(worker.expired());

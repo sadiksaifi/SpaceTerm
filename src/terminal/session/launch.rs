@@ -313,9 +313,10 @@ impl TerminalSession {
         + 'static,
     ) -> Result<StartedSession, SessionError> {
         let (command_tx, command_rx) = mpsc::channel();
-        let reader_transport = ReaderTransport::new(command_tx.clone());
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
+        let reader_transport =
+            ReaderTransport::new(command_tx.clone(), Arc::clone(&clipboard_authority));
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = SessionMetadataState::default();
@@ -411,9 +412,10 @@ impl TerminalSession {
         );
         let terminal_name = identity::TERM_FALLBACK;
         let (command_tx, command_rx) = mpsc::channel();
-        let reader_transport = ReaderTransport::new(command_tx.clone());
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
+        let reader_transport =
+            ReaderTransport::new(command_tx.clone(), Arc::clone(&clipboard_authority));
         let native_pty_close = NativePtyCloseHandle::default();
         let native_pty = start_native_pty(
             pty_size(geometry),
