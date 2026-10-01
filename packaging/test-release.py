@@ -18,6 +18,9 @@ ARTIFACT_SPEC.loader.exec_module(ARTIFACTS)
 PUBLISH_SPEC = importlib.util.spec_from_file_location("publish_release", Path(__file__).with_name("publish-release.py"))
 PUBLISH = importlib.util.module_from_spec(PUBLISH_SPEC)
 PUBLISH_SPEC.loader.exec_module(PUBLISH)
+CASK_SPEC = importlib.util.spec_from_file_location("homebrew_cask", Path(__file__).parent / "macos" / "render-homebrew-cask.py")
+CASK = importlib.util.module_from_spec(CASK_SPEC)
+CASK_SPEC.loader.exec_module(CASK)
 
 
 class ReleaseVersionTests(unittest.TestCase):
@@ -65,7 +68,7 @@ class ReleaseVersionTests(unittest.TestCase):
         self.git("tag", "-a", "v0.1.0", "-m", "Release")
         directory = self.root / "dist/release"
         directory.mkdir(parents=True)
-        assets = [directory / name for name in ("SpaceTerm-0.1.0-darwin-arm64.dmg", "appcast.xml", "SHA256SUMS")]
+        assets = [directory / name for name in ("SpaceTerm-0.1.0-darwin-arm64.dmg", "appcast.xml", "install.sh", "SHA256SUMS")]
         for asset in assets:
             asset.write_bytes(b"fixture")
         calls = []
@@ -118,6 +121,40 @@ class ReleaseVersionTests(unittest.TestCase):
             feed.write_text(invalid)
             with self.assertRaises(ValueError):
                 ARTIFACTS.verify_feed(feed, archive, "0.1.0")
+
+
+class HomebrewCaskTests(unittest.TestCase):
+    DIGEST = "a" * 64
+
+    def test_cask_installs_the_checksummed_disk_image_of_the_tag(self):
+        checksums = f"{self.DIGEST}  SpaceTerm-0.3.0-darwin-arm64.dmg\n{'b' * 64}  appcast.xml\n"
+        cask = CASK.render("v0.3.0", checksums)
+        self.assertIn('version "0.3.0"', cask)
+        self.assertIn(f'sha256 "{self.DIGEST}"', cask)
+        self.assertIn('releases/download/v#{version}/SpaceTerm-#{version}-darwin-arm64.dmg"', cask)
+        self.assertIn('"{{appdir}}/SpaceTerm.app"', cask)
+
+    def test_cask_and_installer_show_the_same_notarization_notice(self):
+        installer = (Path(__file__).parent / "macos" / "install-release.sh").read_text()
+        self.assertIn(f'NOTARIZATION_NOTICE="{CASK.NOTARIZATION_NOTICE}"', installer)
+        self.assertIn(f'caveats "{CASK.NOTARIZATION_NOTICE}"', CASK.render("v0.3.0", f"{self.DIGEST}  SpaceTerm-0.3.0-darwin-arm64.dmg\n"))
+
+    def test_an_older_release_never_replaces_a_newer_cask(self):
+        cask = CASK.render("v0.4.0", f"{self.DIGEST}  SpaceTerm-0.4.0-darwin-arm64.dmg\n")
+        self.assertFalse(CASK.supersedes("v0.3.0", cask))
+        self.assertFalse(CASK.supersedes("v0.3.10", CASK.render("v0.10.0", f"{self.DIGEST}  SpaceTerm-0.10.0-darwin-arm64.dmg\n")))
+        self.assertTrue(CASK.supersedes("v0.4.0", cask))
+        self.assertTrue(CASK.supersedes("v0.10.0", cask))
+        with self.assertRaises(ValueError):
+            CASK.supersedes("v0.5.0", "cask \"spaceterm\" do\nend\n")
+
+    def test_cask_rejects_unstable_tags_and_missing_or_ambiguous_checksums(self):
+        entry = f"{self.DIGEST}  SpaceTerm-0.3.0-darwin-arm64.dmg\n"
+        for tag, checksums in (("0.3.0", entry), ("v0.3.0-beta.1", entry), ("v0.3.0", ""),
+                               ("v0.3.0", entry.replace("0.3.0", "0.2.0")), ("v0.3.0", entry * 2),
+                               ("v0.3.0", entry.replace(self.DIGEST, "not-a-digest"))):
+            with self.subTest(tag=tag, checksums=checksums), self.assertRaises(ValueError):
+                CASK.render(tag, checksums)
 
 
 if __name__ == "__main__":

@@ -88,11 +88,11 @@ int main(int argc, char **argv) {{
                               cwd=self.root, env=self.env, capture_output=True,
                               text=True, timeout=180)
 
-    def unsigned_bytes(self, executable):
-        copy = Path(self.directory.name) / "unsigned"
-        shutil.copyfile(executable, copy)
-        self.run_command("codesign", "--remove-signature", str(copy))
-        return copy.read_bytes()
+    def executable_uuid(self, executable):
+        # Signing can change Mach-O layout even after removing the signature.
+        # The linker's UUID identifies the compiled artifact across signing.
+        result = self.run_command("xcrun", "dwarfdump", "--uuid", str(executable))
+        return result.stdout.split()[1]
 
     def test_packaging_installs_reported_artifact_and_ignores_a_stale_binary(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
@@ -100,7 +100,8 @@ int main(int argc, char **argv) {{
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         bundled = self.root / "dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight"
-        self.assertEqual(self.unsigned_bytes(bundled), self.unsigned_bytes(self.artifact))
+        self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
+        self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         record = json.loads(self.record.read_text())
         self.assertIn("--message-format=json-render-diagnostics", record["arguments"])
         self.assertEqual(record["packaged"], "1")
@@ -125,7 +126,8 @@ int main(int argc, char **argv) {{
         result = self.package("--release", "v0.0.1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         bundled = self.root / "dist/SpaceTerm.app/Contents/MacOS/SpaceTerm"
-        self.assertEqual(self.unsigned_bytes(bundled), self.unsigned_bytes(self.artifact))
+        self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
+        self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
 
     def test_release_packaging_rejects_a_preflight_identity_with_the_same_name_prefix(self):
