@@ -3,6 +3,7 @@ use super::*;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::drag_and_drop::drag_end_observer;
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 /// The chip carrying a Workspace row's hover and persistent selection.
@@ -286,6 +287,10 @@ impl WorkspaceSidebar {
         };
 
         let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
+        let drag_sidebar = sidebar.clone();
+        let owner = sidebar.entity_id();
+        // The lifted row follows the pointer, so its slot keeps only the gap it leaves behind.
+        let lifted = self.workspace_reorder.dragged() == Some(workspace_id);
         let row_content = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
@@ -323,6 +328,23 @@ impl WorkspaceSidebar {
                 });
                 cx.stop_propagation();
             })
+            .when(!renaming, |row| {
+                row.on_drag(
+                    DraggedWorkspace {
+                        workspace_id,
+                        owner,
+                    },
+                    move |_, _, _, cx| {
+                        let preview = drag_sidebar
+                            .update(cx, |sidebar, cx| {
+                                sidebar.begin_workspace_drag(workspace_id, cx)
+                            })
+                            .unwrap_or_else(|_| DragPreview::new("", None));
+                        cx.new(|_| preview)
+                    },
+                )
+            })
+            .when(lifted, |row| row.opacity(0.0))
             .child(
                 div()
                     .w(appearance.spacing(18.0))
@@ -457,6 +479,9 @@ impl WorkspaceSidebar {
         let footer_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
+        let reorder_sidebar = sidebar.clone();
+        let drag_end_sidebar = sidebar.clone();
+        let owner = sidebar.entity_id();
         let mut rows = div()
             .id("workspace-list")
             .debug_selector(|| "workspace-list".to_owned())
@@ -470,6 +495,17 @@ impl WorkspaceSidebar {
             .on_scroll_wheel(move |_, _, cx| {
                 let _ = scroll_sidebar.update(cx, |sidebar, cx| {
                     sidebar.reveal_scrollbar(cx);
+                });
+            })
+            .on_drag_move::<DraggedWorkspace>(move |event, _, cx| {
+                let dragged = event.drag(cx);
+                if dragged.owner != owner {
+                    return;
+                }
+                let workspace_id = dragged.workspace_id;
+                let pointer = event.event.position;
+                let _ = reorder_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.drag_workspace_to(workspace_id, pointer, cx);
                 });
             })
             .occlude();
@@ -617,6 +653,12 @@ impl WorkspaceSidebar {
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
+            .when(self.workspace_reorder.dragged().is_some(), |sidebar| {
+                sidebar.child(drag_end_observer(move |_, cx| {
+                    let _ = drag_end_sidebar
+                        .update(cx, |sidebar, cx| sidebar.finish_workspace_drag(cx));
+                }))
+            })
             .into_any_element();
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)

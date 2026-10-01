@@ -315,6 +315,8 @@ pub(crate) enum WorkspaceError {
     DirectoryLocationMismatch(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
     IdSpaceExhausted,
+    #[error("Workspace position {position} is outside a collection of {len} Workspaces")]
+    PositionOutOfRange { position: usize, len: usize },
 }
 
 pub(crate) struct WorkspaceEntry<T> {
@@ -704,6 +706,36 @@ impl<T> WorkspaceCollection<T> {
 
         self.active_workspace_id = workspace_id;
         Ok(())
+    }
+
+    /// Moves a Workspace to `position` in the Workspace order and reports whether the order
+    /// changed.
+    ///
+    /// The Active Workspace and every Workspace name keep their identities; only presentation
+    /// order changes.
+    pub(crate) fn move_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        position: usize,
+    ) -> Result<bool, WorkspaceError> {
+        let index = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        if position >= self.workspaces.len() {
+            return Err(WorkspaceError::PositionOutOfRange {
+                position,
+                len: self.workspaces.len(),
+            });
+        }
+        if index == position {
+            return Ok(false);
+        }
+
+        let workspace = self.workspaces.remove(index);
+        self.workspaces.insert(position, workspace);
+        Ok(true)
     }
 
     pub(crate) fn rename_workspace(
@@ -1792,6 +1824,77 @@ mod tests {
                 workspaces.active_workspace().payload(),
             ),
             (WorkspaceId::new(1), &"first payload")
+        );
+    }
+
+    #[test]
+    fn move_workspace_should_reorder_without_changing_the_active_workspace_or_names() {
+        let mut workspaces = new_workspaces("first");
+        workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second")
+            .unwrap();
+        let third = workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "third")
+            .unwrap();
+        let names_before = workspaces
+            .iter()
+            .map(|workspace| (workspace.id(), workspace.name().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let moved = workspaces.move_workspace(third, 0).unwrap();
+        let unchanged = workspaces.move_workspace(third, 0).unwrap();
+
+        assert_eq!(
+            (
+                moved,
+                unchanged,
+                workspaces
+                    .iter()
+                    .map(|workspace| *workspace.payload())
+                    .collect::<Vec<_>>(),
+                workspaces.active_workspace_id(),
+                workspaces
+                    .iter()
+                    .map(|workspace| (workspace.id(), workspace.name().to_owned()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            ),
+            (
+                true,
+                false,
+                vec!["third", "first", "second"],
+                third,
+                names_before,
+            )
+        );
+    }
+
+    #[test]
+    fn move_workspace_should_reject_an_unknown_workspace_or_position_without_mutation() {
+        let mut workspaces = new_workspaces("first");
+        workspaces
+            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second")
+            .unwrap();
+
+        let unknown = workspaces.move_workspace(WorkspaceId::new(99), 0);
+        let beyond = workspaces.move_workspace(WorkspaceId::new(1), 2);
+
+        assert_eq!(
+            (
+                unknown,
+                beyond,
+                workspaces
+                    .iter()
+                    .map(|workspace| *workspace.payload())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
+                Err(WorkspaceError::PositionOutOfRange {
+                    position: 2,
+                    len: 2
+                }),
+                vec!["first", "second"],
+            )
         );
     }
 

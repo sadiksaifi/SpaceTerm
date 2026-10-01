@@ -7245,6 +7245,64 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
     );
 }
 
+fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> Vec<u64> {
+    manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id().get())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn dragging_a_workspace_row_should_reorder_live_without_activating_it(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let third = cx.debug_bounds("workspace-row-3-active").unwrap();
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        first.center() + point(px(0.0), px(8.0)),
+        third.center() + point(px(0.0), px(4.0)),
+    ] {
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    let during = (
+        workspace_order(&manager, cx),
+        cx.debug_bounds("drag-preview").map(|preview| preview.size),
+    );
+    cx.simulate_mouse_up(third.center(), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(during, (vec![2, 3, 1], Some(first.size)));
+    assert_eq!(
+        (
+            workspace_order(&manager, cx),
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        ),
+        (vec![2, 3, 1], WorkspaceId::new(3))
+    );
+    assert!(cx.debug_bounds("drag-preview").is_none());
+    let moved = cx
+        .debug_bounds("workspace-row-1-inactive")
+        .expect("the moved Workspace must render in its new place");
+    assert_eq!(moved.origin, third.origin);
+
+    // Position shortcuts follow the presented order.
+    cx.simulate_keystrokes("ctrl-1");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+}
+
 #[gpui::test]
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
