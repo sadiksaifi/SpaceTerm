@@ -1902,6 +1902,7 @@ fn render_tab_identity(
                             error: gpui_color(status.error),
                             paused: gpui_color(status.paused),
                         },
+                        differentiate_without_color: appearance.capabilities.differentiate_without_color,
                     }
                     .render(),
                 ),

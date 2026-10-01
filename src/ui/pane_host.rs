@@ -2338,6 +2338,7 @@ fn render_pane_status(
                     error: gpui_color(paint.error),
                     paused: gpui_color(paint.secondary),
                 },
+                differentiate_without_color: appearance.capabilities.differentiate_without_color,
             }
             .render(),
         )
