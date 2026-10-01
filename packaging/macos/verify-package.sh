@@ -70,9 +70,31 @@ plist_value() {
         || die "missing Info.plist key: $key"
 }
 
+verify_application_identity() {
+    local executable="$1"
+    local label="$2"
+    # An old executable may launch the application instead of answering --version.
+    # Clear helper inputs and bound the query before inspecting its compiled name.
+    python3 - "$executable" "$APP_NAME" "$label" <<'PY'
+import subprocess
+import sys
+
+executable, expected, label = sys.argv[1:]
+try:
+    result = subprocess.run([executable, "--version"], env={}, capture_output=True, timeout=5)
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(f"error: {label} executable application identity query failed")
+name, _, version = result.stdout.removesuffix(b"\n").rpartition(b" ")
+if (result.returncode != 0 or result.stderr or name != expected.encode()
+        or not version or any(byte in b" \t\r\n" for byte in version)):
+    raise SystemExit(f"error: {label} executable application identity must be {expected}")
+PY
+}
+
 verify_askpass_helper_mode() {
     local executable="$1"
     local label="$2"
+    local prompt="$3"
     local stdout_path="$TEMP_ROOT/$label.askpass.stdout"
     local stderr_path="$TEMP_ROOT/$label.askpass.stderr"
     local helper_exit helper_pid deadline
@@ -81,7 +103,7 @@ verify_askpass_helper_mode() {
     : > "$stderr_path"
     /usr/bin/env -i \
         SPACETERM_SSH_ASKPASS_MODE="$ASKPASS_HELPER_MODE" \
-        "$executable" "SpaceTerm package verifier prompt" \
+        "$executable" "$prompt" \
         >"$stdout_path" 2>"$stderr_path" &
     HELPER_PID=$!
     helper_pid="$HELPER_PID"
@@ -187,6 +209,7 @@ verify_app_bundle() {
         || die "$label executable must contain only Apple Silicon code"
     [[ "$(xcrun vtool -show-build "$executable" | awk '$1 == "minos" { print $2 }')" == "$MINIMUM_MACOS_VERSION" ]] \
         || die "$label executable deployment target differs from its bundle minimum"
+    verify_application_identity "$executable" "$label"
 
     [[ -f "$icon_path" ]] || die "$label app icon is missing: $icon_path"
     [[ -f "$asset_catalog" ]] \
@@ -263,7 +286,8 @@ verify_app_bundle() {
             || die "$label nested updater signatures are invalid"
         [[ -d "$app/Contents/Frameworks/Sparkle.framework" ]] || die "$label updater framework is missing"
     fi
-    verify_askpass_helper_mode "$executable" "$label"
+    verify_askpass_helper_mode "$executable" "$label" "SpaceTerm package verifier prompt"
+    verify_askpass_helper_mode "$executable" "$label" "--version"
 }
 
 while (( $# > 0 )); do
@@ -306,6 +330,7 @@ require_command iconutil
 require_command infocmp
 require_command lipo
 require_command plutil
+require_command python3
 [[ -x /usr/libexec/PlistBuddy ]] || die "required command not found: /usr/libexec/PlistBuddy"
 
 # Only a validated release tag may carry the SpaceTerm identity; see ADR 0012.

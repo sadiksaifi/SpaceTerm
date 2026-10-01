@@ -117,6 +117,9 @@ jobs:
       - name: Lint macOS scripts
         timeout-minutes: 5
         run: mise run lint:scripts:macos
+      - name: Test macOS packaging
+        timeout-minutes: 5
+        run: mise run test:package:macos
       - name: Test macOS updater
         timeout-minutes: 10
         run: mise run test:updater:macos

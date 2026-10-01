@@ -532,7 +532,7 @@ fn macos_source_modules_are_target_gated_while_portable_policy_is_not() {
         let declaration = line.trim();
         if (declaration.starts_with("mod macos_")
             || declaration.starts_with("pub(crate) mod macos_")
-            || declaration == "pub(crate) use macos_composition::main;")
+            || declaration.starts_with("pub(crate) use macos_"))
             && !declaration.contains("macos_adapter_tests")
         {
             assert!(
