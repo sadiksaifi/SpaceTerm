@@ -204,6 +204,16 @@ pub(super) enum WorkspaceChromeStatus {
 }
 
 impl WorkspaceChromeStatus {
+    #[cfg(any(test, feature = "developer-tools"))]
+    pub(super) const ALL: [Self; 6] = [
+        Self::Unavailable,
+        Self::Connected,
+        Self::Reconnecting,
+        Self::Disconnected,
+        Self::Closing,
+        Self::Failed,
+    ];
+
     pub(super) fn resolve(
         available: bool,
         remote_connection_phase: Option<RemoteConnectionPhase>,
@@ -220,7 +230,7 @@ impl WorkspaceChromeStatus {
         })
     }
 
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Unavailable => "Directory unavailable",
             Self::Connected => "Connected remote",
@@ -266,6 +276,42 @@ impl WorkspaceChromeStatus {
         }
     }
 
+    /// The status mark: a dot, or the status's own glyph under Differentiate Without Color.
+    ///
+    /// The mark takes its hovered paint while the pointer is over `hover_group`.
+    pub(super) fn mark(
+        self,
+        appearance: &ChromeAppearance,
+        hosts: WorkspaceChromeStatusHosts,
+        hover_group: &'static str,
+    ) -> gpui::Div {
+        let paint = self.paint(appearance, hosts);
+        let normal = gpui_color(paint.normal);
+        let hovered = gpui_color(if appearance.active {
+            paint.hovered
+        } else {
+            paint.normal
+        });
+        let size = status_mark_size(appearance);
+        let mark = div()
+            .debug_selector(move || self.selector().to_owned())
+            .flex_none()
+            .size(size);
+        if appearance.capabilities.differentiate_without_color {
+            mark.text_color(normal)
+                .group_hover(hover_group, move |style| style.text_color(hovered))
+                .child(
+                    div()
+                        .debug_selector(|| "workspace-switcher-status-glyph".to_owned())
+                        .child(Icon::inherited(self.glyph(), size)),
+                )
+        } else {
+            mark.rounded(size / 2.0)
+                .bg(normal)
+                .group_hover(hover_group, move |style| style.bg(hovered))
+        }
+    }
+
     /// The dot's paint on the chip's resting and hovered surfaces.
     ///
     /// The dot is a graphical object, so it meets graphical-object contrast against each surface.
@@ -303,30 +349,9 @@ impl WorkspaceChromeIdentity {
         status_hosts: WorkspaceChromeStatusHosts,
     ) -> AnyElement {
         let status_group = "workspace-chrome-status";
-        let active = appearance.active;
-        let status_dot = self.status.map(|status| {
-            let paint = status.paint(appearance, status_hosts);
-            let normal = gpui_color(paint.normal);
-            let hovered = gpui_color(if active { paint.hovered } else { paint.normal });
-            let size = status_mark_size(appearance);
-            let mark = div()
-                .debug_selector(move || status.selector().to_owned())
-                .flex_none()
-                .size(size);
-            if appearance.capabilities.differentiate_without_color {
-                mark.text_color(normal)
-                    .group_hover(status_group, move |style| style.text_color(hovered))
-                    .child(
-                        div()
-                            .debug_selector(|| "workspace-switcher-status-glyph".to_owned())
-                            .child(Icon::inherited(status.glyph(), size)),
-                    )
-            } else {
-                mark.rounded(size / 2.0)
-                    .bg(normal)
-                    .group_hover(status_group, move |style| style.bg(hovered))
-            }
-        });
+        let status_mark = self
+            .status
+            .map(|status| status.mark(appearance, status_hosts, status_group));
         let chip = div()
             .id("workspace-chip")
             .debug_selector(|| "workspace-chip".to_owned())
@@ -378,7 +403,7 @@ impl WorkspaceChromeIdentity {
                     )),
             )
             .child(chip)
-            .children(status_dot)
+            .children(status_mark)
             .into_any_element()
     }
 
@@ -408,15 +433,6 @@ mod tests {
         );
     }
 
-    const STATUSES: [WorkspaceChromeStatus; 6] = [
-        WorkspaceChromeStatus::Unavailable,
-        WorkspaceChromeStatus::Connected,
-        WorkspaceChromeStatus::Reconnecting,
-        WorkspaceChromeStatus::Disconnected,
-        WorkspaceChromeStatus::Closing,
-        WorkspaceChromeStatus::Failed,
-    ];
-
     #[test]
     fn status_dot_should_be_readable_on_each_title_bar_host() {
         for colors in [
@@ -431,7 +447,7 @@ mod tests {
                 appearance.colors.title_bar_background,
                 appearance.colors.title_bar_inactive_background,
             ] {
-                for status in STATUSES {
+                for status in WorkspaceChromeStatus::ALL {
                     let paint =
                         status.paint(&appearance, WorkspaceChromeStatusHosts::new(host, host));
                     assert!(paint.normal.contrast_ratio(host) >= 3.0, "{status:?}");
@@ -484,8 +500,8 @@ mod tests {
             builtin_chrome_base(Appearance::Dark),
             builtin_chrome_base(Appearance::Light),
         ] {
-            for (index, status) in STATUSES.into_iter().enumerate() {
-                for other in STATUSES.into_iter().skip(index + 1) {
+            for (index, status) in WorkspaceChromeStatus::ALL.into_iter().enumerate() {
+                for other in WorkspaceChromeStatus::ALL.into_iter().skip(index + 1) {
                     if status.color(&colors) != other.color(&colors) {
                         assert_ne!(
                             std::mem::discriminant(&status.glyph()),

@@ -7240,14 +7240,8 @@ fn displayed_directories_should_abbreviate_only_a_local_home_prefix() {
 
 #[test]
 fn differentiate_without_color_gives_every_notice_intent_its_own_glyph() {
-    let intents = [
-        StatusIntent::Information,
-        StatusIntent::Success,
-        StatusIntent::Warning,
-        StatusIntent::Error,
-    ];
-    for (index, intent) in intents.into_iter().enumerate() {
-        for other in intents.into_iter().skip(index + 1) {
+    for (index, intent) in StatusIntent::ALL.into_iter().enumerate() {
+        for other in StatusIntent::ALL.into_iter().skip(index + 1) {
             assert_ne!(
                 std::mem::discriminant(&intent.glyph(true)),
                 std::mem::discriminant(&other.glyph(true)),

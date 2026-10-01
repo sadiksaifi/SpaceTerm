@@ -125,7 +125,7 @@ impl FullscreenEscapeSequence {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-enum StatusIntent {
+pub(super) enum StatusIntent {
     #[default]
     Information,
     Success,
@@ -134,11 +134,39 @@ enum StatusIntent {
 }
 
 impl StatusIntent {
+    #[cfg(any(test, feature = "developer-tools"))]
+    pub(super) const ALL: [Self; 4] = [
+        Self::Information,
+        Self::Success,
+        Self::Warning,
+        Self::Error,
+    ];
+
+    #[cfg(feature = "developer-tools")]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Information => "Information",
+            Self::Success => "Success",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+        }
+    }
+
+    /// The intent's semantic color among `colors`.
+    pub(super) const fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
+        match self {
+            Self::Information => colors.info,
+            Self::Success => colors.success,
+            Self::Warning => colors.warning,
+            Self::Error => colors.error,
+        }
+    }
+
     /// The glyph that leads a notice of this intent.
     ///
     /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
     /// Color an error takes the circle a critical Alert uses.
-    const fn glyph(self, differentiate_without_color: bool) -> IconName {
+    pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
         match self {
             Self::Information => IconName::Info,
             Self::Success => IconName::Check,
@@ -3867,12 +3895,7 @@ impl Render for TerminalPane {
         let (status_color, status_icon) = match status_intent {
             None => (floating_colors.text_muted, IconName::Square),
             Some(intent) => (
-                match intent {
-                    StatusIntent::Information => floating_control_colors.info,
-                    StatusIntent::Success => floating_control_colors.success,
-                    StatusIntent::Warning => floating_control_colors.warning,
-                    StatusIntent::Error => floating_control_colors.error,
-                },
+                intent.color(floating_control_colors),
                 intent.glyph(appearance.capabilities.differentiate_without_color),
             ),
         };
