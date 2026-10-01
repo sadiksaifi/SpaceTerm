@@ -66,7 +66,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::{
     DetailHeading, NavigationEntry, Sidebar, SidebarNavigation, SidebarOwner, WindowMovement,
-    card_gutter,
+    card_gutter, group_spacing,
 };
 
 use catalog::{SettingsRowId, SettingsSectionId};
@@ -914,7 +914,7 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .w_full()
-            .gap(appearance.spacing(26.0))
+            .gap(group_spacing(appearance))
             .children(notice)
             .children(shortcut_search)
             .children(no_shortcuts)

@@ -16,7 +16,7 @@ use spaceterm_ui::{
     TextInputVariant, Tooltip,
 };
 
-use super::DeveloperWorkbench;
+use super::{DeveloperWorkbench, single_line_field};
 use crate::ui::appearance::settings::SettingsAppearance;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::sidebar_window::form::{FormGroup, FormRow};
@@ -96,16 +96,17 @@ impl ModalFixtures {
             FormRow::new(
                 "workbench-row-obscured-field",
                 "Secure field",
-                spaceterm_ui::field_frame(
-                    "workbench-obscured-field-frame",
-                    &focus,
-                    FieldState::default(),
-                    RadiusRole::Control.pixels(),
-                    cx,
+                single_line_field(
+                    spaceterm_ui::field_frame(
+                        "workbench-obscured-field-frame",
+                        &focus,
+                        FieldState::default(),
+                        RadiusRole::Control.pixels(),
+                        cx,
+                    ),
+                    appearance,
                 )
                 .w(appearance.spacing(220.0))
-                .h(appearance.spacing(28.0))
-                .px(appearance.spacing(8.0))
                 .child(input),
             )
             .render(appearance, window, cx)
@@ -249,14 +250,16 @@ impl Render for DialogBody {
             .flex_col()
             .gap(appearance.spacing(10.0))
             .child(
-                spaceterm_ui::field_frame(
-                    "workbench-dialog-field",
-                    &self.input.read(cx).focus_handle(),
-                    FieldState::default(),
-                    RadiusRole::Control.pixels(),
-                    cx,
+                single_line_field(
+                    spaceterm_ui::field_frame(
+                        "workbench-dialog-field",
+                        &self.input.read(cx).focus_handle(),
+                        FieldState::default(),
+                        RadiusRole::Control.pixels(),
+                        cx,
+                    ),
+                    appearance,
                 )
-                .h(appearance.spacing(32.0))
                 .child(self.input.clone()),
             )
             .child(

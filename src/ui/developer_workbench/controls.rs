@@ -13,6 +13,7 @@ use spaceterm_ui::{
     Switch, TextInput,
 };
 
+use super::single_line_field;
 use crate::ui::appearance::settings::SettingsAppearance;
 use crate::ui::appearance::{
     ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily, gpui_color,
@@ -71,6 +72,7 @@ impl ControlStates {
                         cx,
                     )
                     .placeholder("Readable placeholder")
+                    .debug_selector(format!("workbench-field-{index}"))
                     .enabled(index != DISABLED_COLUMN)
                 })
             })
@@ -194,21 +196,22 @@ impl ControlStates {
             .render(surface, window, cx),
         );
         let text_fields = self.fields.iter().enumerate().map(|(index, input)| {
-                    spaceterm_ui::field_frame(
-                        ("workbench-field-frame", index),
-                        &input.read(cx).focus_handle(),
-                        FieldState::default()
-                            .disabled(index == DISABLED_COLUMN)
-                            .invalid(index == 2 || index == 4)
-                            .preview_focus(index == 1 || index == 4),
-                        RadiusRole::Control.pixels(),
-                        cx,
-                    )
-                    .px(px(8.0))
-                    .h(px(30.0))
-                    .child(input.clone())
-                    .into_any_element()
-                });
+            let frame = spaceterm_ui::field_frame(
+                ("workbench-field-frame", index),
+                &input.read(cx).focus_handle(),
+                FieldState::default()
+                    .disabled(index == DISABLED_COLUMN)
+                    .invalid(index == 2 || index == 4)
+                    .preview_focus(index == 1 || index == 4),
+                RadiusRole::Control.pixels(),
+                cx,
+            );
+            single_line_field(frame, appearance)
+                .debug_selector(move || format!("workbench-field-frame-{index}"))
+                .w_full()
+                .child(input.clone())
+                .into_any_element()
+        });
         let fields = vec![
                 cells("Text field", appearance, text_fields),
                 state_row("Resize, scroll", appearance, |column, state| {

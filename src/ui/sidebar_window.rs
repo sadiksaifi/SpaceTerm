@@ -46,6 +46,9 @@ const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
 /// gives back the rest. The two together are what a reader sees as the content's left edge.
 pub(crate) const CONTENT_GUTTER: f32 = 26.0;
 
+/// The space between consecutive groups in the content column.
+const GROUP_SPACING: f32 = 26.0;
+
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
 ///
 /// The title's line box begins just under the controls' top edge, so the large title reads as the
@@ -60,6 +63,11 @@ const HEADING_TOP_INSET: f32 = 20.0;
 /// tracks down the page stays on [`CONTENT_GUTTER`].
 pub(crate) fn card_gutter(appearance: &ChromeAppearance) -> Pixels {
     appearance.spacing(CONTENT_GUTTER) - form::row_horizontal_inset(appearance)
+}
+
+/// The space separating one group's card from the next group's heading.
+pub(crate) fn group_spacing(appearance: &ChromeAppearance) -> Pixels {
+    appearance.spacing(GROUP_SPACING)
 }
 
 /// The options every sidebar window opens with.

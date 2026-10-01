@@ -37,14 +37,14 @@ use crate::appearance::AppearanceMode;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
-use crate::ui::appearance::gpui_color;
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::appearance_runtime::{self, AccessibilityPreviewFact, AppearanceRuntime};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::form::{action_button, section_heading};
 use crate::ui::sidebar_window::{
     DetailHeading, NavigationEntry, Sidebar, SidebarNavigation, SidebarOwner, WindowMovement,
-    card_gutter,
+    card_gutter, group_spacing,
 };
 
 use controls::ControlStates;
@@ -649,6 +649,17 @@ impl DeveloperWorkbench {
     }
 }
 
+/// Lays out a single-line field frame as product fields are: Body text centered in the field's
+/// height.
+fn single_line_field<E: Styled>(frame: E, appearance: &ChromeAppearance) -> E {
+    frame
+        .h(appearance.height(28.0, 13.0))
+        .flex()
+        .items_center()
+        .px(appearance.spacing(8.0))
+        .chrome_text(appearance.typography.style(TextRole::Body))
+}
+
 fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
     match mode {
         AppearanceMode::Light => "Light",
@@ -904,6 +915,7 @@ impl DeveloperWorkbench {
                             .px(card_gutter(appearance))
                             .pt(appearance.spacing(8.0))
                             .pb(appearance.spacing(18.0))
+                            .gap(group_spacing(appearance))
                             .on_scroll_wheel(move |_, _, cx| {
                                 let _ = revealing.update(cx, |workbench, cx| {
                                     workbench.reveal_scrollbar(cx);

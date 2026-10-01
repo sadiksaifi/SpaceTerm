@@ -3,7 +3,7 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Window, div};
-use spaceterm_ui::{Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch};
+use spaceterm_ui::{Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
 use super::preview::AppearancePreview;
@@ -154,6 +154,8 @@ pub(super) fn render(
     });
     let owner = cx.weak_entity();
     let blur = Switch::new("workbench-blur", "Blur", window_preferences.blur)
+        .size(ToggleSize::Regular)
+        .label_hidden(true)
         .debug_selector("workbench-blur")
         .on_change(move |change, _, cx| {
             let blur = change.requested();
@@ -167,6 +169,8 @@ pub(super) fn render(
         "Bold as bright",
         document.preferences.terminal.rendering.bold_as_bright,
     )
+    .size(ToggleSize::Regular)
+    .label_hidden(true)
     .debug_selector("workbench-bold-as-bright")
     .on_change(move |change, _, cx| {
         let enabled = change.requested();
@@ -184,6 +188,8 @@ pub(super) fn render(
         "Alternate typography",
         AppearancePreview::alternate_typography(&document),
     )
+    .size(ToggleSize::Regular)
+    .label_hidden(true)
     .debug_selector("workbench-alternate-typography")
     .on_change(move |change, _, cx| {
         let alternate = change.requested();

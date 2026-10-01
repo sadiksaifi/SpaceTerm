@@ -6,7 +6,7 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Global, Window};
-use spaceterm_ui::Switch;
+use spaceterm_ui::{Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
 use crate::ui::appearance::settings::SettingsAppearance;
@@ -72,6 +72,8 @@ pub(super) fn render(
             "workbench-row-terminal-caption",
             "Pane Caption fixture",
             Switch::new("workbench-terminal-caption", "Pane Caption fixture", caption)
+                .size(ToggleSize::Regular)
+                .label_hidden(true)
                 .debug_selector("workbench-terminal-caption")
                 .on_change(|change, _, cx| set_caption_fixture(change.requested(), cx)),
         )
@@ -86,6 +88,8 @@ pub(super) fn render(
                 "Link preview fixture",
                 link_preview,
             )
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
             .debug_selector("workbench-terminal-link-preview")
             .on_change(|change, _, cx| set_link_preview_fixture(change.requested(), cx)),
         )

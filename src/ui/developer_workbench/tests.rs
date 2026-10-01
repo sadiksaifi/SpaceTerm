@@ -506,3 +506,46 @@ fn inactive_window_simulation_selects_inactive_control_states_without_editing_pr
     assert!(paints_focus_ring(cx));
     assert_eq!(settings.snapshot().candidate.preferences, preferences);
 }
+
+#[gpui::test]
+fn default_window_separates_groups_and_keeps_row_labels_on_one_line(cx: &mut TestAppContext) {
+    install(cx);
+    let (_, cx) = cx.add_window_view(DeveloperWorkbench::new);
+    cx.simulate_resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    let window_group = cx.debug_bounds("workbench-group-window").unwrap();
+    let terminal_group = cx.debug_bounds("workbench-group-terminal").unwrap();
+    let spacing = cx.update(|_, cx| group_spacing(crate::ui::appearance::chrome(cx)));
+    assert_eq!(terminal_group.top() - window_group.bottom(), spacing);
+
+    click(
+        "workbench-navigation-workbench-section-floating-surfaces",
+        cx,
+    );
+    let menus = cx
+        .debug_bounds("workbench-row-surfaces-menus-label")
+        .unwrap();
+    let picker = cx
+        .debug_bounds("workbench-row-surfaces-picker-label")
+        .unwrap();
+    assert_eq!(
+        menus.size.height, picker.size.height,
+        "the menu fixtures must leave their row label one line"
+    );
+}
+
+#[gpui::test]
+fn single_line_fields_center_their_text_in_the_frame(cx: &mut TestAppContext) {
+    install(cx);
+    let (_, cx) = open_workbench_window(cx);
+    click("workbench-navigation-workbench-section-controls", cx);
+
+    let field = cx.debug_bounds("workbench-field-1").unwrap();
+    let frame = cx.debug_bounds("workbench-field-frame-1").unwrap();
+    assert!(
+        (field.center().y - frame.center().y).abs() < px(0.5),
+        "field {field:?} must be centered in frame {frame:?}"
+    );
+}
