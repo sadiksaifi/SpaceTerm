@@ -3183,6 +3183,8 @@ mod tests {
     }
 
     /// Presses a Pane's caption beside its name and moves the pointer along `path`.
+    ///
+    /// The first move leaves the caption, so the drag starts over whatever lies beneath it.
     fn drag_pane_caption(
         caption: Bounds<Pixels>,
         path: &[Point<Pixels>],
@@ -3191,7 +3193,7 @@ mod tests {
         let from = point(caption.left() + px(24.0), caption.center().y);
         cx.simulate_mouse_move(from, None, Modifiers::none());
         cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-        for position in [from + point(px(8.0), px(8.0))].iter().chain(path) {
+        for position in path {
             cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
             cx.run_until_parked();
         }
@@ -3204,7 +3206,11 @@ mod tests {
         let target = cx.debug_bounds("pane-surface-1").unwrap();
         let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
 
-        drag_pane_caption(caption, &[near_left_edge], cx);
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
         let during = (
             cx.debug_bounds("pane-drop-target-1-left")
                 .map(|overlay| (overlay.origin, f32::from(overlay.size.width).round())),
@@ -3236,6 +3242,27 @@ mod tests {
             )
         );
         assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_should_start_over_a_terminal_painted_after_its_caption(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+        let target = cx.debug_bounds("pane-surface-4").unwrap();
+        let near_right_edge = point(target.right() - target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_right_edge, near_right_edge - point(px(1.0), px(0.0))],
+            cx,
+        );
+        cx.simulate_mouse_up(near_right_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            host.read_with(cx, |host, _| host.layout_signature()),
+            "split:1:Horizontal:0.5(pane:3,split:3:Vertical:0.5(pane:2,split:4:Horizontal:0.5(pane:4,pane:1)))"
+        );
     }
 
     #[gpui::test]

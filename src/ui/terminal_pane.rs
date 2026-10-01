@@ -2591,8 +2591,12 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Motion during a Tab, Workspace, or Pane drag belongs to that drag, not to the program.
-        if cx.has_active_drag() {
+        // Motion with a button this Terminal never received pressed belongs to the element that
+        // received the press, such as a Pane Caption starting a Pane drag, not to the program.
+        if event.pressed_button.is_some()
+            && self.pressed_button.is_none()
+            && self.pressed_link.is_none()
+        {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
