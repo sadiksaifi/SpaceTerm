@@ -4186,11 +4186,20 @@ impl Render for TerminalPane {
                                                 .flex()
                                                 .items_start()
                                                 .gap(appearance.spacing(8.0))
-                                                .child(Icon::new(
-                                                    status_icon,
-                                                    status_icon_size,
-                                                    gpui_color(status_color),
-                                                ))
+                                                .child(
+                                                    div()
+                                                        .debug_selector(move || {
+                                                            format!(
+                                                                "terminal-status-glyph-{status_icon:?}"
+                                                            )
+                                                        })
+                                                        .flex_none()
+                                                        .child(Icon::new(
+                                                            status_icon,
+                                                            status_icon_size,
+                                                            gpui_color(status_color),
+                                                        )),
+                                                )
                                                 .child(
                                                     div()
                                                         .debug_selector(|| {

@@ -7250,3 +7250,45 @@ fn differentiate_without_color_gives_every_notice_intent_its_own_glyph() {
         }
     }
 }
+
+#[gpui::test]
+fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut TestAppContext) {
+    let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+    cx.update(|cx| {
+        crate::ui::appearance_runtime::install(
+            crate::settings::UserSettings::load(
+                crate::ui::settings_window::test_support::MemoryStorage::with_document(
+                    &crate::appearance::SettingsDocument::default(),
+                ),
+            ),
+            Rc::new(platform.clone()),
+            cx,
+        )
+        .unwrap();
+    });
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let glyph = |intent, cx: &mut VisualTestContext| {
+        pane.update(cx, |pane, cx| {
+            pane.status = Some("Notice".to_owned());
+            pane.status_intent = intent;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        [
+            ("TriangleAlert", "terminal-status-glyph-TriangleAlert"),
+            ("CircleAlert", "terminal-status-glyph-CircleAlert"),
+        ]
+        .into_iter()
+        .filter(|(_, selector)| cx.debug_bounds(selector).is_some())
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
+    assert_eq!(glyph(StatusIntent::Error, cx), ["TriangleAlert"]);
+
+    platform.set_differentiate_without_color(true);
+    cx.run_until_parked();
+
+    assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
+    assert_eq!(glyph(StatusIntent::Error, cx), ["CircleAlert"]);
+}
