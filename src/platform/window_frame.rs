@@ -39,7 +39,7 @@ pub(crate) struct WindowFrameGeometry {
     outer_corner_radius: Option<f32>,
     outer_edge_width: f32,
     workspace_traffic_lights: Option<TrafficLightPlacement>,
-    settings_traffic_lights: Option<TrafficLightPlacement>,
+    sidebar_window_traffic_lights: Option<TrafficLightPlacement>,
 }
 
 impl WindowFrameGeometry {
@@ -48,7 +48,7 @@ impl WindowFrameGeometry {
             outer_corner_radius,
             outer_edge_width: 0.0,
             workspace_traffic_lights: None,
-            settings_traffic_lights: None,
+            sidebar_window_traffic_lights: None,
         }
     }
 
@@ -61,10 +61,10 @@ impl WindowFrameGeometry {
     pub(crate) const fn with_traffic_lights(
         mut self,
         workspace: TrafficLightPlacement,
-        settings: TrafficLightPlacement,
+        sidebar_window: TrafficLightPlacement,
     ) -> Self {
         self.workspace_traffic_lights = Some(workspace);
-        self.settings_traffic_lights = Some(settings);
+        self.sidebar_window_traffic_lights = Some(sidebar_window);
         self
     }
 
@@ -85,11 +85,11 @@ impl WindowFrameGeometry {
             .map(|placement| placement.resolve(titlebar_height))
     }
 
-    pub(crate) fn settings_traffic_light_position(
+    pub(crate) fn sidebar_window_traffic_light_position(
         self,
         titlebar_height: Pixels,
     ) -> Option<Point<Pixels>> {
-        self.settings_traffic_lights
+        self.sidebar_window_traffic_lights
             .map(|placement| placement.resolve(titlebar_height))
     }
 }
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(42.0)),
-                geometry.settings_traffic_light_position(px(36.0)),
+                geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (
                 Some(point(px(15.5), px(14.0))),
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(50.0)),
-                geometry.settings_traffic_light_position(px(44.0)),
+                geometry.sidebar_window_traffic_light_position(px(44.0)),
             ),
             (
                 Some(point(px(15.5), px(18.0))),
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(42.0)),
-                geometry.settings_traffic_light_position(px(36.0)),
+                geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (None, None)
         );

@@ -69,10 +69,10 @@ mise trust
 mise run setup:macos
 
 # Run from source
-mise run dev
+mise run development
 
 # Build, verify, and install to /Applications
-mise run package:macos:install
+mise run preflight:install:macos
 ```
 
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and

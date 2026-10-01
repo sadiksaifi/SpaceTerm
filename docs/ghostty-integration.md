@@ -18,7 +18,7 @@ SpaceTerm's GPUI renderer, Session scheduling, or application policies.
 ## Source and build ownership
 
 `mise run setup:macos` installs the pinned tools, initializes the submodules, and verifies Apple
-tooling. Other platforms use `mise run setup`. The ordinary `mise run dev`, `check`, `test`, and
+tooling. Other platforms use `mise run setup`. The ordinary `mise run development`, `check`, `test`, and
 packaging tasks compile the native dependency as needed through Cargo.
 
 The build script makes a local Git clone of the committed submodule tree inside Cargo's build
@@ -40,18 +40,18 @@ can be selected explicitly with `GHOSTTY_SOURCE_DIR` while developing the integr
 2. Review upstream C headers, terminal behavior, and relevant wrapper improvements. Rebase the
    patches in `third_party/libghostty-vt-sys/patches`; remove extensions replaced by upstream.
    Keep protocol behavior in Ghostty and expose only the additional operations SpaceTerm needs.
-3. Compile the patched engine with `mise run deps:build`. During patch development,
-   `mise run deps:engine <prepared-source>` compiles a separate prepared source tree.
+3. Compile the patched engine with `mise run engine:build`. During patch development,
+   `mise run engine:upstream:build <prepared-source>` compiles a separate prepared source tree.
    Use a separate copy with `--features=-kitty-graphics` to verify that non-graphics extensions
    also compile when upstream graphics support is disabled.
-4. Regenerate bindings with `mise run deps:bindings`, using the headers from the matching native
+4. Regenerate bindings with `mise run engine:bindings`, using the headers from the matching native
    build. Adapt safe wrappers and callers to changed contracts, especially callback lifetimes,
    sized structures, optional data, and image generations. An explicit `GHOSTTY_INCLUDE_DIR`
    can select prepared headers while resolving a binding bootstrap incompatibility.
 5. Keep dependency changes narrow. Refresh the lockfile only if manifests require it. Run
-   `mise run deps:fmt`, focused regression tests, and then `mise run validate:macos`,
-   `mise run test:conformance`, and `mise run package:macos` before shipping a macOS update.
-   Run supported non-macOS validation on the corresponding hosts.
+   `mise run engine:fmt`, focused regression tests, and then `mise run validate:macos`,
+   `mise run test:conformance`, and `mise run preflight:package:macos` before shipping a macOS
+   update. Run supported non-macOS validation on the corresponding hosts.
 
 ## Regression evidence
 

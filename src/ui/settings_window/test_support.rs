@@ -92,7 +92,7 @@ impl MemoryStorage {
         crate::appearance::parse_settings(bytes).ok()
     }
 
-    pub(super) fn fail_writes(&self, error: Option<StorageError>) {
+    pub(crate) fn fail_writes(&self, error: Option<StorageError>) {
         self.0.lock().unwrap().write_failure = error;
     }
 

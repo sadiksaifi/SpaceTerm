@@ -1,13 +1,16 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=SPACETERM_PACKAGED");
     println!("cargo:rerun-if-env-changed=SPACETERM_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=SPACETERM_SPARKLE_DIR");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");
+    println!("cargo:rustc-check-cfg=cfg(spaceterm_packaged)");
+    println!("cargo:rustc-check-cfg=cfg(spaceterm_release)");
     // Watch source changes as well as refs so development identity cannot retain a release label.
     for path in [
         "src",
-        "scripts/release-version.py",
+        "packaging/resolve-release-version.py",
         ".git/HEAD",
         ".git/index",
         ".git/refs",
@@ -15,10 +18,11 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
+    let release_tag = env::var("SPACETERM_RELEASE_TAG").ok();
     let mut version = Command::new("python3");
-    version.args(["scripts/release-version.py", "--cargo"]);
-    if let Ok(tag) = env::var("SPACETERM_RELEASE_TAG") {
-        version.args(["--tag", &tag, "--require-clean"]);
+    version.args(["packaging/resolve-release-version.py", "--cargo"]);
+    if let Some(tag) = &release_tag {
+        version.args(["--tag", tag, "--require-clean"]);
     }
     let result = version
         .output()
@@ -31,6 +35,19 @@ fn main() {
         "{}",
         String::from_utf8(result.stdout).expect("build identity is UTF-8")
     );
+    // The application identity follows these inputs; see ADR 0012.
+    let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
+    if packaged {
+        assert!(
+            env::var_os("CARGO_FEATURE_DEVELOPER_TOOLS").is_none(),
+            "a packaged build must exclude developer tools"
+        );
+        println!("cargo:rustc-cfg=spaceterm_packaged");
+    }
+    if release_tag.is_some() {
+        assert!(packaged, "only a packaged build may carry a release tag");
+        println!("cargo:rustc-cfg=spaceterm_release");
+    }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -41,6 +58,10 @@ fn main() {
         "SpaceTerm supports Apple Silicon Macs only"
     );
     let Some(frameworks) = env::var_os("SPACETERM_SPARKLE_DIR") else {
+        assert!(
+            release_tag.is_none(),
+            "a release build must link the signed updater"
+        );
         return;
     };
     let frameworks = PathBuf::from(frameworks)

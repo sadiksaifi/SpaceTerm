@@ -19,20 +19,12 @@ run = [
   { task = "doctor" },
 ]
 
-[tasks."hooks:install"]
-description = "Enable repository commit-message validation"
-run = "git config --local core.hooksPath .githooks"
-
-[tasks."lint:commit"]
-description = "Validate a Conventional Commit message file"
-usage = '''
-arg "<file>" help="Commit message file"
-'''
-run = 'python3 .githooks/commit-msg "${usage_file?}"'
-
-[tasks."deps:submodules"]
-description = "Initialize and update pinned Git submodules"
-run = "git submodule update --init --recursive"
+[tasks."setup:macos"]
+description = "Prepare the macOS development environment"
+run = [
+  { task = "setup" },
+  { task = "doctor:macos" },
+]
 
 [tasks.doctor]
 description = "Verify shared development tools"
@@ -47,9 +39,43 @@ python3 --version
 shellcheck --version | head -n 1
 '''
 
+[tasks."doctor:macos"]
+description = "Verify macOS development and packaging tools"
+run = '''
+set -eu
+version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
+major="${version%%.*}"
+test "$major" -ge 26 || {
+  echo "Xcode 26 or newer is required, got: $version" >&2
+  exit 1
+}
+xcrun --find codesign
+xcrun --find actool
+xcrun --find assetutil
+xcrun --find hdiutil
+xcrun --find iconutil
+xcrun --find tic
+'''
+
+[tasks."hooks:install"]
+description = "Enable repository commit-message validation"
+run = "git config --local core.hooksPath .githooks"
+
+[tasks."deps:submodules"]
+description = "Initialize and update pinned Git submodules"
+run = "git submodule update --init --recursive"
+
 [tasks."deps:fetch"]
 description = "Download locked Rust dependencies"
 run = "cargo fetch --locked"
+
+[tasks."deps:metal:macos"]
+description = "Install Xcode's Metal compiler component for native GPUI builds"
+run = "xcodebuild -downloadComponent MetalToolchain"
+
+[tasks."deps:sparkle:macos"]
+description = "Download and verify the pinned macOS updater"
+run = "python3 packaging/macos/prepare-sparkle.py"
 
 [tasks."fonts:prepare"]
 description = "Prepare private bundled font identities from the pinned Nerd Fonts archive"
@@ -64,43 +90,6 @@ else
   uv run scripts/prepare-terminal-fonts.py "${usage_archive?}"
 fi
 '''
-
-[tasks."deps:build"]
-description = "Build the pinned Ghostty source and SpaceTerm C bindings"
-run = "./scripts/cargo-artifacts.sh run -- cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
-
-[tasks."deps:engine"]
-description = "Build a prepared Ghostty source copy while updating native patches"
-usage = '''
-arg "<source>" help="Prepared Ghostty source directory"
-flag "--features <features>" help="Upstream VT feature selection" default="all"
-'''
-run = '''
-cd "${usage_source?}"
-zig build -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline -Doptimize=Debug "-Dvt-features=${usage_features?}"
-'''
-
-[tasks."deps:bindings"]
-description = "Regenerate Rust bindings from the matching patched Ghostty headers"
-run = "./scripts/cargo-artifacts.sh run -- cargo run --package libghostty-vt-sys --features bindgen-tool,kitty-graphics --bin gen-bindings --locked"
-
-[tasks."deps:engine:test"]
-description = "Run upstream native VT tests in a prepared Ghostty source copy"
-usage = '''
-arg "<source>" help="Prepared Ghostty source directory"
-'''
-run = '''
-cd "${usage_source?}"
-zig build test-lib-vt -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline
-'''
-
-[tasks."deps:check"]
-description = "Check every feature of the locally maintained Ghostty wrappers"
-run = "./scripts/cargo-artifacts.sh run -- cargo check --package libghostty-vt --all-features --locked"
-
-[tasks."deps:lock"]
-description = "Refresh local patched dependency entries without upgrading unrelated packages"
-run = "cargo update --package libghostty-vt-sys --offline"
 
 [tasks."gpui:local:on"]
 description = "Use a local SpaceTerm Zed checkout for GPUI dependencies"
@@ -124,55 +113,130 @@ description = "Bump the pinned GPUI fork tag and matching Rust toolchain"
 usage = '''
 arg "<tag>" help="Published SpaceTerm Zed fork tag"
 '''
-run = 'python3 scripts/gpui-bump.py "${usage_tag?}"'
+run = 'python3 scripts/bump-gpui.py "${usage_tag?}"'
 
-[tasks."deps:fmt"]
+[tasks."engine:build"]
+description = "Build the pinned Ghostty source and SpaceTerm C bindings"
+run = "./scripts/cargo-artifacts.sh run -- cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
+
+[tasks."engine:bindings"]
+description = "Regenerate Rust bindings from the matching patched Ghostty headers"
+run = "./scripts/cargo-artifacts.sh run -- cargo run --package libghostty-vt-sys --features bindgen-tool,kitty-graphics --bin gen-bindings --locked"
+
+[tasks."engine:check"]
+description = "Check every feature of the locally maintained Ghostty wrappers"
+run = "./scripts/cargo-artifacts.sh run -- cargo check --package libghostty-vt --all-features --locked"
+
+[tasks."engine:lock"]
+description = "Refresh local patched dependency entries without upgrading unrelated packages"
+run = "cargo update --package libghostty-vt-sys --offline"
+
+[tasks."engine:fmt"]
 description = "Format the locally maintained Ghostty integration"
 run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys"
 
-[tasks."deps:fmt:check"]
+[tasks."engine:fmt:check"]
 description = "Check formatting of the locally maintained Ghostty integration"
 run = "cargo fmt --package libghostty-vt --package libghostty-vt-sys -- --check"
 
-[tasks.dev]
-description = "Run SpaceTerm from source"
-run = "python3 scripts/run-development-app.py dev"
+[tasks."engine:test"]
+description = "Test terminal-library patches with the application feature set"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
 
-[tasks."dev:macos"]
-description = "Run SpaceTerm Dev from a source-built macOS application bundle"
-run = "exec bash scripts/run-development-app-macos.sh dev"
+[tasks."engine:test:no-graphics"]
+description = "Test the owned Rust wrappers with graphics disabled"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt-sys/vendored --locked"
 
-[tasks."dev:macos:updates"]
-description = "Preview the real update UI in SpaceTerm Dev with a simulated updater"
+[tasks."engine:upstream:build"]
+description = "Build a prepared Ghostty source copy while updating native patches"
+usage = '''
+arg "<source>" help="Prepared Ghostty source directory"
+flag "--features <features>" help="Upstream VT feature selection" default="all"
+'''
+run = '''
+cd "${usage_source?}"
+zig build -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline -Doptimize=Debug "-Dvt-features=${usage_features?}"
+'''
+
+[tasks."engine:upstream:test"]
+description = "Run upstream native VT tests in a prepared Ghostty source copy"
+usage = '''
+arg "<source>" help="Prepared Ghostty source directory"
+'''
+run = '''
+cd "${usage_source?}"
+zig build test-lib-vt -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline
+'''
+
+[tasks.development]
+description = "Run SpaceTerm Development from source"
+run = "python3 scripts/run-platform-task.py development"
+
+[tasks."development:macos"]
+description = "Run SpaceTerm Development from a source-built macOS application bundle"
+hide = true
+run = "exec bash packaging/macos/run-development.sh"
+
+[tasks."development:updates"]
+description = "Preview the real update UI in SpaceTerm Development with a simulated updater"
 usage = '''
 arg "[scenario]" help="available, warning, overdue, startup-overdue, startup-ready, offline, up-to-date, check-error, download-error, verification-error, install-error" default="available"
+'''
+run = 'python3 scripts/run-platform-task.py development:updates "${usage_scenario}"'
+
+[tasks."development:updates:macos"]
+description = "Preview the real update UI in SpaceTerm Development on macOS"
+hide = true
+usage = '''
+arg "[scenario]" default="available"
 '''
 run = '''
 case "${usage_scenario}" in
   available|warning|overdue|startup-overdue|startup-ready|offline|up-to-date|check-error|download-error|verification-error|install-error) ;;
   *) echo "Unknown update preview scenario" >&2; exit 2 ;;
 esac
-echo "Update preview: ${usage_scenario}. Choose SpaceTerm Dev > Check for Updates…"
+echo "Update preview: ${usage_scenario}. Choose SpaceTerm Development > Check for Updates…"
 echo "Downloads and installation are simulated. Nothing will be installed or restarted."
 export SPACETERM_UPDATE_PREVIEW="${usage_scenario}"
-exec bash scripts/run-development-app-macos.sh dev
+exec bash packaging/macos/run-development.sh
 '''
 
-[tasks."dev:appearance"]
-description = "Run the appearance exerciser with isolated retained settings"
-run = "python3 scripts/run-development-app.py appearance"
+[tasks."development:workbench"]
+description = "Open the Developer Workbench in SpaceTerm Development"
+usage = '''
+arg "[section]" help="appearance, controls, floating-surfaces, modals, terminal, document" default="appearance"
+'''
+run = 'python3 scripts/run-platform-task.py development:workbench "${usage_section}"'
+
+[tasks."development:workbench:macos"]
+description = "Open the Developer Workbench in SpaceTerm Development on macOS"
+hide = true
+usage = '''
+arg "[section]" default="appearance"
+'''
+run = '''
+case "${usage_section}" in
+  appearance|controls|floating-surfaces|modals|terminal|document) ;;
+  *) echo "Unknown Developer Workbench section" >&2; exit 2 ;;
+esac
+export SPACETERM_DEVELOPER_WORKBENCH="${usage_section}"
+exec bash packaging/macos/run-development.sh
+'''
 
 [tasks.check]
 description = "Check every target and feature"
 run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
 
-[tasks."dev:appearance:macos"]
-description = "Run the source appearance exerciser as a separate inspectable macOS app"
-run = "exec bash scripts/run-development-app-macos.sh appearance"
-
 [tasks."check:portable"]
 description = "Check shared targets without native features"
 run = "./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
+
+[tasks."check:updater:macos"]
+description = "Check the native updater and its Rust integration"
+run = '''
+export SPACETERM_SPARKLE_DIR="$(python3 packaging/macos/prepare-sparkle.py)"
+./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --all-targets --all-features --locked
+'''
 
 [tasks.fmt]
 description = "Format shared Rust sources"
@@ -189,24 +253,17 @@ run = '''python3 -c 'import os, shlex, subprocess; subprocess.run(["rustfmt", "-
 description = "Check shared Rust formatting"
 run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check"
 
+[tasks."fmt:macos"]
+description = "Format isolated macOS Adapter sources"
+run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs"
+
+[tasks."fmt:check:macos"]
+description = "Check isolated macOS Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
+
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked"
-
-[tasks."test:scripts"]
-description = "Test shared repository scripts"
-run = [
-  "python3 scripts/test-gpui-local.py",
-  "python3 scripts/test-gpui-bump.py",
-  "python3 scripts/test-release-version.py",
-  "python3 scripts/test-release-workflow.py",
-  "python3 scripts/test-commit-hook.py",
-  "python3 scripts/test-cargo-artifact-supervisor.py",
-]
-
-[tasks."test:portable"]
-description = "Run shared tests without native features"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks."test:one"]
 description = "Run tests matching a filter"
@@ -215,17 +272,44 @@ arg "<filter>" help="Test name filter"
 '''
 run = './scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --all-features --locked "${usage_filter?}"'
 
-[tasks."test:vendor"]
-description = "Test terminal-library patches with the application feature set"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt/kitty-graphics,libghostty-vt/png,libghostty-vt-sys/vendored --locked"
-
-[tasks."test:vendor:no-graphics"]
-description = "Test the owned Rust wrappers with graphics disabled"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package libghostty-vt --package libghostty-vt-sys --lib --no-default-features --features libghostty-vt-sys/vendored --locked"
+[tasks."test:portable"]
+description = "Run shared tests without native features"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --package spaceterm-directories --package spaceterm-ui --all-targets --no-default-features --locked"
 
 [tasks."test:conformance"]
 description = "Run terminal protocol conformance tests"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
+
+[tasks."test:scripts"]
+description = "Test shared repository scripts"
+run = [
+  "python3 scripts/test-gpui-local.py",
+  "python3 scripts/test-bump-gpui.py",
+  "python3 packaging/test-release.py",
+  "python3 scripts/test-release-workflow.py",
+  "python3 scripts/test-commit-hook.py",
+  "python3 scripts/test-supervise-cargo-artifacts.py",
+]
+
+[tasks."test:artifacts"]
+description = "Test Cargo artifact budget and cleanup behavior"
+run = "./scripts/test-cargo-artifacts.sh"
+
+[tasks."test:macos"]
+description = "Run native macOS Adapter tests"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+
+[tasks."test:updater:macos"]
+description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
+run = "python3 packaging/macos/test-updater.py"
+
+[tasks.lint]
+description = "Run shared linters"
+run = [
+  { task = "lint:rust" },
+  { task = "lint:scripts" },
+  { task = "lint:diff" },
+]
 
 [tasks."lint:rust"]
 description = "Lint every target and feature for the current platform"
@@ -239,28 +323,51 @@ run = "./scripts/cargo-artifacts.sh run -- cargo clippy --package spaceterm --pa
 description = "Check shared scripts"
 run = '''
 set -eu
-shellcheck -x scripts/kitty-graphics-smoke-unix.sh
+shellcheck -x scripts/display-kitty-graphics-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
 python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in (".githooks/commit-msg", "scripts/test-commit-hook.py")]'
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/test-release-workflow.py scripts/publish-release.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' $(git ls-files 'scripts/*.py' 'packaging/*.py' ':!:*-macos.py' ':!:packaging/macos/*')
+'''
+
+[tasks."lint:scripts:macos"]
+description = "Check macOS scripts and package metadata"
+run = '''
+set -eu
+bash -n packaging/macos/*.sh
+shellcheck -x packaging/macos/*.sh
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/*-macos.py packaging/macos/*.py
+plutil -lint packaging/macos/*.plist packaging/macos/*/Info.plist
 '''
 
 [tasks."lint:diff"]
 description = "Check the diff for whitespace errors"
 run = "git diff --check"
 
-[tasks.lint]
-description = "Run shared linters"
+[tasks."lint:commit"]
+description = "Validate a Conventional Commit message file"
+usage = '''
+arg "<file>" help="Commit message file"
+'''
+run = 'python3 .githooks/commit-msg "${usage_file?}"'
+
+[tasks.validate]
+description = "Run the full validation gate for the current platform"
 run = [
-  { task = "lint:rust" },
-  { task = "lint:scripts" },
-  { task = "lint:diff" },
+  { task = "test:artifacts" },
+  { task = "test:scripts" },
+  { task = "fmt:check" },
+  { task = "check" },
+  { task = "test" },
+  { task = "lint" },
+  { task = "engine:test" },
+  { task = "engine:test:no-graphics" },
+  { task = "engine:fmt:check" },
 ]
 
 [tasks."validate:portable"]
 description = "Run checks without native tooling"
 run = [
-  { task = "artifacts:test" },
+  { task = "test:artifacts" },
   { task = "test:scripts" },
   { task = "fmt:check" },
   { task = "check:portable" },
@@ -269,37 +376,15 @@ run = [
   { task = "lint:diff" },
 ]
 
-[tasks.validate]
-description = "Run the full validation gate for the current platform"
+[tasks."validate:macos"]
+description = "Run the full macOS validation gate"
 run = [
-  { task = "artifacts:test" },
-  { task = "test:scripts" },
-  { task = "fmt:check" },
-  { task = "check" },
-  { task = "test" },
-  { task = "lint" },
-  { task = "test:vendor" },
-  { task = "test:vendor:no-graphics" },
-  { task = "deps:fmt:check" },
+  { task = "validate" },
+  { task = "fmt:check:macos" },
+  { task = "test:macos" },
+  { task = "lint:scripts:macos" },
+  { task = "test:updater:macos" },
 ]
-
-[tasks."smoke:unix:kitty-graphics"]
-description = "Display Kitty graphics checks inside a running SpaceTerm Pane on Unix"
-usage = '''
-arg "[scenario]" help="Scenario: all, basics, placeholders, relative, animation, lifecycle, screens" default="all"
-flag "--dump" help="Emit a fixture without prompts or delays"
-'''
-run = '''
-if [ "${usage_dump:-false}" = "true" ]; then
-  ./scripts/kitty-graphics-smoke-unix.sh "${usage_scenario?}" --dump
-else
-  ./scripts/kitty-graphics-smoke-unix.sh "${usage_scenario?}"
-fi
-'''
-
-[tasks."build:release"]
-description = "Build the optimized executable for the current platform"
-run = "./scripts/cargo-artifacts.sh run -- cargo build --release --locked"
 
 [tasks."artifacts:status"]
 description = "Show Cargo artifact usage and the enforced disk budget"
@@ -309,10 +394,6 @@ run = "./scripts/cargo-artifacts.sh status"
 description = "Remove Cargo build artifacts from the active target directory"
 run = "./scripts/cargo-artifacts.sh clean"
 
-[tasks."artifacts:test"]
-description = "Test Cargo artifact budget and cleanup behavior"
-run = "./scripts/test-cargo-artifacts.sh"
-
 [tasks."bench:workload"]
 description = "Run a paced workload in a dedicated terminal Pane"
 usage = '''
@@ -320,117 +401,63 @@ arg "[mode]" help="Workload mode" default="scroll"
 arg "[duration]" help="Duration in seconds" default="60"
 arg "[rate]" help="Updates per second" default="60"
 '''
-run = 'python3 scripts/terminal-resource-workload.py --mode "${usage_mode}" --duration "${usage_duration}" --rate "${usage_rate}"'
+run = 'python3 scripts/run-terminal-workload.py --mode "${usage_mode}" --duration "${usage_duration}" --rate "${usage_rate}"'
 
-[tasks."setup:macos"]
-description = "Prepare the macOS development environment"
-run = [
-  { task = "setup" },
-  { task = "doctor:macos" },
-]
-
-[tasks."doctor:macos"]
-description = "Verify macOS development and packaging tools"
-run = '''
-set -eu
-version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
-major="${version%%.*}"
-test "$major" -ge 26 || {
-  echo "Xcode 26 or newer is required, got: $version" >&2
-  exit 1
-}
-xcrun --find codesign
-xcrun --find actool
-xcrun --find assetutil
-xcrun --find hdiutil
-xcrun --find iconutil
-xcrun --find tic
-'''
-
-[tasks."fmt:macos"]
-description = "Format isolated macOS Adapter sources"
-run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs"
-
-[tasks."fmt:check:macos"]
-description = "Check isolated macOS Adapter formatting"
-run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
-
-[tasks."test:macos"]
-description = "Run native macOS Adapter tests"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
-
-[tasks."lint:macos:scripts"]
-description = "Check macOS scripts and package metadata"
-run = '''
-set -eu
-bash -n scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh scripts/run-development-app-macos.sh
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/measure-macos-terminal-resources.py scripts/prepare-sparkle-macos.py scripts/setup-update-key-macos.py scripts/package-metadata-macos.py scripts/release-artifacts-macos.py scripts/configure-update-secret-macos.py scripts/test-updater-macos.py
-plutil -lint packaging/macos/Info.plist
-plutil -lint packaging/macos/Development-Info.plist
-plutil -lint packaging/macos/AppearanceExerciser-Info.plist
-plutil -lint packaging/macos/Entitlements.plist
-'''
-
-[tasks."validate:macos"]
-description = "Run the full macOS validation gate"
-run = [
-  { task = "validate" },
-  { task = "fmt:check:macos" },
-  { task = "test:macos" },
-  { task = "lint:macos:scripts" },
-  { task = "test:macos:updater" },
-]
-
-[tasks."bench:macos:resources"]
+[tasks."bench:resources:macos"]
 description = "Sample one macOS application process without administrator privileges"
 usage = '''
 arg "<pid>" help="SpaceTerm process ID"
 arg "[duration]" help="Duration in seconds" default="20"
 arg "[interval]" help="Sampling interval in seconds" default="1"
 '''
-run = 'python3 scripts/measure-macos-terminal-resources.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
+run = 'python3 scripts/measure-resources-macos.py "${usage_pid?}" --duration "${usage_duration}" --interval "${usage_interval}"'
 
-[tasks."package:macos"]
-description = "Build and verify the macOS app and disk image"
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh'
+[tasks."smoke:kitty-graphics:unix"]
+description = "Display Kitty graphics checks inside a running SpaceTerm Pane on Unix"
+usage = '''
+arg "[scenario]" help="Scenario: all, basics, placeholders, relative, animation, lifecycle, screens" default="all"
+flag "--dump" help="Emit a fixture without prompts or delays"
+'''
+run = '''
+if [ "${usage_dump:-false}" = "true" ]; then
+  ./scripts/display-kitty-graphics-unix.sh "${usage_scenario?}" --dump
+else
+  ./scripts/display-kitty-graphics-unix.sh "${usage_scenario?}"
+fi
+'''
 
-[tasks."package:macos:install"]
-description = "Build, verify, and install the macOS app"
+[tasks."preflight:package:macos"]
+description = "Build and verify SpaceTerm Preflight, the optimized macOS app and disk image"
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./packaging/macos/package.sh'
+
+[tasks."preflight:install:macos"]
+description = "Build, verify, and install SpaceTerm Preflight beside a SpaceTerm release"
 run = [
-  { task = "package:macos" },
-  "rm -rf -- /Applications/SpaceTerm.app",
-  "/usr/bin/ditto dist/SpaceTerm.app /Applications/SpaceTerm.app",
+  { task = "preflight:package:macos" },
+  "rm -rf -- '/Applications/SpaceTerm Preflight.app'",
+  "/usr/bin/ditto 'dist/SpaceTerm Preflight.app' '/Applications/SpaceTerm Preflight.app'",
 ]
 
-[tasks."package:macos:verify"]
-description = "Verify existing macOS artifacts"
-run = "./scripts/verify-macos-package.sh"
+[tasks."preflight:verify:macos"]
+description = "Verify existing SpaceTerm Preflight artifacts"
+run = "./packaging/macos/verify-package.sh"
 
-[tasks."package:macos:open"]
-description = "Open the packaged macOS application"
-run = "open -n dist/SpaceTerm.app"
+[tasks."preflight:open:macos"]
+description = "Open the packaged SpaceTerm Preflight application"
+run = "open -n 'dist/SpaceTerm Preflight.app'"
 
-[tasks."package:macos:open-dmg"]
-description = "Open the macOS installer disk image"
-run = "open dist/SpaceTerm.dmg"
+[tasks."preflight:open-dmg:macos"]
+description = "Open the SpaceTerm Preflight installer disk image"
+run = "open 'dist/SpaceTerm Preflight.dmg'"
 
-[tasks."package:macos:info"]
-description = "Show macOS package metadata, architectures, signature, and sizes"
+[tasks."preflight:info:macos"]
+description = "Show SpaceTerm Preflight metadata, architectures, signature, and sizes"
 run = [
-  "plutil -p dist/SpaceTerm.app/Contents/Info.plist",
-  "lipo -archs dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
-  "codesign --display --verbose=2 dist/SpaceTerm.app",
-  "ls -lh dist/SpaceTerm.dmg dist/SpaceTerm.app/Contents/MacOS/SpaceTerm",
+  "plutil -p 'dist/SpaceTerm Preflight.app/Contents/Info.plist'",
+  "lipo -archs 'dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight'",
+  "codesign --display --verbose=2 'dist/SpaceTerm Preflight.app'",
+  "ls -lh 'dist/SpaceTerm Preflight.dmg' 'dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight'",
 ]
-
-[tasks."deps:metal:macos"]
-description = "Install Xcode's Metal compiler component for native GPUI builds"
-run = "xcodebuild -downloadComponent MetalToolchain"
-
-[tasks."test:release"]
-description = "Verify Git release provenance and generated update metadata"
-run = "python3 scripts/test-release-version.py"
 
 [tasks."release:targets"]
 description = "Validate Tagsmith release configuration"
@@ -443,61 +470,46 @@ arg "<version>" help="Stable SemVer to release"
 '''
 run = 'npx --yes tagsmith@latest tag --target spaceterm --channel stable --version "${usage_version}" --dry-run --json'
 
-[tasks."deps:macos:sparkle"]
-description = "Download and verify the pinned macOS updater"
-run = "python3 scripts/prepare-sparkle-macos.py"
-
-[tasks."release:macos:key"]
-description = "Prepare the update signing key in macOS Keychain"
-run = "python3 scripts/setup-update-key-macos.py"
-
-[tasks."check:macos:updater"]
-description = "Check the native updater and its Rust integration"
-run = '''
-export SPACETERM_SPARKLE_DIR="$(python3 scripts/prepare-sparkle-macos.py)"
-./scripts/cargo-artifacts.sh run -- cargo check --package spaceterm --all-targets --all-features --locked
-'''
-
-[tasks."release:macos:package"]
-description = "Package the annotated release tag for Apple Silicon"
-usage = '''
-arg "<tag>" help="Annotated stable release tag"
-'''
-run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./scripts/package-macos.sh --release "${usage_tag}"'
-
 [tasks."release:validate"]
 description = "Validate the GitHub Actions annotated release tag"
 run = 'npx --yes tagsmith@latest validate --tag "${GITHUB_REF_NAME:?}" --github-output'
-
-[tasks."release:macos:assets"]
-description = "Generate and verify signed GitHub update assets"
-usage = '''
-arg "<tag>" help="Annotated stable release tag"
-'''
-run = 'python3 scripts/release-artifacts-macos.py "${usage_tag}"'
-
-[tasks."release:publish"]
-description = "Upload assets to a draft, then publish the GitHub release"
-usage = '''
-arg "<tag>" help="Validated stable release tag"
-'''
-run = 'python3 scripts/publish-release.py "${usage_tag}"'
 
 [tasks."release:notes"]
 description = "Print git-cliff notes for the annotated release tag at HEAD"
 usage = '''
 arg "<tag>" help="Annotated stable release tag"
 '''
-run = 'python3 scripts/publish-release.py "${usage_tag}" --notes-only'
+run = 'python3 packaging/publish-release.py "${usage_tag}" --notes-only'
 
 [tasks."release:notes:preview"]
 description = "Preview git-cliff notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
-[tasks."test:macos:updater"]
-description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
-run = "python3 scripts/test-updater-macos.py"
+[tasks."release:key:macos"]
+description = "Prepare the update signing key in macOS Keychain"
+run = "python3 packaging/macos/setup-update-key.py"
 
-[tasks."release:macos:configure-secret"]
+[tasks."release:configure-secret:macos"]
 description = "Configure the GitHub Actions signing secret from macOS Keychain"
-run = "python3 scripts/configure-update-secret-macos.py"
+run = "python3 packaging/macos/configure-update-secret.py"
+
+[tasks."release:package:macos"]
+description = "Package the annotated release tag for Apple Silicon"
+usage = '''
+arg "<tag>" help="Annotated stable release tag"
+'''
+run = 'CARGO_TARGET_DIR=target ./scripts/cargo-artifacts.sh run -- ./packaging/macos/package.sh --release "${usage_tag}"'
+
+[tasks."release:assets:macos"]
+description = "Generate and verify signed GitHub update assets"
+usage = '''
+arg "<tag>" help="Annotated stable release tag"
+'''
+run = 'python3 packaging/macos/create-release-assets.py "${usage_tag}"'
+
+[tasks."release:publish"]
+description = "Upload assets to a draft, then publish the GitHub release"
+usage = '''
+arg "<tag>" help="Validated stable release tag"
+'''
+run = 'python3 packaging/publish-release.py "${usage_tag}"'

@@ -287,3 +287,8 @@ content behind floating surfaces. Foreground controls and text remain sharp.
 The translucency and neutral shading of a background fill. Window backgrounds admit the desktop;
 floating surfaces combine softened application content with the same window backdrop where available,
 while retaining shading for readability.
+
+**Developer Workbench**:
+The development window, present only in SpaceTerm Development, that previews Appearance changes
+and presents every control, floating surface, and modal family as fixtures. Its previews change
+the Settings Document only when committed.

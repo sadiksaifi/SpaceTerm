@@ -2,7 +2,7 @@
 use crate::app::{
     HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
 };
-use crate::application_identity::ApplicationIdentity;
+use crate::application_identity::{ApplicationIdentity, UpdateSource};
 use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
     DesktopWording,
@@ -136,7 +136,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
-            updates: update_adapter(),
+            updates: update_adapter(identity),
             selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
@@ -164,16 +164,10 @@ fn compose(
                 file_preview: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
             },
             lifecycle,
-            microphone_access: if cfg!(any(
-                feature = "development-app",
-                feature = "appearance-exerciser"
-            )) {
-                None
-            } else {
-                Some(Rc::new(
-                    super::macos_microphone_access::MacosMicrophoneAccess::new(),
-                ))
-            },
+            microphone_access: identity.microphone_access().then(|| {
+                Rc::new(super::macos_microphone_access::MacosMicrophoneAccess::new())
+                    as Rc<dyn crate::platform::microphone_access::MicrophoneAccess>
+            }),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },
@@ -194,14 +188,39 @@ fn compose(
     })
 }
 
-fn update_adapter() -> Rc<dyn crate::updates::UpdateAdapter> {
-    #[cfg(feature = "development-app")]
-    if let Ok(value) = std::env::var("SPACETERM_UPDATE_PREVIEW")
-        && let Some(scenario) = crate::updates::preview::Scenario::parse(&value)
-    {
-        return Rc::new(crate::updates::preview::PreviewUpdates::new(scenario));
+fn update_adapter(identity: ApplicationIdentity) -> Rc<dyn crate::updates::UpdateAdapter> {
+    match identity.update_source() {
+        UpdateSource::SignedFeed => signed_feed_updates(),
+        UpdateSource::Simulation => simulated_updates(),
+        UpdateSource::Unavailable => Rc::new(crate::updates::UnavailableUpdates),
     }
+}
+
+#[cfg(spaceterm_sparkle)]
+fn signed_feed_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(super::macos_updates::MacosUpdates::new())
+}
+
+/// Only builds that link the signed updater can read the release feed.
+#[cfg(not(spaceterm_sparkle))]
+fn signed_feed_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+    Rc::new(crate::updates::UnavailableUpdates)
+}
+
+#[cfg(feature = "developer-tools")]
+fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+    match std::env::var("SPACETERM_UPDATE_PREVIEW")
+        .ok()
+        .and_then(|value| crate::updates::preview::Scenario::parse(&value))
+    {
+        Some(scenario) => Rc::new(crate::updates::preview::PreviewUpdates::new(scenario)),
+        None => Rc::new(crate::updates::UnavailableUpdates),
+    }
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+    Rc::new(crate::updates::UnavailableUpdates)
 }
 
 #[cfg(all(test, feature = "macos-native-tests"))]
@@ -381,10 +400,10 @@ mod tests {
             );
             assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌘W"));
             assert_eq!(presentation.shortcut(&CloseTab).as_deref(), Some("⇧⌘W"));
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "developer-tools")]
             assert_eq!(
                 presentation
-                    .shortcut(&crate::ui::appearance_exerciser::ToggleAppearancePreview)
+                    .shortcut(&crate::ui::developer_workbench::ToggleAppearancePreview)
                     .as_deref(),
                 Some("⌥⌘C")
             );

@@ -984,9 +984,11 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
             .map(|selector| format!("{selector}-disclosure"))
             .unwrap_or_else(|| format!("{}-disclosure", self.core.accessibility_name));
         let icon_trigger = self.icon_trigger;
+        let fill_parent_width = self.core.fill_parent_width;
         let content = div()
             .flex()
             .items_center()
+            .when(fill_parent_width, |content| content.flex_1().min_w_0())
             .gap(style.metrics.gap)
             .when_some(self.leading_icon, |content, icon| {
                 content.child(
@@ -1262,6 +1264,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
             .unwrap_or_else(|| format!("{}-disclosure", self.core.accessibility_name));
         let content = div()
             .flex()
+            .flex_1()
+            .min_w_0()
             .items_center()
             .gap(style.metrics.gap)
             .when_some(self.leading_icon, |content, icon| {
@@ -1892,9 +1896,17 @@ impl<A: Clone + 'static> MenuControl<A> {
                         .justify_center()
                         .px(px(0.0))
                 })
+                // A picker reserves its panel's width because the value it shows changes. A menu's
+                // title never changes, so its trigger hugs the title and disclosure, and stops where
+                // a reserving trigger would.
                 .when(!self.icon_trigger, |trigger| {
                     trigger
-                        .min_w(style.metrics.panel_width)
+                        .when(self.kind == TriggerKind::Picker, |trigger| {
+                            trigger.min_w(style.metrics.panel_width)
+                        })
+                        .when(self.kind == TriggerKind::Menu, |trigger| {
+                            trigger.max_w(style.metrics.panel_width)
+                        })
                         .px(style.metrics.horizontal_padding)
                 })
                 .rounded(style.metrics.trigger_corner_radius)
@@ -3894,6 +3906,60 @@ mod tests {
             trigger_edges(paint.focus_border(rgba(0)), true, true),
             (border, None),
             "an inactive presentation must not submit a transparent focus primitive"
+        );
+    }
+
+    #[gpui::test]
+    fn menu_triggers_hug_their_title_while_picker_disclosures_trail(cx: &mut TestAppContext) {
+        struct Triggers;
+        impl Render for Triggers {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .p(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        Menu::new("hug-menu", "Actions", vec![MenuEntry::action("Open", ())])
+                            .debug_selector("hug-menu")
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Picker::new(
+                            "reserve-picker",
+                            "Choice",
+                            1,
+                            vec![PickerOption::new(1, "One")],
+                        )
+                        .unwrap()
+                        .debug_selector("reserve-picker")
+                        .on_change(|_, _, _| {}),
+                    )
+            }
+        }
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| Triggers);
+        cx.run_until_parked();
+        let menu = cx.debug_bounds("hug-menu").unwrap();
+        let menu_disclosure = cx.debug_bounds("hug-menu-disclosure").unwrap();
+        let picker = cx.debug_bounds("reserve-picker").unwrap();
+        let picker_disclosure = cx.debug_bounds("reserve-picker-disclosure").unwrap();
+        let trailing = |trigger: Bounds<Pixels>, disclosure: Bounds<Pixels>| {
+            trigger.right() - disclosure.right()
+        };
+
+        assert!(
+            menu.size.width < picker.size.width,
+            "a menu trigger must hug its title: menu {:?}, picker {:?}",
+            menu.size.width,
+            picker.size.width
+        );
+        assert_eq!(
+            trailing(menu, menu_disclosure),
+            trailing(picker, picker_disclosure),
+            "both disclosures must stand on the trigger's trailing padding"
         );
     }
 

@@ -7,10 +7,22 @@ use crate::ui::*;
 use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
 
+/// The Develop menu's application-wide Shortcuts. Each is System Reserved, so an assigned Command
+/// can never be shadowed by one.
+#[cfg(feature = "developer-tools")]
+const OPEN_DEVELOPER_WORKBENCH: &str = "cmd-alt-a";
+#[cfg(feature = "developer-tools")]
+const TOGGLE_APPEARANCE_PREVIEW: &str = "cmd-alt-c";
+
 pub(crate) fn profile(
     layout: std::rc::Rc<dyn crate::platform::keyboard_layout::KeyboardLayoutAdapter>,
     system_reserved: Vec<SystemReserved>,
 ) -> Result<KeymapProfile, KeymapProfileError> {
+    #[cfg(feature = "developer-tools")]
+    let system_reserved = system_reserved
+        .into_iter()
+        .chain(developer_reservations())
+        .collect();
     let defaults = [
         (
             Command::SwitchWorkspace,
@@ -199,23 +211,42 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
     ];
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     let bindings = bindings
         .into_iter()
         .chain([
             KeyBinding::new(
-                "cmd-alt-a",
-                crate::ui::appearance_exerciser::ShowAppearanceExerciser,
+                OPEN_DEVELOPER_WORKBENCH,
+                crate::ui::developer_workbench::OpenDeveloperWorkbench,
                 None,
             ),
             KeyBinding::new(
-                "cmd-alt-c",
-                crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                TOGGLE_APPEARANCE_PREVIEW,
+                crate::ui::developer_workbench::ToggleAppearancePreview,
                 None,
+            ),
+            KeyBinding::new(
+                "cmd-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
             ),
         ])
         .collect();
     bindings
+}
+
+#[cfg(feature = "developer-tools")]
+fn developer_reservations() -> [SystemReserved; 2] {
+    use crate::keybindings::{Shortcut, SystemReservation};
+
+    [
+        (OPEN_DEVELOPER_WORKBENCH, SystemReservation::DeveloperWorkbench),
+        (TOGGLE_APPEARANCE_PREVIEW, SystemReservation::AppearancePreview),
+    ]
+    .map(|(source, reason)| SystemReserved {
+        shortcut: Shortcut::parse(source).expect("static developer shortcut"),
+        reason,
+    })
 }
 
 fn control_bindings() -> Vec<KeyBinding> {

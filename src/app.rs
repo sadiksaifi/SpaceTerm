@@ -150,6 +150,8 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::init(cx);
     crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
@@ -961,6 +963,8 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         host.adapters.microphone_access.clone(),
@@ -1008,9 +1012,8 @@ fn open_initial_workspace(
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
     crate::ui::settings_recovery::offer_at_launch(workspace, cx);
-    #[cfg(feature = "appearance-exerciser")]
-    crate::ui::appearance_exerciser::open(workspace, cx)
-        .map_err(|_| RuntimeError::Initialization)?;
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::open_at_launch(cx);
     Ok(workspace)
 }
 
@@ -1663,7 +1666,7 @@ mod runtime_tests {
                     .workspace_traffic_light_position(workspace_height)
                     .unwrap(),
                 geometry
-                    .settings_traffic_light_position(appearance.top_height())
+                    .sidebar_window_traffic_light_position(appearance.top_height())
                     .unwrap(),
             )
         });

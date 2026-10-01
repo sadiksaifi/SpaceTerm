@@ -31,7 +31,7 @@ def main():
         f"release validation steps differ from validate:macos:\nexpected {expected}\nactual {actual}"
     )
     publication = workflow.split("\n  publish:\n", 1)[1]
-    assert "needs: [preflight, validate, package]" in publication, (
+    assert "needs: [tag, validate, package]" in publication, (
         "publishing must wait for both macOS gates"
     )
     # mise run installs every missing configured tool unless this is disabled,

@@ -227,7 +227,7 @@ pub struct ComboBoxItem<I> {
     shortcut: Option<SharedString>,
     starts_group: bool,
     debug_selector: Option<String>,
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_selected: bool,
 }
 
@@ -245,7 +245,7 @@ impl<I> ComboBoxItem<I> {
             shortcut: None,
             starts_group: false,
             debug_selector: None,
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_selected: false,
         }
     }
@@ -268,10 +268,10 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Paints this row as persistently selected in development acceptance fixtures.
+    /// Paints this row as persistently selected in Developer Workbench fixtures.
     ///
     /// This does not make a disabled item eligible for navigation or activation.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_selected(mut self, selected: bool) -> Self {
         self.preview_selected = selected;
         self
@@ -338,13 +338,13 @@ impl<I> ComboBoxItem<I> {
             shortcut: self.shortcut,
             starts_group: self.starts_group,
             debug_selector: self.debug_selector,
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_selected: self.preview_selected,
         }
     }
 
     fn paints_selected(&self, provisional: bool) -> bool {
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         if self.preview_selected {
             return true;
         }

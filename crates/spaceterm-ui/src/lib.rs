@@ -160,7 +160,7 @@ pub use window_drag_region::{
 /// Development-only visual state pinning for the production renderer.
 ///
 /// This does not arm interaction or acquire keyboard focus. Production builds omit the Interface.
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "control-preview")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlPreviewState {
     Normal,
@@ -168,7 +168,7 @@ pub enum ControlPreviewState {
     Pressed,
     Focused,
 }
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "control-preview")]
 impl ControlPreviewState {
     pub(crate) fn hovered(self) -> bool {
         matches!(self, Self::Hovered | Self::Pressed)

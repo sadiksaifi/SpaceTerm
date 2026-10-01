@@ -27,7 +27,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
-use super::controls::action_button;
+use crate::ui::sidebar_window::form::action_button;
 use super::import::{ImportError as ThemeReadError, read_selected_document};
 
 /// Results beyond this many ask for a narrower search instead of growing the list.

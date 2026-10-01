@@ -3975,7 +3975,7 @@ impl ChromeAppearance {
     }
 
     /// Bounded, content-free evidence when visibility requires relaxing the quietness ceiling.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     pub(crate) fn separator_ceiling_fallbacks(&self) -> Vec<&'static str> {
         use spaceterm_ui::{ControlHost, FloatingRole};
 

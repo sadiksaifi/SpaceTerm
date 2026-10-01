@@ -345,7 +345,7 @@ struct ScrollbarDrag<O> {
 /// offset mapping. Callers adapt their scroll model through [`ScrollMetrics`] and apply requested
 /// offsets received through [`OverlayScrollbarEvent`].
 pub struct OverlayScrollbar<O: ScrollOffset> {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     name: &'static str,
     metrics: Option<ScrollMetrics<O>>,
@@ -361,7 +361,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     /// Creates a hidden scrollbar with a stable name used for element identity and diagnostics.
     pub fn new(name: &'static str) -> Self {
         Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             name,
             metrics: None,
@@ -375,7 +375,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     }
 
     /// Pins only thumb presentation without starting a drag interaction.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.preview_state = Some(state);
         self
@@ -620,7 +620,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             |catalog| &catalog.scrollbar,
         );
         let (thumb_color, hover_color) = theme.resolve(dragging);
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let (thumb_color, hover_color) =
             self.preview_state
                 .map_or((thumb_color, hover_color), |state| {

@@ -16,6 +16,7 @@ use crate::ui::appearance_runtime;
 
 use super::editor::{COMMIT_DELAY, SaveStatus};
 use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use crate::ui::sidebar_window::SidebarOwner as _;
 
 use super::test_support::MemoryStorage;
 
@@ -1224,12 +1225,12 @@ fn escape_with_an_empty_search_preserves_navigation_focus(cx: &mut TestAppContex
     let (window, _harness, cx) = open_settings(cx);
     cx.simulate_keystrokes("cmd-f tab");
     cx.run_until_parked();
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation.list_focus().is_focused(gpui_window)));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation.list_focus().is_focused(gpui_window)));
 }
 
 #[gpui::test]

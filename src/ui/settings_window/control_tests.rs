@@ -20,7 +20,7 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
         ..ChromeColors::default()
     };
     for selected in [false, true] {
-        let paint = super::navigation_chip_paint(selected, true, &colors);
+        let paint = crate::ui::sidebar_window::navigation_chip_paint(selected, true, &colors);
         assert_eq!(paint.hover_rim, None);
         assert_eq!(paint.rim, selected.then_some(colors.row_selected_border));
         assert_eq!(
@@ -32,7 +32,7 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
             })
         );
     }
-    let unavailable = super::navigation_chip_paint(false, false, &colors);
+    let unavailable = crate::ui::sidebar_window::navigation_chip_paint(false, false, &colors);
     assert_eq!(unavailable.hover_fill, None);
     assert_eq!(unavailable.hover_rim, None);
 }
@@ -64,7 +64,7 @@ fn highlighted_row_materializes_against_its_card_host() {
     );
 
     assert_eq!(
-        super::controls::highlighted_row_background(&appearance),
+        crate::ui::sidebar_window::form::highlighted_row_background(&appearance),
         expected
     );
 }
@@ -83,11 +83,11 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     struct StepperCard(SettingsAppearance);
     impl Render for StepperCard {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-            let stepper = super::controls::Stepper::new("host-stepper", "Value", "1")
+            let stepper = crate::ui::sidebar_window::form::Stepper::new("host-stepper", "Value", "1")
                 .render(&self.0.chrome)
                 .into_any_element();
             div().size_full().p(px(20.0)).child(
-                super::controls::SettingsGroup::new(
+                crate::ui::sidebar_window::form::FormGroup::new(
                     "stepper-card".to_owned(),
                     "Value",
                     vec![stepper],
@@ -223,7 +223,7 @@ fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut
 
     cx.simulate_keystrokes("tab tab");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
+    assert!(cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
     assert_eq!(
         settings.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::Interface
@@ -321,7 +321,7 @@ fn navigation_selection_is_emphasized_only_under_keyboard_navigation(cx: &mut Te
         "a pointer selection should not look keyboard focused"
     );
 
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
     assert_eq!(
@@ -374,11 +374,11 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
-        let focus = settings.read(cx).navigation_focus.clone();
+        let focus = settings.read(cx).navigation.list_focus().clone();
         focus.focus(window, cx);
     });
     cx.run_until_parked();
-    assert!(!settings.read_with(cx, |settings, _| settings.navigation_focus_visible));
+    assert!(!settings.read_with(cx, |settings, _| settings.navigation.focus_visible()));
     cx.simulate_mouse_up(position, gpui::MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
     redraw(cx);
@@ -386,16 +386,16 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
         settings.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::Font
     );
-    assert!(!settings.read_with(cx, |settings, _| settings.navigation_focus_visible));
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
+    assert!(!settings.read_with(cx, |settings, _| settings.navigation.focus_visible()));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.has_visible_focus(window)));
 
     // The search input delegates its bound Tab action, which must restore keyboard modality.
     click("settings-search", cx);
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
-    assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
+    assert!(cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
+    assert!(cx.update(|window, cx| settings.read(cx).navigation.has_visible_focus(window)));
     assert!(navigation_selection_is_emphasized(
         "settings-navigation-chip-settings-section-font",
         cx
@@ -403,8 +403,8 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
 
     click("settings-navigation-settings-section-font", cx);
     redraw(cx);
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.has_visible_focus(window)));
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
     assert_eq!(
@@ -417,7 +417,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
         settings.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::Themes
     );
-    assert!(cx.update(|window, cx| settings.read(cx).navigation_has_visible_focus(window)));
+    assert!(cx.update(|window, cx| settings.read(cx).navigation.has_visible_focus(window)));
     assert!(navigation_selection_is_emphasized(
         "settings-navigation-chip-settings-section-themes",
         cx
@@ -435,7 +435,7 @@ fn unmatched_search_skips_navigation(cx: &mut TestAppContext) {
     // traversal stop, and a query that empties every section leaves navigation nothing to offer.
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(!cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
+    assert!(!cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
 }
 
 #[gpui::test]
@@ -454,7 +454,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
     // directly into the navigation list.
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| settings.read(cx).navigation_focus.is_focused(window)));
+    assert!(cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
 
     cx.simulate_keystrokes("down");
     cx.run_until_parked();

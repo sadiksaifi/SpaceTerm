@@ -889,7 +889,7 @@ pub struct Button {
 
 impl Button {
     /// Pins only presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.core.preview_state = Some(state);
         self
@@ -1162,7 +1162,7 @@ pub struct IconButton {
 
 impl IconButton {
     /// Pins only presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.core.preview_state = Some(state);
         self
@@ -1319,7 +1319,7 @@ struct ButtonCore {
     corner_radius: Option<Pixels>,
     joined_edge: JoinedEdge,
     even_spacing: bool,
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
 }
 
@@ -1348,7 +1348,7 @@ impl ButtonCore {
             corner_radius: None,
             joined_edge: JoinedEdge::None,
             even_spacing: false,
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
         }
     }
@@ -1416,7 +1416,7 @@ impl ButtonCore {
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
         let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let (pressed, hovered, focused) = self
             .preview_state
             .map(|state| (state.pressed(), state.hovered(), state.focused()))

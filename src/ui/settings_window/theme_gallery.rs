@@ -26,7 +26,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
-use super::controls::action_button;
+use crate::ui::sidebar_window::form::action_button;
 
 /// Width over height of every theme preview, large or small, so a tile reads as the same picture.
 const PREVIEW_ASPECT: f32 = 1.6;

@@ -1,6 +1,6 @@
 //! Application-owned update policy. The platform adapter owns transport and installation.
 
-#[cfg(feature = "development-app")]
+#[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
 
 pub(crate) mod policy;
@@ -88,6 +88,25 @@ pub(crate) enum UpdateEvent {
     Failed(UpdateError),
     /// The adapter has ended its cycle, including cancellation of a staged installer.
     Finished,
+}
+
+/// The adapter of an identity that receives no updates.
+pub(crate) struct UnavailableUpdates;
+
+impl UpdateAdapter for UnavailableUpdates {
+    fn start(&self, _: async_channel::Sender<UpdateEvent>) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn check(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn download(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn cancel(&self) {}
+    fn install(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
 }
 
 pub(crate) trait UpdateAdapter {
