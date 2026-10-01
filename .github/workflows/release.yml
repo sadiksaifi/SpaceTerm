@@ -211,3 +211,49 @@ jobs:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: mise run release:publish "$RELEASE_TAG"
+
+  homebrew:
+    name: Update Homebrew cask
+    needs: [tag, package, publish]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: python
+      - name: Download signed release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: signed-release-assets
+          path: dist/release
+      - name: Verify transferred checksums
+        env:
+          CHECKSUM: ${{ needs.package.outputs.checksum }}
+        run: printf '%s  %s\n' "$CHECKSUM" dist/release/SHA256SUMS | shasum -a 256 -c -
+      - uses: actions/checkout@v7
+        with:
+          repository: sadiksaifi/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
+          path: homebrew-tap
+      - name: Render cask
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: mise run release:cask:macos "$RELEASE_TAG" homebrew-tap/Casks/spaceterm.rb
+      - name: Commit and push cask
+        working-directory: homebrew-tap
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Casks/spaceterm.rb
+          if git diff --cached --quiet; then
+            echo "The cask already matches SpaceTerm ${RELEASE_TAG}."
+            exit 0
+          fi
+          git commit -m "release: spaceterm version ${RELEASE_TAG}" \
+            -m "Release: https://github.com/sadiksaifi/SpaceTerm/releases/tag/${RELEASE_TAG}"
+          git push

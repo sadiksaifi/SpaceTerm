@@ -18,6 +18,20 @@ need visible together.
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 - **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
 
+## Install
+
+SpaceTerm requires macOS 26 or newer on Apple silicon.
+
+```sh
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
+```
+
+Or install with Homebrew:
+
+```sh
+brew install --cask sadiksaifi/tap/spaceterm
+```
+
 ## Workspace hierarchy
 
 ```mermaid

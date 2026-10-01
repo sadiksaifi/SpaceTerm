@@ -304,8 +304,11 @@ description = "Exercise signed ad hoc updates, cancellation, rejection, and rela
 run = "python3 packaging/macos/test-updater.py"
 
 [tasks."test:package:macos"]
-description = "Test package artifact selection and compiled application identity"
-run = "python3 packaging/macos/test-package.py"
+description = "Test packaging, compiled application identity, and the release installer"
+run = [
+  "python3 packaging/macos/test-package.py",
+  "python3 packaging/macos/test-install.py",
+]
 
 [tasks.lint]
 description = "Run shared linters"
@@ -511,6 +514,14 @@ usage = '''
 arg "<tag>" help="Annotated stable release tag"
 '''
 run = 'python3 packaging/macos/create-release-assets.py "${usage_tag}"'
+
+[tasks."release:cask:macos"]
+description = "Render the Homebrew cask for a published release"
+usage = '''
+arg "<tag>" help="Published stable release tag"
+arg "<output>" help="Cask file to write"
+'''
+run = 'python3 packaging/macos/render-homebrew-cask.py "${usage_tag}" "${usage_output}"'
 
 [tasks."release:publish"]
 description = "Upload assets to a draft, then publish the GitHub release"

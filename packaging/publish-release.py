@@ -39,7 +39,8 @@ def main():
         return
     directory = ROOT / "dist/release"
     version = args.tag.removeprefix("v")
-    assets = [directory / f"SpaceTerm-{version}-darwin-arm64.dmg", directory / "appcast.xml", directory / "SHA256SUMS"]
+    assets = [directory / f"SpaceTerm-{version}-darwin-arm64.dmg", directory / "appcast.xml",
+              directory / "install.sh", directory / "SHA256SUMS"]
     if not all(path.is_file() for path in assets):
         parser.exit(1, "error: complete release assets are required\n")
     existing = gh("release", "view", args.tag, "--json", "isDraft,tagName", check=False)
@@ -53,7 +54,7 @@ def main():
             notes.write_text(release_notes(args.tag))
             gh("release", "create", args.tag, "--draft", "--verify-tag", "--title", f"SpaceTerm {args.tag}", "--notes-file", str(notes))
     gh("release", "upload", args.tag, *(str(path) for path in assets), "--clobber")
-    # The public latest/download/appcast.xml URL changes only after every asset is present.
+    # The public latest/download URLs for the feed and installer change only after every asset is present.
     gh("release", "edit", args.tag, "--draft=false", "--latest")
     print(f"Published SpaceTerm {args.tag} with complete update assets.")
 

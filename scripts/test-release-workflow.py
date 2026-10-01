@@ -34,6 +34,10 @@ def main():
     assert "needs: [tag, validate, package]" in publication, (
         "publishing must wait for both macOS gates"
     )
+    homebrew = workflow.split("\n  homebrew:\n", 1)[1]
+    assert "needs: [tag, package, publish]" in homebrew, (
+        "the Homebrew cask must point only at a published release"
+    )
     # mise run installs every missing configured tool unless this is disabled,
     # which would undo a job's partial install_args.
     jobs = re.split(r"(?m)^  ([\w-]+):\n", workflow.split("\njobs:\n", 1)[1])[1:]
@@ -46,7 +50,7 @@ def main():
             assert 'MISE_TASK_RUN_AUTO_INSTALL: "false"' in body, (
                 f"{name} installs selected tools, so mise run must not install the rest"
             )
-    print("Release workflow gates publication on every macOS validation task and package.")
+    print("Release workflow gates publication on every macOS validation task and package, then updates the cask.")
 
 
 if __name__ == "__main__":

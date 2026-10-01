@@ -102,8 +102,10 @@ def main():
         signature = verify_feed(feed, archive, version)
         checked([tools / "sign_update", *options, "--verify", archive, signature], input=stdin, env=environment)
         checked([tools / "sign_update", *options, "--verify", feed], input=stdin, env=environment)
+        installer = directory / "install.sh"
+        shutil.copyfile(Path(__file__).with_name("install-release.sh"), installer)
         checksums = []
-        for path in (archive, feed):
+        for path in (archive, feed, installer):
             with path.open("rb") as source:
                 digest = hashlib.file_digest(source, "sha256").hexdigest()
             checksums.append(f"{digest}  {path.name}\n")
@@ -112,9 +114,9 @@ def main():
         if destination.exists():
             shutil.rmtree(destination)
         destination.mkdir()
-        for path in (archive, feed, directory / "SHA256SUMS"):
+        for path in (archive, feed, installer, directory / "SHA256SUMS"):
             shutil.copyfile(path, destination / path.name)
-    print("Release DMG, signed appcast, and checksums verified.")
+    print("Release DMG, signed appcast, installer, and checksums verified.")
 
 
 if __name__ == "__main__":
