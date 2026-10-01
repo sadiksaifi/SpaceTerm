@@ -3,9 +3,7 @@
 mod text;
 mod view;
 
-use super::drag_and_drop::{
-    DragPreview, ReorderableStrip, cancel_drag_on_escape, painted_item_size,
-};
+use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
@@ -544,20 +542,20 @@ impl WorkspaceSidebar {
         cx: &mut Context<Self>,
     ) -> DragPreview {
         let position = self.row_position(workspace_id);
-        if let Some(origin) = position {
-            let escape = cancel_drag_on_escape(window, cx, |sidebar: &mut Self, _, cx| {
-                sidebar.cancel_workspace_drag(cx);
-            });
-            self.workspace_reorder.begin(workspace_id, origin, escape);
-        }
-        cx.notify();
+        let size = position.and_then(|position| painted_item_size(&self.scroll_handle, position));
         let label = position
             .map(|position| self.rows[position].name.clone())
             .unwrap_or_default();
-        DragPreview::new(
-            label,
-            position.and_then(|position| painted_item_size(&self.scroll_handle, position)),
-        )
+        let session = DragSession::begin(window, cx, |sidebar: &mut Self, _, cx| {
+            sidebar.cancel_workspace_drag(cx);
+        });
+        self.workspace_reorder
+            .begin(workspace_id, self.workspace_ids(), session);
+        // The motion that starts the drag already reorders, so a quick drag released on its first
+        // move still lands.
+        self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
+        cx.notify();
+        DragPreview::new(label, size)
     }
 
     /// Moves the dragged row in place and asks the application to move its Workspace. The next
@@ -585,16 +583,20 @@ impl WorkspaceSidebar {
 
     /// Returns a row whose drag was cancelled to the place it was lifted from.
     fn cancel_workspace_drag(&mut self, cx: &mut Context<Self>) {
-        let Some((workspace_id, origin)) = self.workspace_reorder.cancel() else {
+        let Some((workspace_id, position)) = self.workspace_reorder.cancel(&self.workspace_ids())
+        else {
             return;
         };
         if let Some(current) = self.row_position(workspace_id)
-            && current != origin
-            && origin < self.rows.len()
+            && current != position
         {
-            self.move_row(workspace_id, current, origin, cx);
+            self.move_row(workspace_id, current, position, cx);
         }
         cx.notify();
+    }
+
+    fn workspace_ids(&self) -> Vec<WorkspaceId> {
+        self.rows.iter().map(|row| row.workspace_id).collect()
     }
 
     fn move_row(

@@ -12,9 +12,7 @@ use thiserror::Error;
 
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::drag_and_drop::{
-    DragPreview, ReorderableStrip, cancel_drag_on_escape, painted_item_size,
-};
+use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
@@ -1007,6 +1005,9 @@ impl TabManager {
     }
 
     /// Lifts a Tab for reordering. A press that becomes a drag never selects its Tab.
+    ///
+    /// The motion that starts the drag already reorders, so a quick drag released on its first
+    /// move still lands.
     fn begin_tab_drag(
         &mut self,
         tab_id: TabId,
@@ -1015,23 +1016,21 @@ impl TabManager {
     ) -> DragPreview {
         self.cancel_tab_selector(tab_id, cx);
         let position = self.tab_position(tab_id);
-        if let Some(origin) = position {
-            let escape = cancel_drag_on_escape(window, cx, |manager: &mut Self, _, cx| {
-                manager.cancel_tab_drag(cx);
-            });
-            self.tab_reorder.begin(tab_id, origin, escape);
-        }
-        cx.notify();
+        let size =
+            position.and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
         let label = self
             .tabs
             .tab(tab_id)
             .map(|pane_host| pane_host.read(cx).tab_identity().activity)
             .filter(|activity| !activity.is_empty())
             .unwrap_or_else(|| "Terminal".into());
-        DragPreview::new(
-            label,
-            position.and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position)),
-        )
+        let session = DragSession::begin(window, cx, |manager: &mut Self, _, cx| {
+            manager.cancel_tab_drag(cx);
+        });
+        self.tab_reorder.begin(tab_id, self.tab_ids(), session);
+        self.drag_tab_to(tab_id, window.mouse_position(), cx);
+        cx.notify();
+        DragPreview::new(label, size)
     }
 
     fn drag_tab_to(&mut self, tab_id: TabId, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
@@ -1054,10 +1053,14 @@ impl TabManager {
 
     /// Returns a Tab whose drag was cancelled to the place it was lifted from.
     fn cancel_tab_drag(&mut self, cx: &mut Context<Self>) {
-        if let Some((tab_id, origin)) = self.tab_reorder.cancel() {
-            self.move_tab(tab_id, origin, cx);
+        if let Some((tab_id, position)) = self.tab_reorder.cancel(&self.tab_ids()) {
+            self.move_tab(tab_id, position, cx);
             cx.notify();
         }
+    }
+
+    pub(super) fn tab_ids(&self) -> Vec<TabId> {
+        self.tabs.iter().map(|(tab_id, _)| tab_id).collect()
     }
 
     fn move_tab(&mut self, tab_id: TabId, position: usize, cx: &mut Context<Self>) {
@@ -4819,6 +4822,22 @@ mod tests {
         );
         cx.debug_bounds("tab-item-1-inactive")
             .expect("the cancelled Tab must render in its original place");
+    }
+
+    #[gpui::test]
+    fn a_single_motion_should_reorder_a_tab_before_release(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let third = cx.debug_bounds("tab-item-3-active").unwrap();
+        let release = third.center() + point(px(4.0), px(0.0));
+
+        drag_tab(first.center(), &[release], cx);
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
     }
 
     #[gpui::test]

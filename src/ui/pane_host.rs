@@ -1,7 +1,7 @@
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::drag_and_drop::{DragPreview, cancel_drag_on_escape, drag_release_observer};
+use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -333,12 +333,12 @@ struct DraggedPane {
     owner: gpui::EntityId,
 }
 
-/// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the
-/// Escape binding that cancels it.
+/// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
+/// that carries it.
 struct PaneDrag {
     pane_id: PaneId,
     drop_target: Option<(PaneId, PaneEdge)>,
-    _escape: gpui::Subscription,
+    session: DragSession,
 }
 
 pub(crate) struct PaneHost {
@@ -1093,7 +1093,7 @@ impl PaneHost {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let escape = cancel_drag_on_escape(window, cx, |host: &mut Self, _, cx| {
+        let session = DragSession::begin(window, cx, |host: &mut Self, _, cx| {
             if host.pane_drag.take().is_some() {
                 cx.notify();
             }
@@ -1101,8 +1101,9 @@ impl PaneHost {
         self.pane_drag = Some(PaneDrag {
             pane_id,
             drop_target: None,
-            _escape: escape,
+            session,
         });
+        self.drag_pane_to(pane_id, window.mouse_position(), cx);
         cx.notify();
         let label = self
             .pane_captions
@@ -1139,6 +1140,9 @@ impl PaneHost {
             return;
         };
         cx.notify();
+        if !drag.session.is_active(cx) {
+            return;
+        }
         let gap = pane_gap(cx);
         let Some((target_pane_id, edge)) = self.drop_target(drag.pane_id, pointer, gap) else {
             return;
@@ -1855,7 +1859,11 @@ impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A drag GPUI no longer carries ended without this Tab seeing the release, such as while
         // the Tab was hidden, so it moves nothing.
-        if !cx.has_active_drag() {
+        if self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|drag| !drag.session.is_active(cx))
+        {
             self.pane_drag = None;
         }
         let appearance = super::appearance::shared_chrome(cx);

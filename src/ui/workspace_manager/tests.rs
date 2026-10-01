@@ -7384,6 +7384,74 @@ fn escape_should_cancel_a_workspace_row_drag_and_restore_its_place(cx: &mut Test
 }
 
 #[gpui::test]
+fn a_single_motion_should_reorder_a_workspace_row_before_release(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let third = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let release = third.center() + point(px(0.0), px(4.0));
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(workspace_order(&manager, cx), vec![2, 3, 1]);
+}
+
+#[gpui::test]
+fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("ctrl-1");
+    cx.run_until_parked();
+    let (_, hidden_tabs) = active_tab_manager(&manager, cx);
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let second = cx.debug_bounds("tab-item-2-active").unwrap();
+    let past_second = second.center() + point(px(4.0), px(0.0));
+
+    // A Tab drag in the first Workspace ends while that Workspace is hidden.
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(past_second, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-2");
+    cx.run_until_parked();
+    cx.simulate_mouse_up(past_second, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let (_, visible_tabs) = active_tab_manager(&manager, cx);
+
+    // Escape during a drag in the second Workspace cancels that drag alone.
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(past_second, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let moved = visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_mouse_up(past_second, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        (
+            moved,
+            visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
+            hidden_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
+        ),
+        (
+            vec![TabId::new(2), TabId::new(1)],
+            vec![TabId::new(1), TabId::new(2)],
+            vec![TabId::new(2), TabId::new(1)],
+        )
+    );
+}
+
+#[gpui::test]
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
