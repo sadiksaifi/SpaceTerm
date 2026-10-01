@@ -1,8 +1,10 @@
 use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 mod clipboard;
+mod input;
 pub(crate) use clipboard::ClipboardRequest;
 use clipboard::{ClipboardAuthority, ClipboardCompletion, WorkerClipboard};
+use input::PtyInput;
 mod schedules;
 use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
 mod launch;
@@ -13,6 +15,7 @@ pub(crate) use launch::{
     TerminalLaunchPlan,
 };
 use std::fmt;
+#[cfg(test)]
 use std::io::Write;
 use std::mem;
 use std::path::Path;
@@ -808,6 +811,7 @@ enum Command {
     CompleteClipboard(u64, ClipboardCompletion),
     ClipboardExpired,
     ResumeOutput(Option<u64>),
+    FlushInput,
 }
 
 impl Command {
@@ -862,6 +866,7 @@ impl fmt::Debug for Command {
             Self::CompleteClipboard(..) => "CompleteClipboard",
             Self::ClipboardExpired => "ClipboardExpired",
             Self::ResumeOutput(_) => "ResumeOutput",
+            Self::FlushInput => "FlushInput",
         };
         formatter.write_str(name)
     }
@@ -870,6 +875,7 @@ impl fmt::Debug for Command {
 struct TerminalWorker {
     metadata_state: SessionMetadataState,
     native_pty: NativePtyOwner,
+    input: PtyInput,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
@@ -1070,6 +1076,7 @@ impl TerminalWorker {
         let mut worker = Self {
             metadata_state,
             native_pty,
+            input: PtyInput::default(),
             emulator,
             commands,
             reader_events: reader_event_rx,
@@ -1136,6 +1143,13 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        if self
+            .input
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(Command::FlushInput);
+        }
         if self.clipboard.expired() {
             return Some(Command::ClipboardExpired);
         }
@@ -1187,6 +1201,7 @@ impl TerminalWorker {
                 self.schedules.deadline(synchronized_output_deadline),
                 self.emulator.metadata_status_deadline(),
                 self.clipboard.deadline(),
+                self.input.deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1199,6 +1214,13 @@ impl TerminalWorker {
             match self.commands.recv_timeout(timeout) {
                 Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self
+                        .input
+                        .deadline()
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                    {
+                        return Some(Command::FlushInput);
+                    }
                     if self.clipboard.expired() {
                         return Some(Command::ClipboardExpired);
                     }
@@ -1276,6 +1298,7 @@ impl TerminalWorker {
                 self.complete_clipboard(Some(id), completion)
             }
             Command::ClipboardExpired => self.complete_clipboard(None, ClipboardCompletion::Denied),
+            Command::FlushInput => self.flush_input(),
             Command::CompressScrollback => {
                 match self.emulator.compress_scrollback() {
                     Ok(result) => self.schedules.complete_compression(Instant::now(), result),
@@ -1950,12 +1973,16 @@ impl TerminalWorker {
     }
 
     fn write_pty(&mut self, bytes: &[u8]) -> bool {
-        if let Err(error) = self
-            .native_pty
-            .write_all(bytes)
-            .and_then(|()| self.native_pty.flush())
-        {
-            let _ = self.send_runtime_failure(format!("failed to write to the shell PTY: {error}"));
+        if self.input.enqueue(bytes).is_err() {
+            let _ = self.send_runtime_failure("PTY input queue is full".to_owned());
+            return false;
+        }
+        self.flush_input()
+    }
+
+    fn flush_input(&mut self) -> bool {
+        if self.input.drain(&mut self.native_pty).is_err() {
+            let _ = self.send_runtime_failure("failed to write to the shell PTY".to_owned());
             return false;
         }
         true

@@ -267,6 +267,7 @@ struct ScriptedPtyState {
     hidden_input_polls: usize,
     take_reader_calls: usize,
     write_attempts: usize,
+    write_blocked: bool,
     written: Vec<u8>,
     flushes: usize,
     resizes: Vec<NativePtySize>,
@@ -395,6 +396,9 @@ struct ScriptedPty {
 impl Write for ScriptedPty {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.records.update(|state| state.write_attempts += 1);
+        if self.records.snapshot().write_blocked {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         if let Some(message) = &self.write_error {
             return Err(io::Error::new(ErrorKind::BrokenPipe, message.clone()));
         }
@@ -1457,6 +1461,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
         let mut worker = TerminalWorker {
             metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(records.clone()),
+            input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
@@ -1495,6 +1500,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1562,6 +1568,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
@@ -1607,6 +1614,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1653,6 +1661,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1701,6 +1710,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1743,6 +1753,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1809,6 +1820,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1860,6 +1872,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -1913,6 +1926,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
         let mut worker = TerminalWorker {
             metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            input: PtyInput::default(),
             emulator,
             commands,
             reader_events,
@@ -1984,6 +1998,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2034,6 +2049,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2081,6 +2097,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2114,6 +2131,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
@@ -2177,6 +2195,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         let mut worker = TerminalWorker {
             metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            input: PtyInput::default(),
             emulator: TerminalEmulator::new_with_metadata_context(
                 test_geometry(),
                 context,
@@ -2259,6 +2278,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2301,6 +2321,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2347,6 +2368,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2396,6 +2418,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -2436,6 +2459,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
@@ -3189,7 +3213,7 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
     };
     assert_eq!(
         failure,
-        SessionFailure::Runtime("failed to write to the shell PTY: write unavailable".to_owned())
+        SessionFailure::Runtime("failed to write to the shell PTY".to_owned())
     );
     let state = records.wait_for("the failed PTY worker to release ownership", |state| {
         state.pty_drops == 1
@@ -3525,6 +3549,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let mut worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
+        input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
@@ -3666,6 +3691,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
             let mut worker = TerminalWorker {
                 metadata_state: SessionMetadataState::default(),
                 native_pty: direct_native_pty(records.clone()),
+                input: PtyInput::default(),
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
                 commands,
                 reader_events,
@@ -3752,6 +3778,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
         let mut worker = TerminalWorker {
             metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
@@ -3937,6 +3964,7 @@ fn clipboard_worker() -> (
         TerminalWorker {
             metadata_state: SessionMetadataState::default(),
             native_pty: direct_native_pty(records.clone()),
+            input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
@@ -3996,6 +4024,40 @@ fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_repl
     drop(request);
     assert!(worker.process_command(worker.commands.recv().unwrap()));
     assert_eq!(records.snapshot().written, b"\x1b]52;p;\x1b\\\x1b[0n");
+    worker.finish();
+}
+
+#[test]
+fn clipboard_reply_backpressure_keeps_selection_live_and_preserves_input_order() {
+    let (mut worker, records, requests, _reader_tx, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07\x1b[5n".to_vec()]));
+    let request = requests.try_recv().unwrap();
+    drop(request);
+    let Command::CompleteClipboard(id, _) = worker.commands.recv().unwrap() else {
+        panic!("completion expected")
+    };
+    records.update(|state| state.write_blocked = true);
+    assert!(
+        worker.complete_clipboard(Some(id), ClipboardCompletion::Text("x".repeat(1024 * 1024)))
+    );
+    let (reply, selection) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::SelectionCopy(None, reply)));
+    assert_eq!(selection.try_recv().unwrap().unwrap(), None);
+    assert!(worker.write_pty(b"later input"));
+    assert!(records.snapshot().written.is_empty());
+    records.update(|state| state.write_blocked = false);
+    // Continue normal command scheduling until the queued input has drained.
+    while !records.snapshot().written.ends_with(b"\x1b[0nlater input") {
+        let command = worker.receive_next_command().unwrap();
+        assert!(worker.process_command(command));
+    }
+    let expected = format!("\x1b]52;c;{}eA==\x07", "eHh4".repeat((1024 * 1024) / 3)).into_bytes();
+    let written = records.snapshot().written;
+    assert_eq!(&written[..expected.len()], expected);
     worker.finish();
 }
 

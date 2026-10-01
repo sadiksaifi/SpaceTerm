@@ -21,5 +21,9 @@ PTY backpressure while continuing to serve input, Selection queries, and shutdow
 deadline releases the output barrier if the UI cannot respond. Blocking the worker on a UI reply
 would deadlock when the UI synchronously requests a Selection.
 
+PTY input uses nonblocking writes and a bounded ordered queue. A program that stops reading
+must not prevent the worker from answering synchronous Selection queries. Clipboard replies,
+terminal replies, and user input share this queue so backpressure cannot interleave their bytes.
+
 SpaceTerm does not install remote helpers or edit application and multiplexer configurations.
 Multiplexers own forwarding from nested programs to the outer terminal.
