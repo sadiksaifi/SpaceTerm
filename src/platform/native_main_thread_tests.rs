@@ -87,5 +87,9 @@ pub(crate) fn run() {
     native_test!(
         macos_pasteboard::tests::native_write_declares_every_representation_before_publishing_data
     );
-    println!("29 native main-thread tests passed");
+    native_test!(macos_pasteboard::tests::native_text_clipboard_ignores_image_representations);
+    native_test!(
+        macos_pasteboard::tests::native_text_clipboard_preserves_utf8_and_rejects_oversized_text
+    );
+    println!("32 native main-thread tests passed");
 }

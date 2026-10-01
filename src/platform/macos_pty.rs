@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 #[cfg(all(test, feature = "macos-native-tests"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -465,6 +465,35 @@ struct SpawnedPty {
     termination: Arc<ChildTermination>,
 }
 
+struct PtyReader {
+    reader: Box<dyn Read + Send>,
+    readiness: OwnedFd,
+}
+
+impl Read for PtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.reader.read(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let mut poll = libc::pollfd {
+                        fd: self.readiness.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: readiness owns a live descriptor and poll points to one initialized entry.
+                    if unsafe { libc::poll(&mut poll, 1, -1) } == -1 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() != io::ErrorKind::Interrupted {
+                            return Err(error);
+                        }
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
 impl SpawnedPty {
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.reader
@@ -706,6 +735,8 @@ pub(super) enum PtyError {
     ReadTermios(#[source] io::Error),
     #[error("failed to enable UTF-8 input on the macOS pseudo-terminal: {0}")]
     ConfigureTermios(#[source] io::Error),
+    #[error("failed to configure nonblocking macOS pseudo-terminal input")]
+    ConfigureInput,
     #[error("failed to apply the initial macOS pseudo-terminal size: {0}")]
     InitialResize(#[source] AnyError),
     #[error("failed to start Shell Process")]
@@ -742,6 +773,7 @@ fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstru
         PtyError::MissingDescriptor
         | PtyError::ReadTermios(_)
         | PtyError::ConfigureTermios(_)
+        | PtyError::ConfigureInput
         | PtyError::InitialResize(_) => {
             NativePtyAdapterConstructionFailure::ResourceConfigurationFailed
         }
@@ -785,6 +817,11 @@ fn spawn_command_in_pty(
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
     initialize_pty(pair.master.as_ref(), size)?;
+    let readiness = pair.master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
+    // SAFETY: pair.master owns this live descriptor throughout cloning.
+    let readiness = unsafe { BorrowedFd::borrow_raw(readiness) }
+        .try_clone_to_owned()
+        .map_err(|error| PtyError::CloneReader(error.into()))?;
 
     let mut child = pair
         .slave
@@ -801,6 +838,7 @@ fn spawn_command_in_pty(
             return Err(PtyError::CloneReader(source));
         }
     };
+    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
     let writer = match pair.master.take_writer() {
         Ok(writer) => writer,
         Err(source) => {
@@ -856,6 +894,16 @@ fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError>
     // SAFETY: descriptor remains live and termios contains attributes read from this PTY.
     if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &termios) } == -1 {
         return Err(PtyError::ConfigureTermios(io::Error::last_os_error()));
+    }
+    // Cloned master descriptors share these flags. The reader waits through poll, while input
+    // writes return immediately so child backpressure cannot block Terminal Session commands.
+    // SAFETY: descriptor remains owned by master and F_GETFL takes no additional argument.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    // SAFETY: descriptor remains live and F_SETFL accepts these descriptor status flags.
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(PtyError::ConfigureInput);
     }
     master.resize(size).map_err(PtyError::InitialResize)
 }
@@ -1069,6 +1117,33 @@ mod tests {
 
     const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
     const CONTROLLED_CHILD_ACK: &str = "SPACETERM_ACK\n";
+
+    #[test]
+    fn unread_native_pty_input_returns_backpressure_without_blocking() {
+        const NAME: &str = "platform::macos_pty::tests::unread_native_pty_input_returns_backpressure_without_blocking";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "stty raw -echo; printf 'READY'; exec sleep 30"]);
+        let (mut pty, terminator) = spawn_command_in_pty(PtySize::default(), command).unwrap();
+        // Unblock an accidentally blocking writer so this regression can fail without hanging.
+        let (cancel, rescue) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if rescue.recv_timeout(Duration::from_secs(1)).is_err() {
+                terminator.terminate().unwrap();
+            }
+        });
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let result = pty.write_all(&vec![b'x'; 1024 * 1024]);
+        let _ = cancel.send(());
+        watchdog.join().unwrap();
+        drop(reader);
+        drop(pty);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
 
     #[test]
     #[ignore = "runs only as a child of the controlled PTY integration tests"]

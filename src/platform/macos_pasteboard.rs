@@ -6,12 +6,47 @@ use std::path::PathBuf;
 #[cfg(all(test, feature = "macos-native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
-    ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard,
+    ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard, TextClipboard,
     selection_representations,
 };
 use crate::terminal::native_services::file_insertion::{
     MAX_FILE_INSERTION_BYTES, MAX_FILE_ITEMS, parse_file_urls,
 };
+use crate::terminal::osc52::MAX_OSC52_CONTENT_BYTES;
+
+pub(crate) struct MacosTextClipboard;
+impl TextClipboard for MacosTextClipboard {
+    fn read(&self, _: &mut gpui::App) -> Result<Option<String>, ClipboardError> {
+        MainThreadMarker::new().ok_or(ClipboardError::Unavailable)?;
+        read_text_from_pasteboard(&NSPasteboard::generalPasteboard())
+    }
+
+    fn write(&self, text: &str, _: &mut gpui::App) -> Result<(), ClipboardError> {
+        write_selection(text, None).map_err(|_| ClipboardError::Unavailable)
+    }
+}
+
+fn read_text_from_pasteboard(pasteboard: &NSPasteboard) -> Result<Option<String>, ClipboardError> {
+    // SAFETY: AppKit exports this immutable pasteboard type constant.
+    let text_type = unsafe { NSPasteboardTypeString };
+    if !pasteboard
+        .types()
+        .is_some_and(|types| types.containsObject(text_type))
+    {
+        return Ok(None);
+    }
+    let data = pasteboard
+        .dataForType(text_type)
+        .ok_or(ClipboardError::Unavailable)?;
+    if data.len() > MAX_OSC52_CONTENT_BYTES {
+        return Err(ClipboardError::InvalidText);
+    }
+    // SAFETY: The retained pasteboard data is immutable during this synchronous read.
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    std::str::from_utf8(bytes)
+        .map(|text| Some(text.to_owned()))
+        .map_err(|_| ClipboardError::InvalidText)
+}
 
 pub(crate) struct MacosSelectionClipboard;
 impl SelectionClipboard for MacosSelectionClipboard {
@@ -77,8 +112,8 @@ fn read_file_urls_from_items(
         )?;
         source_bytes += source.len();
         parse_file_urls(paths, std::slice::from_ref(&source)).map_err(str::to_owned)?;
-        let url = NSURL::URLWithString(&value)
-            .ok_or_else(|| "file URL is unreadable".to_owned())?;
+        let url =
+            NSURL::URLWithString(&value).ok_or_else(|| "file URL is unreadable".to_owned())?;
         let path_url = url
             .filePathURL()
             .filter(|url| !url.isFileReferenceURL())
@@ -169,10 +204,93 @@ fn write_selection_to_pasteboard(
 #[allow(dead_code)]
 pub(in crate::platform) mod tests {
     use super::*;
-    use objc2::msg_send;
     use objc2::runtime::ProtocolObject;
-    use objc2_app_kit::{NSPasteboardType, NSPasteboardWriting};
-    use objc2_foundation::{NSData, NSURL};
+    use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSPasteboardItemDataProvider, NSPasteboardType, NSPasteboardTypePNG, NSPasteboardWriting,
+    };
+    use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSURL};
+    use std::cell::Cell;
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements; the provider owns its read counter.
+        #[unsafe(super(NSObject))]
+        #[name = "SpaceTermClipboardTestImageProvider"]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = Cell<usize>]
+        struct ImageProvider;
+
+        unsafe impl NSObjectProtocol for ImageProvider {}
+
+        unsafe impl NSPasteboardItemDataProvider for ImageProvider {
+            #[unsafe(method(pasteboard:item:provideDataForType:))]
+            fn provide_data(
+                &self,
+                _: Option<&NSPasteboard>,
+                item: &NSPasteboardItem,
+                ty: &NSPasteboardType,
+            ) {
+                self.ivars().set(self.ivars().get() + 1);
+                let _ = item.setData_forType(&NSData::with_bytes(b"image fixture"), ty);
+            }
+        }
+    );
+
+    pub(in crate::platform) fn native_text_clipboard_ignores_image_representations() {
+        let mtm = MainThreadMarker::new().unwrap();
+        let allocated = ImageProvider::alloc(mtm).set_ivars(Cell::new(0));
+        // SAFETY: NSObject's init is the designated initializer for this provider.
+        let provider: objc2::rc::Retained<ImageProvider> =
+            unsafe { msg_send![super(allocated), init] };
+        let pasteboard = PrivatePasteboard(NSPasteboard::pasteboardWithUniqueName());
+        let item = NSPasteboardItem::new();
+        // SAFETY: AppKit exports this immutable pasteboard type constant.
+        let image_type = unsafe { NSPasteboardTypePNG };
+        assert!(item.setDataProvider_forTypes(
+            ProtocolObject::from_ref(&*provider),
+            &NSArray::from_slice(&[image_type]),
+        ));
+        assert!(
+            pasteboard
+                .0
+                .writeObjects(&NSArray::from_slice(&[ProtocolObject::<
+                    dyn NSPasteboardWriting,
+                >::from_ref(&*item),]))
+        );
+        assert_eq!(read_text_from_pasteboard(&pasteboard.0), Ok(None));
+        assert_eq!(provider.ivars().get(), 0);
+        // The fixture must detect an actual image request.
+        assert!(pasteboard.0.dataForType(image_type).is_some());
+        assert_eq!(provider.ivars().get(), 1);
+    }
+
+    pub(in crate::platform) fn native_text_clipboard_preserves_utf8_and_rejects_oversized_text() {
+        let pasteboard = PrivatePasteboard(NSPasteboard::pasteboardWithUniqueName());
+        let boundary = "😀".repeat(crate::terminal::osc52::MAX_OSC52_CONTENT_BYTES / 4);
+        for text in ["", "a\0😀\ntext", boundary.as_str()] {
+            write_selection_to_pasteboard(&pasteboard.0, text, None).unwrap();
+            assert_eq!(
+                read_text_from_pasteboard(&pasteboard.0).unwrap().as_deref(),
+                Some(text)
+            );
+        }
+        write_selection_to_pasteboard(&pasteboard.0, &(boundary + "x"), None).unwrap();
+        assert!(matches!(
+            read_text_from_pasteboard(&pasteboard.0),
+            Err(ClipboardError::InvalidText)
+        ));
+        // SAFETY: AppKit exports this immutable pasteboard type constant.
+        let text_type = unsafe { NSPasteboardTypeString };
+        assert!(
+            pasteboard
+                .0
+                .setData_forType(Some(&NSData::with_bytes(&[0xff])), text_type)
+        );
+        assert_eq!(
+            read_text_from_pasteboard(&pasteboard.0),
+            Err(ClipboardError::InvalidText)
+        );
+    }
 
     struct FileReferenceFixture {
         path: PathBuf,
