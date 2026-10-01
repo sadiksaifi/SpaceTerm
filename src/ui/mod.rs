@@ -9,6 +9,7 @@ pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
+mod drag_and_drop;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
 pub(crate) mod directory_picker;

@@ -1,7 +1,7 @@
-use crate::ui::appearance::gpui_color;
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
+use crate::ui::appearance::gpui_color;
 #[cfg(test)]
 use gpui::rgba;
 #[cfg(test)]
@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::drag_and_drop::{DragPreview, ReorderableStrip, drag_end_observer, painted_item_size};
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
@@ -385,6 +386,12 @@ impl std::fmt::Debug for TabManagerEvent {
     }
 }
 
+/// The value a Tab drag carries, scoped to the Tab bar that owns the Tab.
+struct DraggedTab {
+    tab_id: TabId,
+    owner: gpui::EntityId,
+}
+
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
@@ -397,6 +404,7 @@ pub(crate) struct TabManager {
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
     hovered_tab: Option<TabId>,
+    tab_reorder: ReorderableStrip<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
@@ -482,6 +490,7 @@ impl TabManager {
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             hovered_tab: None,
+            tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -995,6 +1004,61 @@ impl TabManager {
         cx.notify();
     }
 
+    /// Lifts a Tab for reordering. A press that becomes a drag never selects its Tab.
+    fn begin_tab_drag(&mut self, tab_id: TabId, cx: &mut Context<Self>) -> DragPreview {
+        self.cancel_tab_selector(tab_id, cx);
+        self.tab_reorder.begin(tab_id);
+        cx.notify();
+        let position = self.tab_position(tab_id);
+        let label = self
+            .tabs
+            .tab(tab_id)
+            .map(|pane_host| pane_host.read(cx).tab_identity().activity)
+            .filter(|activity| !activity.is_empty())
+            .unwrap_or_else(|| "Terminal".into());
+        DragPreview::new(
+            label,
+            position.and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position)),
+        )
+    }
+
+    fn drag_tab_to(&mut self, tab_id: TabId, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        if self.tab_reorder.dragged() != Some(tab_id) {
+            return;
+        }
+        let Some(current) = self.tab_position(tab_id) else {
+            return;
+        };
+        let Some(position) = self.tab_reorder.reorder(
+            &self.tab_bar_scroll_handle,
+            current,
+            self.tabs.len(),
+            pointer,
+        ) else {
+            return;
+        };
+        match self.tabs.move_tab(tab_id, position) {
+            Ok(true) => {
+                cx.emit(TabManagerEvent::PresentationChanged);
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => Self::report_tab_error("move", error),
+        }
+    }
+
+    fn finish_tab_drag(&mut self, cx: &mut Context<Self>) {
+        if self.tab_reorder.finish() {
+            cx.notify();
+        }
+    }
+
+    fn tab_position(&self, tab_id: TabId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|(candidate, _)| candidate == tab_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
         self.tabs.active_tab().clone()
@@ -1303,6 +1367,8 @@ impl TabManager {
         let release_manager = manager.clone();
         let click_manager = manager.clone();
         let hover_manager = manager.clone();
+        let drag_manager = manager.clone();
+        let owner = manager.entity_id();
         let close_manager = manager;
         let chip = presentation.tab_chip(active, appearance, cx);
         let foreground = presentation.tab_foreground(active);
@@ -1342,6 +1408,8 @@ impl TabManager {
                 )
             });
         let tab_group = format!("tab-item-{}", tab_id.get());
+        // The lifted Tab follows the pointer, so its slot keeps only the gap it leaves behind.
+        let lifted = self.tab_reorder.dragged() == Some(tab_id);
         div()
             .id(("tab-item", tab_id.get()))
             .debug_selector(move || {
@@ -1401,6 +1469,13 @@ impl TabManager {
                 });
                 cx.stop_propagation();
             })
+            .on_drag(DraggedTab { tab_id, owner }, move |_, _, _, cx| {
+                let preview = drag_manager
+                    .update(cx, |manager, cx| manager.begin_tab_drag(tab_id, cx))
+                    .unwrap_or_else(|_| DragPreview::new("", None));
+                cx.new(|_| preview)
+            })
+            .when(lifted, |item| item.opacity(0.0))
             .child(render_tab_identity(
                 tab_id,
                 identity,
@@ -1481,6 +1556,8 @@ impl TabManager {
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
                 .chip_strip_leading_offset();
+        let reorder_manager = manager.clone();
+        let owner = manager.entity_id();
         let mut items = div()
             .id("tab-items")
             .debug_selector(|| "tab-items".to_owned())
@@ -1490,7 +1567,18 @@ impl TabManager {
             .flex()
             .flex_row()
             .overflow_x_scroll()
-            .track_scroll(&self.tab_bar_scroll_handle);
+            .track_scroll(&self.tab_bar_scroll_handle)
+            .on_drag_move::<DraggedTab>(move |event, _, cx| {
+                let dragged = event.drag(cx);
+                if dragged.owner != owner {
+                    return;
+                }
+                let tab_id = dragged.tab_id;
+                let pointer = event.event.position;
+                let _ = reorder_manager.update(cx, |manager, cx| {
+                    manager.drag_tab_to(tab_id, pointer, cx);
+                });
+            });
         let last_index = self.tabs.len() - 1;
         let mut previous_inactive_tab = None;
         for (index, (tab_id, pane_host)) in self.tabs.iter().enumerate() {
@@ -1528,6 +1616,7 @@ impl TabManager {
         }
 
         let drag_manager = manager.clone();
+        let drag_end_manager = manager.clone();
         let create_manager = manager.clone();
         #[cfg(test)]
         let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
@@ -1636,6 +1725,11 @@ impl TabManager {
                 appearance.surface(crate::appearance::SurfaceRole::Base, background),
             ))
             .child(drag_region)
+            .when(self.tab_reorder.dragged().is_some(), |bar| {
+                bar.child(drag_end_observer(move |_, cx| {
+                    let _ = drag_end_manager.update(cx, |manager, cx| manager.finish_tab_drag(cx));
+                }))
+            })
             .into_any_element()
     }
 }
@@ -1902,7 +1996,9 @@ fn render_tab_identity(
                             error: gpui_color(status.error),
                             paused: gpui_color(status.paused),
                         },
-                        differentiate_without_color: appearance.capabilities.differentiate_without_color,
+                        differentiate_without_color: appearance
+                            .capabilities
+                            .differentiate_without_color,
                     }
                     .render(),
                 ),
@@ -1952,7 +2048,7 @@ mod tests {
     ) -> super::super::appearance::ChromeAppearance {
         use crate::appearance::{
             AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-            ThemeCatalog, SystemAppearance,
+            SystemAppearance, ThemeCatalog,
         };
 
         let mut resolved = ThemeCatalog::default()
@@ -1979,8 +2075,7 @@ mod tests {
 
     #[test]
     fn title_bar_controls_use_focus_paint_prepared_for_their_actual_host() {
-        let appearance =
-            prepared_opposing_title_bar(Color::BLACK, Color::WHITE, true, false);
+        let appearance = prepared_opposing_title_bar(Color::BLACK, Color::WHITE, true, false);
         let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
         let focus = title_bar_control_focus_ring(&appearance).source_over(host);
         assert!(
@@ -2002,8 +2097,7 @@ mod tests {
 
     #[test]
     fn show_borders_prepares_tab_edges_for_the_title_bar_host() {
-        let appearance =
-            prepared_opposing_title_bar(Color::WHITE, Color::BLACK, false, true);
+        let appearance = prepared_opposing_title_bar(Color::WHITE, Color::BLACK, false, true);
         let presentation = TabChromePresentation::resolve(true, true, &appearance.colors);
         let host = appearance.control_host_background(spaceterm_ui::ControlHost::TitleBar);
         let chip = presentation
@@ -2383,7 +2477,7 @@ mod tests {
     fn tab_contextual_controls_should_materialize_hover_against_their_actual_host() {
         use crate::appearance::{
             AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-            ThemeCatalog, SurfaceRole, SystemAppearance,
+            SurfaceRole, SystemAppearance, ThemeCatalog,
         };
 
         let mut preferences = AppearancePreferences::default();
@@ -3269,10 +3363,18 @@ mod tests {
                 let item_bounds = |tab: u64| items[tab as usize - 1];
                 let forward = item_bounds(1).right() == item_bounds(2).left();
                 let leading_edge = |bounds: gpui::Bounds<Pixels>| {
-                    if forward { bounds.left() } else { bounds.right() }
+                    if forward {
+                        bounds.left()
+                    } else {
+                        bounds.right()
+                    }
                 };
                 let trailing_edge = |bounds: gpui::Bounds<Pixels>| {
-                    if forward { bounds.right() } else { bounds.left() }
+                    if forward {
+                        bounds.right()
+                    } else {
+                        bounds.left()
+                    }
                 };
                 let mut boundaries = vec![(
                     "tab-separator-start-1".to_owned(),
@@ -4570,6 +4672,104 @@ mod tests {
         let active = cx.debug_bounds("tab-item-21-active").unwrap();
         assert!(active.left() >= strip.left());
         assert!(active.right() <= strip.right());
+    }
+
+    fn tab_order(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<u64> {
+        manager.read_with(cx, |manager, _| {
+            manager
+                .tabs
+                .iter()
+                .map(|(tab_id, _)| tab_id.get())
+                .collect()
+        })
+    }
+
+    fn drag_tab(from: gpui::Point<Pixels>, path: &[gpui::Point<Pixels>], cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(from, None, Modifiers::none());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        for position in path {
+            cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_should_reorder_live_without_selecting_it(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let third = cx.debug_bounds("tab-item-3-active").unwrap();
+        let lift = first.center() + point(px(8.0), px(0.0));
+
+        drag_tab(
+            first.center(),
+            &[lift, third.center() + point(px(4.0), px(0.0))],
+            cx,
+        );
+        let during = (
+            tab_order(&manager, cx),
+            manager.read_with(cx, |manager, _| manager.tab_reorder.dragged()),
+            cx.debug_bounds("drag-preview").map(|preview| preview.size),
+        );
+        cx.simulate_mouse_up(third.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            during,
+            (vec![2, 3, 1], Some(TabId::new(1)), Some(first.size))
+        );
+        assert_eq!(
+            (
+                tab_order(&manager, cx),
+                manager.read_with(cx, |manager, _| (
+                    manager.tabs.active_tab_id(),
+                    manager.tab_reorder.dragged(),
+                    manager.tab_selector_pressed,
+                )),
+            ),
+            (vec![2, 3, 1], (TabId::new(3), None, None))
+        );
+        cx.debug_bounds("tab-item-1-inactive")
+            .expect("the moved Tab must render in its new place");
+        assert!(cx.debug_bounds("drag-preview").is_none());
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_back_should_restore_its_place(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
+        let third = cx.debug_bounds("tab-item-3-active").unwrap();
+
+        drag_tab(
+            third.center(),
+            &[
+                third.center() - point(px(8.0), px(0.0)),
+                second.center() - point(px(4.0), px(0.0)),
+            ],
+            cx,
+        );
+        let moved = tab_order(&manager, cx);
+        cx.simulate_mouse_move(
+            first.center() - point(px(4.0), px(0.0)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let leading = tab_order(&manager, cx);
+        let release = third.center() + point(px(4.0), px(0.0));
+        cx.simulate_mouse_move(release, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (moved, leading, tab_order(&manager, cx)),
+            (vec![1, 3, 2], vec![3, 1, 2], vec![1, 2, 3])
+        );
     }
 
     #[gpui::test]
