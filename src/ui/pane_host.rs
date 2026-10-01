@@ -1,7 +1,7 @@
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::drag_and_drop::{DragPreview, drag_end_observer};
+use super::drag_and_drop::{DragPreview, cancel_drag_on_escape, drag_release_observer};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -333,11 +333,12 @@ struct DraggedPane {
     owner: gpui::EntityId,
 }
 
-/// A Pane lifted by its caption, and the edge of another Pane it takes if released now.
-#[derive(Clone, Copy)]
+/// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the
+/// Escape binding that cancels it.
 struct PaneDrag {
     pane_id: PaneId,
     drop_target: Option<(PaneId, PaneEdge)>,
+    _escape: gpui::Subscription,
 }
 
 pub(crate) struct PaneHost {
@@ -1086,10 +1087,21 @@ impl PaneHost {
     }
 
     /// Lifts a Pane by its caption so it can split another Pane in this Tab.
-    fn begin_pane_drag(&mut self, pane_id: PaneId, cx: &mut Context<Self>) -> DragPreview {
+    fn begin_pane_drag(
+        &mut self,
+        pane_id: PaneId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> DragPreview {
+        let escape = cancel_drag_on_escape(window, cx, |host: &mut Self, _, cx| {
+            if host.pane_drag.take().is_some() {
+                cx.notify();
+            }
+        });
         self.pane_drag = Some(PaneDrag {
             pane_id,
             drop_target: None,
+            _escape: escape,
         });
         cx.notify();
         let label = self
@@ -1626,6 +1638,7 @@ impl PaneHost {
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let drop_edge = self
             .pane_drag
+            .as_ref()
             .and_then(|drag| drag.drop_target)
             .and_then(|(target_pane_id, edge)| (target_pane_id == pane_id).then_some(edge));
         let measure_host = host.clone();
@@ -1840,6 +1853,11 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A drag GPUI no longer carries ended without this Tab seeing the release, such as while
+        // the Tab was hidden, so it moves nothing.
+        if !cx.has_active_drag() {
+            self.pane_drag = None;
+        }
         let appearance = super::appearance::shared_chrome(cx);
         let radius =
             super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
@@ -1916,7 +1934,7 @@ impl Render for PaneHost {
             .child(content)
             .when(self.pane_drag.is_some(), |root| {
                 let host = cx.entity().downgrade();
-                root.child(drag_end_observer(move |window, cx| {
+                root.child(drag_release_observer(move |window, cx| {
                     let pointer = window.mouse_position();
                     let _ = host.update(cx, |host, cx| host.finish_pane_drag(pointer, window, cx));
                 }))
@@ -2411,9 +2429,9 @@ fn render_pane_caption_content(
         // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
         .when(has_multiple_panes && !zoomed, |row| {
             let owner = drag_host.entity_id();
-            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, _, cx| {
+            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
                 let preview = drag_host
-                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, cx))
+                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, window, cx))
                     .unwrap_or_else(|_| DragPreview::new("", None));
                 cx.new(|_| preview)
             })
@@ -3266,6 +3284,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn escape_should_cancel_a_pane_drag_without_moving_the_pane(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let cancelled = (
+            host.read_with(cx, |host, _| host.pane_drag.is_some()),
+            cx.debug_bounds("pane-drop-target-1-left").is_some(),
+            cx.debug_bounds("drag-preview").is_some(),
+        );
+        cx.simulate_mouse_up(near_left_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                cancelled,
+                host.read_with(cx, |host, _| host.layout_signature())
+            ),
+            ((false, false, false), before)
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_that_ended_unseen_should_move_nothing(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
+        // GPUI ends the drag while this Tab is hidden, so the host never sees the release.
+        cx.update(|window, cx| {
+            cx.stop_active_drag(window);
+        });
+        cx.run_until_parked();
+        let ended = host.read_with(cx, |host, _| host.pane_drag.is_some());
+        cx.simulate_click(near_left_edge, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (ended, host.read_with(cx, |host, _| host.layout_signature())),
+            (false, before)
+        );
+    }
+
+    #[gpui::test]
     fn releasing_a_pane_over_itself_should_leave_the_layout_unchanged(cx: &mut TestAppContext) {
         let (host, cx) = four_pane_host(cx);
         let before = host.read_with(cx, |host, _| host.layout_signature());
@@ -3274,7 +3352,7 @@ mod tests {
 
         drag_pane_caption(caption, &[own_pane.center()], cx);
         let offered_target = host.read_with(cx, |host, _| {
-            host.pane_drag.and_then(|drag| drag.drop_target)
+            host.pane_drag.as_ref().and_then(|drag| drag.drop_target)
         });
         cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();

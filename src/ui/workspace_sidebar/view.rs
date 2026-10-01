@@ -1,9 +1,8 @@
-use crate::ui::appearance::gpui_color;
 use super::*;
+use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::drag_end_observer;
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 
 /// The chip carrying a Workspace row's hover and persistent selection.
@@ -334,10 +333,10 @@ impl WorkspaceSidebar {
                         workspace_id,
                         owner,
                     },
-                    move |_, _, _, cx| {
+                    move |_, _, window, cx| {
                         let preview = drag_sidebar
                             .update(cx, |sidebar, cx| {
-                                sidebar.begin_workspace_drag(workspace_id, cx)
+                                sidebar.begin_workspace_drag(workspace_id, window, cx)
                             })
                             .unwrap_or_else(|_| DragPreview::new("", None));
                         cx.new(|_| preview)
@@ -480,7 +479,6 @@ impl WorkspaceSidebar {
         let settings_shortcut = presentation.shortcut(&crate::ui::settings_window::OpenSettings);
         let scroll_sidebar = sidebar.clone();
         let reorder_sidebar = sidebar.clone();
-        let drag_end_sidebar = sidebar.clone();
         let owner = sidebar.entity_id();
         let mut rows = div()
             .id("workspace-list")
@@ -653,12 +651,6 @@ impl WorkspaceSidebar {
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
-            .when(self.workspace_reorder.dragged().is_some(), |sidebar| {
-                sidebar.child(drag_end_observer(move |_, cx| {
-                    let _ = drag_end_sidebar
-                        .update(cx, |sidebar, cx| sidebar.finish_workspace_drag(cx));
-                }))
-            })
             .into_any_element();
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)

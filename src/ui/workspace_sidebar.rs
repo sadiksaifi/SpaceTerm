@@ -3,12 +3,14 @@
 mod text;
 mod view;
 
+use super::drag_and_drop::{
+    DragPreview, ReorderableStrip, cancel_drag_on_escape, painted_item_size,
+};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
-use super::drag_and_drop::{DragPreview, ReorderableStrip, painted_item_size};
-use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::workspace_creation::WorkspaceCreation;
+use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -538,11 +540,17 @@ impl WorkspaceSidebar {
     fn begin_workspace_drag(
         &mut self,
         workspace_id: WorkspaceId,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        self.workspace_reorder.begin(workspace_id);
-        cx.notify();
         let position = self.row_position(workspace_id);
+        if let Some(origin) = position {
+            let escape = cancel_drag_on_escape(window, cx, |sidebar: &mut Self, _, cx| {
+                sidebar.cancel_workspace_drag(cx);
+            });
+            self.workspace_reorder.begin(workspace_id, origin, escape);
+        }
+        cx.notify();
         let label = position
             .map(|position| self.rows[position].name.clone())
             .unwrap_or_default();
@@ -572,6 +580,30 @@ impl WorkspaceSidebar {
         else {
             return;
         };
+        self.move_row(workspace_id, current, position, cx);
+    }
+
+    /// Returns a row whose drag was cancelled to the place it was lifted from.
+    fn cancel_workspace_drag(&mut self, cx: &mut Context<Self>) {
+        let Some((workspace_id, origin)) = self.workspace_reorder.cancel() else {
+            return;
+        };
+        if let Some(current) = self.row_position(workspace_id)
+            && current != origin
+            && origin < self.rows.len()
+        {
+            self.move_row(workspace_id, current, origin, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_row(
+        &mut self,
+        workspace_id: WorkspaceId,
+        current: usize,
+        position: usize,
+        cx: &mut Context<Self>,
+    ) {
         let row = self.rows.remove(current);
         self.rows.insert(position, row);
         cx.emit(SidebarEvent::Move {
@@ -579,12 +611,6 @@ impl WorkspaceSidebar {
             position,
         });
         cx.notify();
-    }
-
-    fn finish_workspace_drag(&mut self, cx: &mut Context<Self>) {
-        if self.workspace_reorder.finish() {
-            cx.notify();
-        }
     }
 
     fn row_position(&self, workspace_id: WorkspaceId) -> Option<usize> {
@@ -596,6 +622,7 @@ impl WorkspaceSidebar {
 
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace_reorder.end_released(cx);
         self.sync_scrollbar(cx);
         self.render_body(cx.entity().downgrade(), window, cx)
     }

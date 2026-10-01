@@ -3,11 +3,15 @@
 //! A reorderable strip moves its dragged item live: the item takes a neighbour's place as soon as
 //! the pointer crosses that neighbour's midpoint, so the gap it leaves follows the pointer the way
 //! an AppKit tab bar and source list do. The lifted item follows the pointer as a [`DragPreview`].
+//!
+//! GPUI owns each drag's lifetime: it ends a drag on any release, and Escape cancels one through
+//! [`cancel_drag_on_escape`]. A drag owner keeps its own state only while GPUI still carries a drag,
+//! so a release that the owner never saw, such as one while it was hidden, cannot strand it.
 
 use gpui::prelude::*;
 use gpui::{
-    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, MouseButton, MouseUpEvent,
-    Pixels, Point, ScrollHandle, SharedString, Size, Window, canvas, div,
+    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, MouseUpEvent, Pixels, Point,
+    ScrollHandle, SharedString, Size, Subscription, Window, canvas, div,
 };
 
 use super::appearance::gpui_color;
@@ -23,28 +27,47 @@ const PREVIEW_HORIZONTAL_PADDING: f32 = 10.0;
 /// frames leaves every slot where the last frame painted it.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
-    dragged: Option<Id>,
+    lift: Option<Lift<Id>>,
+}
+
+/// The item a strip's drag carries, where it started, and the Escape binding that cancels it.
+struct Lift<Id> {
+    id: Id,
+    origin: usize,
+    _escape: Subscription,
 }
 
 impl<Id: Copy + Eq> ReorderableStrip<Id> {
     pub(crate) const fn new(axis: Axis) -> Self {
-        Self {
-            axis,
-            dragged: None,
+        Self { axis, lift: None }
+    }
+
+    /// Lifts the item `id` from position `origin`, holding `escape` for the drag's lifetime.
+    pub(crate) fn begin(&mut self, id: Id, origin: usize, escape: Subscription) {
+        self.lift = Some(Lift {
+            id,
+            origin,
+            _escape: escape,
+        });
+    }
+
+    /// Ends a drag that GPUI no longer carries.
+    ///
+    /// Call it on every render, so a drag released anywhere, including while the strip was
+    /// hidden, leaves no lifted item behind.
+    pub(crate) fn end_released(&mut self, cx: &App) {
+        if !cx.has_active_drag() {
+            self.lift = None;
         }
     }
 
-    pub(crate) fn begin(&mut self, id: Id) {
-        self.dragged = Some(id);
+    /// Cancels the drag, returning the dragged item and the position it started from.
+    pub(crate) fn cancel(&mut self) -> Option<(Id, usize)> {
+        self.lift.take().map(|lift| (lift.id, lift.origin))
     }
 
-    /// Ends the drag and reports whether one was in progress.
-    pub(crate) fn finish(&mut self) -> bool {
-        self.dragged.take().is_some()
-    }
-
-    pub(crate) const fn dragged(&self) -> Option<Id> {
-        self.dragged
+    pub(crate) fn dragged(&self) -> Option<Id> {
+        self.lift.as_ref().map(|lift| lift.id)
     }
 
     /// Returns the position the dragged item takes for the pointer, when it differs from
@@ -60,7 +83,7 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         pointer: Point<Pixels>,
     ) -> Option<usize> {
         let item_bounds = painted_item_bounds(items);
-        if self.dragged.is_none() || item_bounds.len() != len || current >= len {
+        if self.lift.is_none() || item_bounds.len() != len || current >= len {
             return None;
         }
         let spans = item_bounds
@@ -156,20 +179,21 @@ impl Render for DragPreview {
     }
 }
 
-/// Calls `on_end` when the pointer that carries a drag is released anywhere in the window.
+/// Calls `on_release` when a button is released anywhere in the window while a drag is active.
 ///
-/// GPUI ends every drag on release, including one dropped outside every target, but tells only
-/// the target. Mount this while a drag is in progress so its owner can clear the drag state.
-pub(crate) fn drag_end_observer(
-    on_end: impl Fn(&mut Window, &mut App) + Clone + 'static,
+/// GPUI ends every drag on any release, including one dropped outside every target, but tells only
+/// the target. Mount this while a drag is in progress so its owner can act on the release point
+/// before GPUI ends the drag.
+pub(crate) fn drag_release_observer(
+    on_release: impl Fn(&mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            let on_end = on_end.clone();
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                    on_end(window, cx);
+            let on_release = on_release.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture && cx.has_active_drag() {
+                    on_release(window, cx);
                 }
             });
         },
@@ -177,6 +201,30 @@ pub(crate) fn drag_end_observer(
     .absolute()
     .size_0()
     .into_any_element()
+}
+
+/// Cancels the active drag in `window` when Escape is pressed, then calls `on_cancel` on the drag's
+/// owner.
+///
+/// Escape reaches this binding before any focused element, so it never reaches a Terminal Session
+/// while a drag is active. Keep the subscription for as long as the owner's drag lasts.
+pub(crate) fn cancel_drag_on_escape<T: 'static>(
+    window: &Window,
+    cx: &mut Context<T>,
+    on_cancel: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Subscription {
+    let window_id = window.window_handle().window_id();
+    let owner = cx.weak_entity();
+    cx.intercept_keystrokes(move |event, window, cx| {
+        if window.window_handle().window_id() != window_id
+            || event.keystroke.key != "escape"
+            || !cx.stop_active_drag(window)
+        {
+            return;
+        }
+        cx.stop_propagation();
+        let _ = owner.update(cx, |owner, cx| on_cancel(owner, window, cx));
+    })
 }
 
 #[cfg(test)]

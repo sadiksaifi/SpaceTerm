@@ -4143,7 +4143,10 @@ fn confirm_directory_picker_path(path: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn active_local_pin(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> Option<PathBuf> {
+fn active_local_pin(
+    manager: &Entity<WorkspaceManager>,
+    cx: &mut VisualTestContext,
+) -> Option<PathBuf> {
     manager.read_with(cx, |manager, _| {
         match manager.workspaces.active_workspace().pinned_directory() {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
@@ -4163,21 +4166,35 @@ fn open_local_directory_should_create_a_pinned_workspace_named_by_the_switcher_q
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_some()));
-    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        1
+    );
 
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
-        assert_eq!(manager.workspaces.active_workspace().name(), "fresh workspace");
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(2)
+        );
+        assert_eq!(
+            manager.workspaces.active_workspace().name(),
+            "fresh workspace"
+        );
         assert!(manager.pin_picker.is_none());
     });
     assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
     let starts = records.starts();
     assert_eq!(starts.len(), 2);
     assert_eq!(
-        starts.last().unwrap().local_working_directory().unwrap().path(),
+        starts
+            .last()
+            .unwrap()
+            .local_working_directory()
+            .unwrap()
+            .path(),
         project.as_path()
     );
     fs::remove_dir_all(project).unwrap();
@@ -4206,7 +4223,10 @@ fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_dire
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(2)
+        );
     });
     assert_eq!(records.starts().len(), 2);
     fs::remove_dir_all(project).unwrap();
@@ -4231,9 +4251,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     });
 
     manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .set_next_workspace_id_for_test(2);
+        manager.workspaces.set_next_workspace_id_for_test(2);
     });
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
@@ -4360,7 +4378,10 @@ fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_creat
     click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        1
+    );
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
 
     click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
@@ -4416,7 +4437,9 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-o");
     cx.run_until_parked();
-    let flow = manager.read_with(cx, |manager, _| manager.remote_workspace_flow.clone().unwrap());
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
             flow.select_destination_for_test(
@@ -4439,7 +4462,10 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
         RemoteWorkspaceFlowStage::ChoosingDirectory
     );
     assert!(cx.debug_bounds("command-palette-panel").is_some());
-    assert_eq!(manager.read_with(cx, |manager, _| manager.workspaces.len()), 1);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        1
+    );
     assert_eq!(closes.load(Ordering::Acquire), 0);
 
     confirm_directory_picker_path("~/src/", cx);
@@ -4448,7 +4474,10 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
         assert_eq!(manager.workspaces.len(), 2);
         assert!(manager.remote_workspace_flow.is_none());
         match manager.workspaces.active_workspace().pinned_directory() {
-            Some(PinnedDirectory::Remote { directory, identity }) => {
+            Some(PinnedDirectory::Remote {
+                directory,
+                identity,
+            }) => {
                 assert_eq!(directory.as_str(), "~/src/");
                 assert_eq!(identity.as_str(), "/home/tester/src");
             }
@@ -4490,11 +4519,17 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_workspace_id(), WorkspaceId::new(2));
+        assert_eq!(
+            manager.workspaces.active_workspace_id(),
+            WorkspaceId::new(2)
+        );
         assert!(manager.remote_workspace_flow.is_none());
         assert_eq!(manager.remote_workspace_runtimes.len(), 1);
         match manager.workspaces.active_workspace().pinned_directory() {
-            Some(PinnedDirectory::Remote { directory, identity }) => {
+            Some(PinnedDirectory::Remote {
+                directory,
+                identity,
+            }) => {
                 assert_eq!(directory.as_str(), "~/src");
                 assert_eq!(identity.as_str(), "/home/tester/src");
             }
@@ -4504,7 +4539,13 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
     let starts = records.starts();
     assert_eq!(starts.len(), 2);
     assert_eq!(
-        starts.last().unwrap().remote_launch_plan().unwrap().remote_directory().as_str(),
+        starts
+            .last()
+            .unwrap()
+            .remote_launch_plan()
+            .unwrap()
+            .remote_directory()
+            .as_str(),
         "~/src"
     );
     assert_eq!(closes[0].load(Ordering::Acquire), 0);
@@ -6472,7 +6513,10 @@ fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut Test
         open_local.top() - remote.bottom() > remote.top() - local.bottom(),
         "a separator should divide the New rows from the Open rows"
     );
-    assert_eq!(open_remote.top() - open_local.bottom(), remote.top() - local.bottom());
+    assert_eq!(
+        open_remote.top() - open_local.bottom(),
+        remote.top() - local.bottom()
+    );
 }
 
 #[gpui::test]
@@ -7301,6 +7345,42 @@ fn dragging_a_workspace_row_should_reorder_live_without_activating_it(cx: &mut T
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(2)
     );
+}
+
+#[gpui::test]
+fn escape_should_cancel_a_workspace_row_drag_and_restore_its_place(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let third = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let release = third.center() + point(px(0.0), px(4.0));
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    for position in [first.center() + point(px(0.0), px(8.0)), release] {
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    let moved = workspace_order(&manager, cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let cancelled = (
+        workspace_order(&manager, cx),
+        cx.debug_bounds("drag-preview").is_some(),
+    );
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        (moved, cancelled, workspace_order(&manager, cx)),
+        (vec![2, 3, 1], (vec![1, 2, 3], false), vec![1, 2, 3])
+    );
+    let restored = cx
+        .debug_bounds("workspace-row-1-inactive")
+        .expect("the cancelled Workspace must render in its original place");
+    assert_eq!(restored.origin, first.origin);
 }
 
 #[gpui::test]
