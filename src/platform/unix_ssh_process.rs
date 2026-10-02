@@ -362,24 +362,24 @@ mod tests {
                 ProcessSignal::Terminate => "term",
                 ProcessSignal::Kill => "kill",
             };
-            let pid_file = PathBuf::from(format!(
-                "/tmp/spaceterm-process-{sequence}-{}.pid",
+            let pid_file = std::env::temp_dir().join(format!(
+                "spaceterm-process-{sequence}-{}.pid",
                 std::process::id()
             ));
             let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
             let adapter = UnixSshProcessAdapter;
             let mut spawned = adapter.spawn(shell_request(&script)).unwrap();
+            let mut descendant = None;
             for _ in 0..100 {
-                if pid_file.exists() {
+                descendant = fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
+                if descendant.is_some() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let descendant = fs::read_to_string(&pid_file)
-                .unwrap()
-                .trim()
-                .parse::<libc::pid_t>()
-                .unwrap();
+            let descendant = descendant.expect("the child must finish publishing its process ID");
             let leader = spawned.process_mut().process_group;
 
             adapter.signal(spawned.process_mut(), signal).unwrap();

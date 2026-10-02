@@ -83,6 +83,12 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     /// Observe one live process. Returns `None` for a missing, exited, or unstable process.
     fn observe_process(&self, process: i32) -> Option<ProcessObservation>;
 
+    /// Capture the identity of a child this owner just spawned and has not reaped. A child may
+    /// already have exited before the parent runs again, while its process identity is retained.
+    fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
+        self.observe_process(process)
+    }
+
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
@@ -811,7 +817,7 @@ fn spawn_command_in_pty(
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::MissingProcessGroup);
     };
-    let Some(observation) = host.observe_process(process_group) else {
+    let Some(observation) = host.observe_spawned_child(process_group) else {
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::InspectSession(io::Error::other(
             "the child process identity was unavailable",
@@ -1155,24 +1161,31 @@ mod tests {
     }
 
     fn read_controlled_report(pty: &mut SpawnedPty) -> HashMap<String, String> {
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut output = String::new();
+        let report = loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "controlled PTY report was missing from: {output}"
+            );
+            output.push_str(&line);
+            if line.starts_with("SPACETERM_PTY_REPORT ") {
+                break line;
+            }
+        };
+        // The slave echoes input. Acknowledge only after the complete report, or the echoed
+        // acknowledgment can interleave with a field while the child is still writing it.
         pty.write_all(CONTROLLED_CHILD_ACK.as_bytes()).unwrap();
         pty.flush().unwrap();
-        let mut output = String::new();
-        pty.take_reader()
-            .unwrap()
-            .read_to_string(&mut output)
-            .unwrap();
+        reader.read_to_string(&mut output).unwrap();
         let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
         assert!(
             status.status.success(),
             "controlled PTY child failed ({}): {output}",
             status.status,
         );
-        let report = output
-            .lines()
-            .find(|line| line.starts_with("SPACETERM_PTY_REPORT "))
-            .unwrap_or_else(|| panic!("controlled PTY report was missing from: {output}"));
-
         report
             .split_whitespace()
             .skip(1)

@@ -11,11 +11,12 @@ pub(super) struct LinuxPtyHost;
 
 impl UnixPtyHost for LinuxPtyHost {
     fn observe_process(&self, process: i32) -> Option<ProcessObservation> {
-        if process < 1 {
-            return None;
-        }
-        let stat = std::fs::read(format!("/proc/{process}/stat")).ok()?;
-        parse_process_stat(process, &stat)
+        let stat = read_process_stat(process)?;
+        (!stat.exited).then_some(stat.observation)
+    }
+
+    fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
+        read_process_stat(process).map(|stat| stat.observation)
     }
 
     fn process_ids(&self) -> io::Result<Vec<i32>> {
@@ -38,15 +39,28 @@ impl UnixPtyHost for LinuxPtyHost {
     }
 }
 
+struct ProcessStat {
+    observation: ProcessObservation,
+    exited: bool,
+}
+
+fn read_process_stat(process: i32) -> Option<ProcessStat> {
+    if process < 1 {
+        return None;
+    }
+    let stat = std::fs::read(format!("/proc/{process}/stat")).ok()?;
+    parse_process_stat(process, &stat)
+}
+
 /// Parse `/proc/<pid>/stat`. The command name may contain spaces and parentheses, so fields are
 /// read after its final closing parenthesis. One read is atomic for the process record.
-fn parse_process_stat(process: i32, stat: &[u8]) -> Option<ProcessObservation> {
+fn parse_process_stat(process: i32, stat: &[u8]) -> Option<ProcessStat> {
     let name_end = stat.iter().rposition(|byte| *byte == b')')?;
     let fields = std::str::from_utf8(&stat[name_end + 1..]).ok()?;
     let fields = fields.split_ascii_whitespace().collect::<Vec<_>>();
     // Fields after the command name start at `state` (field 3 in proc_pid_stat(5)).
     let state = *fields.first()?;
-    if matches!(state, "Z" | "X" | "x") {
+    if matches!(state, "X" | "x") {
         return None;
     }
     let process_group = fields.get(2)?.parse::<i32>().ok()?;
@@ -55,16 +69,19 @@ fn parse_process_stat(process: i32, stat: &[u8]) -> Option<ProcessObservation> {
     if session < 1 || process_group < 1 {
         return None;
     }
-    Some(ProcessObservation {
-        identity: ProcessIdentity {
-            process,
-            start: ProcessStart {
-                coarse: started_ticks,
-                fine: 0,
+    Some(ProcessStat {
+        observation: ProcessObservation {
+            identity: ProcessIdentity {
+                process,
+                start: ProcessStart {
+                    coarse: started_ticks,
+                    fine: 0,
+                },
             },
+            process_group,
+            session,
         },
-        process_group,
-        session,
+        exited: state == "Z",
     })
 }
 
@@ -81,8 +98,9 @@ mod tests {
 
     #[test]
     fn linux_stat_parser_reads_group_session_and_start_after_the_command_name() {
-        let observation =
-            parse_process_stat(4242, &stat("sh) (x y", "S", 4242, 4240, 991_234)).unwrap();
+        let parsed = parse_process_stat(4242, &stat("sh) (x y", "S", 4242, 4240, 991_234)).unwrap();
+        assert!(!parsed.exited);
+        let observation = parsed.observation;
 
         assert_eq!(observation.process_group, 4242);
         assert_eq!(observation.session, 4240);
@@ -99,12 +117,47 @@ mod tests {
     }
 
     #[test]
-    fn linux_stat_parser_rejects_exited_and_sessionless_processes() {
-        assert_eq!(parse_process_stat(1, &stat("zsh", "Z", 1, 1, 1)), None);
-        assert_eq!(parse_process_stat(1, &stat("zsh", "X", 1, 1, 1)), None);
-        assert_eq!(parse_process_stat(1, &stat("kthreadd", "S", 0, 0, 1)), None);
-        assert_eq!(parse_process_stat(1, b"1 (truncated"), None);
-        assert_eq!(parse_process_stat(1, b"1 (short) S 1 2"), None);
+    fn linux_stat_parser_retains_unreaped_child_identity_and_rejects_dead_records() {
+        let exited = parse_process_stat(1, &stat("zsh", "Z", 1, 1, 7)).unwrap();
+        assert!(exited.exited);
+        assert_eq!(exited.observation.identity.start.coarse, 7);
+        assert_eq!(exited.observation.session, 1);
+        assert!(parse_process_stat(1, &stat("zsh", "X", 1, 1, 1)).is_none());
+        assert!(parse_process_stat(1, &stat("kthreadd", "S", 0, 0, 1)).is_none());
+        assert!(parse_process_stat(1, b"1 (truncated").is_none());
+        assert!(parse_process_stat(1, b"1 (short) S 1 2").is_none());
+    }
+
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn linux_host_retains_an_exited_owned_child_without_reporting_it_alive() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let process = i32::try_from(child.id()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let exited = loop {
+            if read_process_stat(process).is_some_and(|stat| stat.exited) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let host = LinuxPtyHost;
+        let identity = host.observe_spawned_child(process);
+        let live = host.observe_process(process);
+        child.wait().unwrap();
+
+        assert!(
+            exited,
+            "the child must exit before the parent captures its identity"
+        );
+        assert_eq!(identity.unwrap().identity.process, process);
+        assert_eq!(live, None);
+        assert_eq!(host.observe_spawned_child(process), None);
     }
 
     #[test]
