@@ -1,7 +1,8 @@
 //! Permission Setup: one guided pass through System Settings that adds SpaceTerm to the privacy
 //! lists computer-use tools need.
 //!
-//! A setup starts only when a person chooses Set Up in Settings. It verifies the permission,
+//! A setup starts only when someone asks for it: a person choosing Set Up in Settings, or
+//! accepting a Permission Request from a tool in a Terminal Session. It verifies the permission,
 //! clears a stale entry, opens System Settings at the permission's list, and docks the Setup Guide
 //! beside System Settings' window while that window is in front. The guide offers SpaceTerm itself
 //! to drag into the list and reports the grant as soon as a tool started now would receive it.
@@ -35,7 +36,7 @@ const AUTHORIZATION_INTERVALS: u32 = 30;
 /// How long System Settings may take to come forward before the setup reports it did not.
 const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The installed Permission Setup that Settings presents.
+/// The installed Permission Setup, shared by Settings and every Pane.
 struct InstalledPermissionSetup(Entity<PermissionSetup>);
 
 impl Global for InstalledPermissionSetup {}
@@ -179,6 +180,20 @@ impl PermissionSetup {
             .map_or(PermissionSetupStatus::Idle, |(_, failure)| {
                 PermissionSetupStatus::Failed(*failure)
             })
+    }
+
+    /// The permissions among `permissions` that a tool started now would not receive, in order.
+    pub(crate) fn ungranted(
+        &self,
+        permissions: &[ComputerUsePermission],
+    ) -> Vec<ComputerUsePermission> {
+        permissions
+            .iter()
+            .copied()
+            .filter(|permission| {
+                self.access.authorization(*permission) != Ok(ComputerUseAuthorization::Granted)
+            })
+            .collect()
     }
 
     /// The permission being set up now and its step.

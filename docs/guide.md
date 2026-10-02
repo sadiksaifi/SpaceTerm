@@ -51,6 +51,18 @@ own. To grant them, choose Set Up next to a permission in Settings > Privacy. Sp
 privacy list in System Settings and docks a guide beside it. Drag SpaceTerm from the guide into the
 list. The guide reports the grant, and tools started afterward receive it.
 
+A tool can ask SpaceTerm to offer this setup by writing a Permission Request to the terminal:
+
+```sh
+printf '\033]7701;permissions=screen-recording,accessibility\033\\'
+```
+
+The list names `screen-recording`, `accessibility`, or both. SpaceTerm ignores unknown names, shows
+a notice in the Pane only for permissions it lacks, and starts the setup only when you choose
+Set Up. Not Now silences later requests for those permissions in that Pane. Remote Panes ignore
+Permission Requests. Inside tmux, wrap the request in tmux passthrough and enable
+`set -g allow-passthrough on`.
+
 ## Built with
 
 Rust powers the application, GPUI provides the native GPU-rendered interface, and `libghostty-vt`

@@ -40,6 +40,7 @@ use crate::domain::{PaneId, TabId, WorkspaceId};
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
+use crate::platform::computer_use_access::ComputerUsePermission;
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
 #[cfg(test)]
 use crate::terminal::UnhandledKeyEvent;
@@ -579,6 +580,10 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
+    /// The ungranted permissions a Permission Request asked for, until the person answers.
+    permission_request: Vec<ComputerUsePermission>,
+    /// Permissions the person chose Not Now for; later requests for them stay silent.
+    declined_permissions: Vec<ComputerUsePermission>,
     fullscreen_escape: FullscreenEscapeSequence,
     hovered_link: Option<HoveredTerminalLink>,
     pressed_link: Option<(
@@ -853,6 +858,8 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
+            permission_request: Vec::new(),
+            declined_permissions: Vec::new(),
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
@@ -2115,12 +2122,16 @@ impl TerminalPane {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
             }
+            SessionEvent::PermissionRequested(request) => {
+                return self.offer_permission_setup(request.permissions(), cx);
+            }
             SessionEvent::Exited(status) => {
                 if self.suspend_if_remote_channel_unavailable(cx) {
                     return false;
                 }
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.permission_request.clear();
                 if matches!(self.pane_state, PaneTerminalState::Exited(_))
                     || self
                         .pane_state
@@ -2145,6 +2156,7 @@ impl TerminalPane {
                 let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.permission_request.clear();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
@@ -3265,6 +3277,48 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Offers a Permission Setup for the ungranted permissions a program asked for.
+    ///
+    /// Only a Local Pane offers one: a Remote Pane's programs run on another computer and carry no
+    /// authority over this one. The offer names no program, because terminal output cannot prove
+    /// which program wrote it, and it starts nothing until the person chooses Set Up.
+    fn offer_permission_setup(
+        &mut self,
+        permissions: &[ComputerUsePermission],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.terminal_session.session_factory.is_remote() {
+            return false;
+        }
+        let Some(setup) = super::permission_setup::installed(cx) else {
+            return false;
+        };
+        let mut offered = false;
+        for permission in setup.read(cx).ungranted(permissions) {
+            if !self.declined_permissions.contains(&permission)
+                && !self.permission_request.contains(&permission)
+            {
+                self.permission_request.push(permission);
+                offered = true;
+            }
+        }
+        offered
+    }
+
+    fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
+        let permissions = std::mem::take(&mut self.permission_request);
+        if let Some(setup) = super::permission_setup::installed(cx) {
+            setup.update(cx, |setup, cx| setup.start(&permissions, cx));
+        }
+        cx.notify();
+    }
+
+    fn decline_permission_request(&mut self, cx: &mut Context<Self>) {
+        self.declined_permissions
+            .append(&mut self.permission_request);
+        cx.notify();
+    }
+
     fn confirm_unsafe_paste(
         &mut self,
         _: &ConfirmUnsafePaste,
@@ -3926,6 +3980,11 @@ impl Render for TerminalPane {
         let floating_colors = &appearance.floating_colors;
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
+        // A Permission Request waits behind a paste confirmation and any Terminal Failure.
+        let permission_request = (!self.permission_request.is_empty()
+            && paste_confirmation.is_none()
+            && status.is_none())
+        .then(|| self.permission_request.clone());
         // A failed Terminal Session reads as an error notice.
         let status_intent = match self.pane_state {
             PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
@@ -4135,7 +4194,9 @@ impl Render for TerminalPane {
                 )
             })
             .when_some(
-                link_preview_text.filter(|_| paste_confirmation.is_none() && status.is_none()),
+                link_preview_text.filter(|_| {
+                    paste_confirmation.is_none() && status.is_none() && permission_request.is_none()
+                }),
                 |root, text| {
                     root.child(
                         readout_shell.mount(
@@ -4157,6 +4218,14 @@ impl Render for TerminalPane {
             .when_some(paste_confirmation, |root, confirmation| {
                 root.child(render_paste_confirmation(
                     confirmation,
+                    cx.entity().downgrade(),
+                    appearance.clone(),
+                    notice_shell,
+                ))
+            })
+            .when_some(permission_request, |root, permissions| {
+                root.child(render_permission_request(
+                    permissions,
                     cx.entity().downgrade(),
                     appearance.clone(),
                     notice_shell,
@@ -4395,6 +4464,90 @@ fn render_paste_confirmation(
                                         });
                                     }),
                             ),
+                    ),
+            ),
+    )
+}
+
+/// Presents a Permission Request on the shared Notice surface.
+///
+/// The notice never takes keyboard focus, so a program cannot answer it by writing to the terminal.
+fn render_permission_request(
+    permissions: Vec<ComputerUsePermission>,
+    pane: gpui::WeakEntity<TerminalPane>,
+    appearance: Arc<super::appearance::ChromeAppearance>,
+    shell: FloatingShell,
+) -> impl IntoElement {
+    let floating_colors = &appearance.floating_colors;
+    let decline_pane = pane.clone();
+    let copies: Vec<_> = permissions
+        .iter()
+        .map(|permission| super::permission_setup::permission_copy(*permission))
+        .collect();
+    let names = copies
+        .iter()
+        .map(|copy| copy.name)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let purposes = copies
+        .iter()
+        .map(|copy| copy.purpose)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let application = crate::application_identity::ApplicationIdentity::current().display_name();
+
+    shell.mount(
+        div()
+            .debug_selector(|| "permission-request".to_owned())
+            .chrome_text(appearance.typography.style(TextRole::Body))
+            .absolute()
+            .left(appearance.spacing(16.0))
+            .right(appearance.spacing(16.0))
+            .bottom(appearance.spacing(16.0))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(appearance.spacing(10.0))
+            .px(appearance.spacing(12.0))
+            .py(appearance.spacing(10.0))
+            .text_color(gpui_color(floating_colors.text))
+            .occlude()
+            .child(
+                div()
+                    .debug_selector(|| "permission-request-message".to_owned())
+                    .w_full()
+                    .whitespace_normal()
+                    .child(format!(
+                        "A program asked for {names} access, which lets programs you run in \
+                         {application} {purposes}."
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .gap(appearance.spacing(8.0))
+                    .child(
+                        Button::new("permission-request-not-now", "Not Now")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ButtonSize::Small)
+                            .role(ButtonRole::Cancel)
+                            .debug_selector("permission-request-not-now")
+                            .on_activate(move |_, _, cx| {
+                                let _ = decline_pane
+                                    .update(cx, |pane, cx| pane.decline_permission_request(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("permission-request-set-up", "Set Up…")
+                            .variant(ButtonVariant::Primary)
+                            .size(ButtonSize::Small)
+                            .debug_selector("permission-request-set-up")
+                            .on_activate(move |_, _, cx| {
+                                let _ = pane
+                                    .update(cx, |pane, cx| pane.set_up_requested_permissions(cx));
+                            }),
                     ),
             ),
     )

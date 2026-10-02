@@ -234,9 +234,14 @@ Bounded recognition of terminal clipboard escape sequences before Terminal Emula
 Session-scoped permission to consult the system text clipboard while the originating Pane retains Terminal Input Focus.
 Copying is enabled by default; reading requires the Privacy Setting.
 
+**Permission Request**:
+A Local Pane's offer to start a Permission Setup after a program in it writes `OSC 7701`. It names
+the permissions SpaceTerm lacks and starts nothing until the person chooses Set Up. A Remote Pane
+ignores Permission Requests.
+
 **Permission Setup**:
 One guided pass through System Settings that adds SpaceTerm to the computer-use privacy lists,
-started only from a Settings Row. Computer-use permissions stay off until
+started only from a Settings Row or a Permission Request. Computer-use permissions stay off until
 then; onboarding never asks for them.
 
 **Setup Guide**:

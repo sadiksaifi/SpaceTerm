@@ -23,6 +23,7 @@ pub(crate) mod native_services;
 pub(crate) mod title;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
+pub(crate) mod permission_request;
 pub(crate) use native_services::selection;
 mod pointer_input;
 mod session;

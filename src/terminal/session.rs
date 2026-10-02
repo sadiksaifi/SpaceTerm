@@ -54,6 +54,7 @@ use crate::terminal::metadata::{
     LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
+use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
     PreparedPaste,
@@ -87,6 +88,8 @@ pub(crate) enum SessionEvent {
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
+    /// A program asked for a Permission Setup.
+    PermissionRequested(PermissionRequest),
     Exited(SessionExit),
     Failed(SessionFailure),
 }
@@ -887,6 +890,7 @@ struct TerminalWorker {
     held_keys: HeldKeys,
     schedules: WorkerSchedules,
     osc52_filter: Osc52Filter<Option<u64>>,
+    permission_requests: PermissionRequestFilter,
     clipboard: WorkerClipboard,
 }
 
@@ -1088,6 +1092,7 @@ impl TerminalWorker {
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), schedule_input),
             osc52_filter: Osc52Filter::default(),
+            permission_requests: PermissionRequestFilter::default(),
             clipboard,
         };
 
@@ -1826,7 +1831,15 @@ impl TerminalWorker {
     }
 
     fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
-        self.emulator.feed(bytes);
+        let mut requests = Vec::new();
+        let emulator = &mut self.emulator;
+        self.permission_requests
+            .feed(bytes, |bytes| emulator.feed(bytes), |request| requests.push(request));
+        for request in requests {
+            if !self.send_terminal_event(SessionEvent::PermissionRequested(request)) {
+                return false;
+            }
+        }
         if let Some(error) = self.emulator.graphics_failure() {
             self.send_runtime_failure(format!(
                 "failed to update terminal graphics storage: {error}"

@@ -7292,3 +7292,166 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
     assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
     assert_eq!(glyph(StatusIntent::Error, cx), ["CircleAlert"]);
 }
+
+mod permission_requests {
+    use super::*;
+    use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
+    use crate::platform::computer_use_access::{ComputerUseAuthorization, ComputerUsePermission};
+    use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
+    use crate::terminal::permission_request::PermissionRequest;
+    use ComputerUsePermission::{Accessibility, ScreenRecording};
+
+    fn install_setup(
+        screen_recording: ComputerUseAuthorization,
+        accessibility: ComputerUseAuthorization,
+        cx: &mut VisualTestContext,
+    ) -> Rc<ScriptedComputerUseAccess> {
+        let access = ScriptedComputerUseAccess::new(Ok(screen_recording), Ok(accessibility));
+        let host = ScriptedSetupGuideHost::new();
+        cx.update(|_, cx| {
+            crate::ui::permission_setup::install(access.clone(), host, cx);
+        });
+        access
+    }
+
+    fn request(
+        pane: &Entity<TerminalPane>,
+        permissions: &[ComputerUsePermission],
+        cx: &mut VisualTestContext,
+    ) {
+        pane.update(cx, |pane, cx| {
+            if pane.handle_event(
+                SessionEvent::PermissionRequested(PermissionRequest::for_test(permissions)),
+                cx,
+            ) {
+                cx.notify();
+            }
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn set_up_starts_a_permission_setup_for_the_ungranted_permissions(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert!(cx.debug_bounds("permission-request").is_some());
+        assert!(
+            cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)),
+            "the notice must leave keyboard focus with the terminal"
+        );
+        assert!(access.prepared.borrow().is_empty(), "a request starts nothing by itself");
+
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+        let setup = cx.update(|_, cx| crate::ui::permission_setup::installed(cx).unwrap());
+        assert_eq!(
+            setup.read_with(cx, |setup, _| setup.status(Accessibility)),
+            crate::ui::permission_setup::PermissionSetupStatus::Running
+        );
+    }
+
+    #[gpui::test]
+    fn granted_permissions_are_not_offered(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility]
+        );
+    }
+
+    #[gpui::test]
+    fn not_now_silences_later_requests_for_the_declined_permissions(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility]
+        );
+        assert!(access.prepared.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn repeated_requests_merge_into_one_notice(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[Accessibility], cx);
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility, ScreenRecording]
+        );
+        assert!(cx.debug_bounds("permission-request-message").is_some());
+    }
+
+    #[gpui::test]
+    fn a_remote_pane_ignores_permission_requests(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_remote_terminal_pane(cx);
+        install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert!(pane.read_with(cx, |pane, _| pane.permission_request.is_empty()));
+    }
+
+    #[gpui::test]
+    fn a_session_exit_withdraws_the_notice(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Exited(SessionExit::Success), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_none());
+    }
+}
