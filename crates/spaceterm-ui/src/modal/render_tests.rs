@@ -5683,6 +5683,37 @@ fn modal_scrim_blocks_underlay_pointer_click_through(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn alert_static_content_click_keeps_keyboard_focus(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = alert_window(cx);
+    cx.simulate_keystrokes("tab tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-cancel-keyboard-focus")
+            .is_some(),
+        "Tab traversal should reach the non-first Cancel action"
+    );
+
+    for selector in ["modal-header-title", "modal-alert-message"] {
+        let target = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"));
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        let cancel_focused = cx
+            .debug_bounds("modal-action-cancel-keyboard-focus")
+            .is_some();
+        let suppression_focused = cx
+            .debug_bounds("modal-alert-suppression-keyboard-focus")
+            .is_some();
+        assert!(
+            cancel_focused && !suppression_focused,
+            "click on {selector} moved keyboard focus: cancel_focused={cancel_focused}, suppression_focused={suppression_focused}"
+        );
+    }
+}
+
+#[gpui::test]
 fn modal_scrim_blocks_underlay_move_wheel_and_keyboard_input(cx: &mut TestAppContext) {
     let (_, underlay, _, cx) = alert_window(cx);
     let underlay_bounds = cx
@@ -6870,6 +6901,36 @@ fn right_to_left_dialog_tab_order_follows_logical_policy_not_button_geometry(
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
+    );
+}
+
+#[gpui::test]
+fn dialog_static_content_click_keeps_body_keyboard_focus(cx: &mut TestAppContext) {
+    let (root, cx) = dialog_focus_window(cx, TextDirection::LeftToRight);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        observe_dialog_focus_target(&root, cx),
+        DialogFocusTarget::Second
+    );
+
+    let title = cx
+        .debug_bounds("modal-header-title")
+        .expect("Dialog title should render");
+    cx.simulate_click(title.center(), Modifiers::default());
+    cx.run_until_parked();
+    let after_static_click = observe_dialog_focus_target(&root, cx);
+
+    let first = cx
+        .debug_bounds("First field")
+        .expect("first field should render");
+    cx.simulate_click(first.center(), Modifiers::default());
+    cx.run_until_parked();
+    let after_control_click = observe_dialog_focus_target(&root, cx);
+
+    assert_eq!(
+        (after_static_click, after_control_click),
+        (DialogFocusTarget::Second, DialogFocusTarget::First)
     );
 }
 
