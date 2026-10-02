@@ -8,7 +8,10 @@ pub enum TerminalConvention {
 
 /// The host desktop's division of keyboard chords between programs in the terminal and
 /// application Shortcuts. Composition selects it with the rest of the Desktop Profile.
-#[allow(dead_code, reason = "each desktop composition constructs only its own conventions")]
+#[allow(
+    dead_code,
+    reason = "each desktop composition constructs only its own conventions"
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalConventions {
     /// Command owns application Shortcuts; every Control and Option chord reaches the terminal.
@@ -50,8 +53,8 @@ impl TerminalConventions {
     }
 }
 
-/// Terminal input that every supported desktop reserves on every keyboard layout, so no
-/// settings document can assign it. Desktop-specific reservations wait for the Keymap Profile.
+/// Terminal input that every supported desktop reserves on every keyboard layout. Retained
+/// settings can contain it, but the Keymap Profile prevents installing it as an application chord.
 pub(super) fn universal_reservation(shortcut: &super::Shortcut) -> Option<TerminalConvention> {
     let modifiers = shortcut.modifiers();
     let key = shortcut.key();
@@ -117,7 +120,7 @@ fn control_shift_reservation(
         TerminalConvention::TextInput
     } else if !modifiers.control {
         TerminalConvention::Meta
-    } else if is_navigation_key(key) {
+    } else if key.chars().count() > 1 && key != "space" {
         TerminalConvention::ControlNavigation
     } else {
         TerminalConvention::ControlCharacter
@@ -149,7 +152,7 @@ mod tests {
 
     fn us() -> KeyboardLayout {
         crate::platform::keyboard_layout::testing::us()
-            .snapshot()
+            .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
             .unwrap()
     }
 
@@ -229,7 +232,10 @@ mod tests {
                         "{source}"
                     );
                     assert_eq!(
-                        reservation(TerminalConventions::CommandShortcuts, &format!("cmd-{source}")),
+                        reservation(
+                            TerminalConventions::CommandShortcuts,
+                            &format!("cmd-{source}")
+                        ),
                         None,
                         "{source}"
                     );
@@ -241,8 +247,18 @@ mod tests {
     #[test]
     fn universal_reservations_are_reserved_by_every_desktop() {
         for source in [
-            "k", "shift-k", "1", "!", "alt-b", "alt-shift-f", "ctrl-c", "ctrl-alt-c", "ctrl-space",
-            "ctrl-left", "ctrl-f5", "ctrl-alt-backspace",
+            "k",
+            "shift-k",
+            "1",
+            "!",
+            "alt-b",
+            "alt-shift-f",
+            "ctrl-c",
+            "ctrl-alt-c",
+            "ctrl-space",
+            "ctrl-left",
+            "ctrl-f5",
+            "ctrl-alt-backspace",
         ] {
             let shortcut = Shortcut::parse(source).unwrap();
             assert!(universal_reservation(&shortcut).is_some(), "{source}");
@@ -253,8 +269,20 @@ mod tests {
                 assert!(reservation(conventions, source).is_some(), "{source}");
             }
         }
-        for source in ["cmd-t", "ctrl-shift-t", "ctrl-shift-c", "ctrl-@", "ctrl-!", "ctrl-1", "ctrl-/"] {
-            assert_eq!(universal_reservation(&Shortcut::parse(source).unwrap()), None, "{source}");
+        for source in [
+            "cmd-t",
+            "ctrl-shift-t",
+            "ctrl-shift-c",
+            "ctrl-@",
+            "ctrl-!",
+            "ctrl-1",
+            "ctrl-/",
+        ] {
+            assert_eq!(
+                universal_reservation(&Shortcut::parse(source).unwrap()),
+                None,
+                "{source}"
+            );
         }
     }
 
@@ -305,7 +333,10 @@ mod tests {
             ("ctrl-1", TerminalConvention::ControlCharacter),
             ("ctrl-,", TerminalConvention::ControlCharacter),
             ("ctrl-alt-c", TerminalConvention::ControlCharacter),
-            ("ctrl-tab", TerminalConvention::ControlCharacter),
+            ("ctrl-tab", TerminalConvention::ControlNavigation),
+            ("ctrl-enter", TerminalConvention::ControlNavigation),
+            ("ctrl-insert", TerminalConvention::ControlNavigation),
+            ("ctrl-space", TerminalConvention::ControlCharacter),
             ("ctrl-left", TerminalConvention::ControlNavigation),
             ("ctrl-f5", TerminalConvention::ControlNavigation),
         ] {
@@ -318,6 +349,18 @@ mod tests {
         assert_eq!(
             reservation(TerminalConventions::ControlShiftShortcuts, "cmd-t"),
             Some(Reservation::System(SystemReservation::DesktopShortcut))
+        );
+    }
+
+    #[test]
+    fn a_symbol_available_without_shift_stays_terminal_reserved() {
+        let mut layout = KeyboardLayout::default();
+        layout.insert(false, ",", ";");
+        layout.insert(false, ";", ".");
+        assert_eq!(
+            TerminalConventions::ControlShiftShortcuts
+                .reservation(&Shortcut::parse("ctrl-;").unwrap(), &layout),
+            Some(Reservation::Terminal(TerminalConvention::ControlCharacter)),
         );
     }
 }

@@ -59,10 +59,8 @@ fn capture_startup_dependencies(
 
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
+    layout: Rc<dyn super::keyboard_layout::KeyboardLayoutAdapter>,
 ) -> Result<DesktopProfile, DesktopProfileError> {
-    let layout = Rc::new(super::linux_keyboard_layout::LinuxKeyboardLayout);
-    let snapshot = super::keyboard_layout::KeyboardLayoutAdapter::snapshot(layout.as_ref())
-        .map_err(|_| DesktopProfileError::InvalidCombination)?;
     Ok(DesktopProfile::new(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         ControlKeybindingProfiles::new(
@@ -80,9 +78,7 @@ fn desktop_profile(
                 operating_system_name: "Linux",
                 system_directory_selection: "Choose Directory…",
             },
-            Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter::new(
-                snapshot,
-            )),
+            Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
         ),
         locale,
@@ -137,9 +133,10 @@ fn compose(
         super::unix_askpass_transport::AskPassWindowFactory,
     ));
     HostComposition::new(HostCompositionParts {
-        profile: desktop_profile(Rc::new(super::linux_locale::LinuxLocale::capture(|key| {
-            std::env::var(key).ok()
-        })))?,
+        profile: desktop_profile(
+            Rc::new(super::linux_locale::LinuxLocale::capture(|key| std::env::var(key).ok())),
+            Rc::new(super::linux_keyboard_layout::LinuxKeyboardLayout),
+        )?,
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
@@ -195,9 +192,12 @@ mod tests {
 
         cx.update(|cx| {
             crate::ui::initialize_controls(cx).unwrap();
-            desktop_profile(Rc::new(crate::platform::locale::FixedLocaleDirection(
-                spaceterm_ui::TextDirection::LeftToRight,
-            )))
+            desktop_profile(
+                Rc::new(crate::platform::locale::FixedLocaleDirection(
+                    spaceterm_ui::TextDirection::LeftToRight,
+                )),
+                crate::platform::keyboard_layout::testing::us(),
+            )
             .unwrap()
             .install(cx);
             gpui::BorrowAppContext::update_global::<DesktopPresentation, _>(
@@ -223,6 +223,7 @@ mod tests {
                     presentation.shortcut(&crate::ui::settings_window::OpenSettings),
                     "Ctrl+Shift+,",
                 ),
+                (presentation.shortcut(&crate::app::ToggleFullScreen), "F11"),
             ] {
                 assert_eq!(shortcut.as_deref(), Some(label));
             }
@@ -233,5 +234,63 @@ mod tests {
                 "Choose Directory…"
             );
         });
+    }
+
+    #[gpui::test]
+    fn linux_complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
+        let actual = cx.update(|cx| {
+            crate::ui::initialize_controls(cx).unwrap();
+            desktop_profile(
+                Rc::new(crate::platform::locale::FixedLocaleDirection(
+                    spaceterm_ui::TextDirection::LeftToRight,
+                )),
+                crate::platform::keyboard_layout::testing::us(),
+            )
+            .unwrap()
+            .install(cx);
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let customizable = keymap
+                .bindings()
+                .enumerate()
+                .filter_map(|(index, binding)| {
+                    (binding.meta() == Some(crate::keybindings::CUSTOMIZABLE_BINDINGS))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(customizable.len(), 51);
+            assert!(customizable.windows(2).all(|pair| pair[1] == pair[0] + 1));
+            keymap
+                .bindings()
+                .map(|binding| {
+                    let keys = binding
+                        .keystrokes()
+                        .iter()
+                        .map(|key| key.unparse())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "{}\t{:?}\t{}",
+                        keys,
+                        binding.predicate(),
+                        binding.action().name()
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let expected = include_str!("../keybindings_baseline_linux.txt")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        #[cfg(feature = "appearance-exerciser")]
+        let expected = {
+            let mut expected = expected;
+            expected.extend([
+                "ctrl-alt-shift-a\tNone\tspaceterm::ShowAppearanceExerciser".to_owned(),
+                "ctrl-alt-shift-c\tNone\tspaceterm::ToggleAppearancePreview".to_owned(),
+            ]);
+            expected
+        };
+        assert_eq!(actual, expected);
     }
 }

@@ -9,7 +9,10 @@ use super::keyboard_layout::{KeyboardLayout, KeyboardLayoutAdapter, KeyboardLayo
 pub(crate) struct MacosKeyboardLayout;
 
 impl KeyboardLayoutAdapter for MacosKeyboardLayout {
-    fn snapshot(&self) -> Result<KeyboardLayout, KeyboardLayoutUnavailable> {
+    fn snapshot(
+        &self,
+        _: &dyn gpui::PlatformKeyboardLayout,
+    ) -> Result<KeyboardLayout, KeyboardLayoutUnavailable> {
         // TIS returns the backing keyboard layout even when an input method is selected.
         let source = Source(
             NonNull::new(unsafe { TISCopyCurrentKeyboardLayoutInputSource() })
@@ -208,11 +211,14 @@ pub(crate) mod tests {
             );
         }
         let german = layout("com.apple.keylayout.German");
-        let profile = crate::desktop_profile::default_keymap::profile(
+        let mut profile = crate::desktop_profile::default_keymap::profile(
             Rc::new(german),
             super::super::macos_reserved_shortcuts::shortcuts(),
         )
         .unwrap();
+        profile
+            .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+            .unwrap();
         for source in ["shift-cmd-3", "cmd-§"] {
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
@@ -247,11 +253,14 @@ pub(crate) mod tests {
                 gpui::Modifiers::control(),
             ),
         ] {
-            let profile = crate::desktop_profile::default_keymap::profile(
+            let mut profile = crate::desktop_profile::default_keymap::profile(
                 Rc::new(layout(id)),
                 super::super::macos_reserved_shortcuts::shortcuts(),
             )
             .unwrap();
+            profile
+                .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+                .unwrap();
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
             let native = gpui::Keystroke {
