@@ -560,7 +560,14 @@ unsafe extern "C" {
     pub fn ghostty_accessibility_state_free(state: *mut AccessibilityState);
 }
 unsafe extern "C" {
-    #[doc = " Observe terminal dirty state and extract a bounded semantic delta.\n\n Call this before Ghostty render-state update clears page/row dirty bits.\n max_cells and max_rows are hard-clamped to 16384 and 256 respectively.\n Compressed pages are decoded into temporary storage and remain compressed.\n Topology callbacks are chunked within max_rows. topology_epoch identifies\n one replacement topology and topology_complete marks its final chunk; row\n extraction begins only on a later call after that topology is complete.\n Callback pointers are borrowed only for the duration of this call."]
+    #[doc = " Retain dirty row identities and topology before visual rendering.\n\n Call this before Ghostty render-state update clears page/row dirty bits\n when semantic extraction is deferred. It does not extract text, invoke\n callbacks, or decode compressed pages. Later state_update calls retain\n their bounded topology and row extraction behavior."]
+    pub fn ghostty_accessibility_state_capture(
+        state: *mut AccessibilityState,
+        terminal: Terminal,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Observe terminal dirty state and extract a bounded semantic delta.\n\n Call this or state_capture before Ghostty render-state update clears\n page/row dirty bits. max_cells and max_rows are hard-clamped to 16384\n and 256 respectively.\n Compressed pages are decoded into temporary storage and remain compressed.\n Topology callbacks are chunked within max_rows. topology_epoch identifies\n one replacement topology and topology_complete marks its final chunk; row\n extraction begins only on a later call after that topology is complete.\n Callback pointers are borrowed only for the duration of this call."]
     pub fn ghostty_accessibility_state_update(
         state: *mut AccessibilityState,
         terminal: Terminal,

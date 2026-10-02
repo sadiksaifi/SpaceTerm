@@ -286,6 +286,7 @@ fn verify_required_source_exports(ghostty_dir: &Path) {
             &[
                 "ghostty_accessibility_state_new",
                 "ghostty_accessibility_state_free",
+                "ghostty_accessibility_state_capture",
                 "ghostty_accessibility_state_update",
                 "ghostty_accessibility_state_set_selection",
             ],
@@ -316,6 +317,7 @@ fn verify_required_library_exports(
         "ghostty_grid_ref_hyperlink_userdata",
         "ghostty_accessibility_state_new",
         "ghostty_accessibility_state_free",
+        "ghostty_accessibility_state_capture",
         "ghostty_accessibility_state_update",
         "ghostty_accessibility_state_set_selection",
         "ghostty_terminal_clear_screen",

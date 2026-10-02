@@ -13,7 +13,7 @@ diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibili
 new file mode 100644
 --- /dev/null
 +++ b/include/ghostty/vt/accessibility.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,146 @@
 +#ifndef GHOSTTY_VT_ACCESSIBILITY_H
 +#define GHOSTTY_VT_ACCESSIBILITY_H
 +
@@ -112,10 +112,23 @@ new file mode 100644
 +    GhosttyAccessibilityState* state);
 +
 +/**
++ * Retain dirty row identities and topology before visual rendering.
++ *
++ * Call this before Ghostty render-state update clears page/row dirty bits
++ * when semantic extraction is deferred. It does not extract text, invoke
++ * callbacks, or decode compressed pages. Later state_update calls retain
++ * their bounded topology and row extraction behavior.
++ */
++GHOSTTY_API GhosttyResult ghostty_accessibility_state_capture(
++    GhosttyAccessibilityState* state,
++    GhosttyTerminal terminal);
++
++/**
 + * Observe terminal dirty state and extract a bounded semantic delta.
 + *
-+ * Call this before Ghostty render-state update clears page/row dirty bits.
-+ * max_cells and max_rows are hard-clamped to 16384 and 256 respectively.
++ * Call this or state_capture before Ghostty render-state update clears
++ * page/row dirty bits. max_cells and max_rows are hard-clamped to 16384
++ * and 256 respectively.
 + * Compressed pages are decoded into temporary storage and remain compressed.
 + * Topology callbacks are chunked within max_rows. topology_epoch identifies
 + * one replacement topology and topology_complete marks its final chunk; row
@@ -151,7 +164,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,690 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -393,26 +406,16 @@ new file mode 100644
 +    alloc.destroy(state);
 +}
 +
-+pub fn state_update(
++pub fn state_capture(
 +    state_: ?*State,
 +    terminal_: terminal_c.Terminal,
-+    options_: ?*const UpdateOptions,
-+    userdata: ?*anyopaque,
-+    topology_callback_: ?TopologyCallback,
-+    row_callback_: ?RowCallback,
-+    cell_callback_: ?CellCallback,
-+    out_snapshot_: ?*Snapshot,
 +) callconv(lib.calling_conv) Result {
 +    const state = state_ orelse return .invalid_value;
 +    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
-+    const options = options_ orelse return .invalid_value;
-+    const topology_callback = topology_callback_ orelse return .invalid_value;
-+    const row_callback = row_callback_ orelse return .invalid_value;
-+    const cell_callback = cell_callback_ orelse return .invalid_value;
-+    const out = out_snapshot_ orelse return .invalid_value;
-+    if (options.size < @sizeOf(UpdateOptions) or out.size < @sizeOf(Snapshot)) return .invalid_value;
-+    if (options.max_cells == 0 or options.max_rows == 0) return .invalid_value;
++    return capture(state, t);
++}
 +
++fn capture(state: *State, t: anytype) Result {
 +    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
 +    const screen_index = screenIndex(screen_tag);
 +    const screen_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
@@ -459,6 +462,35 @@ new file mode 100644
 +        ) catch return .out_of_memory;
 +    }
 +    observeDirtyRows(current, screen, state.alloc, screen_tag) catch return .out_of_memory;
++    return .success;
++}
++
++pub fn state_update(
++    state_: ?*State,
++    terminal_: terminal_c.Terminal,
++    options_: ?*const UpdateOptions,
++    userdata: ?*anyopaque,
++    topology_callback_: ?TopologyCallback,
++    row_callback_: ?RowCallback,
++    cell_callback_: ?CellCallback,
++    out_snapshot_: ?*Snapshot,
++) callconv(lib.calling_conv) Result {
++    const state = state_ orelse return .invalid_value;
++    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
++    const options = options_ orelse return .invalid_value;
++    const topology_callback = topology_callback_ orelse return .invalid_value;
++    const row_callback = row_callback_ orelse return .invalid_value;
++    const cell_callback = cell_callback_ orelse return .invalid_value;
++    const out = out_snapshot_ orelse return .invalid_value;
++    if (options.size < @sizeOf(UpdateOptions) or out.size < @sizeOf(Snapshot)) return .invalid_value;
++    if (options.max_cells == 0 or options.max_rows == 0) return .invalid_value;
++    const captured = capture(state, t);
++    if (captured != .success) return captured;
++
++    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
++    const screen_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
++    const screen = t.screens.active;
++    const current = &state.screens[screenIndex(screen_tag)];
 +
 +    state.revision +%= 1;
 +    const scrollbar = screen.pages.scrollbar();
@@ -826,12 +858,13 @@ new file mode 100644
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -252,6 +252,10 @@
+@@ -252,6 +252,11 @@
          @export(&c.sys_set, .{ .name = "ghostty_sys_set" });
          if (features.grid_introspection) {
              @export(&c.grid_ref_hyperlink_userdata, .{ .name = "ghostty_grid_ref_hyperlink_userdata" });
 +            @export(&c.accessibility_state_new, .{ .name = "ghostty_accessibility_state_new" });
 +            @export(&c.accessibility_state_free, .{ .name = "ghostty_accessibility_state_free" });
++            @export(&c.accessibility_state_capture, .{ .name = "ghostty_accessibility_state_capture" });
 +            @export(&c.accessibility_state_update, .{ .name = "ghostty_accessibility_state_update" });
 +            @export(&c.accessibility_state_set_selection, .{ .name = "ghostty_accessibility_state_set_selection" });
              @export(&c.cell_get, .{ .name = "ghostty_cell_get" });
@@ -840,13 +873,14 @@ diff --git a/src/lib_vt.zig b/src/lib_vt.zig
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
-@@ -2,6 +2,11 @@
+@@ -2,6 +2,12 @@
  const CAllocator = lib.alloc.Allocator;
  
  const buildpkg = @import("build_info.zig");
 +const accessibility = @import("accessibility.zig");
 +pub const accessibility_state_new = accessibility.state_new;
 +pub const accessibility_state_free = accessibility.state_free;
++pub const accessibility_state_capture = accessibility.state_capture;
 +pub const accessibility_state_update = accessibility.state_update;
 +pub const accessibility_state_set_selection = accessibility.state_set_selection;
  pub const allocator = @import("allocator.zig");

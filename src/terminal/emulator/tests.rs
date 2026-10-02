@@ -118,6 +118,62 @@ fn accessibility_snapshot_preserves_production_soft_wraps() {
 }
 
 #[test]
+fn accessibility_text_survives_visual_snapshots_before_semantic_publication() {
+    let mut emulator = emulator(32, 3);
+    emulator.snapshot().unwrap().unwrap();
+    let (initial, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(more);
+    assert!(initial.is_none());
+    let (initial, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(!more);
+    assert_eq!(initial.unwrap().text(), "\n\n");
+
+    emulator.feed(b"first");
+    emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"\r\nfixture");
+    let screen = emulator.snapshot().unwrap().unwrap();
+
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\n");
+    assert_eq!(current.generation(), screen.generation);
+
+    emulator.feed(b"\r\nchanged");
+    emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"\r\nlast");
+    let scrolled = emulator.snapshot().unwrap().unwrap();
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(more);
+    assert!(current.is_none());
+    let (current, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\nchanged\nlast");
+    assert_eq!(current.generation(), scrolled.generation);
+
+    emulator.feed(b"\rupdated");
+    let (current, more) = emulator.accessibility_snapshot(true).unwrap();
+    assert!(!more);
+    assert_eq!(current.unwrap().text(), "first\nfixture\nchanged\nupdated");
+    emulator.feed(b"\rnewest!");
+    let screen = emulator.snapshot().unwrap().unwrap();
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\nchanged\nnewest!");
+    assert_eq!(current.generation(), screen.generation);
+}
+
+#[test]
 fn terminal_find_rejects_matches_across_hard_lines() {
     let mut emulator = emulator(4, 2);
     emulator.feed(b"abc\r\ndef");
