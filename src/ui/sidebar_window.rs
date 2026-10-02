@@ -2,8 +2,8 @@
 //!
 //! A sidebar window is a fixed-size, modeless Operating-System Window. Its sidebar lists sections,
 //! and its content column presents one section at a time under a fixed heading. Both columns run
-//! beneath the transparent native titlebar, so this module also owns the client chrome standing in
-//! for that titlebar: the traffic-light strip and the window-movement regions.
+//! beneath the titlebar, so this module also owns its client surface: the window-control space and
+//! the window-movement regions.
 //!
 //! The owner keeps its sections, its content, and its policy. This module keeps the geometry, the
 //! navigation list's keyboard and pointer behavior, and window movement, so every sidebar window
@@ -15,11 +15,12 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
-    Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    AnyElement, App, Bounds, Decorations, Div, Edges, FocusHandle, Pixels, SharedString, Size,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, px,
 };
 use spaceterm_ui::{
-    HoverFade, Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    ClientWindowControls, HoverFade, Icon, IconName, WindowCloseHandler, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::platform::window_movement::{
@@ -72,36 +73,37 @@ pub(crate) fn group_spacing(appearance: &ChromeAppearance) -> Pixels {
 
 /// The options every sidebar window opens with.
 ///
-/// A sidebar window stays ordinary and modeless: the normal window level and the ordinary window
-/// class, with only tabbing, resizing, and minimizing withheld. It never orders itself above other
-/// applications, so a system permission prompt a row raises appears above it.
-///
-/// A sidebar window does not resize, so content scrolls inside a stable frame of `size`.
+/// The host chooses the ordinary, modeless window frame. Resizing, minimizing, and tabbing are
+/// withheld, so content scrolls inside a stable frame of `size`.
 pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) -> WindowOptions {
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
         .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
         .and_then(|geometry| geometry.sidebar_window_traffic_light_position(titlebar_height));
     let bounds = Bounds::centered(None, size, cx);
-    WindowOptions {
-        app_id: crate::app::window_application_id(),
-        window_background: crate::ui::appearance_runtime::window_background(cx),
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            // Retain the native title for the Window menu and accessibility while drawing the
-            // visible section title in the client surface.
-            appears_transparent: true,
-            traffic_light_position,
-        }),
-        kind: WindowKind::Normal,
-        is_movable: true,
-        is_resizable: false,
-        is_minimizable: false,
-        tabbing_identifier: None,
-        ..WindowOptions::default()
-    }
+    cx.global::<crate::platform::window_chrome::WindowChrome>()
+        .options(
+            crate::platform::window_chrome::WindowRole::SidebarWindow,
+            WindowOptions {
+                app_id: crate::app::window_application_id(),
+                window_background: crate::ui::appearance_runtime::window_background(cx),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(title.into()),
+                    // Retain the native title for the Window menu and accessibility while drawing the
+                    // visible section title in the client surface.
+                    appears_transparent: true,
+                    traffic_light_position,
+                }),
+                is_movable: true,
+                is_resizable: false,
+                is_minimizable: false,
+                tabbing_identifier: None,
+                ..WindowOptions::default()
+            },
+            cx,
+        )
 }
 
 /// Renders a sidebar window's surface inside its window-activity and control-theme scopes.
@@ -342,6 +344,10 @@ impl WindowMovement {
                 window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
             }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.platform.show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
+            }
             WindowDragRegionEvent::InteractionFinished { .. } => {
                 self.platform.interaction_finished();
                 WindowDragRegionResponse::Continue
@@ -457,14 +463,19 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             .flex_none()
             .w_full()
             .h(appearance.top_height())
-            .child(self.movement.region(
-                format!("{prefix}-sidebar-drag-region"),
-                div().size_full(),
-                Edges {
-                    left: px(super::workspace_chrome::TRAFFIC_LIGHT_CLEARANCE),
-                    ..Edges::default()
-                },
-            ));
+            .child(
+                self.movement.region(
+                    format!("{prefix}-sidebar-drag-region"),
+                    div().size_full(),
+                    Edges {
+                        left: cx
+                            .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
+                            .and_then(|geometry| geometry.sidebar_window_titlebar_clearance())
+                            .unwrap_or(px(0.0)),
+                        ..Edges::default()
+                    },
+                ),
+            );
         let list = render_navigation_list(prefix, self.entries, owner, appearance, window, cx);
         let sidebar = div()
             .debug_selector(move || format!("{prefix}-sidebar"))
@@ -675,6 +686,7 @@ pub(crate) struct DetailHeading<'a> {
     toolbar: Option<AnyElement>,
     scrolled: bool,
     movement: &'a WindowMovement,
+    close: WindowCloseHandler,
 }
 
 impl<'a> DetailHeading<'a> {
@@ -682,6 +694,7 @@ impl<'a> DetailHeading<'a> {
         prefix: &'static str,
         heading: impl IntoElement,
         movement: &'a WindowMovement,
+        close: WindowCloseHandler,
     ) -> Self {
         Self {
             prefix,
@@ -689,6 +702,7 @@ impl<'a> DetailHeading<'a> {
             toolbar: None,
             scrolled: false,
             movement,
+            close,
         }
     }
 
@@ -705,9 +719,11 @@ impl<'a> DetailHeading<'a> {
         self
     }
 
-    pub(crate) fn render(self, surface: &SettingsAppearance) -> AnyElement {
+    pub(crate) fn render(self, surface: &SettingsAppearance, window: &Window) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
+        let client_controls = matches!(window.window_decorations(), Decorations::Client { .. })
+            && !window.is_fullscreen();
         let heading = div()
             .size_full()
             .px(appearance.spacing(CONTENT_GUTTER))
@@ -736,9 +752,21 @@ impl<'a> DetailHeading<'a> {
                     .items_start()
                     .gap(appearance.spacing(8.0))
                     .pt(appearance.spacing(HEADING_TOP_INSET))
-                    .pr(appearance.spacing(CONTENT_GUTTER))
+                    .pr(appearance.spacing(if client_controls { 8.0 } else { CONTENT_GUTTER }))
                     .child(toolbar)
             }))
+            .when(client_controls, |heading| {
+                heading.child(
+                    div()
+                        .debug_selector(move || format!("{prefix}-window-controls"))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(appearance.top_height())
+                        .pr(appearance.spacing(CONTENT_GUTTER))
+                        .child(ClientWindowControls::new(self.close)),
+                )
+            })
             .when(self.scrolled, |heading| {
                 heading.child(
                     div()

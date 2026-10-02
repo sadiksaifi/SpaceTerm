@@ -559,22 +559,30 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    WindowOptions {
-        app_id: window_application_id(),
-        window_background: crate::ui::appearance_runtime::window_background(cx),
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(480.0), px(260.0))),
-        titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
-            title: titlebar.title.clone(),
-            appears_transparent: titlebar.appears_transparent,
-            traffic_light_position: workspace_traffic_light_position
-                .or(titlebar.traffic_light_position),
-        }),
-        // The Workspace chrome moves the window through its own drag regions. AppKit must not
-        // also move it from the titlebar strip, where a Tab press starts a Tab drag.
-        app_owns_titlebar_drag: true,
-        ..WindowOptions::default()
-    }
+    host.window_chrome.options(
+        crate::platform::window_chrome::WindowRole::Workspace,
+        WindowOptions {
+            app_id: window_application_id(),
+            window_background: crate::ui::appearance_runtime::window_background(cx),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(480.0), px(260.0))),
+            titlebar: host
+                .window_chrome
+                .titlebar
+                .as_ref()
+                .map(|titlebar| TitlebarOptions {
+                    title: titlebar.title.clone(),
+                    appears_transparent: titlebar.appears_transparent,
+                    traffic_light_position: workspace_traffic_light_position
+                        .or(titlebar.traffic_light_position),
+                }),
+            // The Workspace chrome moves the window through its own drag regions. AppKit must not
+            // also move it from the titlebar strip, where a Tab press starts a Tab drag.
+            app_owns_titlebar_drag: true,
+            ..WindowOptions::default()
+        },
+        cx,
+    )
 }
 
 /// Every live Workspace window, resolved at call time from GPUI's own registry.
@@ -733,7 +741,10 @@ mod tests {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter calls back into the Workspace")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter calls back into the Workspace"
+    )
 )]
 #[derive(Clone)]
 struct WorkspaceServicesEndpoint {
@@ -853,7 +864,7 @@ pub(crate) struct HostCompositionParts {
     pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    pub(crate) titlebar: Option<TitlebarOptions>,
+    pub(crate) window_chrome: crate::platform::window_chrome::WindowChrome,
 }
 pub(crate) struct HostComposition {
     profile: crate::desktop_profile::DesktopProfile,
@@ -863,7 +874,7 @@ pub(crate) struct HostComposition {
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    titlebar: Option<TitlebarOptions>,
+    window_chrome: crate::platform::window_chrome::WindowChrome,
     appearance: Option<(
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
@@ -889,9 +900,14 @@ impl HostComposition {
         if !parts.home_directory.is_absolute() {
             return Err(DesktopProfileError::InvalidCombination);
         }
-        if parts.titlebar.as_ref().is_some_and(|titlebar| {
-            titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
-        }) {
+        if parts
+            .window_chrome
+            .titlebar
+            .as_ref()
+            .is_some_and(|titlebar| {
+                titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
+            })
+        {
             return Err(DesktopProfileError::InvalidCombination);
         }
         Ok(Self {
@@ -902,7 +918,7 @@ impl HostComposition {
             services: parts.services,
             window_movement: parts.window_movement,
             window_frame: parts.window_frame,
-            titlebar: parts.titlebar,
+            window_chrome: parts.window_chrome,
             appearance: None,
             permission_setup: std::cell::OnceCell::new(),
         })
@@ -981,6 +997,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
 
 fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
     cx.set_global(host.window_frame);
+    cx.set_global(host.window_chrome.clone());
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
@@ -1028,8 +1045,7 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
-    crate::ui::appearance_runtime::register_fonts(cx)
-        .map_err(|_| RuntimeError::Initialization)?;
+    crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
@@ -1158,7 +1174,7 @@ mod runtime_tests {
             services,
             window_movement: movement,
             window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
-            titlebar: None,
+            window_chrome: crate::platform::window_chrome::WindowChrome::native(None),
         }
     }
     #[test]
@@ -1677,8 +1693,8 @@ mod runtime_tests {
         let geometry = WindowFrameGeometry::new(Some(16.0))
             .with_outer_edge_width(1.0)
             .with_traffic_lights(
-                TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
             );
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.window_frame = geometry;

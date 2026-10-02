@@ -801,8 +801,8 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             WindowFrameGeometry::new(Some(16.0))
                 .with_outer_edge_width(1.0)
                 .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
                 ),
         );
     });
@@ -896,8 +896,8 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
             WindowFrameGeometry::new(Some(16.0))
                 .with_outer_edge_width(1.0)
                 .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
                 ),
         );
         cx.set_global(InstalledChrome::single(std::sync::Arc::new(

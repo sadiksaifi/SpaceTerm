@@ -13,6 +13,8 @@ mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
 mod command_palette;
+mod content_viewport;
+pub use content_viewport::content_viewport;
 mod field_frame;
 mod floating_surface;
 #[cfg(test)]
@@ -44,7 +46,9 @@ mod text_editing;
 mod text_input;
 mod toggle;
 mod tooltip;
+mod window_controls;
 mod window_drag_region;
+pub use window_controls::{ClientWindowControls, WindowCloseHandler};
 
 use gpui::App;
 

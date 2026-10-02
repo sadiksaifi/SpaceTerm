@@ -16,6 +16,7 @@ pub(crate) enum WindowBackgroundAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionCapabilities {
     pub(crate) native_window_transparency: bool,
+    pub(crate) native_window_blur: bool,
     pub(crate) reduce_transparency: bool,
     pub(crate) increase_contrast: bool,
     pub(crate) show_borders: bool,
@@ -30,6 +31,7 @@ impl CompositionCapabilities {
     ) -> Self {
         Self {
             native_window_transparency,
+            native_window_blur: native_window_transparency,
             reduce_transparency: !accessibility_allows_transparency,
             increase_contrast: false,
             show_borders: false,
@@ -493,6 +495,8 @@ impl ResolvedWindowComposition {
         // effect behind a fully painted window costs a backdrop for nothing.
         let native_enabled = capabilities.native_window_transparency
             && accessibility_allows_transparency
+            && (requested != WindowBackgroundAppearance::Blurred
+                || capabilities.native_window_blur)
             && !requested_materials.is_opaque();
         Self {
             capabilities,
@@ -701,6 +705,43 @@ mod tests {
     use crate::appearance::{ChromeColors, Color};
 
     #[test]
+    fn unsupported_desktop_blur_keeps_an_opaque_backing_until_blur_is_disabled() {
+        use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+        for (transparency, blur, requested_blur, expected) in [
+            (true, true, true, Blurred),
+            (true, false, true, Opaque),
+            (true, false, false, Transparent),
+            (false, false, false, Opaque),
+            (false, false, true, Opaque),
+        ] {
+            let preferences = crate::appearance::preferences::WindowPreferences {
+                transparency: 0.5,
+                blur: requested_blur,
+                ..Default::default()
+            };
+            let capabilities = CompositionCapabilities {
+                native_window_blur: blur,
+                ..CompositionCapabilities::new(transparency, true)
+            };
+            let resolved =
+                ResolvedWindowComposition::resolve(&preferences, capabilities, ChromeTone::Dark);
+            assert_eq!(resolved.effective, expected);
+            assert_eq!(resolved.materials.is_opaque(), expected == Opaque);
+            assert!(!resolved.floating_materials.is_opaque());
+            let reduced = ResolvedWindowComposition::resolve(
+                &preferences,
+                CompositionCapabilities {
+                    reduce_transparency: true,
+                    ..capabilities
+                },
+                ChromeTone::Dark,
+            );
+            assert_eq!(reduced.effective, Opaque);
+            assert!(reduced.floating_materials.is_opaque());
+        }
+    }
+
+    #[test]
     fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
         let preferences = crate::appearance::preferences::WindowPreferences::default();
         let capabilities = CompositionCapabilities {
@@ -743,6 +784,7 @@ mod tests {
         );
         let capabilities = CompositionCapabilities {
             native_window_transparency: true,
+            native_window_blur: true,
             reduce_transparency: false,
             increase_contrast: false,
             show_borders: true,

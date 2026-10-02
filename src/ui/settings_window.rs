@@ -736,7 +736,9 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
+        let content =
+            super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -777,8 +779,20 @@ impl SettingsWindow {
 
 impl SettingsWindow {
     /// The active section's large title and description at the head of the content surface.
-    fn render_detail_heading(&self, settings: &SettingsAppearance) -> AnyElement {
+    fn render_detail_heading(
+        &self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let section = self.active_section;
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         DetailHeading::new(
             "settings",
@@ -789,9 +803,10 @@ impl SettingsWindow {
                 &settings.chrome,
             ),
             &self.window_movement,
+            close,
         )
         .scrolled(scrolled)
-        .render(settings)
+        .render(settings, window)
     }
 
     fn render_sidebar(
@@ -850,7 +865,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings))
+            .child(self.render_detail_heading(settings, window, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1930,10 +1945,8 @@ impl SettingsWindow {
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable = !zero_transparency
-                    && composition.effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque
-                    && !composition.floating_materials.is_opaque();
+                let native_unavailable =
+                    !zero_transparency && !composition.capabilities.native_window_transparency;
                 Some(match row {
                     SettingsRowId::Transparency if zero_transparency => {
                         "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
@@ -1944,6 +1957,12 @@ impl SettingsWindow {
                     SettingsRowId::Transparency if native_unavailable => {
                         "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
+                    SettingsRowId::Transparency
+                        if !composition.capabilities.native_window_blur
+                            && self.editor.document().preferences.window.blur =>
+                    {
+                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+                    }
                     SettingsRowId::Transparency => {
                         "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
@@ -1953,7 +1972,7 @@ impl SettingsWindow {
                     _ if accessibility_forced_opaque => {
                         "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
                     }
-                    _ if native_unavailable => {
+                    _ if native_unavailable || !composition.capabilities.native_window_blur => {
                         "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
                     }
                     _ => {

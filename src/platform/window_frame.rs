@@ -11,20 +11,26 @@ use gpui::{Pixels, Point, Window, point, px};
 pub(crate) struct TrafficLightPlacement {
     compact_position: Point<Pixels>,
     compact_titlebar_height: Pixels,
+    leading_clearance: Pixels,
 }
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only desktops with native window controls place them")
+    allow(
+        dead_code,
+        reason = "only desktops with native window controls place them"
+    )
 )]
 impl TrafficLightPlacement {
     pub(crate) const fn new(
         compact_position: Point<Pixels>,
         compact_titlebar_height: Pixels,
+        leading_clearance: Pixels,
     ) -> Self {
         Self {
             compact_position,
             compact_titlebar_height,
+            leading_clearance,
         }
     }
 
@@ -101,6 +107,19 @@ impl WindowFrameGeometry {
         self.outer_edge_width
     }
 
+    /// Leading titlebar space occupied by visible native controls.
+    pub(crate) fn leading_titlebar_clearance(self, fullscreen: bool) -> Option<Pixels> {
+        (!fullscreen)
+            .then_some(self.workspace_traffic_lights)
+            .flatten()
+            .map(|placement| placement.leading_clearance)
+    }
+
+    pub(crate) fn sidebar_window_titlebar_clearance(self) -> Option<Pixels> {
+        self.sidebar_window_traffic_lights
+            .map(|placement| placement.leading_clearance)
+    }
+
     pub(crate) fn workspace_traffic_light_position(
         self,
         titlebar_height: Pixels,
@@ -126,8 +145,8 @@ mod tests {
 
     fn geometry() -> WindowFrameGeometry {
         WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0), px(78.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
         )
     }
 
@@ -173,6 +192,17 @@ mod tests {
                 geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (None, None)
+        );
+    }
+
+    #[test]
+    fn titlebar_clearance_only_reserves_visible_native_controls() {
+        let geometry = geometry();
+        assert_eq!(geometry.leading_titlebar_clearance(false), Some(px(78.0)));
+        assert_eq!(geometry.leading_titlebar_clearance(true), None);
+        assert_eq!(
+            WindowFrameGeometry::new(Some(16.0)).leading_titlebar_clearance(false),
+            None
         );
     }
 }

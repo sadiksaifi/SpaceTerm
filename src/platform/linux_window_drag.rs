@@ -28,4 +28,10 @@ impl OperatingSystemWindowDragPlatform for LinuxWindowDragPlatform {
     }
 
     fn interaction_finished(&self) {}
+
+    fn show_window_menu(&self, window: &Window, position: gpui::Point<gpui::Pixels>) {
+        if window.window_controls().window_menu {
+            window.show_window_menu(position);
+        }
+    }
 }

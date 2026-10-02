@@ -171,8 +171,8 @@ fn compose(
         },
         services: Rc::new(super::linux_services::LinuxServicesRegistration),
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
-        window_frame: super::window_frame::WindowFrameGeometry::new(None),
-        titlebar: None,
+        window_frame: super::window_frame::WindowFrameGeometry::new(Some(16.0)).with_outer_edge_width(1.0),
+        window_chrome: super::window_chrome::WindowChrome::client(),
     })
     .map(|host| {
         host.with_appearance(

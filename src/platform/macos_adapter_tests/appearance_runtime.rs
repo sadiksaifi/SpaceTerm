@@ -63,8 +63,8 @@ fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
             WindowFrameGeometry::new(Some(16.0))
                 .with_outer_edge_width(1.0)
                 .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
                 ),
         );
     });

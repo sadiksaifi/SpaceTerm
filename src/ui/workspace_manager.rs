@@ -664,7 +664,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_status(
         &self,
@@ -699,7 +702,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_selection(
         &self,
@@ -715,7 +721,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn insert_native_service_text(
         &self,
@@ -861,6 +870,11 @@ impl WorkspaceManager {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -2555,6 +2569,12 @@ impl WorkspaceManager {
         }
     }
 
+    fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.should_close_window(window, cx) {
+            window.remove_window();
+        }
+    }
+
     pub(crate) fn should_close_window(
         &mut self,
         window: &mut Window,
@@ -3428,7 +3448,8 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
+        let content = activity.mount(activity.with_scope(|| self.render_chrome(window, cx)));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -3443,6 +3464,10 @@ impl WorkspaceManager {
         let chrome =
             WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
         let update_control = gpui::AnyView::from(self.update_control.clone());
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
+        });
         active_tab_manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 sidebar_layout.visible,
@@ -3451,6 +3476,7 @@ impl WorkspaceManager {
                 cx,
             );
             manager.set_trailing_accessory(Some(update_control), cx);
+            manager.set_window_close_handler(close);
         });
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();

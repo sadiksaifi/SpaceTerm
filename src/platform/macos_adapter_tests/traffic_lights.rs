@@ -11,8 +11,8 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     let geometry = WindowFrameGeometry::new(Some(16.0))
         .with_outer_edge_width(1.0)
         .with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
         );
     let mut wiring = parts(Rc::default(), Rc::default());
     wiring.window_frame = geometry;
@@ -61,7 +61,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
                 .workspace_traffic_light_position(workspace_height)
                 .unwrap(),
             geometry
-                .settings_traffic_light_position(appearance.top_height())
+                .sidebar_window_traffic_light_position(appearance.top_height())
                 .unwrap(),
         )
     });
