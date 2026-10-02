@@ -100,7 +100,7 @@ mod tests {
             ("shift-cmd-`", "⌘~"),
         ] {
             let layout = crate::platform::keyboard_layout::testing::us()
-                .snapshot()
+                .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
                 .unwrap();
             let shortcut = Shortcut::parse(source).unwrap().resolve(&layout);
             assert_eq!(format(&shortcut).as_ref(), display);
