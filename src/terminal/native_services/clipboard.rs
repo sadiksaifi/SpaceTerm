@@ -73,7 +73,13 @@ pub(crate) trait SelectionClipboard {
 
 /// Discovers ordered file paths without granting authority to insert them.
 pub(crate) trait FileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError>;
+    fn read_files(&self, cx: &App) -> Result<Vec<PathBuf>, ClipboardError>;
+}
+
+/// The host's optional PRIMARY selection, independent of explicit Copy.
+pub(crate) trait PrimarySelection {
+    fn publish(&self, copy: &SelectionCopy, cx: &mut App);
+    fn read(&self, cx: &App) -> Option<String>;
 }
 
 pub(crate) struct SelectionPublication {
@@ -116,7 +122,7 @@ impl PastePayload {
     /// Focus and local authority are checked before consulting either clipboard source.
     pub(crate) fn clipboard(
         policy: super::file_insertion::FileInsertionPolicy,
-        files: &dyn FileClipboard,
+        files: impl FnOnce() -> Result<Vec<PathBuf>, ClipboardError>,
         text: impl FnOnce() -> Option<String>,
         focused: bool,
         local: TerminalLocalFileCapabilities,
@@ -152,7 +158,7 @@ mod tests {
         paths: Vec<PathBuf>,
         fail: bool,
     }
-    impl FileClipboard for Files {
+    impl Files {
         fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
             self.reads.set(self.reads.get() + 1);
             if self.fail {
@@ -178,7 +184,7 @@ mod tests {
         assert!(
             PastePayload::clipboard(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-                &files,
+                || files.read_files(),
                 text,
                 false,
                 TerminalLocalFileCapabilities::Enabled
@@ -188,7 +194,7 @@ mod tests {
         assert_eq!((files.reads.get(), text_reads.get()), (0, 0));
         let remote = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Disabled,
@@ -199,7 +205,7 @@ mod tests {
         assert_eq!((files.reads.get(), text_reads.get()), (0, 1));
         let local = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Enabled,
@@ -219,7 +225,7 @@ mod tests {
         };
         let result = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             || panic!("unexpected clipboard read"),
             true,
             TerminalLocalFileCapabilities::Enabled,

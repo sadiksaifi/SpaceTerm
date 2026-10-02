@@ -60,3 +60,5 @@ pub(crate) fn local_filesystem() -> crate::platform::local_filesystem::LocalFile
         std::sync::Arc::new(super::unix_local_identity::UnixLocalIdentity),
     )
 }
+
+mod selected_file;

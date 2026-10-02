@@ -1,77 +1,29 @@
-//! The logical text direction of the POSIX locale SpaceTerm was started with.
+//! Resolve the desktop locale against SpaceTerm's shipped localizations.
 use spaceterm_ui::TextDirection;
-
-/// Languages whose scripts are written right to left.
-const RIGHT_TO_LEFT_LANGUAGES: &[&str] = &[
-    "ar", "arc", "ckb", "dv", "fa", "ha", "he", "iw", "ks", "ku", "ps", "sd", "ug", "ur", "yi",
-];
-
-/// Captured once at startup from `LC_ALL`, `LC_MESSAGES`, then `LANG`, as POSIX resolves them.
-pub(super) struct LinuxLocale {
-    direction: TextDirection,
-}
-
+pub(super) struct LinuxLocale { direction: TextDirection }
 impl LinuxLocale {
     pub(super) fn capture(read: impl Fn(&str) -> Option<String>) -> Self {
-        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .into_iter()
-            .find_map(|key| read(key).filter(|value| !value.is_empty()));
-        Self {
-            direction: locale.map_or(TextDirection::LeftToRight, |locale| direction(&locale)),
-        }
+        let preferred = preferred_languages(read);
+        Self { direction: super::locale::resolved_direction(&preferred, &["en"]) }
     }
 }
-
-impl super::locale::LocaleDirection for LinuxLocale {
-    fn text_direction(&self) -> TextDirection {
-        self.direction
-    }
+fn preferred_languages(read: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let effective = ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter()
+        .find_map(|key| read(key).filter(|value| !value.is_empty())).unwrap_or_else(|| "C".into());
+    if matches!(effective.split('.').next(), Some("C" | "POSIX")) { return vec!["en".into()]; }
+    let mut preferred: Vec<_> = read("LANGUAGE").into_iter().flat_map(|value| value.split(':').filter(|value| !value.is_empty()).map(str::to_owned).collect::<Vec<_>>()).collect();
+    preferred.push(effective);
+    preferred
 }
-
-fn direction(locale: &str) -> TextDirection {
-    let language = locale
-        .split(['_', '.', '@', '-'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if RIGHT_TO_LEFT_LANGUAGES.contains(&language.as_str()) {
-        TextDirection::RightToLeft
-    } else {
-        TextDirection::LeftToRight
-    }
-}
-
+impl super::locale::LocaleDirection for LinuxLocale { fn text_direction(&self) -> TextDirection { self.direction } }
 #[cfg(test)]
 mod tests {
-    use super::super::locale::LocaleDirection;
     use super::*;
-
-    fn capture(values: &[(&str, &str)]) -> TextDirection {
-        LinuxLocale::capture(|key| {
-            values
-                .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| (*value).to_owned())
-        })
-        .text_direction()
-    }
-
     #[test]
-    fn linux_locale_direction_follows_posix_precedence() {
-        assert_eq!(capture(&[]), TextDirection::LeftToRight);
-        assert_eq!(capture(&[("LANG", "he_IL.UTF-8")]), TextDirection::RightToLeft);
-        assert_eq!(
-            capture(&[("LANG", "he_IL.UTF-8"), ("LC_ALL", "en_US.UTF-8")]),
-            TextDirection::LeftToRight
-        );
-        assert_eq!(
-            capture(&[("LANG", "en_US.UTF-8"), ("LC_MESSAGES", "ar_EG")]),
-            TextDirection::RightToLeft
-        );
-        assert_eq!(
-            capture(&[("LC_ALL", ""), ("LANG", "fa_IR@persian")]),
-            TextDirection::RightToLeft
-        );
-        assert_eq!(capture(&[("LANG", "C")]), TextDirection::LeftToRight);
+    fn language_preferences_respect_posix_precedence_and_c_locale() {
+        let read = |key: &str| match key { "LANGUAGE" => Some("ar:en".into()), "LC_ALL" => Some("C.UTF-8".into()), "LANG" => Some("ar_EG.UTF-8".into()), _ => None };
+        assert_eq!(preferred_languages(read), ["en"]);
+        let read = |key: &str| match key { "LANGUAGE" => Some("ar:en".into()), "LC_MESSAGES" => Some("fr_FR.UTF-8".into()), "LANG" => Some("en_US".into()), _ => None };
+        assert_eq!(preferred_languages(read), ["ar", "en", "fr_FR.UTF-8"]);
     }
 }

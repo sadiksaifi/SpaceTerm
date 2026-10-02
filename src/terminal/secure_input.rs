@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native secure input Adapter rejects transitions")
+    allow(dead_code, reason = "native input transition rejection")
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecureInputError {
@@ -27,9 +27,29 @@ struct PaneState {
 pub(crate) struct SecureInputHandle(Rc<RefCell<SecureInputCoordinator>>);
 
 impl SecureInputHandle {
+    #[allow(
+        dead_code,
+        reason = "native input isolation is selected by composition"
+    )]
     pub(crate) fn new(adapter: Box<dyn SecureInputAdapter>) -> Self {
         Self(Rc::new(RefCell::new(SecureInputCoordinator {
-            adapter,
+            adapter: Some(adapter),
+            next_pane_id: 0,
+            application_active: false,
+            enabled: false,
+            release_pending: false,
+            owner: None,
+            panes: BTreeMap::new(),
+        })))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "absence of input isolation is selected by composition"
+    )]
+    pub(crate) fn unavailable() -> Self {
+        Self(Rc::new(RefCell::new(SecureInputCoordinator {
+            adapter: None,
             next_pane_id: 0,
             application_active: false,
             enabled: false,
@@ -92,7 +112,7 @@ impl Drop for SecureInputPane {
 }
 
 struct SecureInputCoordinator {
-    adapter: Box<dyn SecureInputAdapter>,
+    adapter: Option<Box<dyn SecureInputAdapter>>,
     next_pane_id: u64,
     application_active: bool,
     enabled: bool,
@@ -137,6 +157,9 @@ impl SecureInputCoordinator {
     }
 
     fn reconcile(&mut self) {
+        if self.adapter.is_none() {
+            return;
+        }
         // Failed release retains physical accounting but never logical ownership. Complete
         // that release before accepting fresh eligibility, even if focus has returned.
         if self.release_pending {
@@ -158,7 +181,10 @@ impl SecureInputCoordinator {
     }
 
     fn transition(&mut self, enabled: bool) -> bool {
-        match self.adapter.set_enabled(enabled) {
+        let Some(adapter) = &mut self.adapter else {
+            return true;
+        };
+        match adapter.set_enabled(enabled) {
             Ok(()) => {
                 self.enabled = enabled;
                 self.release_pending = false;

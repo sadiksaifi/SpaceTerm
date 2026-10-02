@@ -2203,8 +2203,8 @@ fn publish_terminal_preferences(
     cx: &mut App,
 ) {
     use crate::appearance::{
-        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, ThemeCatalog,
-        SystemAppearance,
+        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, SystemAppearance,
+        ThemeCatalog,
     };
     let previous = super::super::appearance_runtime::current(cx);
     let resolved = ThemeCatalog::default()
@@ -7236,4 +7236,71 @@ fn displayed_directories_should_abbreviate_only_a_local_home_prefix() {
             "{directory}"
         );
     }
+}
+
+#[gpui::test]
+fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_tracking(
+    cx: &mut TestAppContext,
+) {
+    struct Primary(Rc<std::cell::RefCell<Option<String>>>);
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, copy: &SelectionCopy, _: &mut App) {
+            *self.0.borrow_mut() = Some(copy.plain_text.clone());
+        }
+        fn read(&self, _: &App) -> Option<String> {
+            self.0.borrow().clone()
+        }
+    }
+    let primary = Rc::new(std::cell::RefCell::new(None));
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "primary selection".into(),
+            html: None,
+        },
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary(primary.clone())))
+    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    assert_eq!(primary.borrow().as_deref(), Some("primary selection"));
+    let before = records.commands().len();
+    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
+    assert!(
+        records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| record.command
+                == RecordedSessionCommand::RequestPaste("primary selection".into()))
+    );
+    pane.update(cx, |pane, _| {
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true
+    });
+    let before = records.commands().len();
+    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| matches!(record.command, RecordedSessionCommand::RequestPaste(_)))
+    );
+    assert!(
+        records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| matches!(
+                record.command,
+                RecordedSessionCommand::Pointer(PointerInput {
+                    button: Some(PointerButton::Middle),
+                    ..
+                })
+            ))
+    );
 }

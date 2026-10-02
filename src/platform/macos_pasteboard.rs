@@ -29,7 +29,7 @@ pub(crate) struct MacosFileClipboard {
     pub(crate) paths: crate::local_path::LocalPathSemantics,
 }
 impl FileClipboard for MacosFileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
+    fn read_files(&self, _: &gpui::App) -> Result<Vec<PathBuf>, ClipboardError> {
         read_file_urls(self.paths)
     }
 }

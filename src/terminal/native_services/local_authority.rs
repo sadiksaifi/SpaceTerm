@@ -1,6 +1,6 @@
 //! The only local-authority gate for Native Terminal Services. An admitted operation retains
 //! this private proof instead of repeatedly interpreting metadata in each caller.
-use super::clipboard::{ClipboardError, FileClipboard};
+use super::clipboard::ClipboardError;
 use super::file_insertion::{FileInsertionPolicy, prepare_file_insertion};
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget, parse_local_file_uri, stable_identity};
 use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
@@ -17,9 +17,9 @@ impl LocalFileAccess {
 
     pub(super) fn clipboard(
         self,
-        clipboard: &dyn FileClipboard,
+        clipboard: impl FnOnce() -> Result<Vec<PathBuf>, ClipboardError>,
     ) -> Result<Vec<PathBuf>, ClipboardError> {
-        clipboard.read_files()
+        clipboard()
     }
 
     pub(super) fn insertion(

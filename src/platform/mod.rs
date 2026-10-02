@@ -3,6 +3,7 @@ pub(crate) mod app_paths;
 pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
+pub(crate) mod application_menu_model;
 pub(crate) mod application_quit;
 pub(crate) mod control_socket;
 pub(crate) mod https_transport;
@@ -13,8 +14,8 @@ mod macos_appearance;
 mod macos_keyboard_layout;
 #[cfg(target_os = "macos")]
 mod macos_quick_look_window;
-#[cfg(target_os = "macos")]
-mod macos_selected_file;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix_selected_file;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
@@ -268,11 +269,7 @@ mod linux_reserved_shortcuts;
 #[cfg(target_os = "linux")]
 mod linux_scroll;
 
-#[cfg(target_os = "linux")]
-mod linux_secure_input;
 
-#[cfg(target_os = "linux")]
-mod linux_services;
 
 #[cfg(target_os = "linux")]
 mod linux_shortcut_text;
@@ -285,3 +282,10 @@ mod linux_window_drag;
 
 #[cfg(target_os = "linux")]
 mod linux_window_visibility;
+
+#[cfg(target_os = "linux")]
+mod linux_session_bus;
+#[cfg(target_os = "linux")]
+mod linux_desktop_events;
+#[cfg(target_os = "linux")]
+mod linux_application_instance;

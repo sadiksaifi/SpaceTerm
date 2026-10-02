@@ -5712,6 +5712,7 @@ dependencies = [
  "unicode-bidi",
  "unicode-segmentation",
  "ureq",
+ "zbus",
  "zeroize",
 ]
 
