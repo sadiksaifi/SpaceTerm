@@ -6,7 +6,6 @@ use gpui::{AnyElement, Window, div};
 use spaceterm_ui::{Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
-use super::preview::AppearancePreview;
 use crate::appearance::{Appearance, ChromeDensity, ResetTarget, SettingsDocument};
 use crate::ui::appearance::gpui_color;
 use crate::ui::appearance::settings::SettingsAppearance;
@@ -186,7 +185,7 @@ pub(super) fn render(
     let alternate = Switch::new(
         "workbench-alternate-typography",
         "Alternate typography",
-        AppearancePreview::alternate_typography(&document),
+        workbench.preview.alternate_typography(&document),
     )
     .size(ToggleSize::Regular)
     .label_hidden(true)
@@ -235,7 +234,10 @@ pub(super) fn render(
             "Alternate typography",
             alternate,
         )
-        .description("Menlo at 22 points with a 1.35 line height, and the other density.")
+        .description(format!(
+            "{} at 22 points with a 1.35 line height.",
+            crate::host_fonts::HostFonts::get(cx).system_monospace_family,
+        ))
         .render(appearance, window, cx)
         .into_any_element(),
     ];

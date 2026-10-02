@@ -2026,26 +2026,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
-    #[cfg(test)]
-    TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
-    let mut cell_font = font(family.clone());
-    cell_font.features = FontFeatures::disable_ligatures();
-    cell_font.fallbacks = Some(FontFallbacks::from_fonts(
-        ["Apple Color Emoji", "Menlo"]
-            .into_iter()
-            .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
-            .map(str::to_owned)
-            .collect(),
-    ));
-    if bold {
-        cell_font = cell_font.bold();
-    }
-    if italic {
-        cell_font = cell_font.italic();
-    }
-    cell_font
-}
+pub(super) use tests::terminal_cell_font;
 
 #[cfg(test)]
 fn test_terminal_fonts(family: &SharedString) -> TerminalFonts {
@@ -3114,6 +3095,27 @@ fn frame_cursor_paint_plan(
 
 #[cfg(test)]
 mod tests {
+    pub(in crate::ui) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
+        #[cfg(test)]
+        TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
+        let mut cell_font = font(family.clone());
+        cell_font.features = FontFeatures::disable_ligatures();
+        cell_font.fallbacks = Some(FontFallbacks::from_fonts(
+            ["Apple Color Emoji", "Menlo"]
+                .into_iter()
+                .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
+                .map(str::to_owned)
+                .collect(),
+        ));
+        if bold {
+            cell_font = cell_font.bold();
+        }
+        if italic {
+            cell_font = cell_font.italic();
+        }
+        cell_font
+    }
+
     use std::{
         borrow::Cow,
         cell::{Cell, RefCell},
@@ -3128,6 +3130,10 @@ mod tests {
     #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
+    }
+    #[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+    mod linux_adapter_tests {
+        include!("../platform/linux_adapter_tests/terminal_glyphs.rs");
     }
 
     #[derive(Clone, Debug, PartialEq)]

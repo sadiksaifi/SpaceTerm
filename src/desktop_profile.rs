@@ -186,6 +186,7 @@ pub(crate) struct DesktopProfile {
     control_keys: ControlKeybindingProfiles,
     keymap: KeymapProfile,
     locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
+    fonts: crate::host_fonts::HostFonts,
 }
 
 #[derive(Clone, Copy)]
@@ -234,9 +235,16 @@ impl DesktopProfile {
             control_keys,
             keymap,
             locale,
+            fonts: crate::host_fonts::HostFonts::default(),
         }
     }
+
+    pub(crate) fn with_fonts(mut self, fonts: crate::host_fonts::HostFonts) -> Self {
+        self.fonts = fonts;
+        self
+    }
     pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
+        cx.set_global(self.fonts.clone());
         cx.set_global(self.presentation.clone());
         spaceterm_ui::install_modal_policy(
             cx,

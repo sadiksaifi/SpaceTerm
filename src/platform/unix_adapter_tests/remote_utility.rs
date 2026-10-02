@@ -333,7 +333,8 @@ fn listing_enumerator_should_be_terminated_and_waited_when_remote_shell_is_cance
         }
     }
 
-    let test_root = std::env::temp_dir().join(format!("spaceterm-list-cancel-{}", std::process::id()));
+    let test_root =
+        std::env::temp_dir().join(format!("spaceterm-list-cancel-{}", std::process::id()));
     let fake_bin = test_root.join("bin");
     let fake_find = fake_bin.join("find");
     let pid_file = test_root.join("enumerator-pid");

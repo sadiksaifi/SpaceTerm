@@ -7,9 +7,9 @@ SSH and in fullscreen terminal interfaces. Settings > Privacy > Clipboard contro
 reading separately. Copying is enabled by default. Reading is disabled by default; enabling it
 lets the focused terminal program read your system clipboard. Requests are limited to 1 MiB of text.
 
-Cmd+C copies SpaceTerm's Selection. With no Selection, applications that enable the enhanced
-keyboard protocol receive Cmd+C. Cmd+V follows SpaceTerm's paste handling, including bracketed
-paste. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
+Cmd+C on macOS or Ctrl+Shift+C on Linux copies SpaceTerm's Selection. On macOS, with no
+Selection, applications that enable the enhanced keyboard protocol receive Cmd+C. Cmd+V on macOS
+or Ctrl+Shift+V on Linux follows SpaceTerm's paste handling, including bracketed paste. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
 
 For Neovim over SSH, select its OSC 52 provider before clipboard providers initialize:
 
@@ -50,15 +50,20 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Build from source
 
-You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
-Mise manages the official Zig compiler and the remaining development tools. Xcode supplies
-the Metal compiler, macOS SDK, and icon packaging tools.
+Install [`mise`](https://mise.jdx.dev/) to manage the pinned development tools, including Zig.
+Clone the repository and trust its tasks:
 
 ```sh
 git clone https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
 mise trust
+```
 
+### macOS
+
+Xcode 26 or newer supplies the Metal compiler, macOS SDK, and icon packaging tools.
+
+```sh
 # Install pinned tools, initialize submodules, and verify the macOS development environment
 mise run setup:macos
 
@@ -69,6 +74,26 @@ mise run development
 mise run preflight:install:macos
 ```
 
+### Linux
+
+Wayland and X11 are supported. On Debian or Ubuntu, install:
+
+```sh
+sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
+  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils
+
+mise run setup:linux
+mise run doctor:linux
+mise run development
+```
+
+`setup:linux` installs pinned tools, initializes submodules, and runs the environment checks.
+`doctor:linux` repeats those checks. Development uses Wayland when available;
+`mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
+for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview.
+Linux currently supports source builds only, with no packaging, distribution, or updates.
+
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
-platform segment such as `:macos`.
+platform segment such as `:macos` or `:linux`.

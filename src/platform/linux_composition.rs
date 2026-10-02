@@ -83,7 +83,8 @@ fn desktop_profile(
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
         ),
         locale,
-    ))
+    )
+    .with_fonts(super::linux_fonts::capture()))
 }
 
 fn compose(

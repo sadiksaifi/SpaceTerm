@@ -10,7 +10,7 @@ fn bundled_terminal_fonts_resolve_all_styles_and_nerd_glyphs() {
         None,
         native.clone(),
     );
-    cx.update(|cx| register_terminal_fonts(cx).unwrap());
+    cx.update(|cx| register_fonts(cx).unwrap());
     start(&mut cx);
     cx.update(|cx| {
         let appearance = crate::ui::appearance_runtime::current(cx);

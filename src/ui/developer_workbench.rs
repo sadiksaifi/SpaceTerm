@@ -389,7 +389,7 @@ impl DeveloperWorkbench {
         })
         .detach();
         let settings = cx.global::<AppearanceRuntime>().settings.clone();
-        let preview = AppearancePreview::new(settings);
+        let preview = AppearancePreview::new(settings, crate::host_fonts::HostFonts::get(cx).system_monospace_family);
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let navigation = SidebarNavigation::new(focus_handle.clone(), window, cx);

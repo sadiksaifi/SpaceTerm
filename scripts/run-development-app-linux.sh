@@ -15,10 +15,12 @@ fi
 
 CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
-command -v tic >/dev/null || {
-    echo "error: tic is required to compile the SpaceTerm terminfo entry; run mise run doctor:linux" >&2
-    exit 1
-}
+for tool in tic desktop-file-validate; do
+    command -v "$tool" >/dev/null || {
+        echo "error: $tool is required; run mise run doctor:linux" >&2
+        exit 1
+    }
+done
 
 ARTIFACT_PATH="$(mktemp "${TMPDIR:-/tmp}/spaceterm-development-executable.XXXXXX")"
 STAGING_ROOT=""
@@ -59,4 +61,5 @@ rm -rf -- "$PREFIX"
 mv -- "$STAGING_ROOT" "$PREFIX"
 STAGING_ROOT=""
 
+python3 "$SCRIPT_DIR/development-desktop-linux.py" "$PREFIX"
 exec "$PREFIX/bin/spaceterm"

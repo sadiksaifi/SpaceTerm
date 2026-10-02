@@ -91,6 +91,20 @@ else
 fi
 '''
 
+[tasks."fonts:ui:prepare"]
+description = "Prepare private UI font identities from the pinned Inter archive"
+usage = '''
+arg "<archive>" help="Inter-4.1.zip from the official Inter 4.1 release"
+flag "--check" help="Verify committed fonts without changing files"
+'''
+run = '''
+if [ "${usage_check:-false}" = "true" ]; then
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}" --check
+else
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}"
+fi
+'''
+
 [tasks."gpui:local:on"]
 description = "Use a local SpaceTerm Zed checkout for GPUI dependencies"
 usage = '''
@@ -254,12 +268,20 @@ description = "Check shared Rust formatting"
 run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check"
 
 [tasks."fmt:macos"]
-description = "Format isolated macOS Adapter sources"
-run = "rustfmt --edition 2024 src/platform/*_adapter_tests/*.rs"
+description = "Format isolated macOS and shared Unix Adapter sources"
+run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
 
 [tasks."fmt:check:macos"]
-description = "Check isolated macOS Adapter formatting"
-run = "rustfmt --edition 2024 --check src/platform/*_adapter_tests/*.rs"
+description = "Check isolated macOS and shared Unix Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
+
+[tasks."fmt:linux"]
+description = "Format isolated Linux and shared Unix Adapter sources"
+run = "rustfmt --edition 2024 src/platform/linux_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
+
+[tasks."fmt:check:linux"]
+description = "Check isolated Linux and shared Unix Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/linux_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
 
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
@@ -548,6 +570,10 @@ python3 -c 'import ctypes; ctypes.CDLL("libvulkan.so.1")' || {
   exit 1
 }
 command -v tic
+command -v desktop-file-validate >/dev/null || {
+  echo "Install desktop-file-utils to validate the Development desktop entry" >&2
+  exit 1
+}
 command -v dbus-daemon
 command -v ssh
 '''
@@ -586,8 +612,9 @@ run = '''
 set -eu
 bash -n scripts/run-development-app-linux.sh
 shellcheck -x scripts/run-development-app-linux.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/development-desktop-linux.py").read_text())'
 '''
 
 [tasks."validate:linux"]
 description = "Run the full Linux validation gate"
-run = [{ task = "validate" }, { task = "test:linux" }, { task = "lint:scripts:linux" }]
+run = [{ task = "validate" }, { task = "fmt:check:linux" }, { task = "test:linux" }, { task = "lint:scripts:linux" }]
