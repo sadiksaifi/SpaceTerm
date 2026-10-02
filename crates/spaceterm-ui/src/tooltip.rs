@@ -464,7 +464,7 @@ impl RenderOnce for TooltipTarget {
                         &self.tooltip,
                         &theme,
                         tooltip_fonts(&typography),
-                        window.viewport_size(),
+                        crate::content_viewport(window).size,
                     ),
                     theme.metrics,
                 )
@@ -1259,8 +1259,10 @@ impl Element for TooltipOverlay {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let child_layout = self.child.request_layout(window, cx);
-        let available =
-            available_tooltip_size(window.viewport_size(), self.metrics.viewport_margin);
+        let available = available_tooltip_size(
+            crate::content_viewport(window).size,
+            self.metrics.viewport_margin,
+        );
         let style = Style {
             display: Display::Flex,
             max_size: gpui::size(available.width.into(), available.height.into()),
@@ -1301,14 +1303,16 @@ impl Element for TooltipOverlay {
             return false;
         };
         let child_bounds = window.layout_bounds(*child_layout);
-        let placed = place_tooltip(
-            target,
+        let content_viewport = crate::content_viewport(window);
+        let mut placed = place_tooltip(
+            Bounds::new(target.origin - content_viewport.origin, target.size),
             child_bounds.size,
-            window.viewport_size(),
+            content_viewport.size,
             self.metrics.target_gap,
             self.metrics.viewport_margin,
-            window.mouse_position(),
+            window.mouse_position() - content_viewport.origin,
         );
+        placed.origin += content_viewport.origin;
         // The child's bounds already include the element offset of a scrolled target.
         let offset = placed.origin - child_bounds.origin;
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
@@ -1906,7 +1910,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tooltip_surface_should_fit_inside_a_minimum_width_viewport(cx: &mut TestAppContext) {
+    fn tooltip_surface_should_fit_inside_a_minimum_width_client_frame(cx: &mut TestAppContext) {
         let mut theme = test_theme();
         theme.metrics = TooltipMetrics::new(px(480.0));
         cx.set_global(theme);
@@ -1936,7 +1940,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("tooltip test window failed: {error}"))
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, _| window.activate_window());
+        cx.simulate_decorations(gpui::Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        });
+        cx.update(|window, _| {
+            window.set_client_inset(px(24.0));
+            window.activate_window();
+        });
         cx.run_until_parked();
         hover_for_show_delay(&mut cx, "test-tooltip-button");
         let tooltip = cx
@@ -1949,8 +1959,11 @@ mod tests {
             )
         });
         let limits = Bounds::new(
-            point(margin, margin),
-            available_tooltip_size(viewport, margin),
+            point(margin + px(24.0), margin + px(24.0)),
+            available_tooltip_size(
+                size(viewport.width - px(48.0), viewport.height - px(48.0)),
+                margin,
+            ),
         );
 
         assert!(

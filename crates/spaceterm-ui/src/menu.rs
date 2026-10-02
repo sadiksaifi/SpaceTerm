@@ -3110,7 +3110,8 @@ impl RenderOnce for ComboBoxOwnedMenuOverlay {
 
 fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
     let typography = crate::control_typography(cx);
-    let viewport = window.viewport_size();
+    let content = crate::content_viewport(window);
+    let viewport = content.size;
     let hovered_row = state.read(cx).hovered_row;
     let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
         let menu = state.read(cx);
@@ -3139,7 +3140,8 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         style.metrics.icon_baseline_center,
         window,
     );
-    let root_bounds = place_root(anchor, root_size, viewport, placement);
+    let local_anchor = Bounds::new(anchor.origin - content.origin, anchor.size);
+    let root_bounds = place_root(local_anchor, root_size, viewport, placement);
     let root_highlighted = highlighted.first().copied().flatten();
     let root_scroll = state.update(cx, |state, _| {
         state.prepare_panel_scroll(0, root_bounds.size, &entries, root_highlighted)
@@ -3195,6 +3197,9 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         parent_entries = children;
     }
     state.update(cx, |state, _| state.panel_scroll.truncate(panels.len()));
+    for (_, bounds, _, _, _) in &mut panels {
+        bounds.origin += content.origin;
+    }
     let chain_bounds: Vec<_> = panels.iter().map(|(_, bounds, _, _, _)| *bounds).collect();
 
     let outside_state = state.downgrade();
@@ -3223,8 +3228,8 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
 
     let mut overlay = div()
         .relative()
-        .w(viewport.width)
-        .h(viewport.height)
+        .w(window.viewport_size().width)
+        .h(window.viewport_size().height)
         .key_context(KEY_CONTEXT)
         .font(typography.regular().clone())
         .track_focus(&state.read(cx).focus_handle)

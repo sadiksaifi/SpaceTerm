@@ -535,9 +535,10 @@ impl WorkspaceSidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let maximum = (window.bounds().size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
-            .min(px(SIDEBAR_MAXIMUM_WIDTH))
-            .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+        let maximum = (spaceterm_ui::content_viewport(window).size.width
+            - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+        .min(px(SIDEBAR_MAXIMUM_WIDTH))
+        .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
         let width = width.clamp(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH), maximum);
         if self.layout == (SidebarLayout { visible, width }) {
             return;
