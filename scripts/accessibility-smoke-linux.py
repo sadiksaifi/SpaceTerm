@@ -1263,17 +1263,49 @@ def measure_performance(probe, input_driver, output, application, properties, fr
         values["text_source_query_errors"] = source_errors
         values["activation_readback_at_capture_end"] = bool(
             properties.Get("org.a11y.Status", "IsEnabled")) == active
-        probe.phase = None
         values["frames"] = frame_output.end()
         persist()
         require(values["activation_readback_at_capture_end"], "performance_activation_changed_during_capture")
         require(not source_errors, "performance_event_source_unknown")
-        require((text_events > 0) == active and (owned_events > 0) == active
-                and (all_terminal_events > 0) == active, "performance_accessibility_activation_mismatch")
         if active:
-            probe.wait(lambda: probe.contains("perf-active-004999"),
-                       "performance_active_convergence_timeout", timeout=60)
-            values["accessible_output_convergence_ms"] = round((time.monotonic() - started) * 1000)
+            # Coherent semantic publication can follow the fixed CPU/frame sample.
+            # Keep that sample unchanged and verify queued events with full output.
+            def published_output():
+                return (probe.contains("perf-active-004999")
+                        and probe.counts["insert_events"] + probe.counts["delete_events"] > 0
+                        and probe.source_counts["process_owned_terminal_text_events"]
+                        > source_before["process_owned_terminal_text_events"]
+                        and probe.source_counts["terminal_text_events"]
+                        > source_before["terminal_text_events"])
+
+            publication = {}
+            values["publication"] = publication
+            try:
+                probe.wait(published_output, "performance_active_convergence_timeout", timeout=60)
+                values["accessible_output_convergence_ms"] = round((time.monotonic() - started) * 1000)
+                values["publication_tree"] = reacquire_terminal(probe, application, "perf-active-004999")
+            finally:
+                publication.update(
+                    observation_ms=round((time.monotonic() - started) * 1000),
+                    text_events=probe.counts["insert_events"] + probe.counts["delete_events"],
+                    process_owned_terminal_text_events=(
+                        probe.source_counts["process_owned_terminal_text_events"]
+                        - source_before["process_owned_terminal_text_events"]),
+                    all_terminal_text_events=(probe.source_counts["terminal_text_events"]
+                                              - source_before["terminal_text_events"]),
+                    text_source_query_errors=(probe.source_counts["source_query_errors"]
+                                              - source_before["source_query_errors"]))
+                persist()
+            publication["activation_readback_at_completion"] = bool(
+                properties.Get("org.a11y.Status", "IsEnabled"))
+            persist()
+            require(not publication["text_source_query_errors"], "performance_event_source_unknown")
+            require(publication["activation_readback_at_completion"],
+                    "performance_activation_changed_before_publication")
+        else:
+            require(text_events == 0 and owned_events == 0 and all_terminal_events == 0,
+                    "performance_accessibility_activation_mismatch")
+        probe.phase = None
         if not active:
             reactivation = time.monotonic()
             properties.Set("org.a11y.Status", "IsEnabled", dbus.Boolean(True))
