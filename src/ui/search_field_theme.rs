@@ -145,7 +145,7 @@ mod tests {
 
     fn descriptor() -> ResolvedFontDescriptor {
         ResolvedFontDescriptor {
-            primary_family: ".SystemUIFont".to_owned(),
+            primary_family: "system-ui".to_owned(),
             fallback_families: Vec::new(),
             size: 13.0,
             line_height: 13.0,

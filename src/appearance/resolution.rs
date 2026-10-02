@@ -92,6 +92,8 @@ pub(crate) struct AvailableFont {
 pub(crate) struct AvailableFonts {
     pub(crate) system_ui: AvailableFont,
     pub(crate) system_monospace: AvailableFont,
+    pub(crate) terminal_families: Vec<String>,
+    pub(crate) emoji_family: String,
     pub(crate) installed: Vec<AvailableFont>,
 }
 
@@ -109,6 +111,8 @@ impl Default for AvailableFonts {
                 resolution_identity: String::from("system-monospace"),
             },
             installed: Vec::new(),
+            terminal_families: vec![crate::bundled_font::FAMILY.into()],
+            emoji_family: "emoji".into(),
         }
     }
 }
@@ -348,15 +352,6 @@ fn resolve_chrome_typography(fonts: &AvailableFonts) -> ResolvedChromeTypography
     }
 }
 
-/// Ordered fallback families used when Terminal typography requests the default.
-pub(crate) const DEFAULT_TERMINAL_FAMILIES: [&str; 5] = [
-    crate::bundled_font::FAMILY,
-    "JetBrainsMono Nerd Font",
-    "JetBrainsMono Nerd Font Mono",
-    "JetBrains Mono",
-    "Menlo",
-];
-
 fn resolve_terminal_typography(
     preferences: &AppearancePreferences,
     fonts: &AvailableFonts,
@@ -365,8 +360,11 @@ fn resolve_terminal_typography(
     let requested = &preferences.terminal.typography;
     let mut unavailable = false;
     let selected = match &requested.family {
-        TerminalFontFamily::DefaultMonospace => DEFAULT_TERMINAL_FAMILIES
+        TerminalFontFamily::DefaultMonospace => fonts
+            .terminal_families
             .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(fonts.system_monospace.family.as_str()))
             .find_map(|family| {
                 fonts
                     .named(family)
@@ -388,10 +386,10 @@ fn resolve_terminal_typography(
     if unavailable {
         diagnostics.push(AppearanceDiagnostic::TerminalFontUnavailable);
     }
-    let mut fallbacks = vec![String::from("Apple Color Emoji")];
-    for family in DEFAULT_TERMINAL_FAMILIES {
-        if family != selected.family && !fallbacks.iter().any(|value| value == family) {
-            fallbacks.push(family.to_owned());
+    let mut fallbacks = vec![fonts.emoji_family.clone()];
+    for family in &fonts.terminal_families {
+        if family != &selected.family && !fallbacks.iter().any(|value| value == family) {
+            fallbacks.push(family.clone());
         }
     }
     if fonts.system_monospace.family != selected.family

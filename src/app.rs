@@ -1028,7 +1028,7 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
-    crate::ui::appearance_runtime::register_terminal_fonts(cx)
+    crate::ui::appearance_runtime::register_fonts(cx)
         .map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::UserSettings::load(Arc::clone(storage));

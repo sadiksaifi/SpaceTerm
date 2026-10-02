@@ -15,8 +15,8 @@ use crate::platform::window_frame::WindowFrameGeometry;
 
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
-    AvailableFonts, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES, FontClass,
-    ResolvedAppearance, SystemAppearance, TerminalFontFamily, ThemeCatalog,
+    AvailableFonts, CompositionCapabilities, FontClass, ResolvedAppearance, SystemAppearance,
+    TerminalFontFamily, ThemeCatalog,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -91,11 +91,13 @@ pub(crate) struct AppearanceRuntime {
 }
 impl Global for AppearanceRuntime {}
 
-/// Register the embedded terminal faces before capturing the font catalog.
-pub(crate) fn register_terminal_fonts(cx: &App) -> gpui::Result<()> {
+/// Register all private host and terminal faces before capturing the font catalog.
+pub(crate) fn register_fonts(cx: &App) -> gpui::Result<()> {
+    let host = crate::host_fonts::HostFonts::get(cx);
     cx.text_system().add_fonts(
         crate::bundled_font::FACES
             .iter()
+            .chain(host.bundled_ui_faces.iter())
             .map(|bytes| Cow::Borrowed(*bytes))
             .collect(),
     )
@@ -325,25 +327,38 @@ fn available_font(text: &gpui::TextSystem, family: String) -> AvailableFont {
     }
 }
 
-fn base_fonts(installed: Vec<AvailableFont>) -> AvailableFonts {
+fn base_fonts(installed: Vec<AvailableFont>, cx: &App) -> AvailableFonts {
+    let host = crate::host_fonts::HostFonts::get(cx);
     AvailableFonts {
         system_ui: AvailableFont {
-            family: ".SystemUIFont".into(),
+            family: host.ui_family,
             class: FontClass::Proportional,
             resolution_identity: "system-ui".into(),
         },
         system_monospace: AvailableFont {
-            family: "Menlo".into(),
+            family: host.system_monospace_family,
             class: FontClass::Monospace,
             resolution_identity: "system-monospace".into(),
         },
         installed,
+        terminal_families: host
+            .terminal_families
+            .iter()
+            .map(|family| (*family).into())
+            .collect(),
+        emoji_family: host.emoji_family,
     }
 }
 
-fn selected_font(family: &str, preferences: &AppearancePreferences) -> bool {
+fn selected_font(
+    family: &str,
+    preferences: &AppearancePreferences,
+    host: &crate::host_fonts::HostFonts,
+) -> bool {
     match &preferences.terminal.typography.family {
-        TerminalFontFamily::DefaultMonospace => DEFAULT_TERMINAL_FAMILIES.contains(&family),
+        TerminalFontFamily::DefaultMonospace => {
+            host.terminal_families.contains(&family) || host.system_monospace_family == family
+        }
         TerminalFontFamily::Named { family: selected } => selected == family,
     }
 }
@@ -355,24 +370,26 @@ fn capture_initial_fonts(
 ) -> (AvailableFonts, Option<Vec<String>>) {
     let text = cx.text_system();
     let names = text.all_font_names();
+    let host = crate::host_fonts::HostFonts::get(cx);
     let installed = names
         .iter()
-        .filter(|family| selected_font(family, preferences))
+        .filter(|family| selected_font(family, preferences, &host))
         .cloned()
         .map(|family| available_font(text, family))
         .collect();
-    (base_fonts(installed), Some(names))
+    (base_fonts(installed, cx), Some(names))
 }
 
 /// Classify a newly requested family before resolving an appearance change.
 fn ensure_selected_fonts(preferences: &AppearancePreferences, cx: &mut App) {
+    let host = crate::host_fonts::HostFonts::get(cx);
     let missing = {
         let runtime = cx.global::<AppearanceRuntime>();
         runtime.pending_font_names.as_ref().map(|names| {
             names
                 .iter()
                 .filter(|family| {
-                    selected_font(family, preferences)
+                    selected_font(family, preferences, &host)
                         && !runtime
                             .fonts
                             .installed
@@ -432,6 +449,7 @@ fn capture_fonts(cx: &App) -> AvailableFonts {
             .into_iter()
             .map(|family| available_font(text, family))
             .collect(),
+        cx,
     )
 }
 
@@ -450,7 +468,7 @@ pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
 pub(crate) fn available_fonts(cx: &App) -> AvailableFonts {
     cx.try_global::<AppearanceRuntime>()
         .map(|runtime| runtime.fonts.clone())
-        .unwrap_or_default()
+        .unwrap_or_else(|| base_fonts(Vec::new(), cx))
 }
 
 pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
@@ -463,19 +481,7 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
                         AppearanceGeneration::INITIAL,
                         &Default::default(),
                         SystemAppearance::unavailable(),
-                        &AvailableFonts {
-                            system_ui: AvailableFont {
-                                family: ".SystemUIFont".into(),
-                                class: FontClass::Proportional,
-                                resolution_identity: "system-ui".into(),
-                            },
-                            system_monospace: AvailableFont {
-                                family: "Menlo".into(),
-                                class: FontClass::Monospace,
-                                resolution_identity: "system-monospace".into(),
-                            },
-                            installed: Vec::new(),
-                        },
+                        &base_fonts(Vec::new(), cx),
                     )
                     .expect("built-in appearance is valid"),
             )

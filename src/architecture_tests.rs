@@ -797,6 +797,8 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
         "Nautilus",
         "Sushi",
         "Linux",
+        "Menlo",
+        ".SystemUIFont",
     ]
     .into_iter()
     .find(|forbidden| source.contains(forbidden))
@@ -808,8 +810,14 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let mut files = Vec::new();
     collect_rust_sources(&root.join("ui"), &mut files);
     files.push(root.join("terminal/failure.rs"));
+    files.push(root.join("appearance/resolution.rs"));
+    files.push(root.join("../crates/spaceterm-ui/src/appearance.rs"));
     for path in files {
-        if is_test_source(&path) {
+        if is_test_source(&path)
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
+        {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
@@ -851,6 +859,8 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
         "let label = \"Preview with GNOME Sushi\";",
         "let label = \"Show in Nautilus\";",
         "let failure = \"Linux integration\";",
+        "let family = \"Menlo\";",
+        "let family = \".SystemUIFont\";",
     ] {
         assert!(
             shared_presentation_violation(source).is_some(),

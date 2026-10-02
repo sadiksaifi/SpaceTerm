@@ -1,6 +1,6 @@
 use gpui::{BoxShadow, Font, FontWeight, Hsla, Pixels, font, point, px};
 
-const SYSTEM_UI_FONT_FAMILY: &str = ".SystemUIFont";
+const SYSTEM_UI_FONT_FAMILY: &str = "system-ui";
 
 /// The resolved fonts used by reusable chrome controls.
 ///

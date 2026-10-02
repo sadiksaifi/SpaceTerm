@@ -17,7 +17,8 @@ normally reached through the macOS menu are available through the Linux Command 
 Ctrl+click activates Terminal Hyperlinks on Linux; Command+click remains the macOS gesture.
 
 Host font facts preserve `.SystemUIFont` and Menlo on macOS. Linux Application Chrome uses the
-bundled Inter 4.1 release under the SIL Open Font License, with recorded checksums and notices.
+bundled Inter 4.1 release under the SIL Open Font License, privately named SpaceTerm UI to avoid
+collisions with installed versions, with recorded checksums and notices.
 Terminal text starts with the bundled SpaceTerm Default family and falls back to fontconfig
 monospace on Linux.
 

@@ -54,6 +54,80 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
     (settings, platform)
 }
 
+#[gpui::test]
+fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(crate::host_fonts::HostFonts {
+            ui_family: "Chrome Test".into(),
+            system_monospace_family: "Terminal Test".into(),
+            terminal_families: &[crate::bundled_font::FAMILY],
+            emoji_family: "Emoji Test".into(),
+            bundled_ui_faces: &[],
+        });
+    });
+    start(cx);
+    cx.update(|cx| {
+        enum Snapshot {
+            Initial,
+            CompleteCatalog,
+            #[cfg(feature = "developer-tools")]
+            Reload,
+        }
+        for snapshot in [
+            Snapshot::Initial,
+            Snapshot::CompleteCatalog,
+            #[cfg(feature = "developer-tools")]
+            Snapshot::Reload,
+        ] {
+            match snapshot {
+                Snapshot::Initial => {}
+                Snapshot::CompleteCatalog => {
+                    complete_font_catalog(cx);
+                    refresh(cx).unwrap();
+                }
+                #[cfg(feature = "developer-tools")]
+                Snapshot::Reload => reload_fonts(cx).unwrap(),
+            }
+            let resolved = current(cx);
+            assert_eq!(
+                resolved.chrome.typography.body.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.chrome.typography.heading.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.primary_family,
+                "Terminal Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.fallback_families,
+                ["Emoji Test", "SpaceTerm Default"]
+            );
+            assert_eq!(
+                crate::ui::appearance::chrome(cx)
+                    .typography
+                    .style(crate::ui::chrome_typography::TextRole::Body)
+                    .font
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+            assert_eq!(
+                cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                    .installed_typography()
+                    .regular()
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+        }
+    });
+}
+
 struct CatalogTextSystem {
     base: gpui::NoopTextSystem,
     terminal_fonts_registered: std::sync::atomic::AtomicBool,
@@ -859,3 +933,6 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
 mod macos_adapter_tests {
     include!("../platform/macos_adapter_tests/appearance_runtime.rs");
 }
+#[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+#[path = "../platform/linux_adapter_tests/fonts.rs"]
+mod linux_adapter_tests;

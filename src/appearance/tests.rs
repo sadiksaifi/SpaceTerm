@@ -1015,13 +1015,13 @@ fn terminal_emoji_fallback_precedes_every_text_fallback() {
     ] {
         assert_eq!(
             descriptor.fallback_families.first().map(String::as_str),
-            Some("Apple Color Emoji")
+            Some("emoji")
         );
         assert_eq!(
             descriptor
                 .fallback_families
                 .iter()
-                .filter(|family| family.as_str() == "Apple Color Emoji")
+                .filter(|family| family.as_str() == "emoji")
                 .count(),
             1
         );
@@ -1063,7 +1063,7 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
             .fallback_families
             .first()
             .map(String::as_str),
-        Some("Apple Color Emoji")
+        Some("emoji")
     );
     assert!(
         resolved

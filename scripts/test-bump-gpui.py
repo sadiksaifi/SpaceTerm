@@ -42,6 +42,9 @@ gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui_wgpu = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
 '''
 TOOLCHAIN = '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'
 MEMBER = "crates/fixture-ui/Cargo.toml"
@@ -56,7 +59,7 @@ gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
 [dev-dependencies]
 gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
 '''
-LOCK_NAMES = ("gpui", "gpui_apple", "gpui_macos", "gpui_platform")
+LOCK_NAMES = ("gpui", "gpui_apple", "gpui_macos", "gpui_platform", "gpui_wgpu")
 FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", OTHER_MEMBER, MEMBER)
 
 

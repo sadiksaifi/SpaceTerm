@@ -196,7 +196,7 @@ pub(super) fn render(
     let alternate = Switch::new(
         "workbench-alternate-typography",
         "Alternate typography",
-        AppearancePreview::alternate_typography(&document),
+        workbench.preview.alternate_typography(&document),
     )
     .size(ToggleSize::Regular)
     .label_hidden(true)
@@ -249,7 +249,10 @@ pub(super) fn render(
             "Alternate typography",
             alternate,
         )
-        .description("Menlo at 22 points with a 1.35 line height, and the other density.")
+        .description(format!(
+            "{} at 22 points with a 1.35 line height.",
+            crate::host_fonts::HostFonts::get(cx).system_monospace_family,
+        ))
         .render(appearance, window, cx)
         .into_any_element(),
     ];
