@@ -2878,17 +2878,80 @@ fn removing_an_open_palette_should_preserve_a_successor_focus(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn client_frame_palette_edge_clicks_activate_the_visible_item(cx: &mut TestAppContext) {
+    let (root, palette, events, underlay, cx) = palette_window(cx);
+    // SpaceTerm's client shell publishes this inset and removes it at tiled edges.
+    cx.update(|window, _| window.set_client_inset(px(24.0)));
+    for tiling in [
+        gpui::Tiling::default(),
+        gpui::Tiling {
+            top: true,
+            right: true,
+            ..Default::default()
+        },
+    ] {
+        cx.simulate_decorations(gpui::Decorations::Client { tiling });
+        for bottom_edge in [false, true] {
+            open_palette(&root, &palette, cx);
+            events.borrow_mut().clear();
+            let row = cx.debug_bounds("row-close").expect("last item is visible");
+            let position = if bottom_edge {
+                point(row.center().x, row.bottom() - px(2.0))
+            } else {
+                point(row.right() - px(2.0), row.center().y)
+            };
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            cx.simulate_click(position, Modifiers::none());
+            cx.run_until_parked();
+
+            assert!(
+                events.borrow().contains(&CommandPaletteEvent::Activated(
+                    CommandPaletteActivation {
+                        item_id: 3,
+                        source: CommandPaletteActivationSource::Pointer,
+                    }
+                )),
+                "clicking visible item {row:?} at {position:?} must activate it: {:?}",
+                events.borrow()
+            );
+            assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+            assert_eq!(*underlay.borrow(), 0);
+        }
+    }
+}
+
+#[gpui::test]
 fn outside_press_should_close_without_reaching_underlay(cx: &mut TestAppContext) {
     let (root, palette, _, underlay, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    let panel = cx.debug_bounds("command-palette-panel").unwrap_or_default();
-    let outside = point(panel.left() - px(8.0), panel.bottom() + px(8.0));
+    cx.update(|window, _| window.set_client_inset(px(24.0)));
+    for decorations in [
+        gpui::Decorations::Server,
+        gpui::Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        },
+    ] {
+        cx.simulate_decorations(decorations);
+        for above_left in [false, true] {
+            open_palette(&root, &palette, cx);
+            let panel = cx
+                .debug_bounds("command-palette-panel")
+                .expect("visible panel");
+            let outside = if above_left {
+                point(panel.left() - px(8.0), panel.top() - px(8.0))
+            } else {
+                point(panel.left() - px(8.0), panel.bottom() + px(8.0))
+            };
 
-    cx.simulate_click(outside, Modifiers::default());
-    cx.run_until_parked();
+            cx.simulate_click(outside, Modifiers::default());
+            cx.run_until_parked();
 
-    assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
-    assert_eq!(*underlay.borrow(), 0);
+            assert!(
+                !palette.read_with(cx, |palette, _| palette.is_open()),
+                "click {outside:?} outside visible panel {panel:?} must dismiss it"
+            );
+            assert_eq!(*underlay.borrow(), 0);
+        }
+    }
 }
 
 #[gpui::test]
