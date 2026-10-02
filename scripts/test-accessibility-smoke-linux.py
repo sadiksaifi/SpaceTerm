@@ -185,8 +185,6 @@ def cleanup_regression(smoke, directory, proof, fail_after_spawn=False):
     runtime = Path(tempfile.mkdtemp(prefix="r94-", dir=NOTES))
     control_home = directory / "control-home"
     control_runtime = directory / "control-runtime"
-    control_home.mkdir(mode=0o700)
-    control_runtime.mkdir(mode=0o700)
     owner = None
     controls = []
     descendant_pid = None
@@ -205,15 +203,6 @@ def cleanup_regression(smoke, directory, proof, fail_after_spawn=False):
         "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
         "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
     launcher = directory / "launcher.py"
-    launcher.write_text(
-        "import pathlib,subprocess,sys,time\n"
-        "child=subprocess.Popen([sys.executable,'-I','-c',sys.argv[1],sys.argv[2]],"
-        "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,"
-        "stderr=subprocess.DEVNULL)\n"
-        "ledger=pathlib.Path(sys.argv[3])\n"
-        "pending=ledger.with_suffix('.next')\n"
-        "pending.write_text(str(child.pid)); pending.replace(ledger)\n"
-        "time.sleep(60)\n")
     proof.update(no_display_bus_application_or_reader=True)
 
     def start_reaper():
@@ -232,6 +221,17 @@ def cleanup_regression(smoke, directory, proof, fail_after_spawn=False):
         return thread
 
     try:
+        control_home.mkdir(mode=0o700)
+        control_runtime.mkdir(mode=0o700)
+        launcher.write_text(
+            "import pathlib,subprocess,sys,time\n"
+            "child=subprocess.Popen([sys.executable,'-I','-c',sys.argv[1],sys.argv[2]],"
+            "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,"
+            "stderr=subprocess.DEVNULL)\n"
+            "ledger=pathlib.Path(sys.argv[3])\n"
+            "pending=ledger.with_suffix('.next')\n"
+            "pending.write_text(str(child.pid)); pending.replace(ledger)\n"
+            "time.sleep(60)\n")
         check(libc.prctl(36, 1, 0, 0, 0) == 0, "subreaper_activation_failed")
         os.environ.update(HOME=str(home), XDG_RUNTIME_DIR=str(runtime))
         owner = smoke.Processes(directory / "owned-processes.json")
