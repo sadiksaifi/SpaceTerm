@@ -2465,7 +2465,7 @@ impl TerminalPane {
         };
 
         if button == PointerButton::Left
-            && event.modifiers.platform
+            && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
         {
             self.pressed_link = Some((self.screen.generation, link));
@@ -2582,7 +2582,7 @@ impl TerminalPane {
                 &pressed,
                 self.screen.generation,
                 current.as_ref(),
-                event.modifiers.platform,
+                spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers),
             ) {
                 cx.open_url(&url);
             }
@@ -3823,7 +3823,11 @@ impl Render for TerminalPane {
                 active_hovered_link(
                     self.hovered_link.as_ref(),
                     self.screen.generation,
-                    self.pointer_modifiers.platform,
+                    spaceterm_ui::PointerConventions::get(cx).activates_link(gpui::Modifiers {
+                        control: self.pointer_modifiers.control,
+                        platform: self.pointer_modifiers.platform,
+                        ..Default::default()
+                    }),
                 )
                 .cloned()
             })

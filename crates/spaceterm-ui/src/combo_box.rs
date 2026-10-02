@@ -2367,8 +2367,8 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                 let hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || event.modifiers.control
+                        || !crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers)
                         || !hitbox.is_hovered(window)
                         || !enabled
                     {
@@ -3272,8 +3272,8 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                     let down_hitbox = hitbox.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
-                            || event.button != MouseButton::Left
-                            || event.modifiers.control
+                            || !crate::PointerConventions::get(cx)
+                                .primary(event.button, event.modifiers)
                             || !down_hitbox.is_hovered(window)
                         {
                             return;
@@ -3292,12 +3292,11 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                         {
                             return;
                         }
+                        let primary = crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers);
                         let accepted = up_state
                             .update(cx, |state, _| {
-                                state.pointer_up(
-                                    &up_id,
-                                    !event.modifiers.control && up_hitbox.is_hovered(window),
-                                )
+                                state.pointer_up(&up_id, primary && up_hitbox.is_hovered(window))
                             })
                             .unwrap_or(false);
                         if accepted {

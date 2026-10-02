@@ -233,6 +233,17 @@ impl DesktopProfile {
     }
     pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
         cx.set_global(self.presentation.clone());
+        spaceterm_ui::install_pointer_conventions(
+            cx,
+            match self.keymap.terminal_conventions() {
+                crate::keybindings::TerminalConventions::CommandShortcuts => {
+                    spaceterm_ui::PointerConventions::ControlClickSecondary
+                }
+                crate::keybindings::TerminalConventions::ControlShiftShortcuts => {
+                    spaceterm_ui::PointerConventions::SecondaryButton
+                }
+            },
+        );
         spaceterm_ui::install_modal_policy(
             cx,
             self.modal_policy

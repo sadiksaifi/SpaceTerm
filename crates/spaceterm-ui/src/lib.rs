@@ -27,6 +27,7 @@ mod middle_truncated_text;
 mod modal;
 mod optical_text;
 mod overlay_scrollbar;
+mod pointer_conventions;
 mod progress;
 #[cfg(test)]
 mod progress_tests;
@@ -45,6 +46,8 @@ mod tooltip;
 mod window_drag_region;
 
 use gpui::App;
+
+pub use pointer_conventions::{PointerConventions, install_pointer_conventions};
 
 pub use anchored_placement::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,
