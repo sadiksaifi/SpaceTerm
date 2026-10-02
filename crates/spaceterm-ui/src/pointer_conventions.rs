@@ -12,31 +12,6 @@ pub enum PointerConventions {
     SecondaryButton,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn desktop_link_modifiers_keep_control_click_available_on_linux() {
-        let control = Modifiers::control();
-        let command = Modifiers {
-            platform: true,
-            ..Modifiers::none()
-        };
-        assert!(PointerConventions::SecondaryButton.activates_link(control));
-        assert!(!PointerConventions::SecondaryButton.activates_link(command));
-        assert!(PointerConventions::ControlClickSecondary.activates_link(command));
-        assert!(!PointerConventions::ControlClickSecondary.activates_link(control));
-        for policy in [
-            PointerConventions::SecondaryButton,
-            PointerConventions::ControlClickSecondary,
-        ] {
-            assert!(!policy.activates_link(Modifiers::none()));
-            assert!(policy.secondary(MouseButton::Right, Modifiers::none()));
-        }
-    }
-}
-
 impl Global for PointerConventions {}
 
 /// Installs the host's pointer policy without performing operating-system detection.
@@ -69,5 +44,30 @@ impl PointerConventions {
 
     pub(crate) fn primary(self, button: MouseButton, modifiers: Modifiers) -> bool {
         button == MouseButton::Left && (self == Self::SecondaryButton || !modifiers.control)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_link_modifiers_keep_control_click_available_on_linux() {
+        let control = Modifiers::control();
+        let command = Modifiers {
+            platform: true,
+            ..Modifiers::none()
+        };
+        assert!(PointerConventions::SecondaryButton.activates_link(control));
+        assert!(!PointerConventions::SecondaryButton.activates_link(command));
+        assert!(PointerConventions::ControlClickSecondary.activates_link(command));
+        assert!(!PointerConventions::ControlClickSecondary.activates_link(control));
+        for policy in [
+            PointerConventions::SecondaryButton,
+            PointerConventions::ControlClickSecondary,
+        ] {
+            assert!(!policy.activates_link(Modifiers::none()));
+            assert!(policy.secondary(MouseButton::Right, Modifiers::none()));
+        }
     }
 }
