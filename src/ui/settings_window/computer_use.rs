@@ -5,8 +5,10 @@
 //! grants, so these rows are where a person learns why such a tool reports missing access and
 //! starts a Permission Setup. The Operating System reports only whether a grant is usable, and a
 //! grant can stay switched on after it stops working, so every readable state keeps a way to
-//! troubleshoot. Nothing here captures the screen or sends input to test access, and a reset
-//! reaches one permission of the running application only, after the person confirms it.
+//! troubleshoot. Nothing here captures the screen or sends input to test access. A reset reaches
+//! one permission of the running application only: Troubleshoot resets an entry after the person
+//! confirms it, and Set Up clears an entry that does not grant the permission so the person can
+//! add the running application again.
 
 use std::rc::Rc;
 
@@ -299,7 +301,7 @@ impl ComputerUseAccessRow {
             ComputerUseAccessStatus::Unsupported => (
                 "Unavailable",
                 text.state_unavailable,
-                format!("SpaceTerm does not manage {name} access on this platform."),
+                format!("{application} does not manage {name} access on this platform."),
                 None,
             ),
             ComputerUseAccessStatus::Authorization(Authorization::Granted) => (
@@ -307,7 +309,8 @@ impl ComputerUseAccessRow {
                 text.state_allowed,
                 notice.unwrap_or_else(|| {
                     format!(
-                        "Computer-use tools running in SpaceTerm can {}. If a tool still reports \
+                        "Computer-use tools running in {application} can {}. If a tool still \
+                         reports \
                          missing access, choose Troubleshoot.",
                         copy.purpose
                     )
@@ -318,8 +321,7 @@ impl ComputerUseAccessRow {
                 let (explanation, action) = match self.setup {
                     Some(PermissionSetupStatus::Running) => (
                         format!(
-                            "Follow the guide beside System Settings to add {application} to \
-                             {pane}."
+                            "Follow the guide in System Settings to add {application} to {pane}."
                         ),
                         Action::CancelSetup,
                     ),
@@ -340,7 +342,8 @@ impl ComputerUseAccessRow {
                         (
                             notice.or(failure).unwrap_or_else(|| {
                                 format!(
-                                    "Computer-use tools running in SpaceTerm need this to {}. \
+                                    "Computer-use tools running in {application} need this to \
+                                     {}. \
                                      Choose Set Up to add {application} in System Settings.",
                                     copy.purpose
                                 )
@@ -351,7 +354,8 @@ impl ComputerUseAccessRow {
                     None => (
                         notice.unwrap_or_else(|| {
                             format!(
-                                "Computer-use tools running in SpaceTerm need this to {}. Turn on \
+                                "Computer-use tools running in {application} need this to {}. \
+                                 Turn on \
                                  {application} under Privacy & Security > {pane}.",
                                 copy.purpose
                             )
@@ -366,7 +370,7 @@ impl ComputerUseAccessRow {
                 text.state_unavailable,
                 match error {
                     ComputerUseAccessError::OffMainThread => {
-                        format!("SpaceTerm could not check {name} access.")
+                        format!("{application} could not check {name} access.")
                     }
                     ComputerUseAccessError::PlatformUnavailable => {
                         format!("The system did not report {name} access.")
@@ -396,7 +400,7 @@ impl ComputerUseAccessRow {
         let title = format!("Troubleshoot {name}");
         let message = format!(
             "The {name} grant can stop working after {application} is updated or signed again, \
-             while its switch stays on. SpaceTerm cannot detect this. If a tool reports {name} \
+             while its switch stays on. {application} cannot detect this. If a tool reports {name} \
              access missing, try these steps in order, even while access shows Allowed."
         );
         let reopen =
@@ -414,7 +418,7 @@ impl ComputerUseAccessRow {
              first.\n\n\
              Some tools also run their own helper app that needs a separate grant. Follow the \
              tool's instructions for that app. A device management policy can also block the \
-             grant, and SpaceTerm cannot change that policy."
+             grant, and {application} cannot change that policy."
         );
         (title, message, detail)
     }

@@ -1,0 +1,29 @@
+# Guide Permission Setup on System Settings
+
+Computer-use tools need Screen Recording and Device Control, and macOS grants both only through
+System Settings. SpaceTerm cannot grant them itself and must not change privacy settings without a
+person. Permission Setup therefore opens the relevant privacy list and docks a Setup Guide on System
+Settings' window, from which the person drags SpaceTerm into the list and turns it on.
+
+Permission Setup starts only from a person's action: Set Up in Settings, or Set Up on a Permission
+Request notice in a Pane. Onboarding never starts it, and every permission stays off until the
+person grants it.
+
+SpaceTerm reads grants from a fresh child process of its own executable. The Screen Recording
+answer in a running process keeps its launch value, so an in-process read cannot see a grant made
+during the setup. At most one probe runs at a time, and a Pane reads authorization only when a request
+adds a permission it has not seen.
+
+Set Up clears the permission's entry with `tccutil` when a probe has just verified that it is not
+granted. A stale entry from an earlier signature shows as present but grants nothing, and removing
+it lets the person add SpaceTerm afresh. A verified grant and a failed probe never reset. Troubleshoot
+resets only after the person confirms. A reset names only the running identity's bundle identifier.
+
+The Setup Guide is a non-activating panel that follows System Settings' window by reading window
+geometry and owners, which needs no permission. It shows only while System Settings is frontmost, so
+it never covers another application, and it polls less often while System Settings is covered.
+Locating the window and its content column is host code; placement within the column is portable.
+
+A Permission Request is an OSC 7701 sequence that any terminal output can carry, including remote
+programs and printed files. It can only offer the setup; the person decides. The filter abandons a
+request on any escape, as Ghostty's parser does, so a truncated request cannot hide later output.

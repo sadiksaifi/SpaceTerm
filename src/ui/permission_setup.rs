@@ -3,8 +3,8 @@
 //!
 //! A setup starts only when someone asks for it: a person choosing Set Up in Settings, or
 //! accepting a Permission Request from a tool in a Terminal Session. It verifies the permission,
-//! clears a stale entry, opens System Settings at the permission's list, and docks the Setup Guide
-//! beside System Settings' window while that window is in front. The guide offers SpaceTerm itself
+//! clears an entry that does not grant it, opens System Settings at the permission's list, and
+//! docks the Setup Guide on System Settings' window while that window is in front. The guide offers SpaceTerm itself
 //! to drag into the list and reports the grant as soon as a tool started now would receive it.
 //! Closing System Settings ends the setup.
 
@@ -16,7 +16,7 @@ mod tests;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Global, Pixels, Task};
 
@@ -30,8 +30,14 @@ pub(crate) use guide::SetupGuide;
 
 /// How often the guide follows System Settings' window, which a person can move at any time.
 const TRACKING_INTERVAL: Duration = Duration::from_millis(33);
-/// How many tracking intervals pass between authorization reads. System Settings reports no
-/// Screen Recording change, so the setup reads it about once a second while guiding.
+/// How often the setup looks for System Settings while it is covered, when no guide follows it.
+const COVERED_TRACKING_INTERVAL: Duration = Duration::from_millis(250);
+/// How long System Settings may keep showing the previous list after it is asked for another.
+/// The guide waits this long after opening a list, so it never points at the wrong one.
+const OPENING_SETTLE: Duration = Duration::from_millis(250);
+/// How many tracking intervals in front pass between authorization reads. System Settings reports
+/// no Screen Recording change, so the setup reads it about once a second while the person works
+/// in System Settings.
 const AUTHORIZATION_INTERVALS: u32 = 30;
 /// How long System Settings may take to come forward before the setup reports it did not.
 const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,7 +114,7 @@ pub(crate) enum SetupStep {
     Preparing,
     /// System Settings was asked for the permission's list and has not come forward yet.
     Opening,
-    /// The guide waits beside System Settings for the person to add SpaceTerm.
+    /// The guide waits on System Settings for the person to add SpaceTerm.
     Guiding,
     /// Tools started now receive the permission.
     Granted,
@@ -132,6 +138,9 @@ pub(crate) struct PermissionSetup {
     failures: Vec<(ComputerUsePermission, PermissionSetupFailure)>,
     /// The running application as the guide offers it, resolved once on first use.
     bundle: Option<Option<ApplicationBundle>>,
+    /// Notifies this setup's observers of authorization changes, from the first
+    /// [`PermissionSetup::watch_authorization`] on.
+    watch: Option<(Box<dyn ComputerUseAccessSubscription>, Task<()>)>,
 }
 
 struct SetupRun {
@@ -139,7 +148,10 @@ struct SetupRun {
     queued: VecDeque<ComputerUsePermission>,
     step: SetupStep,
     guide: Option<GuideWindow>,
+    /// Tracking intervals with System Settings in front.
     intervals: u32,
+    /// When System Settings was last asked for a list.
+    opened_at: Instant,
     /// Waits for the current step: the preparation's result or the opening timeout.
     _step: Option<Task<()>>,
     _tracking: Task<()>,
@@ -160,7 +172,28 @@ impl PermissionSetup {
             run: None,
             failures: Vec::new(),
             bundle: None,
+            watch: None,
         }
+    }
+
+    /// Notifies this setup's observers whenever an authorization may have changed, so a Pane
+    /// waiting on a Permission Request reads again and withdraws or renews its offer.
+    pub(crate) fn watch_authorization(&mut self, cx: &mut Context<Self>) {
+        if self.watch.is_some() {
+            return;
+        }
+        self.watch = self.access.observe().map(|observation| {
+            let changed = observation.changed;
+            let task = cx.spawn(async move |setup, cx| {
+                while changed.recv().await.is_ok() {
+                    while changed.try_recv().is_ok() {}
+                    if setup.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            });
+            (observation.subscription, task)
+        });
     }
 
     pub(crate) fn status(&self, permission: ComputerUsePermission) -> PermissionSetupStatus {
@@ -213,8 +246,17 @@ impl PermissionSetup {
                     run.queued.push_back(permission);
                 }
             }
-            if matches!(run.step, SetupStep::Opening | SetupStep::Guiding) {
-                let _ = self.access.open_settings(run.permission);
+            match run.step {
+                SetupStep::Opening | SetupStep::Guiding => {
+                    let _ = self.access.open_settings(run.permission);
+                }
+                // The person asked for more after a grant, so the setup moves on rather than
+                // waiting for Continue in a guide that may be hidden.
+                SetupStep::Granted if !run.queued.is_empty() => {
+                    self.advance(cx);
+                    return;
+                }
+                SetupStep::Preparing | SetupStep::Granted => {}
             }
             self.present(cx);
             cx.notify();
@@ -240,17 +282,16 @@ impl PermissionSetup {
         });
         let host = Arc::clone(&self.host);
         let tracking = cx.spawn(async move |setup, cx| {
+            let mut interval = TRACKING_INTERVAL;
             loop {
-                cx.background_executor().timer(TRACKING_INTERVAL).await;
+                cx.background_executor().timer(interval).await;
                 let host = Arc::clone(&host);
                 let located = cx
                     .background_spawn(async move { host.locate_system_settings() })
                     .await;
-                if setup
-                    .update(cx, |setup, cx| setup.follow(located, cx))
-                    .is_err()
-                {
-                    break;
+                match setup.update(cx, |setup, cx| setup.follow(located, cx)) {
+                    Ok(next) => interval = next,
+                    Err(_) => break,
                 }
             }
         });
@@ -260,6 +301,7 @@ impl PermissionSetup {
             step: SetupStep::Preparing,
             guide: None,
             intervals: 0,
+            opened_at: cx.background_executor().now(),
             _step: None,
             _tracking: tracking,
             _changes: changes,
@@ -337,6 +379,7 @@ impl PermissionSetup {
             return;
         }
         run.step = SetupStep::Opening;
+        run.opened_at = cx.background_executor().now();
         run._step = Some(cx.spawn(async move |setup, cx| {
             cx.background_executor().timer(OPENING_TIMEOUT).await;
             let _ = setup.update(cx, |setup, cx| {
@@ -378,31 +421,53 @@ impl PermissionSetup {
         }
     }
 
-    fn follow(&mut self, located: SystemSettingsWindow, cx: &mut Context<Self>) {
+    /// Follows System Settings' window and returns how long to wait before looking again.
+    fn follow(&mut self, located: SystemSettingsWindow, cx: &mut Context<Self>) -> Duration {
+        let now = cx.background_executor().now();
         let Some(run) = &mut self.run else {
-            return;
+            return COVERED_TRACKING_INTERVAL;
         };
-        run.intervals = run.intervals.wrapping_add(1);
-        let read_due = run.intervals % AUTHORIZATION_INTERVALS == 0;
+        let frontmost = matches!(located, SystemSettingsWindow::Frontmost { .. });
+        if frontmost {
+            run.intervals = run.intervals.wrapping_add(1);
+        }
+        // Authorization is read only while the person can change it in System Settings, and once
+        // more as System Settings leaves the front, so a grant made just before is not missed.
+        let read_due = if frontmost {
+            run.intervals.is_multiple_of(AUTHORIZATION_INTERVALS)
+        } else {
+            run.guide.is_some()
+        };
+        let next = if frontmost || run.step == SetupStep::Opening {
+            TRACKING_INTERVAL
+        } else {
+            COVERED_TRACKING_INTERVAL
+        };
+        if read_due {
+            self.read_authorization(cx);
+        }
+        let Some(run) = &mut self.run else {
+            return next;
+        };
         match (run.step, located) {
             (SetupStep::Preparing, _) => {}
             // System Settings may still be launching or switching lists.
             (SetupStep::Opening, SystemSettingsWindow::Closed | SystemSettingsWindow::Covered) => {}
-            (SetupStep::Opening, SystemSettingsWindow::Frontmost { display, bounds }) => {
-                run.step = SetupStep::Guiding;
-                run._step = None;
-                cx.notify();
-                self.present_guide(display, bounds, cx);
+            (SetupStep::Opening, SystemSettingsWindow::Frontmost { display, content }) => {
+                if now.saturating_duration_since(run.opened_at) >= OPENING_SETTLE {
+                    run.step = SetupStep::Guiding;
+                    run._step = None;
+                    cx.notify();
+                    self.present_guide(display, content, cx);
+                }
             }
             (_, SystemSettingsWindow::Closed) => self.finish(cx),
             (_, SystemSettingsWindow::Covered) => self.dismiss_guide(cx),
-            (_, SystemSettingsWindow::Frontmost { display, bounds }) => {
-                self.present_guide(display, bounds, cx);
+            (_, SystemSettingsWindow::Frontmost { display, content }) => {
+                self.present_guide(display, content, cx);
             }
         }
-        if read_due {
-            self.read_authorization(cx);
-        }
+        next
     }
 
     /// Reads whether a tool started now receives the permission, and reports a grant.
@@ -447,11 +512,11 @@ impl PermissionSetup {
         }
     }
 
-    /// Docks the guide on System Settings' window, opening it when it is not open.
+    /// Docks the guide on System Settings' content column, opening it when it is not open.
     fn present_guide(
         &mut self,
         display: DisplayId,
-        settings: Bounds<Pixels>,
+        content: Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) {
         let Some(visible) = cx
@@ -461,7 +526,7 @@ impl PermissionSetup {
             self.dismiss_guide(cx);
             return;
         };
-        let bounds = placement::place_guide(settings, visible, guide::GUIDE_HEIGHT);
+        let bounds = placement::place_guide(content, visible, guide::GUIDE_HEIGHT);
         let Some(presentation) = self.presentation() else {
             return;
         };

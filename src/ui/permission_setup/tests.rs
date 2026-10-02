@@ -11,7 +11,8 @@ use gpui::{
 
 use super::{
     AUTHORIZATION_INTERVALS, OPENING_TIMEOUT, PermissionSetup, PermissionSetupFailure,
-    PermissionSetupStatus, SetupGuide, SetupStep, TRACKING_INTERVAL,
+    PermissionSetupStatus, SetupGuide, SetupStep, COVERED_TRACKING_INTERVAL, OPENING_SETTLE,
+    TRACKING_INTERVAL,
 };
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -85,7 +86,7 @@ impl Fixture {
     fn show_settings(&self, frame: Bounds<Pixels>, cx: &mut TestAppContext) {
         self.host.set_window(SystemSettingsWindow::Frontmost {
             display: self.display,
-            bounds: frame,
+            content: frame,
         });
         tick(cx);
     }
@@ -100,8 +101,11 @@ fn settings_frame() -> Bounds<Pixels> {
     bounds(point(px(400.0), px(100.0)), size(px(715.0), px(560.0)))
 }
 
+/// Lets the setup look at System Settings at least once, however it last found it, and lets a
+/// newly opened list settle.
 fn tick(cx: &mut TestAppContext) {
-    cx.executor().advance_clock(TRACKING_INTERVAL);
+    cx.executor()
+        .advance_clock(COVERED_TRACKING_INTERVAL.max(OPENING_SETTLE) + TRACKING_INTERVAL);
     cx.run_until_parked();
 }
 
@@ -303,6 +307,74 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     assert!(self::guide(cx).is_none());
     fixture.show_settings(settings_frame(), cx);
     assert!(self::guide(cx).is_some());
+}
+
+/// After a grant the person may return to SpaceTerm, which hides the guide. A request for another
+/// permission then moves on at once instead of waiting for Continue in the hidden guide.
+#[gpui::test]
+fn a_request_after_a_grant_opens_the_next_list(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    fixture.access.set(ScreenRecording, Ok(Granted));
+    fixture.access.report_change();
+    cx.run_until_parked();
+    fixture.set_window(SystemSettingsWindow::Covered, cx);
+    assert!(guide(cx).is_none());
+
+    fixture.start(&[Accessibility], cx);
+
+    assert_eq!(
+        *fixture.access.opened.borrow(),
+        [ScreenRecording, Accessibility]
+    );
+    assert_eq!(
+        fixture.current(cx),
+        Some((Accessibility, SetupStep::Opening))
+    );
+}
+
+/// System Settings keeps showing the previous list for a moment after it is asked for another, so
+/// the guide waits before pointing at "the list above".
+#[gpui::test]
+fn the_guide_waits_for_a_new_list_to_settle(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.host.set_window(SystemSettingsWindow::Frontmost {
+        display: fixture.display,
+        content: settings_frame(),
+    });
+
+    cx.executor().advance_clock(TRACKING_INTERVAL);
+    cx.run_until_parked();
+    assert!(guide(cx).is_none());
+
+    cx.executor().advance_clock(OPENING_SETTLE);
+    cx.run_until_parked();
+    assert!(guide(cx).is_some());
+}
+
+/// While System Settings is covered the person cannot change a grant, so the setup reads none and
+/// starts no verification.
+#[gpui::test]
+fn a_covered_setup_reads_no_authorization(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    // Leaving System Settings reads once, so a grant made just before is found.
+    let reads = fixture.access.reads();
+    fixture.set_window(SystemSettingsWindow::Covered, cx);
+    assert_eq!(fixture.access.reads(), reads + 1);
+
+    for _ in 0..AUTHORIZATION_INTERVALS * 2 {
+        tick(cx);
+    }
+
+    assert_eq!(fixture.access.reads(), reads + 1);
+    assert_eq!(
+        fixture.current(cx),
+        Some((ScreenRecording, SetupStep::Guiding))
+    );
 }
 
 #[gpui::test]

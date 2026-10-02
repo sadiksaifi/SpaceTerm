@@ -812,7 +812,7 @@ pub(crate) struct ApplicationCapabilities {
     /// Reads and recovers the grants computer-use tools in a Terminal Session inherit.
     pub(crate) computer_use_access:
         Option<Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>>,
-    /// Docks the Setup Guide beside System Settings during a Permission Setup.
+    /// Docks the Setup Guide on System Settings' window during a Permission Setup.
     pub(crate) setup_guide: Option<Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,

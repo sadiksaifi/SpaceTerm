@@ -7454,4 +7454,98 @@ mod permission_requests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("permission-request").is_none());
     }
+
+    fn offered(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) -> Vec<ComputerUsePermission> {
+        pane.read_with(cx, |pane, _| pane.permission_request.clone())
+    }
+
+    /// A program that repeats its request reads authorization once per permission, because a
+    /// native read can start a verification process.
+    #[gpui::test]
+    fn repeated_requests_read_authorization_once(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        let reads = access.reads();
+        for _ in 0..20 {
+            request(&pane, &[ScreenRecording], cx);
+        }
+        assert_eq!(access.reads(), reads);
+
+        let not_now = {
+            request(&pane, &[Accessibility], cx);
+            cx.debug_bounds("permission-request-not-now").unwrap()
+        };
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        let reads = access.reads();
+        for _ in 0..20 {
+            request(&pane, &[Accessibility], cx);
+        }
+        assert_eq!(access.reads(), reads);
+    }
+
+    #[gpui::test]
+    fn a_grant_withdraws_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        access.report_change();
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [Accessibility]);
+    }
+
+    /// A grant read from a cache can be stale. When a verification finds it withdrawn, the Pane
+    /// offers the setup the program asked for.
+    #[gpui::test]
+    fn a_withdrawn_grant_renews_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::Granted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        access.report_change();
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+        assert!(cx.debug_bounds("permission-request").is_some());
+    }
+
+    /// A setup started anywhere else holds the permission, so this Pane stops offering it.
+    #[gpui::test]
+    fn a_setup_started_elsewhere_withdraws_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+
+        let setup = cx.update(|_, cx| crate::ui::permission_setup::installed(cx).unwrap());
+        setup.update(cx, |setup, cx| setup.start(&[ScreenRecording], cx));
+        cx.run_until_parked();
+        assert!(offered(&pane, cx).is_empty());
+
+        setup.update(cx, |setup, cx| setup.cancel(cx));
+        cx.run_until_parked();
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+    }
 }

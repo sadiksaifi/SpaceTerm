@@ -137,6 +137,7 @@ pub(crate) mod testing {
         /// Reports a change to every observer, as the system does after a grant changes.
         changes: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
         observers: Rc<Cell<usize>>,
+        reads: Cell<usize>,
     }
 
     /// Counts an observation until its owner drops it.
@@ -165,7 +166,13 @@ pub(crate) mod testing {
                 pending_resets: RefCell::default(),
                 changes: Rc::default(),
                 observers: Rc::default(),
+                reads: Cell::new(0),
             })
+        }
+
+        /// How many authorization reads were made. A native read can start a verification.
+        pub(crate) fn reads(&self) -> usize {
+            self.reads.get()
         }
 
         /// How many observations are alive.
@@ -199,6 +206,7 @@ pub(crate) mod testing {
 
     impl ComputerUseAccess for ScriptedComputerUseAccess {
         fn authorization(&self, permission: ComputerUsePermission) -> Authorization {
+            self.reads.set(self.reads.get() + 1);
             match permission {
                 ComputerUsePermission::ScreenRecording => self.screen_recording.get(),
                 ComputerUsePermission::Accessibility => self.accessibility.get(),

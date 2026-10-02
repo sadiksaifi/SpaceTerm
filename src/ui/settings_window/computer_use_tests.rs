@@ -262,7 +262,7 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
 
     host.set_window(SystemSettingsWindow::Frontmost {
         display: cx.update(|_, cx| cx.primary_display().expect("a display").id()),
-        bounds: gpui::bounds(
+        content: gpui::bounds(
             gpui::point(gpui::px(100.0), gpui::px(100.0)),
             gpui::size(gpui::px(715.0), gpui::px(560.0)),
         ),

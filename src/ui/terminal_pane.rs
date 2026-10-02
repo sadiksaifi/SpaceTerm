@@ -580,10 +580,17 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
-    /// The ungranted permissions a Permission Request asked for, until the person answers.
+    /// Permissions a Permission Request asked for that the person has not answered. The Pane
+    /// keeps them while granted, so it offers a setup again if a grant is later withdrawn.
+    requested_permissions: Vec<ComputerUsePermission>,
+    /// The requested permissions the notice offers now: those a tool started now would not receive
+    /// and no running Permission Setup holds.
     permission_request: Vec<ComputerUsePermission>,
     /// Permissions the person chose Not Now for; later requests for them stay silent.
     declined_permissions: Vec<ComputerUsePermission>,
+    /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
+    /// first request on.
+    _permission_setup: Option<gpui::Subscription>,
     fullscreen_escape: FullscreenEscapeSequence,
     hovered_link: Option<HoveredTerminalLink>,
     pressed_link: Option<(
@@ -858,8 +865,10 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
+            requested_permissions: Vec::new(),
             permission_request: Vec::new(),
             declined_permissions: Vec::new(),
+            _permission_setup: None,
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
@@ -2131,6 +2140,7 @@ impl TerminalPane {
                 }
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.requested_permissions.clear();
                 self.permission_request.clear();
                 if matches!(self.pane_state, PaneTerminalState::Exited(_))
                     || self
@@ -2156,6 +2166,7 @@ impl TerminalPane {
                 let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.requested_permissions.clear();
                 self.permission_request.clear();
                 self.hidden_input = false;
                 self.sync_secure_input();
@@ -3277,11 +3288,13 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Offers a Permission Setup for the ungranted permissions a program asked for.
+    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for.
     ///
-    /// Only a Local Pane offers one: a Remote Pane's programs run on another computer and carry no
-    /// authority over this one. The offer names no program, because terminal output cannot prove
-    /// which program wrote it, and it starts nothing until the person chooses Set Up.
+    /// Only a Local Pane offers one, because a Remote Pane's programs run on another computer.
+    /// Any output a Local Pane shows can carry a request, including output a remote shell or a
+    /// file relays, so the offer names no program and starts nothing until the person chooses Set
+    /// Up. A permission already requested or declined adds nothing, so repeated requests read no
+    /// authorization.
     fn offer_permission_setup(
         &mut self,
         permissions: &[ComputerUsePermission],
@@ -3293,20 +3306,56 @@ impl TerminalPane {
         let Some(setup) = super::permission_setup::installed(cx) else {
             return false;
         };
-        let mut offered = false;
-        for permission in setup.read(cx).ungranted(permissions) {
-            if !self.declined_permissions.contains(&permission)
-                && !self.permission_request.contains(&permission)
+        let mut added = false;
+        for permission in permissions {
+            if !self.declined_permissions.contains(permission)
+                && !self.requested_permissions.contains(permission)
             {
-                self.permission_request.push(permission);
-                offered = true;
+                self.requested_permissions.push(*permission);
+                added = true;
             }
         }
-        offered
+        if !added {
+            return false;
+        }
+        if self._permission_setup.is_none() {
+            setup.update(cx, |setup, cx| setup.watch_authorization(cx));
+            self._permission_setup = Some(cx.observe(&setup, |pane, _, cx| {
+                if pane.refresh_permission_offer(cx) {
+                    cx.notify();
+                }
+            }));
+        }
+        self.refresh_permission_offer(cx)
+    }
+
+    /// Reads which requested permissions the notice offers, and reports whether that changed.
+    fn refresh_permission_offer(&mut self, cx: &App) -> bool {
+        let offered = match super::permission_setup::installed(cx) {
+            Some(setup) if !self.requested_permissions.is_empty() => {
+                let setup = setup.read(cx);
+                setup
+                    .ungranted(&self.requested_permissions)
+                    .into_iter()
+                    .filter(|permission| {
+                        setup.status(*permission)
+                            != super::permission_setup::PermissionSetupStatus::Running
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if offered == self.permission_request {
+            return false;
+        }
+        self.permission_request = offered;
+        true
     }
 
     fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
         let permissions = std::mem::take(&mut self.permission_request);
+        self.requested_permissions
+            .retain(|permission| !permissions.contains(permission));
         if let Some(setup) = super::permission_setup::installed(cx) {
             setup.update(cx, |setup, cx| setup.start(&permissions, cx));
         }
@@ -3314,8 +3363,10 @@ impl TerminalPane {
     }
 
     fn decline_permission_request(&mut self, cx: &mut Context<Self>) {
-        self.declined_permissions
-            .append(&mut self.permission_request);
+        let declined = std::mem::take(&mut self.permission_request);
+        self.requested_permissions
+            .retain(|permission| !declined.contains(permission));
+        self.declined_permissions.extend(declined);
         cx.notify();
     }
 

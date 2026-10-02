@@ -202,6 +202,8 @@ impl SetupGuide {
         div()
             .id("setup-guide-application")
             .debug_selector(|| "setup-guide-application".to_owned())
+            .aria_label(name)
+            .aria_description("Drag to the list above")
             .h(px(ROW_HEIGHT))
             .flex_none()
             .flex()

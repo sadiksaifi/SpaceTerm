@@ -155,23 +155,13 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         std::thread::Builder::new()
             .name("spaceterm-permission-setup".to_owned())
             .spawn(move || {
-                // Only a verified NotGranted clears the entry, so a grant made since the last
-                // read is never reset.
-                let readiness = match run_probe() {
-                    Ok(report) => {
-                        verification.record(report);
-                        if report.authorization(permission) == ComputerUseAuthorization::Granted {
-                            ComputerUseSetupReadiness::AlreadyGranted
-                        } else {
-                            if let Some(bundle_identifier) = reset_bundle_identifier {
-                                // A failed reset leaves an entry the person turns on instead.
-                                let _ = run_reset(permission, bundle_identifier);
-                            }
-                            ComputerUseSetupReadiness::Ready
-                        }
-                    }
-                    Err(_) => ComputerUseSetupReadiness::Ready,
-                };
+                let readiness = prepare(
+                    permission,
+                    reset_bundle_identifier,
+                    run_probe,
+                    run_reset,
+                    |report| verification.record(report),
+                );
                 completion(Ok(readiness));
             })
             .map(drop)
@@ -212,6 +202,29 @@ impl ComputerUseAccess for MacosComputerUseAccess {
             .map(drop)
             .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
     }
+}
+
+/// Reads `permission` from a fresh process and clears its entry only on a verified NotGranted, so
+/// a grant made since the last read is never reset and a failed read resets nothing.
+fn prepare(
+    permission: ComputerUsePermission,
+    reset_bundle_identifier: Option<&'static str>,
+    probe: impl FnOnce() -> Result<ProbeReport, ComputerUseAccessError>,
+    reset: impl FnOnce(ComputerUsePermission, &'static str) -> Result<(), ComputerUseAccessError>,
+    record: impl FnOnce(ProbeReport),
+) -> ComputerUseSetupReadiness {
+    let Ok(report) = probe() else {
+        return ComputerUseSetupReadiness::Ready;
+    };
+    record(report);
+    if report.authorization(permission) == ComputerUseAuthorization::Granted {
+        return ComputerUseSetupReadiness::AlreadyGranted;
+    }
+    if let Some(bundle_identifier) = reset_bundle_identifier {
+        // A failed reset leaves an entry the person turns on instead.
+        let _ = reset(permission, bundle_identifier);
+    }
+    ComputerUseSetupReadiness::Ready
 }
 
 fn run_reset(
@@ -427,6 +440,69 @@ mod tests {
                 ["reset", "ScreenCapture", bundle],
                 ["reset", "Accessibility", bundle],
             ]
+        );
+    }
+
+    const BUNDLE: &str = "io.github.sadiksaifi.spaceterm";
+
+    /// Prepares a Screen Recording setup against a probe result and returns the readiness with the
+    /// resets it made.
+    fn prepare_with(
+        probe: Result<ProbeReport, ComputerUseAccessError>,
+        reset_bundle_identifier: Option<&'static str>,
+    ) -> (ComputerUseSetupReadiness, Vec<(ComputerUsePermission, &'static str)>) {
+        let mut resets = Vec::new();
+        let readiness = prepare(
+            ComputerUsePermission::ScreenRecording,
+            reset_bundle_identifier,
+            || probe,
+            |permission, bundle| {
+                resets.push((permission, bundle));
+                Ok(())
+            },
+            |_| {},
+        );
+        (readiness, resets)
+    }
+
+    fn report(screen_recording: bool) -> ProbeReport {
+        ProbeReport::read(|permission| {
+            permission == ComputerUsePermission::ScreenRecording && screen_recording
+        })
+    }
+
+    #[test]
+    fn a_verified_missing_grant_clears_its_entry() {
+        assert_eq!(
+            prepare_with(Ok(report(false)), Some(BUNDLE)),
+            (
+                ComputerUseSetupReadiness::Ready,
+                vec![(ComputerUsePermission::ScreenRecording, BUNDLE)]
+            )
+        );
+    }
+
+    #[test]
+    fn a_verified_grant_is_never_reset() {
+        assert_eq!(
+            prepare_with(Ok(report(true)), Some(BUNDLE)),
+            (ComputerUseSetupReadiness::AlreadyGranted, Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_failed_read_resets_nothing() {
+        assert_eq!(
+            prepare_with(Err(ComputerUseAccessError::PlatformUnavailable), Some(BUNDLE)),
+            (ComputerUseSetupReadiness::Ready, Vec::new())
+        );
+    }
+
+    #[test]
+    fn another_identity_resets_nothing() {
+        assert_eq!(
+            prepare_with(Ok(report(false)), None),
+            (ComputerUseSetupReadiness::Ready, Vec::new())
         );
     }
 
