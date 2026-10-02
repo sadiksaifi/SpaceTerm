@@ -3466,6 +3466,10 @@ mod tests {
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
     }
+    #[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+    mod linux_adapter_tests {
+        include!("../platform/linux_adapter_tests/terminal_glyphs.rs");
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     enum PaintedGlyphKind {
