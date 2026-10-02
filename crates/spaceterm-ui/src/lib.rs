@@ -19,6 +19,7 @@ mod floating_surface;
 mod floating_surface_tests;
 mod focus_ring;
 mod fuzzy;
+mod hover_fade;
 mod icon;
 mod leading_columns;
 mod list_row;
@@ -83,6 +84,7 @@ pub use floating_surface::{
 };
 pub use focus_ring::{FocusRing, Ringed, RingedElement, focus_ring};
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
+pub use hover_fade::{HoverFade, mix_rgba};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{

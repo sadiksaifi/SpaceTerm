@@ -190,6 +190,24 @@ impl ButtonPaint {
     pub fn border(self) -> Rgba {
         self.border
     }
+
+    /// The paint `level` of the way from this state to `other`.
+    ///
+    /// A shadow has no partial state, so it switches halfway.
+    pub(crate) fn mix(self, other: Self, level: f32) -> Self {
+        let mix = |from, to| crate::mix_rgba(from, to, level);
+        Self {
+            background: mix(self.background, other.background),
+            foreground: mix(self.foreground, other.foreground),
+            icon_foreground: mix(self.icon_foreground, other.icon_foreground),
+            border: mix(self.border, other.border),
+            shadow: if level < 0.5 {
+                self.shadow
+            } else {
+                other.shadow
+            },
+        }
+    }
 }
 
 /// Paints for every interactive state of one visual variant.
@@ -1405,23 +1423,28 @@ impl ButtonCore {
             state.synchronize(enabled, self.tab_stop, cx);
         });
 
-        let (focus_handle, pressed, hovered) = {
+        let (focus_handle, pressed) = {
             let state = state.read(cx);
-            (
-                state.focus_handle.clone(),
-                state.interaction.is_pressed(),
-                state.interaction.is_hovered(),
-            )
+            (state.focus_handle.clone(), state.interaction.is_pressed())
         };
+        let hover = crate::HoverFade::new(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "hover".into()),
+            window,
+            cx,
+        );
+        let hover_level = hover.level(window, cx);
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
         let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
         #[cfg(feature = "control-preview")]
-        let (pressed, hovered, focused) = self
+        let (pressed, hover_level, focused) = self
             .preview_state
-            .map(|state| (state.pressed(), state.hovered(), state.focused()))
-            .unwrap_or((pressed, hovered, focused));
-        let paint = resolve_paint(style, enabled, pressed, hovered);
+            .map(|state| {
+                let hover_level = if state.hovered() { 1.0 } else { 0.0 };
+                (state.pressed(), hover_level, state.focused())
+            })
+            .unwrap_or((pressed, hover_level, focused));
+        let paint = resolve_paint(style, enabled, pressed, hover_level);
         let focus_ring = (focused && !self.parent_draws_focus_ring).then_some(style.focus_border);
         let border_color = if self.modal_borderless {
             paint.background
@@ -1614,6 +1637,7 @@ impl ButtonCore {
             })
             .child(content)
             .child(pointer_tracker)
+            .child(hover.tracker())
             .when_some(focus_anchor, |button, anchor| {
                 button.child(anchor.bounds_tracker(style.border_width))
             });
@@ -1637,15 +1661,14 @@ impl ButtonCore {
     }
 }
 
-fn resolve_paint(style: ButtonStyle, enabled: bool, pressed: bool, hovered: bool) -> ButtonPaint {
+/// A press shows at once; hover eases between the resting and hovered paints.
+fn resolve_paint(style: ButtonStyle, enabled: bool, pressed: bool, hover: f32) -> ButtonPaint {
     if !enabled {
         style.disabled
     } else if pressed {
         style.pressed
-    } else if hovered {
-        style.hovered
     } else {
-        style.normal
+        style.normal.mix(style.hovered, hover)
     }
 }
 
@@ -1895,7 +1918,7 @@ mod tests {
 
     use gpui::{
         Context, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton,
-        Render, TestAppContext, VisualTestContext, Window, point, rgba,
+        MouseExitEvent, Render, TestAppContext, VisualTestContext, Window, point, rgba,
     };
 
     use super::*;
@@ -1937,10 +1960,15 @@ mod tests {
     fn visual_state_precedence_should_be_disabled_pressed_hovered_then_normal() {
         let style = test_style();
 
-        assert_eq!(resolve_paint(style, false, true, true), style.disabled);
-        assert_eq!(resolve_paint(style, true, true, true), style.pressed);
-        assert_eq!(resolve_paint(style, true, false, true), style.hovered);
-        assert_eq!(resolve_paint(style, true, false, false), style.normal);
+        assert_eq!(resolve_paint(style, false, true, 1.0), style.disabled);
+        assert_eq!(resolve_paint(style, true, true, 1.0), style.pressed);
+        assert_eq!(resolve_paint(style, true, false, 1.0), style.hovered);
+        assert_eq!(resolve_paint(style, true, false, 0.0), style.normal);
+        let halfway = resolve_paint(style, true, false, 0.5).background();
+        assert_eq!(
+            halfway,
+            crate::mix_rgba(style.normal.background(), style.hovered.background(), 0.5)
+        );
     }
 
     #[test]
@@ -2175,7 +2203,7 @@ mod tests {
             .expect("button is rendered")
             .center();
         cx.simulate_mouse_move(center, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::hover_fade::settle(cx);
         assert_eq!(observed.get(), icons[1]);
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -2186,6 +2214,46 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(observed.get(), icons[3]);
+    }
+
+    #[gpui::test]
+    fn hover_should_stay_cleared_after_the_pointer_leaves_the_window(cx: &mut TestAppContext) {
+        let icons = [0x11223344, 0x55667788, 0x99aabbcc, 0x12345678].map(rgba);
+        let base = test_variant_style();
+        let mut theme = test_theme();
+        theme.variants.primary = ButtonVariantStyle::new(
+            base.normal.icon_foreground(icons[0]),
+            base.hovered.icon_foreground(icons[1]),
+            base.pressed.icon_foreground(icons[2]),
+            base.disabled.icon_foreground(icons[3]),
+        );
+        cx.set_global(theme);
+        let observed = Rc::new(Cell::new(rgba(0)));
+        let root_observed = observed.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| PaintProbeRoot {
+            icon_color: root_observed,
+            disabled: false,
+        });
+        cx.run_until_parked();
+        let center = cx
+            .debug_bounds("paint-probe")
+            .expect("button is rendered")
+            .center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        crate::hover_fade::settle(cx);
+        assert_eq!(observed.get(), icons[1]);
+
+        // GPUI keeps the last pointer position after the pointer leaves, so later paints must not
+        // read the button as hovered again.
+        cx.simulate_event(MouseExitEvent {
+            position: center,
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        crate::hover_fade::settle(cx);
+        cx.update(|window, _| window.refresh());
+        crate::hover_fade::settle(cx);
+        assert_eq!(observed.get(), icons[0]);
     }
 
     struct TestRoot {

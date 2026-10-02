@@ -1,7 +1,7 @@
-use crate::ui::appearance::gpui_color;
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -9,6 +9,7 @@ use super::terminal_status::{
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
+use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
 
 use thiserror::Error;
@@ -44,8 +45,8 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
 use crate::domain::{
-    ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
+    ClosePaneOutcome, FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneTreeRef,
+    SplitAxis, SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
@@ -54,10 +55,10 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    Render, Window, div, px, relative,
+    Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
+    Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName, ModalAction,
     ModalActionRole, ModalId, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
     Tooltip,
 };
@@ -92,6 +93,8 @@ const PANE_CONTROL_GAP: f32 = 2.0;
 /// the eye reads that gap as wider at the same measurement.
 const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
+/// The share of the accent color that fills the half of a Pane a dragged Pane would take.
+const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
 #[cfg(test)]
 const PANE_STATUS_WIDTH: f32 = 13.0 + PANE_STATUS_ICON_GAP;
@@ -324,6 +327,26 @@ impl std::fmt::Debug for PaneHostEvent {
     }
 }
 
+/// The value a Pane drag carries, scoped to the Pane Layout that owns the Pane.
+struct DraggedPane {
+    pane_id: PaneId,
+    owner: gpui::EntityId,
+}
+
+/// The widest a lifted Pane Caption grows, so a wide Pane lifts a card rather than a bar.
+const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
+
+/// Each Pane's hover and how far it has eased, as read at the start of a frame.
+type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
+
+/// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
+/// that carries it.
+struct PaneDrag {
+    pane_id: PaneId,
+    drop_target: Option<(PaneId, PaneEdge)>,
+    session: DragSession,
+}
+
 pub(crate) struct PaneHost {
     terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
@@ -335,6 +358,7 @@ pub(crate) struct PaneHost {
     pane_captions: BTreeMap<PaneId, PaneCaptionText>,
     pane_attention: BTreeMap<PaneId, u32>,
     resizing_split_id: Option<SplitId>,
+    pane_drag: Option<PaneDrag>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -413,6 +437,7 @@ impl PaneHost {
             pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             resizing_split_id: None,
+            pane_drag: None,
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1067,6 +1092,213 @@ impl PaneHost {
         }
     }
 
+    /// Lifts a Pane by its caption so it can split another Pane in this Tab.
+    fn begin_pane_drag(
+        &mut self,
+        pane_id: PaneId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> DragPreview {
+        let session = DragSession::begin(cx, |host: &mut Self, _, cx| {
+            if host.pane_drag.take().is_some() {
+                cx.notify();
+            }
+        });
+        self.pane_drag = Some(PaneDrag {
+            pane_id,
+            drop_target: None,
+            session,
+        });
+        let pointer = window.mouse_position();
+        self.drag_pane_to(pane_id, pointer, cx);
+        cx.notify();
+        let Some(pane) = self.pane_bounds.get(&pane_id).copied() else {
+            return DragPreview::empty();
+        };
+        let caption = Bounds::new(
+            pane.origin,
+            gpui::size(pane.size.width, super::appearance::chrome(cx).caption_height()),
+        );
+        let grab = grab_point(window, cx);
+        let host = cx.entity().downgrade();
+        DragPreview::new(window, cx, move |window, cx| {
+            host.upgrade()
+                .map(|host| {
+                    host.read(cx)
+                        .render_lifted_caption(pane_id, caption, grab, window, cx)
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+    }
+
+    /// The copy of a dragged Pane's caption that follows the pointer.
+    ///
+    /// It shows the Pane's identity exactly as the caption does, without the controls, which act
+    /// on a Pane in place. A caption wider than a card lifts a card's width of itself, placed so
+    /// the pointer keeps its share of the caption's width. `caption` is where the caption was
+    /// painted and `grab` where the pointer took it, both in window coordinates.
+    fn render_lifted_caption(
+        &self,
+        pane_id: PaneId,
+        caption: Bounds<Pixels>,
+        grab: Point<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
+            return div().into_any_element();
+        };
+        let appearance = super::appearance::chrome(cx);
+        let mut text = self
+            .pane_captions
+            .get(&pane_id)
+            .cloned()
+            .unwrap_or_default();
+        text.glyph = drawable_reported_glyph(text.glyph.as_ref(), |glyph| {
+            let caption_style = appearance.typography.style(TextRole::Body);
+            reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
+        });
+        let focused = self.terminal_tab.focused_pane_id() == pane_id;
+        let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
+        let background = terminal.read(cx).surface_background();
+        let paint = appearance.colors.caption(background, focused);
+        let card_width = caption
+            .size
+            .width
+            .min(appearance.spacing(LIFTED_CAPTION_MAXIMUM_WIDTH));
+        let grab_x = (grab.x - caption.origin.x).clamp(px(0.0), caption.size.width);
+        let card_left = grab_x * (1.0 - card_width / caption.size.width.max(card_width));
+        let layout = CaptionLayout::resolve(
+            &PaneCaption {
+                pane_id,
+                terminal,
+                text: text.clone(),
+                focused,
+                zoomed: false,
+                attention,
+                has_multiple_panes: true,
+            },
+            card_width,
+            window,
+            appearance,
+        );
+        // The Pane's surface as the window shows it, so the card reads the same over any Pane.
+        let surface = appearance
+            .pane_surface(background)
+            .source_over(appearance.control_host_background(spaceterm_ui::ControlHost::Window));
+        let radius =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).pane_radius();
+        let shell =
+            spaceterm_ui::floating_surface_theme(cx).shell(spaceterm_ui::FloatingRole::Popover);
+        let card = shell
+            .frame(
+                caption_row(appearance, paint.foreground)
+                    .child(render_caption_identity(
+                        pane_id, text, attention, layout, appearance, &paint,
+                    )),
+            )
+            .debug_selector(move || format!("pane-caption-preview-{}", pane_id.get()))
+            .absolute()
+            .top_0()
+            .left(card_left)
+            .w(card_width)
+            .h(caption.size.height)
+            .rounded(radius)
+            .bg(gpui_color(surface))
+            .border_color(gpui_color(appearance.pane_rim_on(background)));
+        div()
+            .relative()
+            .w(caption.size.width)
+            .h(caption.size.height)
+            .child(card)
+            .into_any_element()
+    }
+
+    fn drag_pane_to(&mut self, pane_id: PaneId, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+        let drop_target = self.drop_target(pane_id, pointer, pane_gap(cx));
+        let Some(drag) = self
+            .pane_drag
+            .as_mut()
+            .filter(|drag| drag.pane_id == pane_id)
+        else {
+            return;
+        };
+        if drag.drop_target != drop_target {
+            drag.drop_target = drop_target;
+            cx.notify();
+        }
+    }
+
+    /// Ends a Pane drag, moving the Pane onto the edge of the Pane under `pointer`, if any.
+    fn finish_pane_drag(
+        &mut self,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.pane_drag.take() else {
+            return;
+        };
+        cx.notify();
+        if !drag.session.is_active(cx) {
+            return;
+        }
+        let gap = pane_gap(cx);
+        let Some((target_pane_id, edge)) = self.drop_target(drag.pane_id, pointer, gap) else {
+            return;
+        };
+        let Some(target_size) = self.split_target_size(target_pane_id, gap) else {
+            return;
+        };
+        match self
+            .terminal_tab
+            .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
+        {
+            Ok(true) => {
+                self.advance_native_service_hierarchy_generation(cx);
+                self.split_bounds.clear();
+                self.sync_terminal_focus(cx);
+                cx.emit(PaneHostEvent::PresentationChanged {
+                    tab_id: self.terminal_tab.id(),
+                });
+                if let Some(terminal) = self.terminal_tab.terminal(drag.pane_id) {
+                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                }
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to move Pane: {error}"),
+        }
+    }
+
+    /// The Pane under `pointer` that can take the dragged Pane, and the edge it would take.
+    ///
+    /// A Pane offers no target to itself, while zoomed, or when it is too small to split along
+    /// the edge's axis.
+    fn drop_target(
+        &self,
+        pane_id: PaneId,
+        pointer: Point<Pixels>,
+        gap: f32,
+    ) -> Option<(PaneId, PaneEdge)> {
+        if matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_)) {
+            return None;
+        }
+        let mut panes = Vec::new();
+        collect_pane_order(self.terminal_tab.root(), &mut panes);
+        let (target_pane_id, bounds) = panes
+            .into_iter()
+            .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
+            .find(|(_, bounds)| bounds.contains(&pointer))?;
+        if target_pane_id == pane_id {
+            return None;
+        }
+        let edge = drop_edge(bounds, pointer);
+        let target_size = self.split_target_size(target_pane_id, gap)?;
+        self.terminal_tab
+            .can_receive_pane(target_pane_id, edge, target_size, gap)
+            .then_some((target_pane_id, edge))
+    }
+
     fn split_pane_with_prepared_launch(
         &mut self,
         target_pane_id: PaneId,
@@ -1464,25 +1696,50 @@ impl PaneHost {
     fn render_tree(
         &self,
         tree: PaneTreeRef<'_>,
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, appearance, cx),
+            PaneNodeRef::Leaf { pane_id } => {
+                self.render_leaf(pane_id, hovers, host, appearance, cx)
+            }
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host, appearance, cx),
+            } => self.render_split(
+                split_id,
+                axis,
+                ratio,
+                (first, second),
+                hovers,
+                host,
+                appearance,
+                cx,
+            ),
         }
+    }
+
+    /// Each Pane's hover, read once per frame.
+    fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
+        self.terminal_tab
+            .terminals_with_ids()
+            .map(|(pane_id, _)| {
+                let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
+                let level = fade.level(window, cx);
+                (pane_id, (fade, level))
+            })
+            .collect()
     }
 
     fn render_leaf(
         &self,
         pane_id: PaneId,
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
@@ -1506,8 +1763,14 @@ impl PaneHost {
             .get(&pane_id)
             .cloned()
             .unwrap_or_default();
-        let pane_group = format!("pane-group-{}", pane_id.get());
+        let hover = hovers.get(&pane_id).cloned();
+        let hover_level = hover.as_ref().map_or(0.0, |(_, level)| *level);
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
+        let drop_edge = self
+            .pane_drag
+            .as_ref()
+            .and_then(|drag| drag.drop_target)
+            .and_then(|(target_pane_id, edge)| (target_pane_id == pane_id).then_some(edge));
         let measure_host = host.clone();
         let focus_host = host.clone();
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
@@ -1548,7 +1811,6 @@ impl PaneHost {
             })
             .id(("pane", pane_id.get()))
             .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
-            .group(pane_group.clone())
             .relative()
             .size_full()
             .min_w_0()
@@ -1586,7 +1848,7 @@ impl PaneHost {
                     attention,
                     has_multiple_panes,
                 },
-                &pane_group,
+                hover_level,
                 host.clone(),
                 appearance.clone(),
             ))
@@ -1601,6 +1863,10 @@ impl PaneHost {
             .child(render_pane_corner_surface(pane_id, frame, appearance))
             // The hairline paints last so the caption, Terminal and corner mask never cover it.
             .child(pane_rim)
+            .when_some(drop_edge, |leaf, edge| {
+                leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
+            })
+            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()))
             .into_any_element()
     }
 
@@ -1614,13 +1880,14 @@ impl PaneHost {
         axis: SplitAxis,
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone(), appearance, cx);
-        let second = self.render_tree(second, host.clone(), appearance, cx);
+        let first = self.render_tree(first, hovers, host.clone(), appearance, cx);
+        let second = self.render_tree(second, hovers, host.clone(), appearance, cx);
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1716,7 +1983,16 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 }
 
 impl Render for PaneHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A drag GPUI no longer carries ended without this Tab seeing the release, such as while
+        // the Tab was hidden, so it moves nothing.
+        if self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|drag| !drag.session.is_active(cx))
+        {
+            self.pane_drag = None;
+        }
         let appearance = super::appearance::shared_chrome(cx);
         let radius =
             super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
@@ -1739,11 +2015,18 @@ impl Render for PaneHost {
                 }
             },
         };
+        let hovers = self.pane_hovers(window, cx);
         let content = match zoom_state {
-            ZoomState::Restored => {
-                self.render_tree(self.terminal_tab.root(), host.clone(), &appearance, cx)
+            ZoomState::Restored => self.render_tree(
+                self.terminal_tab.root(),
+                &hovers,
+                host.clone(),
+                &appearance,
+                cx,
+            ),
+            ZoomState::Zoomed(pane_id) => {
+                self.render_leaf(pane_id, &hovers, host, &appearance, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, &appearance, cx),
         };
 
         div()
@@ -1777,7 +2060,27 @@ impl Render for PaneHost {
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
+            .on_drag_move::<DraggedPane>({
+                let host = cx.entity().downgrade();
+                let owner = cx.entity_id();
+                move |event, _, cx| {
+                    let dragged = event.drag(cx);
+                    if dragged.owner != owner {
+                        return;
+                    }
+                    let pane_id = dragged.pane_id;
+                    let pointer = event.event.position;
+                    let _ = host.update(cx, |host, cx| host.drag_pane_to(pane_id, pointer, cx));
+                }
+            })
             .child(content)
+            .child({
+                let host = cx.entity().downgrade();
+                drag_release_observer(move |window, cx| {
+                    let pointer = window.mouse_position();
+                    let _ = host.update(cx, |host, cx| host.finish_pane_drag(pointer, window, cx));
+                })
+            })
     }
 }
 
@@ -1932,12 +2235,11 @@ struct PaneCaption {
 
 fn render_pane_caption(
     caption: PaneCaption,
-    pane_group: &str,
+    hover: f32,
     host: gpui::WeakEntity<PaneHost>,
     appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
     let caption_height = appearance.caption_height();
-    let pane_group = pane_group.to_owned();
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
@@ -1975,7 +2277,7 @@ fn render_pane_caption(
             let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
-                &pane_group,
+                hover,
                 host,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
@@ -2023,7 +2325,7 @@ pub(super) fn drawable_reported_glyph(
 
 fn render_pane_caption_content(
     caption: PaneCaption,
-    pane_group: &str,
+    hover: f32,
     host: gpui::WeakEntity<PaneHost>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
@@ -2061,6 +2363,7 @@ fn render_pane_caption_content(
     // behavior is unchanged.
     let caption_action_available = focused || appearance.active;
     let focus_host = host.clone();
+    let drag_host = host.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
         .debug_selector(move || {
@@ -2075,10 +2378,9 @@ fn render_pane_caption_content(
         .gap(appearance.spacing(PANE_CONTROL_GAP))
         .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
+        // An unfocused Pane shows its controls only under the pointer.
         .when(!focused, |controls| {
-            controls.opacity(0.0).when(appearance.active, |controls| {
-                controls.group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
-            })
+            controls.opacity(if appearance.active { hover } else { 0.0 })
         });
     let actions = [
         (
@@ -2158,6 +2460,50 @@ fn render_pane_caption_content(
             controls.child(button)
         };
     }
+    let caption_content =
+        render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+    caption_row(appearance, color)
+        .id(("pane-caption", pane_id.get()))
+        .debug_selector(move || {
+            format!(
+                "pane-caption-{}-{}",
+                pane_id.get(),
+                if focused { "focused" } else { "unfocused" }
+            )
+        })
+        // The press focuses the Pane at once, since a press that starts a drag never clicks.
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            let _ = focus_host.update(cx, |host, cx| {
+                host.focus_pane(pane_id, cx);
+                host.focus(window, cx);
+            });
+            cx.stop_propagation();
+        })
+        // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
+        .when(has_multiple_panes && !zoomed, |row| {
+            let owner = drag_host.entity_id();
+            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
+                let preview = drag_host
+                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, window, cx))
+                    .unwrap_or_else(|_| DragPreview::empty());
+                cx.new(|_| preview)
+            })
+        })
+        .child(caption_content)
+        .child(controls)
+        .into_any_element()
+}
+
+/// The Pane's identity as its caption shows it: origin, directory, name, status, and label.
+fn render_caption_identity(
+    pane_id: PaneId,
+    text: PaneCaptionText,
+    attention: bool,
+    layout: CaptionLayout,
+    appearance: &super::appearance::ChromeAppearance,
+    paint: &crate::appearance::CaptionPaint,
+) -> gpui::Div {
+    let color = paint.foreground;
     let mut caption_content = div()
         .flex_1()
         .min_w_0()
@@ -2204,7 +2550,7 @@ fn render_pane_caption_content(
             .child(render_pane_status(
                 pane_id,
                 (text.progress, text.glyph, attention),
-                &paint,
+                paint,
                 appearance,
             ))
             .when(layout.show_label && !text.label.is_empty(), |row| {
@@ -2222,7 +2568,7 @@ fn render_pane_caption_content(
             .child(render_pane_status(
                 pane_id,
                 (text.progress, text.glyph, attention),
-                &paint,
+                paint,
                 appearance,
             ))
             .child(
@@ -2233,15 +2579,12 @@ fn render_pane_caption_content(
                     .child(text.name),
             );
     }
+    caption_content
+}
+
+/// The caption strip's row: full height, padded, and set in the caption's text style.
+fn caption_row(appearance: &super::appearance::ChromeAppearance, color: crate::appearance::Color) -> gpui::Div {
     div()
-        .id(("pane-caption", pane_id.get()))
-        .debug_selector(move || {
-            format!(
-                "pane-caption-{}-{}",
-                pane_id.get(),
-                if focused { "focused" } else { "unfocused" }
-            )
-        })
         // The row fills the caption strip rather than restating its height, so the contents centre
         // on the strip's own middle and the whole strip stays one hit target.
         .h_full()
@@ -2256,17 +2599,6 @@ fn render_pane_caption_content(
         .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
         .chrome_text(appearance.typography.style(TextRole::Body))
         .text_color(gpui_color(color))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, window, cx| {
-            let _ = focus_host.update(cx, |host, cx| {
-                host.focus_pane(pane_id, cx);
-                host.focus(window, cx);
-            });
-            cx.stop_propagation();
-        })
-        .child(caption_content)
-        .child(controls)
-        .into_any_element()
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
@@ -2378,6 +2710,34 @@ fn render_pane_corner_surface(
         .into_any_element()
 }
 
+/// Shows the half of a target Pane that a dragged Pane takes when it is released.
+fn render_pane_drop_target(
+    pane_id: PaneId,
+    edge: PaneEdge,
+    radius: Pixels,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let accent = appearance.colors.primary_background;
+    let half = div()
+        .debug_selector(move || {
+            format!("pane-drop-target-{}-{edge:?}", pane_id.get()).to_lowercase()
+        })
+        .absolute()
+        .bg(gpui_color(
+            accent.multiply_opacity(PANE_DROP_TARGET_FILL_OPACITY),
+        ))
+        .border_2()
+        .border_color(gpui_color(accent))
+        .rounded(radius);
+    match edge {
+        PaneEdge::Left => half.top_0().bottom_0().left_0().w(relative(0.5)),
+        PaneEdge::Right => half.top_0().bottom_0().right_0().w(relative(0.5)),
+        PaneEdge::Top => half.left_0().right_0().top_0().h(relative(0.5)),
+        PaneEdge::Bottom => half.left_0().right_0().bottom_0().h(relative(0.5)),
+    }
+    .into_any_element()
+}
+
 fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoElement {
     let child = div()
         .flex_basis(DefiniteLength::Fraction(ratio))
@@ -2459,6 +2819,26 @@ fn restored_leaf_size(
     }
 }
 
+/// The edge of a Pane nearest `point`, measured relative to the Pane's own proportions.
+///
+/// The Pane's diagonals divide it into four triangles, one per edge, so a wide Pane and a tall
+/// Pane each offer every edge an equal share of their area.
+fn drop_edge(bounds: Bounds<Pixels>, point: Point<Pixels>) -> PaneEdge {
+    let center = bounds.center();
+    let horizontal = f32::from(point.x - center.x) / f32::from(bounds.size.width).max(f32::EPSILON);
+    let vertical = f32::from(point.y - center.y) / f32::from(bounds.size.height).max(f32::EPSILON);
+    match (
+        horizontal.abs() > vertical.abs(),
+        horizontal < 0.0,
+        vertical < 0.0,
+    ) {
+        (true, true, _) => PaneEdge::Left,
+        (true, false, _) => PaneEdge::Right,
+        (false, _, true) => PaneEdge::Top,
+        (false, _, false) => PaneEdge::Bottom,
+    }
+}
+
 fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSizeError> {
     PaneSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height))
 }
@@ -2483,7 +2863,6 @@ fn split_ratio_for_offset(
         .is_finite()
         .then_some(requested_offset / content_extent)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2541,11 +2920,7 @@ mod tests {
             let appearance =
                 prepared_appearance(crate::appearance::Appearance::Light, transparency);
             let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
-            for terminal in [
-                Color::BLACK,
-                Color::rgb(0xfafafa),
-                Color::rgb(0x38658a),
-            ] {
+            for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let host = appearance.pane_surface(terminal).source_over(window);
                 let edge = appearance.pane_rim_on(terminal).source_over(host);
                 let contrast = edge.contrast_ratio(host);
@@ -2561,11 +2936,7 @@ mod tests {
     fn dark_pane_rim_uses_the_accepted_terminal_surface_as_its_host() {
         for transparency in [0.0, 0.35, 1.0] {
             let appearance = prepared_appearance(crate::appearance::Appearance::Dark, transparency);
-            for terminal in [
-                Color::BLACK,
-                Color::rgb(0xfafafa),
-                Color::rgb(0x38658a),
-            ] {
+            for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
                 let host = appearance.pane_surface(terminal).source_over(window);
                 let edge = appearance.pane_rim_on(terminal).source_over(host);
@@ -2987,6 +3358,230 @@ mod tests {
         cx.run_until_parked();
 
         (host, cx)
+    }
+
+    /// Presses a Pane's caption beside its name and moves the pointer along `path`.
+    ///
+    /// The first move leaves the caption, so the drag starts over whatever lies beneath it.
+    fn drag_pane_caption(
+        caption: Bounds<Pixels>,
+        path: &[Point<Pixels>],
+        cx: &mut VisualTestContext,
+    ) {
+        let from = point(caption.left() + px(24.0), caption.center().y);
+        cx.simulate_mouse_move(from, None, Modifiers::none());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        for position in path {
+            cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn dropping_a_pane_on_an_edge_of_another_should_split_it_there(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
+        let during = (
+            cx.debug_bounds("pane-drop-target-1-left")
+                .map(|overlay| (overlay.origin, f32::from(overlay.size.width).round())),
+            cx.debug_bounds("drag-preview").is_some(),
+        );
+        cx.simulate_mouse_up(near_left_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            during,
+            (
+                Some((target.origin, (f32::from(target.size.width) / 2.0).round())),
+                true
+            )
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| (
+                host.layout_signature(),
+                host.focused_pane_id(),
+                host.pane_count(),
+                host.pane_drag.is_some(),
+            )),
+            (
+                "split:1:Horizontal:0.5(split:2:Vertical:0.5(split:4:Horizontal:0.5(pane:4,pane:1),pane:3),pane:2)"
+                    .to_owned(),
+                PaneId::new(4),
+                4,
+                false,
+            )
+        );
+        assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_should_start_over_a_terminal_painted_after_its_caption(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+        let target = cx.debug_bounds("pane-surface-4").unwrap();
+        let near_right_edge = point(target.right() - target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_right_edge, near_right_edge - point(px(1.0), px(0.0))],
+            cx,
+        );
+        cx.simulate_mouse_up(near_right_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            host.read_with(cx, |host, _| host.layout_signature()),
+            "split:1:Horizontal:0.5(pane:3,split:3:Vertical:0.5(pane:2,split:4:Horizontal:0.5(pane:4,pane:1)))"
+        );
+    }
+
+    #[gpui::test]
+    fn escape_should_cancel_a_pane_drag_without_moving_the_pane(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let cancelled = (
+            host.read_with(cx, |host, _| host.pane_drag.is_some()),
+            cx.debug_bounds("pane-drop-target-1-left").is_some(),
+            cx.debug_bounds("drag-preview").is_some(),
+        );
+        cx.simulate_mouse_up(near_left_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                cancelled,
+                host.read_with(cx, |host, _| host.layout_signature())
+            ),
+            ((false, false, false), before)
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_that_ended_unseen_should_move_nothing(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
+
+        drag_pane_caption(
+            caption,
+            &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
+            cx,
+        );
+        // GPUI ends the drag while this Tab is hidden, so the host never sees the release.
+        cx.update(|window, cx| {
+            cx.stop_active_drag(window);
+        });
+        cx.run_until_parked();
+        let ended = host.read_with(cx, |host, _| host.pane_drag.is_some());
+        cx.simulate_click(near_left_edge, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (ended, host.read_with(cx, |host, _| host.layout_signature())),
+            (false, before)
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_that_moves_nothing_should_leave_its_pane_focused(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
+
+        drag_pane_caption(caption, &[own_pane.center()], cx);
+        cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let released = cx.update(|window, cx| {
+            let host = host.read(cx);
+            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+        });
+
+        let caption = cx.debug_bounds("pane-caption-1-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-4").unwrap();
+        drag_pane_caption(caption, &[target.center()], cx);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let cancelled = cx.update(|window, cx| {
+            let host = host.read(cx);
+            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+        });
+
+        assert_eq!(
+            (released, cancelled),
+            ((PaneId::new(4), true), (PaneId::new(1), true)),
+            "the pressed Pane must take keyboard focus even though the drag never clicked"
+        );
+    }
+
+    #[gpui::test]
+    fn releasing_a_pane_over_itself_should_leave_the_layout_unchanged(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
+
+        drag_pane_caption(caption, &[own_pane.center()], cx);
+        let offered_target = host.read_with(cx, |host, _| {
+            host.pane_drag.as_ref().and_then(|drag| drag.drop_target)
+        });
+        cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                offered_target,
+                host.read_with(cx, |host, _| (
+                    host.layout_signature(),
+                    host.pane_drag.is_some()
+                )),
+            ),
+            (None, (before, false))
+        );
+    }
+
+    #[test]
+    fn drop_edge_should_divide_a_pane_along_its_diagonals() {
+        let pane = bounds(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)));
+
+        assert_eq!(
+            [
+                point(px(60.0), px(50.0)),
+                point(px(340.0), px(50.0)),
+                point(px(200.0), px(10.0)),
+                point(px(200.0), px(90.0)),
+                point(px(120.0), px(20.0)),
+            ]
+            .map(|pointer| drop_edge(pane, pointer)),
+            [
+                PaneEdge::Left,
+                PaneEdge::Right,
+                PaneEdge::Top,
+                PaneEdge::Bottom,
+                PaneEdge::Top,
+            ]
+        );
     }
 
     #[gpui::test]

@@ -3,11 +3,12 @@
 mod text;
 mod view;
 
+use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
-use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::workspace_creation::WorkspaceCreation;
+use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -42,6 +43,10 @@ pub(super) enum SidebarEvent {
     Rename {
         workspace_id: WorkspaceId,
         name: String,
+    },
+    Move {
+        workspace_id: WorkspaceId,
+        position: usize,
     },
     Create(WorkspaceCreation),
     FocusChanged,
@@ -114,7 +119,13 @@ pub(super) struct SidebarLayout {
     pub(super) width: Pixels,
 }
 
-/// Owns sidebar layout, scrolling, menus, inline rename, and focus transitions.
+/// The value a Workspace drag carries, scoped to the sidebar that lists the Workspace.
+struct DraggedWorkspace {
+    workspace_id: WorkspaceId,
+    owner: EntityId,
+}
+
+/// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
     remote_unavailable: Option<String>,
@@ -130,6 +141,7 @@ pub(super) struct WorkspaceSidebar {
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
+    workspace_reorder: ReorderableStrip<WorkspaceId>,
 }
 
 impl WorkspaceSidebar {
@@ -185,6 +197,7 @@ impl WorkspaceSidebar {
             rename: None,
             resize_origin: None,
             suppress_pointer_until_release: false,
+            workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
         }
     }
 
@@ -520,10 +533,146 @@ impl WorkspaceSidebar {
         WorkspaceChromeLayout::collapsed_width(&identity, window, cx)
     }
 }
+impl WorkspaceSidebar {
+    /// Lifts a Workspace row to move it in the list. A press that becomes a drag never activates
+    /// it.
+    ///
+    /// The row keeps its place until release, and an exact copy of it follows the pointer. The
+    /// motion that starts the drag already marks a slot, so a quick drag released on its first move
+    /// still lands.
+    fn begin_workspace_drag(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> DragPreview {
+        let size = self
+            .row_position(workspace_id)
+            .and_then(|position| painted_item_size(&self.scroll_handle, position));
+        let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
+            sidebar.workspace_reorder.cancel();
+            cx.notify();
+        });
+        self.workspace_reorder.begin(workspace_id, session);
+        self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
+        cx.notify();
+        let sidebar = cx.entity().downgrade();
+        DragPreview::new(window, cx, move |window, cx| {
+            sidebar
+                .upgrade()
+                .map(|owner| {
+                    owner
+                        .read(cx)
+                        .render_lifted_row(workspace_id, size, sidebar.clone(), window, cx)
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+    }
+
+    /// The copy of a dragged row that follows the pointer, at the size its row was painted.
+    fn render_lifted_row(
+        &self,
+        workspace_id: WorkspaceId,
+        size: Option<gpui::Size<Pixels>>,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(row) = self
+            .row_position(workspace_id)
+            .map(|position| self.rows[position].clone())
+        else {
+            return div().into_any_element();
+        };
+        let appearance = super::appearance::chrome(cx);
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        div()
+            .when_some(size, |row, size| row.w(size.width))
+            .child(self.render_workspace_row(
+                row,
+                view::RowRole::Lifted,
+                view::RowHover {
+                    level: 1.0,
+                    tracker: None,
+                },
+                sidebar,
+                presentation,
+                window,
+                appearance,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn drag_workspace_to(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pointer: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_reorder.dragged() != Some(workspace_id) {
+            return;
+        }
+        let Some(current) = self.row_position(workspace_id) else {
+            return;
+        };
+        if self
+            .workspace_reorder
+            .track(&self.scroll_handle, current, self.rows.len(), pointer)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Lands the dragged row in the slot marked at the release point and asks the application to
+    /// move its Workspace. The next rows the application supplies confirm or replace this order.
+    fn finish_workspace_drag(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.workspace_reorder.dragged() else {
+            return;
+        };
+        self.drag_workspace_to(workspace_id, pointer, cx);
+        let current = self.row_position(workspace_id);
+        let landing = current.and_then(|current| {
+            self.workspace_reorder
+                .finish(current, self.rows.len(), cx)
+                .map(|(workspace_id, position)| (workspace_id, current, position))
+        });
+        self.workspace_reorder.cancel();
+        if let Some((workspace_id, current, position)) = landing {
+            self.move_row(workspace_id, current, position, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_row(
+        &mut self,
+        workspace_id: WorkspaceId,
+        current: usize,
+        position: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let row = self.rows.remove(current);
+        self.rows.insert(position, row);
+        cx.emit(SidebarEvent::Move {
+            workspace_id,
+            position,
+        });
+        cx.notify();
+    }
+
+    fn row_position(&self, workspace_id: WorkspaceId) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| row.workspace_id == workspace_id)
+    }
+}
+
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace_reorder.end_released(cx);
         self.sync_scrollbar(cx);
-        self.render_body(cx.entity().downgrade(), window, cx)
+        let hovers = self.row_hovers(window, cx);
+        self.render_body(hovers, cx.entity().downgrade(), window, cx)
     }
 }
 

@@ -2591,6 +2591,14 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
+        // Motion with a button this Terminal never received pressed belongs to the element that
+        // received the press, such as a Pane Caption starting a Pane drag, not to the program.
+        if event.pressed_button.is_some()
+            && self.pressed_button.is_none()
+            && self.pressed_link.is_none()
+        {
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
@@ -4460,7 +4468,6 @@ fn ime_candidate_bounds(
         size(cell_width, line_height),
     )
 }
-
 
 /// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
 /// how far along it reports being.

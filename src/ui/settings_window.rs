@@ -999,7 +999,7 @@ impl SettingsWindow {
         &mut self,
         row: SettingsRowId,
         appearance: &ChromeAppearance,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {

@@ -2789,6 +2789,14 @@ impl WorkspaceManager {
                 }
                 self.synchronize_tab_manager_layouts(window, cx);
             }
+            SidebarEvent::Move {
+                workspace_id,
+                position,
+            } => {
+                if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
+                    Self::report_workspace_error("move", error);
+                }
+            }
             SidebarEvent::Create(WorkspaceCreation::Local) => self.create_local_workspace(window, cx),
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
