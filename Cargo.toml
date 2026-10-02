@@ -37,7 +37,13 @@ members = [
     "third_party/libghostty-vt-sys",
 ]
 default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
+exclude = ["vendor/accesskit", "vendor/accesskit-consumer", "vendor/accesskit-atspi-common"]
 resolver = "2"
+
+[patch.crates-io]
+accesskit = { path = "vendor/accesskit" }
+accesskit_consumer = { path = "vendor/accesskit-consumer" }
+accesskit_atspi_common = { path = "vendor/accesskit-atspi-common" }
 
 [features]
 default = []
@@ -100,6 +106,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
+accesskit_consumer = "=0.38.0"
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-09-26.1", features = ["test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
 
