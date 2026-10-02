@@ -15,20 +15,11 @@ use crate::domain::RemoteConnectionPhase;
 
 pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 
-// Reserved native traffic-light region, with no additional leading gap.
-/// Space reserved for native window controls in app-owned top chrome.
-pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 78.0;
-
-/// Leading inset of the top-left chrome.
-///
-/// Fullscreen hides the native window controls, so the clearance guards nothing. The header still
-/// keeps the frame's own edge air rather than running flush to the window edge.
-pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels) -> Pixels {
-    if fullscreen {
-        frame_space
-    } else {
-        px(TRAFFIC_LIGHT_CLEARANCE)
-    }
+/// Keep the frame's edge air when the host has no visible native controls.
+pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels, cx: &App) -> Pixels {
+    cx.try_global::<crate::platform::window_frame::WindowFrameGeometry>()
+        .and_then(|geometry| geometry.leading_titlebar_clearance(fullscreen))
+        .unwrap_or(frame_space)
 }
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
@@ -119,7 +110,7 @@ impl WorkspaceChromeLayout {
             + identity_width
             + status_width;
         let edge_reserve = trailing_reserve(appearance, cx);
-        (leading_clearance(window.is_fullscreen(), edge_reserve)
+        (leading_clearance(window.is_fullscreen(), edge_reserve, cx)
             + edge_reserve
             + edge_reserve
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
@@ -155,7 +146,7 @@ impl WorkspaceChromeLayout {
             // line.
             .top(window_edge)
             .bottom_0()
-            .left(leading_clearance(self.fullscreen, edge_reserve))
+            .left(leading_clearance(self.fullscreen, edge_reserve, cx))
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
             // stops, so the identity area and the list under it share one trailing edge.
             .right(edge_reserve)
@@ -415,22 +406,27 @@ impl WorkspaceChromeIdentity {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, ThemeCatalog, SystemAppearance, builtin_chrome_base,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog, builtin_chrome_base,
     };
 
-    #[test]
-    fn fullscreen_header_should_keep_edge_air_without_traffic_lights() {
-        assert_eq!(leading_clearance(true, px(8.0)), px(8.0));
-        assert_eq!(
-            leading_clearance(false, px(8.0)),
-            px(TRAFFIC_LIGHT_CLEARANCE)
-        );
+    #[gpui::test]
+    fn fullscreen_header_should_keep_edge_air_without_traffic_lights(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+        cx.update(|cx| {
+            assert_eq!(leading_clearance(false, px(8.0), cx), px(8.0));
+            let placement =
+                TrafficLightPlacement::new(gpui::point(px(15.5), px(14.0)), px(41.0), px(78.0));
+            cx.set_global(WindowFrameGeometry::default().with_traffic_lights(placement, placement));
+            assert_eq!(leading_clearance(true, px(8.0), cx), px(8.0));
+            assert_eq!(leading_clearance(false, px(8.0), cx), px(78.0));
+        });
     }
 
     #[test]

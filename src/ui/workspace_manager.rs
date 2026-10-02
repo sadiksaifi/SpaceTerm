@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use super::workspace_creation::WorkspaceCreation;
 use super::directory_picker::{
     DirectoryPicker, DirectoryPickerEvent, DirectorySource, LocalDirectorySource,
     RemoteDirectorySource,
@@ -39,6 +38,7 @@ use super::remote_workspace_flow::{
 };
 use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
+use super::workspace_creation::WorkspaceCreation;
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
@@ -47,9 +47,9 @@ use super::{
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     NewRemoteWorkspace, NewWorkspace, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind,
-    RemoteChildLaunchUnavailable, SplitDown,
-    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT,
+    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -664,7 +664,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_status(
         &self,
@@ -699,7 +702,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_selection(
         &self,
@@ -715,7 +721,10 @@ impl WorkspaceManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn insert_native_service_text(
         &self,
@@ -861,6 +870,11 @@ impl WorkspaceManager {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -1253,9 +1267,12 @@ impl WorkspaceManager {
                                     })
                             });
                         let application = match (current, pinned.clone(), target.clone()) {
-                            (false, _, _) | (_, PinnedDirectory::Remote { .. }, PinTarget::NewLocalWorkspace { .. }) => {
-                                PinApplication::Failed
-                            }
+                            (false, _, _)
+                            | (
+                                _,
+                                PinnedDirectory::Remote { .. },
+                                PinTarget::NewLocalWorkspace { .. },
+                            ) => PinApplication::Failed,
                             (true, PinnedDirectory::Local(directory), target) => {
                                 manager.apply_local_pin_target(target, directory, window, cx)
                             }
@@ -2552,6 +2569,12 @@ impl WorkspaceManager {
         }
     }
 
+    fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.should_close_window(window, cx) {
+            window.remove_window();
+        }
+    }
+
     pub(crate) fn should_close_window(
         &mut self,
         window: &mut Window,
@@ -2809,7 +2832,9 @@ impl WorkspaceManager {
                     Self::report_workspace_error("move", error);
                 }
             }
-            SidebarEvent::Create(WorkspaceCreation::Local) => self.create_local_workspace(window, cx),
+            SidebarEvent::Create(WorkspaceCreation::Local) => {
+                self.create_local_workspace(window, cx)
+            }
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
                 // the terminal before a chooser captures its cancel-restore target.
@@ -3423,7 +3448,8 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
+        let content = activity.mount(activity.with_scope(|| self.render_chrome(window, cx)));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -3438,6 +3464,10 @@ impl WorkspaceManager {
         let chrome =
             WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
         let update_control = gpui::AnyView::from(self.update_control.clone());
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
+        });
         active_tab_manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 sidebar_layout.visible,
@@ -3446,6 +3476,7 @@ impl WorkspaceManager {
                 cx,
             );
             manager.set_trailing_accessory(Some(update_control), cx);
+            manager.set_window_close_handler(close);
         });
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();

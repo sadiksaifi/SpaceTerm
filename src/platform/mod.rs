@@ -21,6 +21,7 @@ pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
+pub(crate) mod window_chrome;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
 

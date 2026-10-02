@@ -165,8 +165,10 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         })
         .ok_or(SettingsError::RevisionExhausted)?;
     let accessibility = platform.accessibility_display_options();
+    let native_composition = platform.native_window_composition(cx);
     let capabilities = CompositionCapabilities {
-        native_window_transparency: platform.supports_native_window_transparency(),
+        native_window_transparency: native_composition.transparency,
+        native_window_blur: native_composition.blur,
         reduce_transparency: accessibility.reduce_transparency,
         increase_contrast: accessibility.increase_contrast,
         show_borders: accessibility.show_borders,

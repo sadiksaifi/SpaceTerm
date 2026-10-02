@@ -59,7 +59,9 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         ))
     }
     /// The same file the settings storage reads and writes, as other programs open it.
-    pub(crate) fn settings_file(&self) -> Rc<dyn crate::platform::settings_file::SettingsFileAccess> {
+    pub(crate) fn settings_file(
+        &self,
+    ) -> Rc<dyn crate::platform::settings_file::SettingsFileAccess> {
         Rc::new(crate::platform::settings_file::SystemSettingsFile::new(
             self.paths.directories().settings_file(),
             &self.home_directory,
@@ -509,40 +511,37 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
-    let result = cx.open_window(
-        workspace_window_options(host, cx),
-        |window, cx| {
-            let workspace_manager = cx.new(|cx| {
-                WorkspaceManager::new_with_adapters(
-                    session_factory,
-                    home_directory,
-                    adapters,
-                    window,
-                    cx,
-                )
-            });
-            workspace_manager.update(cx, |workspace_manager, cx| {
-                workspace_manager.focus(window, cx);
-            });
-            let close_manager = workspace_manager.downgrade();
-            window.on_window_should_close(cx, move |window, cx| {
-                close_manager
-                    .update(cx, |manager, cx| manager.should_close_window(window, cx))
-                    .unwrap_or(true)
-            });
-            if let Err(error) = host.services.install(
+    let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+        let workspace_manager = cx.new(|cx| {
+            WorkspaceManager::new_with_adapters(
+                session_factory,
+                home_directory,
+                adapters,
                 window,
-                Rc::new(WorkspaceServicesEndpoint {
-                    app: cx.to_async(),
-                    window: window.window_handle(),
-                    owner: workspace_manager.downgrade(),
-                }),
-            ) {
-                eprintln!("failed to install the Services responder: {error}");
-            }
-            workspace_manager
-        },
-    );
+                cx,
+            )
+        });
+        workspace_manager.update(cx, |workspace_manager, cx| {
+            workspace_manager.focus(window, cx);
+        });
+        let close_manager = workspace_manager.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_manager
+                .update(cx, |manager, cx| manager.should_close_window(window, cx))
+                .unwrap_or(true)
+        });
+        if let Err(error) = host.services.install(
+            window,
+            Rc::new(WorkspaceServicesEndpoint {
+                app: cx.to_async(),
+                window: window.window_handle(),
+                owner: workspace_manager.downgrade(),
+            }),
+        ) {
+            eprintln!("failed to install the Services responder: {error}");
+        }
+        workspace_manager
+    });
 
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
@@ -557,24 +556,31 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    WindowOptions {
-        app_id: window_application_id(),
-        window_background: crate::ui::appearance_runtime::window_background(cx),
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(480.0), px(260.0))),
-        titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
-            title: titlebar.title.clone(),
-            appears_transparent: titlebar.appears_transparent,
-            traffic_light_position: workspace_traffic_light_position
-                .or(titlebar.traffic_light_position),
-        }),
-        // The Workspace chrome moves the window through its own drag regions. AppKit must not
-        // also move it from the titlebar strip, where a Tab press starts a Tab drag.
-        app_owns_titlebar_drag: true,
-        ..WindowOptions::default()
-    }
+    host.window_chrome.options(
+        crate::platform::window_chrome::WindowRole::Workspace,
+        WindowOptions {
+            app_id: window_application_id(),
+            window_background: crate::ui::appearance_runtime::window_background(cx),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(480.0), px(260.0))),
+            titlebar: host
+                .window_chrome
+                .titlebar
+                .as_ref()
+                .map(|titlebar| TitlebarOptions {
+                    title: titlebar.title.clone(),
+                    appears_transparent: titlebar.appears_transparent,
+                    traffic_light_position: workspace_traffic_light_position
+                        .or(titlebar.traffic_light_position),
+                }),
+            // The Workspace chrome moves the window through its own drag regions. AppKit must not
+            // also move it from the titlebar strip, where a Tab press starts a Tab drag.
+            app_owns_titlebar_drag: true,
+            ..WindowOptions::default()
+        },
+        cx,
+    )
 }
-
 /// Every live Workspace window, resolved at call time from GPUI's own registry.
 ///
 /// A Settings window is not a Workspace window: it presents no Workspace, cannot host one, and must
@@ -731,7 +737,10 @@ mod tests {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter calls back into the Workspace")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter calls back into the Workspace"
+    )
 )]
 #[derive(Clone)]
 struct WorkspaceServicesEndpoint {
@@ -846,7 +855,7 @@ pub(crate) struct HostCompositionParts {
     pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    pub(crate) titlebar: Option<TitlebarOptions>,
+    pub(crate) window_chrome: crate::platform::window_chrome::WindowChrome,
 }
 pub(crate) struct HostComposition {
     profile: crate::desktop_profile::DesktopProfile,
@@ -856,7 +865,7 @@ pub(crate) struct HostComposition {
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    titlebar: Option<TitlebarOptions>,
+    window_chrome: crate::platform::window_chrome::WindowChrome,
     appearance: Option<(
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
@@ -878,9 +887,14 @@ impl HostComposition {
         if !parts.home_directory.is_absolute() {
             return Err(DesktopProfileError::InvalidCombination);
         }
-        if parts.titlebar.as_ref().is_some_and(|titlebar| {
-            titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
-        }) {
+        if parts
+            .window_chrome
+            .titlebar
+            .as_ref()
+            .is_some_and(|titlebar| {
+                titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
+            })
+        {
             return Err(DesktopProfileError::InvalidCombination);
         }
         Ok(Self {
@@ -891,7 +905,7 @@ impl HostComposition {
             services: parts.services,
             window_movement: parts.window_movement,
             window_frame: parts.window_frame,
-            titlebar: parts.titlebar,
+            window_chrome: parts.window_chrome,
             appearance: None,
         })
     }
@@ -969,6 +983,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
 
 fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
     cx.set_global(host.window_frame);
+    cx.set_global(host.window_chrome.clone());
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
@@ -1002,8 +1017,7 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
-    crate::ui::appearance_runtime::register_fonts(cx)
-        .map_err(|_| RuntimeError::Initialization)?;
+    crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::UserSettings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
@@ -1130,7 +1144,7 @@ mod runtime_tests {
             services,
             window_movement: movement,
             window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
-            titlebar: None,
+            window_chrome: crate::platform::window_chrome::WindowChrome::native(None),
         }
     }
     #[test]
@@ -1356,7 +1370,9 @@ mod runtime_tests {
             .unwrap()
             .with_appearance(
                 storage,
-                Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+                Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
             )
     }
 
@@ -1386,9 +1402,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn launch_offers_settings_recovery_once_for_malformed_settings(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn launch_offers_settings_recovery_once_for_malformed_settings(cx: &mut gpui::TestAppContext) {
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
@@ -1420,9 +1434,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn settings_recovery_can_be_declined_without_changing_the_file(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn settings_recovery_can_be_declined_without_changing_the_file(cx: &mut gpui::TestAppContext) {
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
@@ -1651,8 +1663,8 @@ mod runtime_tests {
         let geometry = WindowFrameGeometry::new(Some(16.0))
             .with_outer_edge_width(1.0)
             .with_traffic_lights(
-                TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
             );
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.window_frame = geometry;

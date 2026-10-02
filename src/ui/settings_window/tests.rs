@@ -26,6 +26,31 @@ struct Harness {
     platform: RecordingAppearancePlatform,
 }
 
+#[gpui::test]
+fn unsupported_blur_explains_how_to_use_available_desktop_transparency(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    harness
+        .platform
+        .set_native_window_transparency_supported(true);
+    harness.platform.set_native_window_blur_supported(false);
+    cx.run_until_parked();
+    let guidance = window.read_with(cx, |settings, cx| {
+        settings.row_description(SettingsRowId::Transparency, cx)
+    });
+    assert_eq!(
+        guidance,
+        Some(
+            "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+        )
+    );
+    click("settings-blur", cx);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
+        crate::appearance::WindowBackgroundAppearance::Transparent
+    );
+}
+
 fn open_settings(
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
@@ -2535,6 +2560,10 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     cx: &mut TestAppContext,
 ) {
     let (window, harness, cx) = open_settings(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.run_until_parked();
     click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
@@ -2549,8 +2578,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     });
     let handle = cx.update(|native, _| native.window_handle());
 
-    request_window_close(&window, cx);
-    request_window_close(&window, cx);
+    click("window-close", cx);
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 

@@ -2731,6 +2731,27 @@ fn rendered_combo_box_placement_should_flip_alignment_at_the_viewport_corner(
 }
 
 #[gpui::test]
+fn rendered_combo_box_stays_inside_the_client_frame_content(cx: &mut TestAppContext) {
+    let (_, cx) = placement_window(
+        cx,
+        point(px(488.0), px(12.0)),
+        AnchoredPlacementConfig::new(AnchoredPlacement::Top, AnchoredAlignment::Start),
+        gpui::size(px(600.0), px(420.0)),
+        items(),
+    );
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.update(|window, _| window.set_client_inset(px(24.0)));
+    open_by_pointer(cx);
+    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
+    assert!(panel.left() >= px(36.0));
+    assert!(panel.top() >= px(36.0));
+    assert!(panel.right() <= px(564.0));
+    assert!(panel.bottom() <= px(384.0));
+}
+
+#[gpui::test]
 fn rendered_combo_box_placement_should_keep_logical_start_when_flipped_in_rtl(
     cx: &mut TestAppContext,
 ) {

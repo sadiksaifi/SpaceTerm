@@ -102,6 +102,11 @@ pub enum WindowDragRegionEvent {
     },
     /// A primary-pointer double activation occurred without starting a drag interaction.
     DoubleActivationRequested,
+    /// A secondary-pointer activation requests the desktop window menu.
+    SecondaryActivationRequested {
+        /// Pointer position in window coordinates.
+        position: Point<Pixels>,
+    },
     /// The region released ownership of a primary-pointer interaction.
     InteractionFinished {
         /// Stable identity for this interaction.
@@ -279,10 +284,24 @@ impl RenderOnce for WindowDragRegion {
                 let down_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.bubble()
-                        || event.button != MouseButton::Left
+                        || !matches!(event.button, MouseButton::Left | MouseButton::Right)
                         || !down_hitbox.is_hovered(window)
                         || !down_state.read(cx).enabled
                     {
+                        return;
+                    }
+
+                    if event.button == MouseButton::Right {
+                        emit_events(
+                            down_handler.clone(),
+                            vec![WindowDragRegionEvent::SecondaryActivationRequested {
+                                position: event.position,
+                            }],
+                            window,
+                            cx,
+                        );
+                        window.prevent_default();
+                        cx.stop_propagation();
                         return;
                     }
 
@@ -1098,9 +1117,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn secondary_middle_and_navigation_buttons_should_pass_through_unchanged(
-        cx: &mut TestAppContext,
-    ) {
+    fn middle_and_navigation_buttons_should_pass_through_unchanged(cx: &mut TestAppContext) {
         let DragWindow {
             events,
             parent_events,
@@ -1112,7 +1129,6 @@ mod tests {
             region_bounds(cx).center().y,
         );
         let buttons = [
-            MouseButton::Right,
             MouseButton::Middle,
             MouseButton::Navigate(NavigationDirection::Back),
             MouseButton::Navigate(NavigationDirection::Forward),
@@ -1299,6 +1315,28 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             [WindowDragRegionEvent::DoubleActivationRequested]
+        );
+    }
+
+    #[gpui::test]
+    fn secondary_activation_requests_the_window_menu_without_owning_a_drag(
+        cx: &mut TestAppContext,
+    ) {
+        let DragWindow { events, cx, .. } = drag_window(cx);
+        let position = point(
+            region_bounds(cx).right() - px(80.0),
+            region_bounds(cx).center().y,
+        );
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_move(
+            position + point(px(20.0), px(0.0)),
+            MouseButton::Right,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            [WindowDragRegionEvent::SecondaryActivationRequested { position }]
         );
     }
 }

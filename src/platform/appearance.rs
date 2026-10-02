@@ -32,6 +32,12 @@ pub(crate) enum WindowBackdrop {
     Frosted(ChromeTone),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeWindowComposition {
+    pub(crate) transparency: bool,
+    pub(crate) blur: bool,
+}
+
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
@@ -42,6 +48,13 @@ pub(crate) trait AppearancePlatform {
     /// Whether this Adapter can present a translucent native Operating-System Window.
     fn supports_native_window_transparency(&self) -> bool {
         false
+    }
+    fn native_window_composition(&self, _: &gpui::App) -> NativeWindowComposition {
+        let supported = self.supports_native_window_transparency();
+        NativeWindowComposition {
+            transparency: supported,
+            blur: supported,
+        }
     }
     /// Accessibility display choices apply to both native and in-window materials.
     fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
@@ -69,6 +82,7 @@ pub(crate) mod testing {
         fact: Rc<Cell<Option<Appearance>>>,
         reduced_motion: Rc<Cell<bool>>,
         native_window_transparency: Rc<Cell<bool>>,
+        native_window_blur: Rc<Cell<Option<bool>>>,
         accessibility: Rc<Cell<AccessibilityDisplayOptions>>,
         pub(crate) backdrops: Rc<RefCell<Vec<WindowBackdrop>>>,
         notifications: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
@@ -88,6 +102,10 @@ pub(crate) mod testing {
 
         pub(crate) fn set_native_window_transparency_supported(&self, supported: bool) {
             self.native_window_transparency.set(supported);
+            self.set_system_appearance(self.fact.get());
+        }
+        pub(crate) fn set_native_window_blur_supported(&self, supported: bool) {
+            self.native_window_blur.set(Some(supported));
             self.set_system_appearance(self.fact.get());
         }
         pub(crate) fn set_reduce_transparency(&self, reduced: bool) {
@@ -138,6 +156,15 @@ pub(crate) mod testing {
         }
         fn supports_native_window_transparency(&self) -> bool {
             self.native_window_transparency.get()
+        }
+        fn native_window_composition(&self, _: &gpui::App) -> NativeWindowComposition {
+            NativeWindowComposition {
+                transparency: self.native_window_transparency.get(),
+                blur: self
+                    .native_window_blur
+                    .get()
+                    .unwrap_or(self.native_window_transparency.get()),
+            }
         }
         fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
             self.accessibility.get()

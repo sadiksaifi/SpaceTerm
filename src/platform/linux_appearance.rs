@@ -7,6 +7,26 @@ use super::appearance::{AppearancePlatform, SystemAppearanceObservation};
 pub(super) struct LinuxAppearancePlatform;
 
 impl AppearancePlatform for LinuxAppearancePlatform {
+    fn native_window_composition(
+        &self,
+        cx: &gpui::App,
+    ) -> super::appearance::NativeWindowComposition {
+        let support = cx.window_background_support();
+        super::appearance::NativeWindowComposition {
+            transparency: support.transparent,
+            blur: support.blurred,
+        }
+    }
+
+    fn apply_window_backdrop(
+        &self,
+        window: &gpui::Window,
+        backdrop: super::appearance::WindowBackdrop,
+    ) {
+        if matches!(backdrop, super::appearance::WindowBackdrop::Frosted(_)) {
+            window.set_background_appearance(gpui::WindowBackgroundAppearance::Blurred);
+        }
+    }
     fn system_appearance(&self) -> Option<Appearance> {
         None
     }

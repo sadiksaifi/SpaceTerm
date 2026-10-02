@@ -51,15 +51,14 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
+    ThemeId,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
-use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::platform::window_movement::{
-    OperatingSystemWindowDragPlatform, WindowMovementFactory,
-};
+use crate::platform::window_movement::{OperatingSystemWindowDragPlatform, WindowMovementFactory};
+use crate::theme_registry::ZedThemeRegistry;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
@@ -70,11 +69,11 @@ use crate::ui::sidebar_window::{
     card_gutter, group_spacing,
 };
 
-use catalog::{SettingsRowId, SettingsSectionId};
 use crate::ui::sidebar_window::form::{
-    FormGroup, FormRow, FormRowLayout, Stepper, action_button,
-    reset_button, row_horizontal_inset, section_heading,
+    FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button, row_horizontal_inset,
+    section_heading,
 };
+use catalog::{SettingsRowId, SettingsSectionId};
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
@@ -549,8 +548,7 @@ impl SettingsWindow {
             return;
         };
         let viewport = self.scroll.bounds();
-        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height
-        {
+        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
             viewport.top() - bounds.top()
         } else if bounds.bottom() > viewport.bottom() {
             viewport.bottom() - bounds.bottom()
@@ -694,7 +692,9 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
+        let content =
+            super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -735,8 +735,20 @@ impl SettingsWindow {
 
 impl SettingsWindow {
     /// The active section's large title and description at the head of the content surface.
-    fn render_detail_heading(&self, settings: &SettingsAppearance) -> AnyElement {
+    fn render_detail_heading(
+        &self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let section = self.active_section;
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         DetailHeading::new(
             "settings",
@@ -747,9 +759,10 @@ impl SettingsWindow {
                 &settings.chrome,
             ),
             &self.window_movement,
+            close,
         )
         .scrolled(scrolled)
-        .render(settings)
+        .render(settings, window)
     }
 
     fn render_sidebar(
@@ -808,7 +821,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings))
+            .child(self.render_detail_heading(settings, window, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -906,7 +919,9 @@ impl SettingsWindow {
                 let row_bounds = Rc::clone(&self.row_bounds);
                 FormGroup::new(group_selector(section, title), heading, members)
                     .on_rows_prepainted(move |bounds, _, _| {
-                        row_bounds.borrow_mut().extend(ids.iter().copied().zip(bounds));
+                        row_bounds
+                            .borrow_mut()
+                            .extend(ids.iter().copied().zip(bounds));
                     })
                     .render(settings)
                     .into_any_element()
@@ -928,7 +943,6 @@ impl SettingsWindow {
             .into_any_element()
     }
 }
-
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -1111,7 +1125,8 @@ impl SettingsWindow {
     /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
     fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
         let document = self.editor.document();
-        let catalog = ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
+        let catalog =
+            ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
         let pick = |appearance: Appearance| {
             let mut preferences = document.preferences.clone();
             preferences.mode = appearance.into();
@@ -1863,10 +1878,8 @@ impl SettingsWindow {
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable = !zero_transparency
-                    && composition.effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque
-                    && !composition.floating_materials.is_opaque();
+                let native_unavailable =
+                    !zero_transparency && !composition.capabilities.native_window_transparency;
                 Some(match row {
                     SettingsRowId::Transparency if zero_transparency => {
                         "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
@@ -1877,6 +1890,12 @@ impl SettingsWindow {
                     SettingsRowId::Transparency if native_unavailable => {
                         "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
+                    SettingsRowId::Transparency
+                        if !composition.capabilities.native_window_blur
+                            && self.editor.document().preferences.window.blur =>
+                    {
+                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+                    }
                     SettingsRowId::Transparency => {
                         "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
@@ -1886,7 +1905,7 @@ impl SettingsWindow {
                     _ if accessibility_forced_opaque => {
                         "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
                     }
-                    _ if native_unavailable => {
+                    _ if native_unavailable || !composition.capabilities.native_window_blur => {
                         "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
                     }
                     _ => {
