@@ -367,12 +367,75 @@ run = "exec bash scripts/run-development-app-linux.sh appearance"
 description = "Run native Linux and shared Unix Adapter tests"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
 
+[tasks."test:linux:accessibility:diff"]
+description = "Test AT-SPI text change events against the real AccessKit adapter"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --manifest-path vendor/accesskit-atspi-common/Cargo.toml --lib"
+
+[tasks."lint:linux:accessibility:diff"]
+description = "Lint the retained AT-SPI text change patch"
+run = "./scripts/cargo-artifacts.sh run -- cargo clippy --manifest-path vendor/accesskit-atspi-common/Cargo.toml --all-targets -- -D warnings"
+
+[tasks."fmt:linux:accessibility:check"]
+description = "Check formatting of the retained AccessKit patches"
+run = [
+  "cargo fmt --manifest-path vendor/accesskit-atspi-common/Cargo.toml -- --check",
+  "cargo fmt --manifest-path vendor/accesskit/Cargo.toml -- --check",
+  "cargo fmt --manifest-path vendor/accesskit-consumer/Cargo.toml -- --check",
+]
+
+[tasks."test:linux:accessibility:core"]
+description = "Test the additive AccessKit caret geometry property"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --manifest-path vendor/accesskit/Cargo.toml --all-features"
+
+[tasks."test:linux:accessibility:consumer"]
+description = "Test AccessKit text geometry including explicit terminal caret bounds"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --manifest-path vendor/accesskit-consumer/Cargo.toml --lib"
+
+[tasks."lint:linux:accessibility:core"]
+description = "Lint the additive AccessKit caret geometry property"
+run = "./scripts/cargo-artifacts.sh run -- cargo clippy --manifest-path vendor/accesskit/Cargo.toml --features serde,schemars,enumn --all-targets -- -D warnings"
+
+[tasks."lint:linux:accessibility:consumer"]
+description = "Lint AccessKit text geometry including explicit terminal caret bounds"
+run = "./scripts/cargo-artifacts.sh run -- cargo clippy --manifest-path vendor/accesskit-consumer/Cargo.toml --all-targets -- -D warnings"
+
+[tasks."build:linux:accessibility"]
+description = "Build the source executable for private Linux accessibility smoke tests"
+usage = '''
+arg "<artifact>" help="File receiving Cargo's executable path"
+'''
+run = 'CARGO_BUILD_JOBS=2 ./scripts/cargo-artifacts.sh run -- python3 scripts/cargo-build-executable.py --output "${usage_artifact?}" --bin spaceterm -- --features development-app --locked'
+
+[tasks."test:linux:accessibility"]
+description = "Verify AT-SPI Terminal text, selection, focus and bounded event churn on private Linux displays"
+usage = '''
+flag "--backend <backend>" help="both, x11 or wayland" default="both"
+flag "--binary <binary>" help="Existing source executable; skips building"
+flag "--expected-binary-sha256 <expected_binary_sha256>" help="Required SHA256 pin for --binary"
+flag "--output-dir <output_dir>" help="Output directory beneath the sibling .linux-port folder"
+flag "--session-timeout <session_timeout>" help="Maximum runtime per backend in seconds" default="600"
+flag "--isolation-only" help="Verify private bus/dconf ownership without launching a display"
+'''
+run = '''
+set -- --backend "${usage_backend?}" --session-timeout "${usage_session_timeout?}"
+if [ -n "${usage_binary:-}" ]; then set -- "$@" --binary "$usage_binary"; fi
+if [ -n "${usage_expected_binary_sha256:-}" ]; then set -- "$@" --expected-binary-sha256 "$usage_expected_binary_sha256"; fi
+if [ -n "${usage_output_dir:-}" ]; then set -- "$@" --output-dir "$usage_output_dir"; fi
+if [ "${usage_isolation_only:-false}" = true ]; then set -- "$@" --isolation-only; fi
+exec /usr/bin/python3 scripts/accessibility-smoke-linux.py "$@"
+'''
+
+[tasks."lint:linux:accessibility"]
+description = "Check the Linux AT-SPI runtime smoke script"
+run = "python3 -c 'import ast, pathlib; ast.parse(pathlib.Path(\"scripts/accessibility-smoke-linux.py\").read_text())'"
+
 [tasks."lint:linux:scripts"]
 description = "Check Linux scripts"
 run = '''
 set -eu
 bash -n scripts/run-development-app-linux.sh
 shellcheck -x scripts/run-development-app-linux.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/accessibility-smoke-linux.py").read_text())'
 '''
 
 [tasks."validate:linux"]
@@ -381,6 +444,13 @@ run = [
   { task = "validate" },
   { task = "test:linux" },
   { task = "lint:linux:scripts" },
+  { task = "fmt:linux:accessibility:check" },
+  { task = "test:linux:accessibility:core" },
+  { task = "test:linux:accessibility:consumer" },
+  { task = "test:linux:accessibility:diff" },
+  { task = "lint:linux:accessibility:core" },
+  { task = "lint:linux:accessibility:consumer" },
+  { task = "lint:linux:accessibility:diff" },
 ]
 
 [tasks."setup:macos"]
