@@ -509,26 +509,8 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
-    let appearance = crate::ui::appearance::chrome(cx);
-    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
-        .top_chrome_height(appearance.top_height());
-    let workspace_traffic_light_position = host
-        .window_frame
-        .workspace_traffic_light_position(workspace_titlebar_height);
-    let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
-        WindowOptions {
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(480.0), px(260.0))),
-            titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
-                title: titlebar.title.clone(),
-                appears_transparent: titlebar.appears_transparent,
-                traffic_light_position: workspace_traffic_light_position
-                    .or(titlebar.traffic_light_position),
-            }),
-            ..WindowOptions::default()
-        },
+        workspace_window_options(host, cx),
         |window, cx| {
             let workspace_manager = cx.new(|cx| {
                 WorkspaceManager::new_with_adapters(
@@ -565,6 +547,31 @@ pub(crate) fn open(
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
     Ok(window)
+}
+
+fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
+    let appearance = crate::ui::appearance::chrome(cx);
+    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
+        .top_chrome_height(appearance.top_height());
+    let workspace_traffic_light_position = host
+        .window_frame
+        .workspace_traffic_light_position(workspace_titlebar_height);
+    let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
+    WindowOptions {
+        window_background: crate::ui::appearance_runtime::window_background(cx),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(480.0), px(260.0))),
+        titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
+            title: titlebar.title.clone(),
+            appears_transparent: titlebar.appears_transparent,
+            traffic_light_position: workspace_traffic_light_position
+                .or(titlebar.traffic_light_position),
+        }),
+        // The Workspace chrome moves the window through its own drag regions. AppKit must not
+        // also move it from the titlebar strip, where a Tab press starts a Tab drag.
+        app_owns_titlebar_drag: true,
+        ..WindowOptions::default()
+    }
 }
 
 /// Every live Workspace window, resolved at call time from GPUI's own registry.
@@ -1182,6 +1189,19 @@ mod runtime_tests {
                 .unwrap()
         });
         assert_eq!(initial_size, size(px(900.0), px(580.0)));
+    }
+
+    #[gpui::test]
+    fn workspace_window_should_leave_titlebar_moves_to_its_drag_regions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let options = cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+            workspace_window_options(&host, cx)
+        });
+
+        assert!(options.app_owns_titlebar_drag);
     }
 
     #[gpui::test]
