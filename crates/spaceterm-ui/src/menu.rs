@@ -1719,13 +1719,9 @@ impl<A: Clone + 'static> MenuControl<A> {
                     if !phase.capture() || !hitbox.is_hovered(window) || !enabled {
                         return;
                     }
-                    let context_gesture = event.button == MouseButton::Right
-                        || (event.button == MouseButton::Left
-                            && event.modifiers.control
-                            && !event.modifiers.alt
-                            && !event.modifiers.platform);
-                    let ordinary_gesture =
-                        event.button == MouseButton::Left && !event.modifiers.control;
+                    let pointer = crate::PointerConventions::get(cx);
+                    let context_gesture = pointer.secondary(event.button, event.modifiers);
+                    let ordinary_gesture = pointer.primary(event.button, event.modifiers);
                     let accepts = match trigger_kind {
                         TriggerKind::Context => context_gesture,
                         TriggerKind::Menu | TriggerKind::Picker => ordinary_gesture,
@@ -6317,6 +6313,27 @@ mod tests {
             ..Modifiers::none()
         };
         cx.simulate_click(target.center(), modifiers);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Inspect").is_some());
+    }
+
+    #[gpui::test]
+    fn linux_control_click_reaches_content_and_secondary_button_still_opens_menu(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        cx.update(|cx| {
+            crate::install_pointer_conventions(cx, crate::PointerConventions::SecondaryButton)
+        });
+        let (_, cx) = cx.add_window_view(|_, _| ContextRoot);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx.debug_bounds("context-target").expect("target painted");
+        cx.simulate_click(target.center(), Modifiers::control());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Inspect").is_none());
+        cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("Inspect").is_some());
     }
