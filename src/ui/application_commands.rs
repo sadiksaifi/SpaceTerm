@@ -68,9 +68,10 @@ fn open(window: &mut Window, cx: &mut App) {
         .map(|(index, command)| {
             let mut item = CommandPaletteItem::new(index, command.label.clone())
                 .disabled(
-                    !available
-                        .iter()
-                        .any(|action| action.partial_eq(command.action.as_ref())),
+                    !window_supports_action(window, command.action.as_ref())
+                        || !available
+                            .iter()
+                            .any(|action| action.partial_eq(command.action.as_ref())),
                 )
                 .debug_selector(format!("application-command-{index}"));
             if let Some(shortcut) = crate::desktop_profile::DesktopPresentation::get(cx)
@@ -92,7 +93,12 @@ fn open(window: &mut Window, cx: &mut App) {
             // The palette restores its predecessor's focus before emitting activation.
             // Defer until that focus has a complete dispatch tree again.
             cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+                let _ = handle.update(cx, |_, window, cx| {
+                    // Native capabilities can change while a palette is open.
+                    if window_supports_action(window, action.as_ref()) {
+                        window.dispatch_action(action, cx);
+                    }
+                });
             });
         }
     });
@@ -107,6 +113,16 @@ fn open(window: &mut Window, cx: &mut App) {
         palette.open(window, cx);
     });
     window.refresh();
+}
+
+fn window_supports_action(window: &Window, action: &dyn gpui::Action) -> bool {
+    if action.as_any().is::<crate::app::MinimizeWindow>() {
+        window.is_minimizable() && window.window_controls().minimize
+    } else if action.as_any().is::<crate::app::ZoomActiveWindow>() {
+        window.is_resizable() && window.window_controls().maximize
+    } else {
+        true
+    }
 }
 
 pub(crate) fn perform(
@@ -260,6 +276,178 @@ mod tests {
                     )),
             )
             .transient(div().absolute().inset_0().children(layer(window, cx)))
+        }
+    }
+
+    fn install_application_actions(cx: &mut App) {
+        struct PaletteMenu;
+        impl crate::platform::application_menu::ApplicationMenuAdapter for PaletteMenu {
+            fn install(&self, _: &mut App) -> Result<(), ApplicationMenuError> {
+                Ok(())
+            }
+            fn uses_command_palette(&self) -> bool {
+                true
+            }
+        }
+        crate::app::init(
+            cx,
+            std::rc::Rc::new(PaletteMenu),
+            std::rc::Rc::new(
+                crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn try_window_commands(cx: &mut gpui::VisualTestContext, enabled: bool) {
+        for (label, action, request) in [
+            (
+                "Window › Minimize",
+                Box::new(crate::app::MinimizeWindow) as Box<dyn gpui::Action>,
+                gpui::TestWindowRequest::Minimize,
+            ),
+            (
+                "Window › Zoom",
+                Box::new(crate::app::ZoomActiveWindow) as Box<dyn gpui::Action>,
+                gpui::TestWindowRequest::Zoom,
+            ),
+        ] {
+            // A globally routed action exists even when this specific Window cannot do it.
+            assert!(cx.update(|window, cx| {
+                window
+                    .available_actions(cx)
+                    .iter()
+                    .any(|available| available.partial_eq(action.as_ref()))
+            }));
+            cx.update(|window, cx| window.dispatch_action(Box::new(OpenApplicationCommands), cx));
+            cx.run_until_parked();
+            cx.simulate_input(label);
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(|window, cx| layer(window, cx)
+                    .unwrap()
+                    .read(cx)
+                    .selected_item_id()
+                    .is_some()),
+                enabled,
+                "{label} must follow this Window's capabilities"
+            );
+            let before = cx.window_requests().len();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(|window, cx| layer(window, cx).unwrap().read(cx).is_open()),
+                !enabled
+            );
+            assert_eq!(
+                &cx.window_requests()[before..],
+                if enabled { vec![request] } else { Vec::new() }
+            );
+            if !enabled {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn application_palette_respects_the_real_settings_window_capabilities(cx: &mut TestAppContext) {
+        use crate::platform::window_movement::{
+            OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
+            WindowMovementFactory,
+        };
+        struct Movement;
+        impl WindowMovementFactory for Movement {
+            fn create(&self) -> std::rc::Rc<dyn OperatingSystemWindowDragPlatform> {
+                std::rc::Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+            }
+        }
+        cx.update(|cx| {
+            crate::ui::appearance_runtime::install(
+                crate::settings::UserSettings::load(
+                    crate::ui::settings_window::test_support::MemoryStorage::with_document(
+                        &crate::appearance::SettingsDocument::default(),
+                    ),
+                ),
+                std::rc::Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
+                cx,
+            )
+            .unwrap();
+            crate::ui::init(cx).unwrap();
+            install_application_actions(cx);
+            crate::ui::settings_window::configure_window_chrome(
+                std::rc::Rc::new(Movement),
+                None,
+                None,
+                cx,
+            );
+            crate::ui::settings_window::open_or_activate(cx);
+        });
+        cx.run_until_parked();
+        let handle = cx.windows()[0];
+        let mut cx = gpui::VisualTestContext::from_window(handle, cx);
+        cx.update(|window, _| {
+            assert!(!window.is_minimizable());
+            assert!(!window.is_resizable());
+            assert!(window.window_controls().minimize);
+            assert!(window.window_controls().maximize);
+            window.activate_window();
+        });
+        cx.run_until_parked();
+        try_window_commands(&mut cx, false);
+    }
+
+    #[gpui::test]
+    fn application_palette_respects_host_controls_and_keeps_supported_commands(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        cx.update(install_application_actions);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            window.activate_window();
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            CommandsWindow {
+                focus,
+                invoked: Vec::new(),
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert!(window.is_minimizable());
+            assert!(window.is_resizable());
+        });
+        cx.simulate_window_controls(gpui::WindowControls {
+            minimize: false,
+            maximize: false,
+            ..Default::default()
+        });
+        try_window_commands(cx, false);
+        cx.simulate_window_controls(gpui::WindowControls::default());
+        try_window_commands(cx, true);
+        for label in ["Window › Minimize", "Window › Zoom"] {
+            cx.simulate_window_controls(gpui::WindowControls::default());
+            cx.update(|window, cx| window.dispatch_action(Box::new(OpenApplicationCommands), cx));
+            cx.run_until_parked();
+            cx.simulate_input(label);
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| layer(window, cx)
+                .unwrap()
+                .read(cx)
+                .selected_item_id()
+                .is_some()));
+            // The compositor can withdraw support after the command was listed.
+            cx.simulate_window_controls(gpui::WindowControls {
+                minimize: false,
+                maximize: false,
+                ..Default::default()
+            });
+            let before = cx.window_requests().len();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(cx.window_requests().len(), before);
         }
     }
 
