@@ -6,20 +6,17 @@ use crate::desktop_profile::ShortcutFormatter;
 
 /// Presents chords as the person presses them. A shifted symbol that GPUI dispatches without
 /// Shift, such as `ctrl-!` on US English, reads as its key with Shift: `Ctrl+Shift+1`.
-pub(super) struct LinuxShortcutFormatter {
-    layout: KeyboardLayout,
-}
-
-impl LinuxShortcutFormatter {
-    pub(super) const fn new(layout: KeyboardLayout) -> Self {
-        Self { layout }
-    }
-}
+pub(super) struct LinuxShortcutFormatter;
 
 impl ShortcutFormatter for LinuxShortcutFormatter {
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
-        let (shift, key) = match self.layout.unshifted(false, key) {
-            Some(base) if !modifiers.shift => (true, base),
+    fn format_chord(
+        &self,
+        modifiers: Modifiers,
+        key: &str,
+        layout: &KeyboardLayout,
+    ) -> SharedString {
+        let (shift, key) = match layout.unshifted(false, key) {
+            Some(base) if !modifiers.shift && layout.is_shifted_symbol(false, key) => (true, base),
             _ => (modifiers.shift, key),
         };
         let modifiers = Modifiers { shift, ..modifiers };
@@ -77,8 +74,8 @@ mod tests {
     fn format(source: &str) -> String {
         let layout = KeyboardLayout::us_english();
         let shortcut = Shortcut::parse(source).unwrap().resolve(&layout);
-        LinuxShortcutFormatter::new(layout)
-            .format_chord(shortcut.modifiers(), shortcut.key())
+        LinuxShortcutFormatter
+            .format_chord(shortcut.modifiers(), shortcut.key(), &layout)
             .to_string()
     }
 
@@ -101,7 +98,7 @@ mod tests {
         ] {
             assert_eq!(format(source), label, "{source}");
         }
-        let formatter = LinuxShortcutFormatter::new(KeyboardLayout::us_english());
+        let formatter = LinuxShortcutFormatter;
         assert_eq!(
             formatter
                 .format_modifiers(Modifiers::control_shift())

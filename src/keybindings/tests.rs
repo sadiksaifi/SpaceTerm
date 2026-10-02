@@ -172,7 +172,12 @@ fn preferences_are_sparse_and_validate_only_override_conflicts() {
         Err(KeybindingPreferencesError::DuplicateShortcut)
     );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"unknown":null}"#).is_err());
-    assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"close_tab":"ctrl-c"}"#).is_err());
+    assert_eq!(
+        profile()
+            .resolve(&preferences(r#"{"close_tab":"ctrl-c"}"#))
+            .state(Command::CloseTab),
+        KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+    );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"close_tab":12}"#).is_err());
     assert_eq!(preferences(r#"{"close_tab":"cmd-q"}"#).validate(), Ok(()));
     assert_eq!(
@@ -311,8 +316,8 @@ fn resolve_defaults_preserves_primary_alias_order_and_separates_fixed_controls()
         profile.control_bindings()[0].keystrokes()[0].unparse(),
         "escape"
     );
-    assert_eq!(profile.fixed_bindings()[0].meta(), None);
-    assert_eq!(profile.control_bindings()[0].meta(), None);
+    assert_eq!(profile.fixed_bindings()[0].meta(), Some(FIXED_BINDINGS));
+    assert_eq!(profile.control_bindings()[0].meta(), Some(CONTROL_BINDINGS));
 }
 
 #[test]
@@ -733,14 +738,18 @@ fn deterministic_assign_reset_clear_sequence_preserves_unique_ownership() {
 fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "7", "/");
-    let profile = KeymapProfile::new(
+    let mut profile = KeymapProfile::new(
         std::rc::Rc::new(layout),
         crate::keybindings::TerminalConventions::CommandShortcuts,
         [],
         vec![],
         vec![],
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
     assert_eq!(prefs.validate(), Ok(()));
     let resolved = profile.resolve(&prefs);
@@ -779,14 +788,18 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
 fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(false, "7", "/");
-    let profile = KeymapProfile::new(
+    let mut profile = KeymapProfile::new(
         std::rc::Rc::new(layout),
         crate::keybindings::TerminalConventions::CommandShortcuts,
         [],
         vec![],
         vec![],
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"ctrl-shift-7"}"#);
     assert_eq!(
         profile.resolve(&prefs).state(Command::NewWorkspace),
@@ -806,7 +819,7 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
 fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "7", "/");
-    let profile = KeymapProfile::new(
+    let mut profile = KeymapProfile::new(
         std::rc::Rc::new(layout),
         crate::keybindings::TerminalConventions::CommandShortcuts,
         [(Command::CloseTab, Some(DefaultBinding::new("cmd-/", &[])))],
@@ -815,6 +828,9 @@ fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
         vec![],
     )
     .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
     profile.reset(&mut prefs, Command::CloseTab);
     assert_eq!(prefs.validate(), Ok(()));
@@ -828,14 +844,18 @@ fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
 fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "ı", "I");
-    let profile = KeymapProfile::new(
+    let mut profile = KeymapProfile::new(
         std::rc::Rc::new(layout),
         crate::keybindings::TerminalConventions::CommandShortcuts,
         [],
         vec![],
         vec![],
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let prefs = preferences(r#"{"new_workspace":"shift-cmd-ı","create_tab":"shift-cmd-i"}"#);
     let resolved = profile.resolve(&prefs);
     let native = gpui::Keystroke {
@@ -891,15 +911,18 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
 
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(false, "2", "\"");
-    let norwegian =
-        KeymapProfile::new(
+    let mut norwegian = KeymapProfile::new(
         std::rc::Rc::new(layout),
         crate::keybindings::TerminalConventions::CommandShortcuts,
         [],
         vec![],
         vec![],
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
+    norwegian
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let native = gpui::Keystroke::parse("ctrl-\"").unwrap();
     let recorded = Shortcut::from_keystroke(&native).unwrap();
     let resolved = norwegian.resolve(&document.keybindings);

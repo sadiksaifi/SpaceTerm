@@ -228,7 +228,7 @@ mod tests {
         ] {
             let retained = Shortcut::parse(&format!("shift-cmd-{base}")).unwrap();
             let layout = crate::platform::keyboard_layout::testing::us()
-                .snapshot()
+                .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
                 .unwrap();
             let shortcut = retained.resolve(&layout);
             let native = Keystroke::parse(&format!("cmd-{symbol}")).unwrap();

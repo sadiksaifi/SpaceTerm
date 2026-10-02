@@ -5,7 +5,12 @@ use crate::desktop_profile::ShortcutFormatter;
 pub(crate) struct MacosShortcutFormatter;
 
 impl ShortcutFormatter for MacosShortcutFormatter {
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
+    fn format_chord(
+        &self,
+        modifiers: Modifiers,
+        key: &str,
+        _: &super::keyboard_layout::KeyboardLayout,
+    ) -> SharedString {
         let key = match key {
             "enter" => "↩".into(),
             "tab" => "⇥".into(),
@@ -47,7 +52,11 @@ mod tests {
     use crate::keybindings::Shortcut;
 
     fn format(shortcut: &Shortcut) -> SharedString {
-        MacosShortcutFormatter.format_chord(shortcut.modifiers(), shortcut.key())
+        MacosShortcutFormatter.format_chord(
+            shortcut.modifiers(),
+            shortcut.key(),
+            &super::super::keyboard_layout::KeyboardLayout::default(),
+        )
     }
 
     #[test]
