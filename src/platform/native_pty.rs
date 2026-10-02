@@ -43,38 +43,38 @@ impl fmt::Display for NativePtyExit {
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{message}")]
+#[error("Native PTY read failed ({kind:?})")]
 pub(crate) struct NativePtyReadFailure {
-    message: String,
+    kind: io::ErrorKind,
 }
 
 impl NativePtyReadFailure {
-    fn new(message: String) -> Self {
-        Self { message }
+    fn new(kind: io::ErrorKind) -> Self {
+        Self { kind }
     }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{message}")]
+#[error("Native PTY wait failed ({kind:?})")]
 pub(crate) struct NativePtyWaitFailure {
-    message: String,
+    kind: io::ErrorKind,
 }
 
 impl NativePtyWaitFailure {
-    pub(crate) fn new(message: String) -> Self {
-        Self { message }
+    pub(crate) fn new(kind: io::ErrorKind) -> Self {
+        Self { kind }
     }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{message}")]
+#[error("Native PTY operation failed ({kind:?})")]
 pub(crate) struct NativePtyOperationFailure {
-    message: String,
+    kind: io::ErrorKind,
 }
 
 impl NativePtyOperationFailure {
-    pub(crate) fn new(message: String) -> Self {
-        Self { message }
+    pub(crate) fn new(kind: io::ErrorKind) -> Self {
+        Self { kind }
     }
 }
 
@@ -86,10 +86,10 @@ pub(crate) enum NativePtyStartupFailure {
     Adapter(#[from] NativePtyAdapterConstructionFailure),
     #[error("Native PTY lifecycle coordination could not be started")]
     LifecycleCoordination,
-    #[error("{0}")]
-    Reader(String),
-    #[error("failed to start PTY reader thread: {0}")]
-    ReaderThread(#[source] io::Error),
+    #[error("Native PTY reader acquisition failed ({0:?})")]
+    Reader(io::ErrorKind),
+    #[error("Native PTY reader thread creation failed ({0:?})")]
+    ReaderThread(io::ErrorKind),
 }
 
 impl NativePtyStartupFailure {
@@ -209,7 +209,10 @@ impl NativePtyCloseHandle {
             .spawn(move || match receiver.recv() {
                 Ok(TerminationSupervisorCommand::Close) => {
                     if let Err(error) = termination.request_termination() {
-                        eprintln!("failed to terminate shell while shutting down Native PTY Owner: {error}");
+                        eprintln!(
+                            "failed to terminate shell while shutting down Native PTY Owner: {:?}",
+                            error.kind()
+                        );
                     }
                 }
                 Ok(TerminationSupervisorCommand::Stop) | Err(_) => {}
@@ -321,9 +324,9 @@ impl NativePtyOwner {
         let reader = parts
             .adapter
             .take_reader()
-            .map_err(|error| NativePtyStartupFailure::Reader(error.to_string()))?;
-        let reader_thread =
-            spawn_reader(reader, output).map_err(NativePtyStartupFailure::ReaderThread)?;
+            .map_err(|error| NativePtyStartupFailure::Reader(error.kind()))?;
+        let reader_thread = spawn_reader(reader, output)
+            .map_err(|error| NativePtyStartupFailure::ReaderThread(error.kind()))?;
         Ok(Self {
             adapter: Some(parts.adapter),
             termination_supervisor: Some(termination_supervisor),
@@ -398,7 +401,7 @@ fn spawn_reader(
                     Ok(read) => NativePtyOutput::Bytes(buffer[..read].to_vec()),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => {
-                        NativePtyOutput::Stopped(Some(NativePtyReadFailure::new(error.to_string())))
+                        NativePtyOutput::Stopped(Some(NativePtyReadFailure::new(error.kind())))
                     }
                 };
                 let stopped = matches!(event, NativePtyOutput::Stopped(_));

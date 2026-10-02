@@ -715,18 +715,23 @@ impl NativePtyAdapter for SpawnedPty {
     }
 
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
-        Self::resize(self, portable_size(size))
-            .map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+        Self::resize(self, portable_size(size)).map_err(|error| {
+            NativePtyOperationFailure::new(
+                error
+                    .downcast_ref::<io::Error>()
+                    .map_or(io::ErrorKind::Other, io::Error::kind),
+            )
+        })
     }
 
     fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-        Self::hidden_input(self).map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+        Self::hidden_input(self).map_err(|error| NativePtyOperationFailure::new(error.kind()))
     }
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
         let exit = self
             .wait_for_child(timeout)
-            .map_err(|error| NativePtyWaitFailure::new(error.to_string()))?;
+            .map_err(|error| NativePtyWaitFailure::new(error.kind()))?;
         Ok(native_exit(exit))
     }
 }

@@ -102,7 +102,10 @@ impl ScheduleInput {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
     )]
     pub(super) fn enqueue_accessibility_demand(&self, requested_at: Instant) -> bool {
         self.accessibility_demand.request(requested_at)
@@ -540,7 +543,7 @@ mod tests {
             schedule.update(
                 start,
                 Err(NativePtyOperationFailure::new(
-                    "descriptor closed".to_owned()
+                    std::io::ErrorKind::BrokenPipe
                 ))
             ),
             Some(false)
@@ -1265,7 +1268,10 @@ impl Default for AccessibilityDemandMailboxState {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 impl AccessibilityDemandMailbox {
     fn request(&self, requested_at: Instant) -> bool {

@@ -431,21 +431,18 @@ impl NativePtyAdapter for ScriptedPty {
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
         self.records.update(|state| state.resizes.push(size));
         match &self.resize_error {
-            Some(message) => Err(NativePtyOperationFailure::new(message.clone())),
+            Some(_) => Err(NativePtyOperationFailure::new(ErrorKind::Other)),
             None => Ok(()),
         }
     }
 
-    fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
+    fn wait_for_exit(&mut self, _timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
         self.records.update(|state| state.waits += 1);
         if self.wait_times_out {
-            return Err(NativePtyWaitFailure::new(format!(
-                "timed out after {} ms waiting for the scripted shell process to exit",
-                timeout.as_millis()
-            )));
+            return Err(NativePtyWaitFailure::new(ErrorKind::TimedOut));
         }
         match &self.wait_error {
-            Some(message) => Err(NativePtyWaitFailure::new(message.clone())),
+            Some(_) => Err(NativePtyWaitFailure::new(ErrorKind::Other)),
             None if self.exit_code == 0 => Ok(NativePtyExit::Success),
             None => Ok(NativePtyExit::ExitCode(self.exit_code)),
         }
@@ -1164,7 +1161,7 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
 #[test]
 fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
-        reader_error: Some("reader unavailable".to_owned()),
+        reader_error: Some("native detail: /private/terminal token=secret".to_owned()),
         ..ScriptedPtyOptions::default()
     });
 
@@ -1176,7 +1173,7 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
 
     assert!(matches!(
         error,
-        SessionError::EmulatorStartup(message) if message == "reader unavailable"
+        SessionError::EmulatorStartup(message) if message == "Native PTY reader acquisition failed (Other)"
     ));
     assert_eq!(
         (
@@ -3430,7 +3427,9 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
     let (mut session, events, _accessibility) = result.unwrap();
 
     reader_steps
-        .send(ReaderStep::Error("read unavailable".to_owned()))
+        .send(ReaderStep::Error(
+            "native detail: /private/terminal token=secret".to_owned(),
+        ))
         .unwrap();
     let event = receive_event(&events, "the PTY read failure", |event| {
         matches!(event, SessionEvent::Failed(_))
@@ -3443,7 +3442,7 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
     else {
         panic!("a read error followed by a successful wait must be classified as PtyRead")
     };
-    assert_eq!(read_error, "read unavailable");
+    assert_eq!(read_error, "Native PTY read failed (Other)");
     assert_eq!(exit_status, "Shell exited with code 7");
     assert_eq!(records.snapshot().waits, 1);
 
@@ -3459,7 +3458,9 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
     let (mut session, events, _accessibility) = result.unwrap();
 
     reader_steps
-        .send(ReaderStep::Error("read unavailable".to_owned()))
+        .send(ReaderStep::Error(
+            "native detail: /private/terminal token=secret".to_owned(),
+        ))
         .unwrap();
     let event = receive_event(&events, "the PTY read and wait failure", |event| {
         matches!(event, SessionEvent::Failed(_))
@@ -3471,8 +3472,8 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
     assert_eq!(
         failure,
         SessionFailure::ShellWait {
-            read_error: Some("read unavailable".to_owned()),
-            wait_error: "wait unavailable".to_owned(),
+            read_error: Some("Native PTY read failed (Other)".to_owned()),
+            wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
     assert_eq!(records.snapshot().waits, 1);
@@ -3500,7 +3501,7 @@ fn reader_eof_with_wait_failure_should_emit_a_shell_wait_failure() {
         failure,
         SessionFailure::ShellWait {
             read_error: None,
-            wait_error: "wait unavailable".to_owned(),
+            wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
     assert_eq!(records.snapshot().waits, 1);
@@ -3529,10 +3530,7 @@ fn child_wait_timeout_should_emit_a_shell_wait_failure() {
         panic!("a child wait timeout must be classified as ShellWait")
     };
     assert_eq!(read_error, None);
-    assert_eq!(
-        wait_error,
-        "timed out after 2000 ms waiting for the scripted shell process to exit"
-    );
+    assert_eq!(wait_error, "Native PTY wait failed (TimedOut)");
     let state = records.wait_for("the timed-out PTY worker to release ownership", |state| {
         state.pty_drops == 1 && state.reader_drops == 1
     });
