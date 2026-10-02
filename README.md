@@ -1,6 +1,6 @@
 # SpaceTerm
 
-A native desktop terminal multiplexer currently built for macOS.
+A native desktop terminal multiplexer for macOS and Linux.
 
 > [!WARNING]
 > SpaceTerm is under active development and has not reached its first release. Build it from source
@@ -56,16 +56,21 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Try SpaceTerm
 
-You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
-Mise manages the official Zig compiler and the remaining development tools. Xcode supplies
-the Metal compiler, macOS SDK, and icon packaging tools.
+Install [`mise`](https://mise.jdx.dev/) to manage the pinned development tools, including Zig.
+Clone the repository and trust its tasks:
 
 ```sh
 git clone https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
 mise trust
+```
 
-# Install pinned tools, initialize submodules, and verify the macOS development environment
+### macOS
+
+You need Xcode 26 or newer for the Metal compiler, macOS SDK, and icon packaging tools.
+
+```sh
+# Install pinned tools, initialize submodules, and verify the development environment
 mise run setup:macos
 
 # Run from source
@@ -75,6 +80,26 @@ mise run dev
 mise run package:macos:install
 ```
 
+### Linux
+
+Wayland and X11 are supported. On Debian or Ubuntu, install the development libraries and
+runtime tools:
+
+```sh
+sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
+  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus
+
+mise run setup:linux
+mise run doctor:linux
+mise run dev
+```
+
+`setup:linux` installs pinned tools, initializes submodules, and runs the environment checks.
+`doctor:linux` repeats those checks. `dev` uses Wayland when available; `mise run dev:linux:x11`
+selects X11. GNOME Sushi (`gnome-sushi`) is optional for File Preview.
+Linux currently supports source builds only, with no packages, distribution, or updates.
+
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
-platform segment such as `:macos`.
+platform segment such as `:macos` or `:linux`.

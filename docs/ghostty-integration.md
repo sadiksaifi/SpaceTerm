@@ -17,9 +17,10 @@ SpaceTerm's GPUI renderer, Session scheduling, or application policies.
 
 ## Source and build ownership
 
-`mise run setup:macos` installs the pinned tools, initializes the submodules, and verifies Apple
-tooling. Other platforms use `mise run setup`. The ordinary `mise run dev`, `check`, `test`, and
-packaging tasks compile the native dependency as needed through Cargo.
+`mise run setup:macos` or `mise run setup:linux` installs the pinned tools, initializes the
+submodules, and verifies the host development environment. The ordinary `mise run dev`, `check`,
+and `test` tasks compile the native dependency as needed through Cargo. macOS packaging tasks
+use the same build integration; Linux has no packaging or updates.
 
 The build script makes a local Git clone of the committed submodule tree inside Cargo's build
 output, then applies SpaceTerm's patches there. Source changes and patch contents invalidate the
@@ -51,7 +52,7 @@ can be selected explicitly with `GHOSTTY_SOURCE_DIR` while developing the integr
 5. Keep dependency changes narrow. Refresh the lockfile only if manifests require it. Run
    `mise run deps:fmt`, focused regression tests, and then `mise run validate:macos`,
    `mise run test:conformance`, and `mise run package:macos` before shipping a macOS update.
-   Run supported non-macOS validation on the corresponding hosts.
+   Run `mise run validate:linux` and `mise run test:conformance` on Linux for engine changes.
 
 ## Regression evidence
 

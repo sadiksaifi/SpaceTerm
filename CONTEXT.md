@@ -56,6 +56,10 @@ Session itself rather than by the spelling of either value.
 **Operating-System Window**:
 A native window that presents SpaceTerm.
 
+**Window Controls**:
+The close, minimize, and maximize controls of an Operating-System Window: native traffic lights on
+macOS; drawn by SpaceTerm at the top right on Linux, following the desktop button layout.
+
 ## Settings
 
 **Settings**:
@@ -98,7 +102,8 @@ A SpaceTerm operation whose Shortcut a person can change, such as New Tab or Spl
 application commands, such as Copy and Quit, are not Commands.
 
 **Shortcut**:
-One key chord: a key with any combination of the Control, Option, Shift, and Command modifiers.
+One key chord: a key with any combination of the host modifiers. macOS names them Control, Option,
+Shift, and Command; Linux names them Ctrl, Alt, Shift, and Super.
 _Avoid_: Hotkey, key equivalent
 
 **Keybinding**:
@@ -116,10 +121,11 @@ A Shortcut no Command can be assigned. It is Terminal Reserved or System Reserve
 
 **Terminal Reserved**:
 A Shortcut that types into the terminal or that programs running in the terminal read, such as
-Control-C or Option-B.
+Ctrl-C or Alt-B (Control-C or Option-B on macOS).
 
 **System Reserved**:
-A Shortcut the Operating System or a standard application command owns, such as Command-Q.
+A Shortcut the Operating System or a standard application command owns, such as Command-Q on
+macOS or Super shortcuts on Linux.
 
 ## Updates
 
@@ -220,6 +226,10 @@ Literal search owned by one Pane over its active screen and available Scrollback
 **Terminal Hyperlink**:
 A validated target attached to complete terminal cells and activated through the current
 modified-pointer gesture.
+
+**File Preview**:
+A host preview of a local file, using Quick Look on macOS or GNOME Sushi on Linux. The command is
+absent when the host has no previewer.
 
 **Paste Payload**:
 A bounded text insertion candidate retained until accepted or cancelled.
