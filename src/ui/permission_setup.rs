@@ -121,9 +121,6 @@ pub(crate) struct GuidePresentation {
     pub(crate) granted: bool,
     /// The permission set up after this one, when the setup holds another.
     pub(crate) next: Option<ComputerUsePermission>,
-    /// This permission's place in the setup, counting from one.
-    pub(crate) position: usize,
-    pub(crate) total: usize,
 }
 
 /// Owns the one running setup and the Setup Guide window it presents.
@@ -140,8 +137,6 @@ pub(crate) struct PermissionSetup {
 struct SetupRun {
     permission: ComputerUsePermission,
     queued: VecDeque<ComputerUsePermission>,
-    position: usize,
-    total: usize,
     step: SetupStep,
     guide: Option<GuideWindow>,
     intervals: u32,
@@ -216,7 +211,6 @@ impl PermissionSetup {
             for permission in requested {
                 if permission != run.permission && !run.queued.contains(&permission) {
                     run.queued.push_back(permission);
-                    run.total += 1;
                 }
             }
             if matches!(run.step, SetupStep::Opening | SetupStep::Guiding) {
@@ -262,9 +256,7 @@ impl PermissionSetup {
         });
         self.run = Some(SetupRun {
             permission,
-            total: 1 + requested.len(),
             queued: requested,
-            position: 1,
             step: SetupStep::Preparing,
             guide: None,
             intervals: 0,
@@ -293,12 +285,6 @@ impl PermissionSetup {
     pub(crate) fn continue_setup(&mut self, cx: &mut Context<Self>) {
         if self.current().is_some_and(|(_, step)| step == SetupStep::Granted) {
             self.advance(cx);
-        }
-    }
-
-    pub(crate) fn reveal_application(&self) {
-        if self.host.reveal_application_bundle().is_err() {
-            eprintln!("SpaceTerm could not reveal its application bundle");
         }
     }
 
@@ -371,7 +357,6 @@ impl PermissionSetup {
             return;
         };
         run.permission = next;
-        run.position += 1;
         // System Settings moves to the next list, so the guide waits until it comes forward.
         self.dismiss_guide(cx);
         self.prepare(cx);
@@ -441,8 +426,6 @@ impl PermissionSetup {
             permission: run.permission,
             granted: run.step == SetupStep::Granted,
             next: run.queued.front().copied(),
-            position: run.position,
-            total: run.total,
         })
     }
 
@@ -464,7 +447,7 @@ impl PermissionSetup {
         }
     }
 
-    /// Docks the guide beside System Settings' window, opening it when it is not open.
+    /// Docks the guide on System Settings' window, opening it when it is not open.
     fn present_guide(
         &mut self,
         display: DisplayId,
@@ -478,7 +461,7 @@ impl PermissionSetup {
             self.dismiss_guide(cx);
             return;
         };
-        let bounds = placement::place_guide(settings, visible, guide::GUIDE_SIZE);
+        let bounds = placement::place_guide(settings, visible, guide::GUIDE_HEIGHT);
         let Some(presentation) = self.presentation() else {
             return;
         };

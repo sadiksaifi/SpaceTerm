@@ -245,8 +245,8 @@ started only from a Settings Row or a Permission Request. Computer-use permissio
 then; onboarding never asks for them.
 
 **Setup Guide**:
-The non-activating panel a Permission Setup docks beside System Settings' window while it is in
-front. It offers SpaceTerm to drag into the privacy list and reports the grant.
+The non-activating panel a Permission Setup docks inside the bottom of System Settings' window
+while it is in front. It offers SpaceTerm to drag into the privacy list and reports the grant.
 
 **Terminal Local File Capabilities**:
 Session-scoped authority for local path actions in a Local Pane.

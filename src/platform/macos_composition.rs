@@ -77,7 +77,6 @@ fn desktop_profile(
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
                 system_directory_selection: "Choose in Finder…",
-                reveal_file: "Show in Finder",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),

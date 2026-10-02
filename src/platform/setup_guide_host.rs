@@ -1,4 +1,4 @@
-//! Portable seam for the native pieces a Setup Guide presents beside System Settings.
+//! Portable seam for the native pieces a Setup Guide presents on System Settings.
 //!
 //! The guide follows System Settings' window and offers SpaceTerm itself for a person to drag into
 //! a privacy list. Locating the window reads only window geometry and owners, which needs no
@@ -27,18 +27,11 @@ pub(crate) enum SystemSettingsWindow {
 /// The running application as a person drags it into a System Settings list.
 #[derive(Clone)]
 pub(crate) struct ApplicationBundle {
-    /// The running application's bundle. It is only dragged and revealed, so it carries no
-    /// authority for any other file action.
+    /// The running application's bundle. It is only dragged, so it carries no authority for any
+    /// other file action.
     pub(crate) path: PathBuf,
     /// The application's icon as the system presents it.
     pub(crate) icon: Arc<gpui::Image>,
-}
-
-/// Content-free failures from Setup Guide host operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum SetupGuideHostError {
-    #[error("the running application has no bundle to present")]
-    BundleUnavailable,
 }
 
 pub(crate) trait SetupGuideHost: Send + Sync {
@@ -49,15 +42,11 @@ pub(crate) trait SetupGuideHost: Send + Sync {
     /// main thread.
     fn application_bundle(&self) -> Option<ApplicationBundle>;
 
-    /// Selects the running application in Finder, from where a person can add it with System
-    /// Settings' add button instead of dragging it.
-    fn reveal_application_bundle(&self) -> Result<(), SetupGuideHostError>;
 }
 
 #[cfg(test)]
 pub(crate) mod testing {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -65,7 +54,6 @@ pub(crate) mod testing {
     pub(crate) struct ScriptedSetupGuideHost {
         window: Mutex<SystemSettingsWindow>,
         bundle: Option<ApplicationBundle>,
-        reveals: AtomicUsize,
     }
 
     impl ScriptedSetupGuideHost {
@@ -79,7 +67,6 @@ pub(crate) mod testing {
                         Vec::new(),
                     )),
                 }),
-                reveals: AtomicUsize::new(0),
             })
         }
 
@@ -87,9 +74,6 @@ pub(crate) mod testing {
             *self.window.lock().expect("window lock") = window;
         }
 
-        pub(crate) fn reveals(&self) -> usize {
-            self.reveals.load(Ordering::SeqCst)
-        }
     }
 
     impl SetupGuideHost for ScriptedSetupGuideHost {
@@ -101,9 +85,5 @@ pub(crate) mod testing {
             self.bundle.clone()
         }
 
-        fn reveal_application_bundle(&self) -> Result<(), SetupGuideHostError> {
-            self.reveals.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
     }
 }

@@ -14,11 +14,11 @@ use objc2_app_kit::{
     NSRunningApplication, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSBundle, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSArray, NSBundle, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString,
 };
 
 use super::setup_guide_host::{
-    ApplicationBundle, SetupGuideHost, SetupGuideHostError, SystemSettingsWindow,
+    ApplicationBundle, SetupGuideHost, SystemSettingsWindow,
 };
 
 const SYSTEM_SETTINGS_BUNDLE_IDENTIFIER: &str = "com.apple.systempreferences";
@@ -72,18 +72,6 @@ impl SetupGuideHost for MacosSetupGuideHost {
         })
     }
 
-    fn reveal_application_bundle(&self) -> Result<(), SetupGuideHostError> {
-        let url = NSBundle::mainBundle().bundleURL();
-        if !url
-            .path()
-            .is_some_and(|path| path.to_string().ends_with(".app"))
-        {
-            return Err(SetupGuideHostError::BundleUnavailable);
-        }
-        NSWorkspace::sharedWorkspace()
-            .activateFileViewerSelectingURLs(&NSArray::<NSURL>::from_retained_slice(&[url]));
-        Ok(())
-    }
 }
 
 fn system_settings_processes() -> Vec<i32> {

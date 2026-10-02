@@ -131,7 +131,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn a_setup_opens_system_settings_and_docks_the_guide_below_it(cx: &mut TestAppContext) {
+fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
 
     fixture.start(&[ScreenRecording], cx);
@@ -157,12 +157,13 @@ fn a_setup_opens_system_settings_and_docks_the_guide_below_it(cx: &mut TestAppCo
         fixture.current(cx),
         Some((ScreenRecording, SetupStep::Guiding))
     );
-    let handle = guide(cx).expect("the guide opens beside System Settings");
+    let handle = guide(cx).expect("the guide opens on System Settings");
     let frame = cx
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
-    assert_eq!(frame.top(), settings_frame().bottom() + px(8.0));
-    assert_eq!(frame.size, super::guide::GUIDE_SIZE);
+    assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
+    assert_eq!(frame.size.height, super::guide::GUIDE_HEIGHT);
+    assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
 }
 
 #[gpui::test]
@@ -179,7 +180,7 @@ fn the_guide_follows_system_settings_and_hides_while_it_is_covered(cx: &mut Test
         .window_bounds_requests(handle)
         .last()
         .expect("the guide moved with System Settings");
-    assert_eq!(requested.top(), moved.bottom() + px(8.0));
+    assert_eq!(requested.bottom(), moved.bottom() - px(12.0));
     assert_eq!(display, Some(fixture.display));
     // An unchanged frame asks for no move.
     let requests = cx.window_bounds_requests(handle).len();
@@ -220,11 +221,12 @@ fn a_grant_read_while_guiding_completes_the_setup(cx: &mut TestAppContext) {
         fixture.current(cx),
         Some((ScreenRecording, SetupStep::Granted))
     );
+    // Nothing waits, so the guide offers no Continue and closing it finishes the setup.
     let guide = guide_context(cx);
-    assert!(guide.debug_bounds("setup-guide-done").is_some());
     assert!(guide.debug_bounds("setup-guide-application").is_none());
+    assert!(guide.debug_bounds("setup-guide-continue").is_none());
 
-    click("setup-guide-done", guide);
+    click("setup-guide-close", guide);
 
     assert_eq!(fixture.current(cx), None);
     assert!(self::guide(cx).is_none());
@@ -270,8 +272,10 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     fixture.start(&[Accessibility, ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
     {
+        // While guiding, the drag is the only action besides closing.
         let guide = guide_context(cx);
-        assert!(guide.debug_bounds("setup-guide-progress").is_some());
+        assert!(guide.debug_bounds("setup-guide-application").is_some());
+        assert!(guide.debug_bounds("setup-guide-continue").is_none());
     }
 
     fixture.access.set(Accessibility, Ok(Granted));
@@ -280,7 +284,6 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     assert_eq!(*fixture.access.opened.borrow(), [Accessibility]);
 
     let guide = guide_context(cx);
-    assert!(guide.debug_bounds("setup-guide-not-now").is_some());
     click("setup-guide-continue", guide);
 
     assert_eq!(
@@ -325,13 +328,13 @@ fn a_second_request_joins_the_running_setup(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn cancel_closes_the_guide_and_leaves_system_settings_alone(cx: &mut TestAppContext) {
+fn closing_the_guide_cancels_and_leaves_system_settings_alone(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
 
     let guide = guide_context(cx);
-    click("setup-guide-cancel", guide);
+    click("setup-guide-close", guide);
 
     assert_eq!(fixture.current(cx), None);
     assert!(self::guide(cx).is_none());
@@ -340,19 +343,6 @@ fn cancel_closes_the_guide_and_leaves_system_settings_alone(cx: &mut TestAppCont
         PermissionSetupStatus::Idle
     );
     assert_eq!(fixture.access.opened.borrow().len(), 1);
-}
-
-#[gpui::test]
-fn reveal_selects_the_application_bundle(cx: &mut TestAppContext) {
-    let fixture = install(NotGranted, NotGranted, cx);
-    fixture.start(&[ScreenRecording], cx);
-    fixture.show_settings(settings_frame(), cx);
-
-    let guide = guide_context(cx);
-    click("setup-guide-reveal", guide);
-
-    assert_eq!(fixture.host.reveals(), 1);
-    assert!(self::guide(cx).is_some());
 }
 
 /// Dragging the application out of the guide hands its bundle to the system with its own icon,
@@ -382,7 +372,7 @@ fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppC
         cx.external_drag_payloads(handle),
         [ExternalDragPayload::Files(
             FileDragPaths::new([("/Applications/SpaceTerm.app".into(), true)])
-                .with_icon(FileDragIcon::File { size: px(64.0) })
+                .with_icon(FileDragIcon::File { size: px(32.0) })
         )]
     );
 }

@@ -48,8 +48,8 @@ OSC 52. Their paste behavior also depends on the program and multiplexer configu
 Computer-use tools that take screenshots or control other apps inherit macOS Screen & System Audio
 Recording and Device Control and Data Access from SpaceTerm. SpaceTerm never asks for them on its
 own. To grant them, choose Set Up next to a permission in Settings > Privacy. SpaceTerm opens the
-privacy list in System Settings and docks a guide beside it. Drag SpaceTerm from the guide into the
-list. The guide reports the grant, and tools started afterward receive it.
+privacy list in System Settings and docks a guide at the bottom of its window. Drag SpaceTerm from
+the guide into the list. The guide reports the grant, and tools started afterward receive it.
 
 A tool can ask SpaceTerm to offer this setup by writing a Permission Request to the terminal:
 
