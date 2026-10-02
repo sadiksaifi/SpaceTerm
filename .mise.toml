@@ -671,7 +671,18 @@ if [ "${usage_isolation_only:-false}" = true ]; then set -- "$@" --isolation-onl
 exec /usr/bin/python3 scripts/accessibility-smoke-linux.py "$@"
 '''
 
-[tasks."lint:linux:accessibility"]
+[tasks."test:accessibility:regressions:linux"]
+description = "Test real Linux accessibility FIFOs and owned-process cleanup"
+usage = '''
+flag "--output-dir <output_dir>" help="Evidence directory beneath the sibling .linux-port folder"
+'''
+run = '''
+set --
+if [ -n "${usage_output_dir:-}" ]; then set -- --output-dir "$usage_output_dir"; fi
+exec /usr/bin/python3 scripts/test-accessibility-smoke-linux.py "$@"
+'''
+
+[tasks."lint:accessibility:linux"]
 description = "Check the Linux AT-SPI runtime smoke script"
 run = "python3 -c 'import ast, pathlib; ast.parse(pathlib.Path(\"scripts/accessibility-smoke-linux.py\").read_text())'"
 
@@ -681,7 +692,8 @@ run = '''
 set -eu
 bash -n scripts/run-development-app-linux.sh
 shellcheck -x scripts/run-development-app-linux.sh
-python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/accessibility-smoke-linux.py").read_text())'
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/development-desktop-linux.py").read_text())'
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in ("scripts/accessibility-smoke-linux.py", "scripts/test-accessibility-smoke-linux.py")]'
 '''
 
 [tasks."validate:linux"]
