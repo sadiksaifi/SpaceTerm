@@ -149,7 +149,13 @@ fn child_proxy_denial_never_searches_path_and_closes_the_real_ssh_transport() {
         "proxy denial executed a PATH-supplied command"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Connection closed"), "{stderr}");
+    // OpenSSH races its banner write against the exited proxy: it either reads the closed
+    // transport first or fails writing the banner into it. Both name the proxy pseudo-peer.
+    assert!(
+        stderr.contains("Connection closed by UNKNOWN port 65535")
+            || stderr.contains("Connection to UNKNOWN port 65535: Broken pipe"),
+        "{stderr}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
