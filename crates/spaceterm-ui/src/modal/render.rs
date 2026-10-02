@@ -203,7 +203,8 @@ fn render_overlay(
     let paint = theme.paint;
     let shell = theme.shell;
     let typography = crate::control_typography(cx);
-    let viewport = window.viewport_size();
+    let content_viewport = crate::content_viewport(window);
+    let viewport = content_viewport.size;
     let desired_width = metrics.width_for(match snapshot.kind {
         ModalKind::Alert => DialogSize::Regular,
         ModalKind::Dialog => snapshot.dialog_size,
@@ -214,7 +215,10 @@ fn render_overlay(
         ModalKind::Dialog => metrics.dialog_height_cap(),
         ModalKind::Progress => metrics.progress_height_cap(),
     });
-    let geometry = clamp_surface_to_viewport(viewport, size(desired_width, height_cap), metrics);
+    let mut geometry =
+        clamp_surface_to_viewport(viewport, size(desired_width, height_cap), metrics);
+    geometry.origin_x += content_viewport.origin.x;
+    geometry.origin_y += content_viewport.origin.y;
     let available_actions = (geometry.size.width - metrics.surface_padding * 2.0).max(px(1.0));
     // Action layout is chosen before the shell mounts its Floating control host.
     let button_theme = ControlHost::Floating.button_theme(cx);

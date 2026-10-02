@@ -3210,7 +3210,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 let _ = palette.update(cx, |_, cx| cx.notify());
             });
         }
-        let viewport = window.viewport_size();
+        let content_viewport = crate::content_viewport(window);
+        let viewport = content_viewport.size;
         let available_width = (viewport.width - metrics.viewport_margin * 2.0).max(px(0.0));
         let panel_width = metrics.panel_width.min(available_width);
         let left = ((viewport.width - panel_width) / 2.0).max(px(0.0));
@@ -3294,8 +3295,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         );
         let overlay = div()
             .relative()
-            .w(viewport.width)
-            .h(viewport.height)
+            .w(window.viewport_size().width)
+            .h(window.viewport_size().height)
             .key_context(KEY_CONTEXT)
             .font(font)
             .line_height(metrics.body_line_height)
@@ -3305,8 +3306,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .child(
                 div()
                     .absolute()
-                    .left(left)
-                    .top(top)
+                    .left(left + content_viewport.origin.x)
+                    .top(top + content_viewport.origin.y)
                     // A hidden panel keeps its focus and key handling, so typing is not lost.
                     .when(!panel_visible, |panel| panel.opacity(0.0))
                     .child(panel),
