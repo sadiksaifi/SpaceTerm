@@ -91,6 +91,20 @@ else
 fi
 '''
 
+[tasks."fonts:ui:prepare"]
+description = "Prepare private UI font identities from the pinned Inter archive"
+usage = '''
+arg "<archive>" help="Inter-4.1.zip from the official Inter 4.1 release"
+flag "--check" help="Verify committed fonts without changing files"
+'''
+run = '''
+if [ "${usage_check:-false}" = "true" ]; then
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}" --check
+else
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}"
+fi
+'''
+
 [tasks."gpui:local:on"]
 description = "Use a local SpaceTerm Zed checkout for GPUI dependencies"
 usage = '''
