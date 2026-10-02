@@ -96,8 +96,9 @@ Ctrl+Shift+P opens application commands, including About, Help, and Export Termi
 Linux currently supports source builds only, with no packaging, distribution, or updates.
 
 `mise run validate:linux` includes the native adapters and retained AccessKit patch tests.
-For terminal screen-reader checks on private X11 and Wayland displays, install the dependencies
-listed in `scripts/accessibility-smoke-linux.py`, then run `mise run test:accessibility:linux`.
+For terminal screen-reader checks on private X11 and Wayland displays, install system Python 3.11+
+and the dependencies listed in `scripts/accessibility-smoke-linux.py`, then run
+`mise run test:accessibility:regressions:linux` and `mise run test:accessibility:linux`.
 
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
