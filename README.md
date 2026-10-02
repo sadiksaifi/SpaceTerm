@@ -1,6 +1,6 @@
 # SpaceTerm
 
-A native desktop terminal multiplexer currently built for macOS.
+A native desktop terminal multiplexer for macOS and Linux.
 
 SpaceTerm brings terminal multiplexing into a native, keyboard-first desktop application.
 Workspaces organize terminal work, Tabs separate tasks, and split Pane Layouts keep the shells you
@@ -62,3 +62,15 @@ one or more Panes through its Pane Layout.
 ## Documentation
 
 See the [SpaceTerm guide](docs/guide.md) for terminal clipboard setup and source builds.
+
+## Linux development
+
+Wayland and X11 are supported from source. Install the [Linux development dependencies](docs/guide.md#linux), then run:
+
+```sh
+mise run setup:linux
+mise run doctor:linux
+mise run development
+```
+
+`mise run development:x11:linux` selects X11 explicitly. Linux packaging and updates are not included.

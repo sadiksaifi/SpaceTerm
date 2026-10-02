@@ -79,15 +79,20 @@ provides terminal emulation. Remote Workspaces use the system OpenSSH client.
 
 ## Build from source
 
-You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
-Mise manages the official Zig compiler and the remaining development tools. Xcode supplies
-the Metal compiler, macOS SDK, and icon packaging tools.
+Install [`mise`](https://mise.jdx.dev/) to manage the pinned development tools, including Zig.
+Clone the repository and trust its tasks:
 
 ```sh
 git clone https://github.com/sadiksaifi/SpaceTerm.git
 cd SpaceTerm
 mise trust
+```
 
+### macOS
+
+Xcode 26 or newer supplies the Metal compiler, macOS SDK, and icon packaging tools.
+
+```sh
 # Install pinned tools, initialize submodules, and verify the macOS development environment
 mise run setup:macos
 
@@ -100,4 +105,4 @@ mise run preflight:install:macos
 
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
-platform segment such as `:macos`.
+platform segment such as `:macos` or `:linux`.
