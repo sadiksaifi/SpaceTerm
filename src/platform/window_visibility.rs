@@ -15,7 +15,9 @@ pub(crate) trait WindowVisibilitySource {
 }
 
 pub(crate) trait WindowVisibilityFactory {
-    /// `changed` must enqueue a wakeup, never synchronously reenter GPUI.
+    /// `changed` must enqueue a wakeup, never synchronously reenter GPUI. `None` means the window
+    /// cannot be tracked; Panes then treat it as occluded, so they neither present nor start
+    /// their Terminal Session.
     fn capture(
         &self,
         window: &Window,
