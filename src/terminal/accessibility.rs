@@ -1051,6 +1051,7 @@ struct AccessibilityScreenState {
     live_rows: BTreeSet<AccessibilityRowId>,
     rows: BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>,
     document: Arc<AccessibilityDocument>,
+    document_dirty: bool,
     content_revision: u64,
 }
 
@@ -1061,6 +1062,7 @@ impl Default for AccessibilityScreenState {
             live_rows: BTreeSet::new(),
             rows: BTreeMap::new(),
             document: AccessibilityDocument::empty(),
+            document_dirty: false,
             content_revision: 0,
         }
     }
@@ -1092,7 +1094,6 @@ impl TerminalAccessibilityState {
             AccessibilityScreen::Primary => &mut self.primary,
             AccessibilityScreen::Alternate => &mut self.alternate,
         };
-        let mut document_dirty = false;
         if let Some(topology) = update.topology.as_ref() {
             if topology.iter().any(|id| {
                 id.screen != update.screen || id.screen_generation != update.screen_generation
@@ -1101,7 +1102,7 @@ impl TerminalAccessibilityState {
             }
             let live = topology.iter().copied().collect::<BTreeSet<_>>();
             state.rows.retain(|id, _| live.contains(id));
-            document_dirty = state.topology.as_ref() != topology.as_slice();
+            state.document_dirty |= state.topology.as_ref() != topology.as_slice();
             state.topology = Arc::from(topology.clone());
             state.live_rows = live;
         }
@@ -1114,7 +1115,7 @@ impl TerminalAccessibilityState {
             }
             let replacement = AccessibilityRow::from_update(changed);
             let existing = state.rows.get(&replacement.id);
-            document_dirty |= existing.is_none_or(|existing| {
+            state.document_dirty |= existing.is_none_or(|existing| {
                 existing.revision != replacement.revision
                     || existing.soft_wrapped != replacement.soft_wrapped
                     || existing.text != replacement.text
@@ -1137,11 +1138,13 @@ impl TerminalAccessibilityState {
             return None;
         }
 
-        let document = if document_dirty {
+        // Incomplete deltas may be followed by an empty completion.
+        let document = if state.document_dirty {
             build_document(&state.topology, &state.rows, Some(&state.document))
         } else {
             Arc::clone(&state.document)
         };
+        state.document_dirty = false;
         let document_changed = !Arc::ptr_eq(&document, &state.document);
         if document_changed {
             state.content_revision = state.content_revision.saturating_add(1);
@@ -2305,5 +2308,139 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained.text(), "retained");
+    }
+    #[test]
+    fn incomplete_topology_changes_publish_on_empty_completion() {
+        let a = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let b = row_id(AccessibilityScreen::Primary, 1, 10, 1);
+        let update = |topology, changed_rows, complete| AccessibilityUpdate {
+            revision: 1,
+            screen: AccessibilityScreen::Primary,
+            screen_generation: 1,
+            complete,
+            more: !complete,
+            topology,
+            visible_lines: 0..2,
+            cursor: None,
+            selection: None,
+            changed_rows,
+        };
+        for (topology, expected) in [(vec![b], "b"), (vec![b, a], "b\na"), (vec![], "")] {
+            let mut state = TerminalAccessibilityState::default();
+            let initial = state
+                .apply(
+                    update(
+                        Some(vec![a, b]),
+                        vec![update_row(a, 1, "a", false), update_row(b, 1, "b", false)],
+                        true,
+                    ),
+                    PresentationGeneration::test(1),
+                )
+                .unwrap();
+            assert!(
+                state
+                    .apply(
+                        update(Some(topology.clone()), vec![], false),
+                        PresentationGeneration::test(2)
+                    )
+                    .is_none()
+            );
+            assert_eq!(state.latest.as_ref().unwrap().text(), "a\nb");
+            // Repeating the pending topology cannot clear its unpublished change.
+            assert!(
+                state
+                    .apply(
+                        update(Some(topology), vec![], false),
+                        PresentationGeneration::test(3)
+                    )
+                    .is_none()
+            );
+            let complete = state
+                .apply(update(None, vec![], true), PresentationGeneration::test(4))
+                .unwrap();
+            assert_eq!(complete.text(), expected);
+            assert!(complete.data.content_revision > initial.data.content_revision);
+            assert_eq!(initial.text(), "a\nb");
+            let unchanged = state
+                .apply(update(None, vec![], true), PresentationGeneration::test(5))
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                &complete.data.document,
+                &unchanged.data.document
+            ));
+            assert_eq!(
+                complete.data.content_revision,
+                unchanged.data.content_revision
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_row_changes_survive_empty_completion_and_screen_switches() {
+        let primary = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let alternate = row_id(AccessibilityScreen::Alternate, 2, 20, 0);
+        let update =
+            |screen, screen_generation, topology, changed_rows, complete| AccessibilityUpdate {
+                revision: 1,
+                screen,
+                screen_generation,
+                complete,
+                more: !complete,
+                topology,
+                visible_lines: 0..1,
+                cursor: None,
+                selection: None,
+                changed_rows,
+            };
+        let mut state = TerminalAccessibilityState::default();
+        let initial = state
+            .apply(
+                update(
+                    AccessibilityScreen::Primary,
+                    1,
+                    Some(vec![primary]),
+                    vec![update_row(primary, 1, "primary", false)],
+                    true,
+                ),
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+        assert!(
+            state
+                .apply(
+                    update(
+                        AccessibilityScreen::Primary,
+                        1,
+                        None,
+                        vec![update_row(primary, 2, "changed", false)],
+                        false
+                    ),
+                    PresentationGeneration::test(2)
+                )
+                .is_none()
+        );
+        let other = state
+            .apply(
+                update(
+                    AccessibilityScreen::Alternate,
+                    2,
+                    Some(vec![alternate]),
+                    vec![update_row(alternate, 1, "alternate", false)],
+                    true,
+                ),
+                PresentationGeneration::test(3),
+            )
+            .unwrap();
+        assert_eq!(other.text(), "alternate");
+        let complete = state
+            .apply(
+                update(AccessibilityScreen::Primary, 1, None, vec![], true),
+                PresentationGeneration::test(4),
+            )
+            .unwrap();
+        assert_eq!(complete.text(), "changed");
+        assert!(complete.data.content_revision > initial.data.content_revision);
+        assert_eq!(initial.text(), "primary");
+        assert_eq!(other.text(), "alternate");
     }
 }
