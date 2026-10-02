@@ -577,6 +577,13 @@ struct GeometryCache {
     selected_line: ShapedLine,
 }
 
+#[derive(Clone)]
+struct GeometryStyle {
+    font: Font,
+    font_size: Pixels,
+    theme: TextInputTheme,
+}
+
 #[derive(Clone, Copy)]
 enum TextInputMenuAction {
     Undo,
@@ -613,6 +620,7 @@ pub struct TextInput {
     revision: u64,
     composition: Option<CompositionState>,
     geometry: Option<GeometryCache>,
+    rendered_geometry_style: Option<GeometryStyle>,
     last_bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
     pointer_generation: u64,
@@ -689,6 +697,7 @@ impl TextInput {
             revision: 0,
             composition: None,
             geometry: None,
+            rendered_geometry_style: None,
             last_bounds: None,
             scroll: px(0.0),
             pointer_generation: 0,
@@ -1775,13 +1784,29 @@ impl TextInput {
         )
     }
 
+    fn geometry_style(&self, window: &Window, cx: &App) -> GeometryStyle {
+        self.rendered_geometry_style
+            .clone()
+            .unwrap_or_else(|| GeometryStyle {
+                font: crate::control_typography(cx).regular().clone(),
+                font_size: window.text_style().font_size.to_pixels(window.rem_size()),
+                theme: *crate::floating_surface::hosted_text_input_theme(cx),
+            })
+    }
+
     fn rebuild_geometry(
         &mut self,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) -> ShapedLine {
-        let theme = *crate::floating_surface::hosted_text_input_theme(cx);
+        // Native input and IME geometry callbacks run outside the element's render scope.
+        // Use the last rendered font and host theme until prepaint publishes their replacement.
+        let GeometryStyle {
+            font,
+            font_size,
+            theme,
+        } = self.geometry_style(window, cx);
         let paint = theme.variants.paint(self.variant);
         let empty = self.buffer.text.is_empty();
         let color: gpui::Hsla = if self.enabled {
@@ -1792,9 +1817,6 @@ impl TextInput {
             paint.disabled_text
         }
         .into();
-        let text_style = window.text_style();
-        let font = text_style.font();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
         let marked_range = (!empty && self.is_visually_active(window))
             .then(|| {
                 self.composition
@@ -2042,11 +2064,8 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(
-            &line,
-            bounds,
-            crate::floating_surface::hosted_text_input_theme(cx).metrics,
-        );
+        let scroll =
+            self.reconcile_scroll(&line, bounds, self.geometry_style(window, cx).theme.metrics);
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
         let display_range =
             self.display_offset_for_source(range.start)..self.display_offset_for_source(range.end);
@@ -2069,11 +2088,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(
-            &line,
-            bounds,
-            crate::floating_surface::hosted_text_input_theme(cx).metrics,
-        );
+        let scroll =
+            self.reconcile_scroll(&line, bounds, self.geometry_style(window, cx).theme.metrics);
         let index = self
             .source_offset_for_display(line.closest_index_for_x(point.x - bounds.left() + scroll));
         Some(byte_offset_to_utf16(&self.buffer.text, index))
@@ -2287,6 +2303,12 @@ impl Element for TextElement {
         self.input.update(cx, |input, cx| {
             let theme = *crate::floating_surface::hosted_text_input_theme(cx);
             let paint = theme.variants.paint(input.variant);
+            let text_style = window.text_style();
+            input.rendered_geometry_style = Some(GeometryStyle {
+                font: text_style.font(),
+                font_size: text_style.font_size.to_pixels(window.rem_size()),
+                theme,
+            });
             let line = input.rebuild_geometry(bounds, window, cx);
             let empty = input.buffer.text.is_empty();
             let caret_x = if empty {
