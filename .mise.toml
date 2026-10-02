@@ -64,6 +64,21 @@ else
 fi
 '''
 
+
+[tasks."fonts:ui:prepare"]
+description = "Prepare private UI font identities from the pinned Inter archive"
+usage = '''
+arg "<archive>" help="Inter-4.1.zip from the official Inter 4.1 release"
+flag "--check" help="Verify committed fonts without changing files"
+'''
+run = '''
+if [ "${usage_check:-false}" = "true" ]; then
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}" --check
+else
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}"
+fi
+'''
+
 [tasks."deps:build"]
 description = "Build the pinned Ghostty source and SpaceTerm C bindings"
 run = "./scripts/cargo-artifacts.sh run -- cargo build --package libghostty-vt-sys --features kitty-graphics --locked"
@@ -247,7 +262,7 @@ set -eu
 shellcheck -x scripts/kitty-graphics-smoke-unix.sh
 shellcheck -x scripts/cargo-artifacts.sh scripts/test-cargo-artifacts.sh
 python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in (".githooks/commit-msg", "scripts/test-commit-hook.py")]'
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/test-run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' scripts/cargo-artifact-supervisor.py scripts/cargo-build-executable.py scripts/run-development-app.py scripts/test-run-development-app.py scripts/terminal-resource-workload.py scripts/kitty-graphics-smoke.py scripts/prepare-terminal-fonts.py scripts/prepare-ui-fonts.py scripts/gpui-local.py scripts/test-gpui-local.py scripts/gpui-bump.py scripts/test-gpui-bump.py scripts/release-version.py scripts/test-release-version.py scripts/publish-release.py
 '''
 
 [tasks."lint:diff"]
