@@ -579,8 +579,8 @@ fn render_navigation_list<T: SidebarOwner>(
             // surfaces read as one material rather than as two conventions.
             let chip = navigation_chip(selected, available, emphasized, appearance, &selection_colors);
             // Text and icon follow the chip's hover paint.
-            let foreground = foreground.mix(hover_foreground, f64::from(hover));
-            let icon_color = icon_color.mix(hover_icon, f64::from(hover));
+            let foreground = foreground.fade(hover_foreground, f64::from(hover));
+            let icon_color = icon_color.fade(hover_icon, f64::from(hover));
             let chip_selector = format!("{prefix}-navigation-chip-{selector}");
             let selecting = cx.weak_entity();
             div()

@@ -768,7 +768,7 @@ fn selection_ring(
         .border_color(gpui_color(if selected {
             accent
         } else {
-            hover_ring.with_alpha(0).mix(hover_ring, f64::from(hover_level))
+            hover_ring.with_alpha(0).fade(hover_ring, f64::from(hover_level))
         }))
         .child(content.rounded(radius.pixels()))
         .when(!selected, |ring| ring.child(hover.tracker()));

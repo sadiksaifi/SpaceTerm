@@ -6,11 +6,13 @@
 //! leaving eases out more slowly, so a pointer sweeping across a list leaves a short trail instead
 //! of a flicker. A reversal mid-transition continues from the current level. Reduced motion
 //! switches at once. Hover never shows during a drag, as with GPUI hover styles.
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    App, ElementId, Entity, HitboxBehavior, MouseExitEvent, MouseMoveEvent, Rgba, Window, canvas,
+    App, ElementId, Entity, Global, Hitbox, HitboxBehavior, MouseExitEvent, MouseMoveEvent, Rgba,
+    Window, WindowId, canvas,
 };
 
 use crate::ControlMotion;
@@ -70,7 +72,7 @@ impl HoverFade {
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
             move |_, hitbox, window, cx| {
-                let hovered = !cx.has_active_drag() && hitbox.is_hovered(window);
+                let hovered = pointer_over(&hitbox, window, cx);
                 let region = state.update(cx, |region, _| {
                     region.measured = hovered;
                     *region
@@ -87,13 +89,15 @@ impl HoverFade {
                 let move_state = state.clone();
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                     if phase.capture() {
-                        let hovered = !cx.has_active_drag() && hitbox.is_hovered(window);
+                        set_pointer_outside(window, false, cx);
+                        let hovered = pointer_over(&hitbox, window, cx);
                         set_hovered(&move_state, hovered, cx);
                     }
                 });
                 let exit_state = state.clone();
-                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                     if phase.capture() {
+                        set_pointer_outside(window, true, cx);
                         set_hovered(&exit_state, false, cx);
                     }
                 });
@@ -112,6 +116,42 @@ pub(crate) fn settle(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }
+
+/// Whether the pointer rests over `hitbox` and can hover it.
+///
+/// GPUI keeps the last position and hit test after the pointer leaves a window, so a region under
+/// that position would otherwise read as hovered on every later paint.
+fn pointer_over(hitbox: &Hitbox, window: &Window, cx: &App) -> bool {
+    !cx.has_active_drag()
+        && !cx.try_global::<PointerOutside>().is_some_and(|outside| {
+            outside
+                .windows
+                .contains(&window.window_handle().window_id())
+        })
+        && hitbox.is_hovered(window)
+}
+
+fn set_pointer_outside(window: &Window, outside: bool, cx: &mut App) {
+    let window_id = window.window_handle().window_id();
+    if outside {
+        cx.default_global::<PointerOutside>()
+            .windows
+            .insert(window_id);
+    } else if cx
+        .try_global::<PointerOutside>()
+        .is_some_and(|pointer| pointer.windows.contains(&window_id))
+    {
+        cx.global_mut::<PointerOutside>().windows.remove(&window_id);
+    }
+}
+
+/// The windows the pointer has left since its last move inside them.
+#[derive(Default)]
+struct PointerOutside {
+    windows: HashSet<WindowId>,
+}
+
+impl Global for PointerOutside {}
 
 /// Measures the pointer over the region and starts the transition toward it.
 fn set_hovered(state: &Entity<HoverRegion>, hovered: bool, cx: &mut App) {
@@ -133,9 +173,10 @@ struct HoverRegion {
     transition: HoverTransition,
 }
 
-/// Paints straight between a resting and a hovered color.
+/// Paints a resting color partway to its hovered color.
 ///
-/// Each end returns its own color exactly.
+/// Channels mix premultiplied by alpha, so fading from or to a transparent fill changes only its
+/// coverage and never passes through a darker color. Each end returns its own color exactly.
 pub fn mix_rgba(rest: Rgba, hovered: Rgba, level: f32) -> Rgba {
     if level <= 0.0 {
         return rest;
@@ -143,12 +184,16 @@ pub fn mix_rgba(rest: Rgba, hovered: Rgba, level: f32) -> Rgba {
     if level >= 1.0 {
         return hovered;
     }
-    let channel = |rest: f32, hovered: f32| rest * (1.0 - level) + hovered * level;
+    let a = rest.a * (1.0 - level) + hovered.a * level;
+    if a <= 0.0 {
+        return Rgba::default();
+    }
+    let channel = |from: f32, to: f32| (from * rest.a * (1.0 - level) + to * hovered.a * level) / a;
     Rgba {
         r: channel(rest.r, hovered.r),
         g: channel(rest.g, hovered.g),
         b: channel(rest.b, hovered.b),
-        a: channel(rest.a, hovered.a),
+        a,
     }
 }
 
@@ -262,5 +307,16 @@ mod tests {
         assert_eq!(mix_rgba(rest, hovered, 0.0), rest);
         assert_eq!(mix_rgba(rest, hovered, 1.0), hovered);
         assert_eq!(mix_rgba(rest, hovered, 0.5).a, 0.5);
+    }
+
+    #[test]
+    fn fading_in_a_transparent_fill_should_keep_its_color() {
+        let hovered = gpui::rgba(0xd2d2d2ff);
+        let halfway = mix_rgba(gpui::rgba(0x00000000), hovered, 0.5);
+        assert_eq!(
+            (halfway.r, halfway.g, halfway.b),
+            (hovered.r, hovered.g, hovered.b)
+        );
+        assert_eq!(halfway.a, 0.5);
     }
 }

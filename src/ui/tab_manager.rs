@@ -1036,7 +1036,7 @@ impl TabManager {
         let size = self
             .tab_position(tab_id)
             .and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
-        let session = DragSession::begin(window, cx, |manager: &mut Self, _, cx| {
+        let session = DragSession::begin(cx, |manager: &mut Self, _, cx| {
             manager.tab_reorder.cancel();
             cx.notify();
         });
@@ -1044,7 +1044,7 @@ impl TabManager {
         self.drag_tab_to(tab_id, window.mouse_position(), cx);
         cx.notify();
         let manager = cx.entity().downgrade();
-        DragPreview::new(move |window, cx| {
+        DragPreview::new(window, cx, move |window, cx| {
             manager
                 .upgrade()
                 .map(|owner| {
@@ -1485,7 +1485,7 @@ impl TabManager {
         // Content follows the chip's paired hover paint, preserving selected identity.
         let foreground = presentation
             .tab_foreground(active)
-            .mix(presentation.tab_hover_foreground(active), f64::from(hover));
+            .fade(presentation.tab_hover_foreground(active), f64::from(hover));
         let control_style = presentation.close_control_style(
             active,
             under_pointer,
@@ -1760,13 +1760,11 @@ impl TabManager {
             );
         }
         let release_manager = manager.clone();
-        let release_observer = self.tab_reorder.dragged().map(|_| {
-            drag_release_observer(move |window, cx| {
-                let pointer = window.mouse_position();
-                let _ = release_manager.update(cx, |manager, cx| {
-                    manager.finish_tab_drag(pointer, cx);
-                });
-            })
+        let release_observer = drag_release_observer(move |window, cx| {
+            let pointer = window.mouse_position();
+            let _ = release_manager.update(cx, |manager, cx| {
+                manager.finish_tab_drag(pointer, cx);
+            });
         });
 
         let drag_manager = manager.clone();
@@ -1787,7 +1785,7 @@ impl TabManager {
             .flex_row()
             .items_center()
             .child(items)
-            .children(release_observer)
+            .child(release_observer)
             .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
@@ -4861,6 +4859,30 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
+    }
+
+    #[gpui::test]
+    fn a_tab_released_beside_the_tab_bar_should_stay_in_place(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let last = cx.debug_bounds("tab-item-3-active").unwrap();
+        // Level with the Tabs, but past the strip's leading end.
+        let beside = point(strip.left() - px(12.0), last.center().y);
+
+        drag_tab(last.center(), &[last.center() - point(px(8.0), px(0.0)), beside], cx);
+        let marked = [
+            "tab-insertion-marker-0",
+            "tab-insertion-marker-1",
+            "tab-insertion-marker-2",
+        ]
+        .into_iter()
+        .any(|marker| cx.debug_bounds(marker).is_some());
+        cx.simulate_mouse_up(beside, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!((marked, tab_order(&manager, cx)), (false, vec![1, 2, 3]));
     }
 
     #[gpui::test]

@@ -1,7 +1,7 @@
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer};
+use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
@@ -1099,7 +1099,7 @@ impl PaneHost {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let session = DragSession::begin(window, cx, |host: &mut Self, _, cx| {
+        let session = DragSession::begin(cx, |host: &mut Self, _, cx| {
             if host.pane_drag.take().is_some() {
                 cx.notify();
             }
@@ -1119,12 +1119,13 @@ impl PaneHost {
             pane.origin,
             gpui::size(pane.size.width, super::appearance::chrome(cx).caption_height()),
         );
+        let grab = grab_point(window, cx);
         let host = cx.entity().downgrade();
-        DragPreview::new(move |window, cx| {
+        DragPreview::new(window, cx, move |window, cx| {
             host.upgrade()
                 .map(|host| {
                     host.read(cx)
-                        .render_lifted_caption(pane_id, caption, pointer, window, cx)
+                        .render_lifted_caption(pane_id, caption, grab, window, cx)
                 })
                 .unwrap_or_else(|| div().into_any_element())
         })
@@ -2073,12 +2074,12 @@ impl Render for PaneHost {
                 }
             })
             .child(content)
-            .when(self.pane_drag.is_some(), |root| {
+            .child({
                 let host = cx.entity().downgrade();
-                root.child(drag_release_observer(move |window, cx| {
+                drag_release_observer(move |window, cx| {
                     let pointer = window.mouse_position();
                     let _ = host.update(cx, |host, cx| host.finish_pane_drag(pointer, window, cx));
-                }))
+                })
             })
     }
 }
@@ -2470,8 +2471,8 @@ fn render_pane_caption_content(
                 if focused { "focused" } else { "unfocused" }
             )
         })
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, window, cx| {
+        // The press focuses the Pane at once, since a press that starts a drag never clicks.
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             let _ = focus_host.update(cx, |host, cx| {
                 host.focus_pane(pane_id, cx);
                 host.focus(window, cx);
@@ -3499,6 +3500,38 @@ mod tests {
         assert_eq!(
             (ended, host.read_with(cx, |host, _| host.layout_signature())),
             (false, before)
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_that_moves_nothing_should_leave_its_pane_focused(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
+
+        drag_pane_caption(caption, &[own_pane.center()], cx);
+        cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let released = cx.update(|window, cx| {
+            let host = host.read(cx);
+            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+        });
+
+        let caption = cx.debug_bounds("pane-caption-1-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-4").unwrap();
+        drag_pane_caption(caption, &[target.center()], cx);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let cancelled = cx.update(|window, cx| {
+            let host = host.read(cx);
+            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+        });
+
+        assert_eq!(
+            (released, cancelled),
+            ((PaneId::new(4), true), (PaneId::new(1), true)),
+            "the pressed Pane must take keyboard focus even though the drag never clicked"
         );
     }
 

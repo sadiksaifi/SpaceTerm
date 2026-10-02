@@ -549,7 +549,7 @@ impl WorkspaceSidebar {
         let size = self
             .row_position(workspace_id)
             .and_then(|position| painted_item_size(&self.scroll_handle, position));
-        let session = DragSession::begin(window, cx, |sidebar: &mut Self, _, cx| {
+        let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
             sidebar.workspace_reorder.cancel();
             cx.notify();
         });
@@ -557,7 +557,7 @@ impl WorkspaceSidebar {
         self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
         cx.notify();
         let sidebar = cx.entity().downgrade();
-        DragPreview::new(move |window, cx| {
+        DragPreview::new(window, cx, move |window, cx| {
             sidebar
                 .upgrade()
                 .map(|owner| {

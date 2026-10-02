@@ -283,11 +283,11 @@ impl WorkspaceSidebar {
         let level = f64::from(hover);
         row_colors.row_foreground = row_colors
             .row_foreground
-            .mix(row_colors.row_hover_foreground, level);
+            .fade(row_colors.row_hover_foreground, level);
         row_colors.row_secondary = row_colors
             .row_secondary
-            .mix(row_colors.row_hover_secondary, level);
-        row_colors.row_icon = row_colors.row_icon.mix(row_colors.row_hover_icon, level);
+            .fade(row_colors.row_hover_secondary, level);
+        row_colors.row_icon = row_colors.row_icon.fade(row_colors.row_hover_icon, level);
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -318,7 +318,7 @@ impl WorkspaceSidebar {
             (path, None, None)
         };
         let under_pointer = |paint: WorkspaceStatusPaint| WorkspaceStatusPaint {
-            normal: paint.normal.mix(paint.hovered, level),
+            normal: paint.normal.fade(paint.hovered, level),
             ..paint
         };
         let detail_paint = detail_color
@@ -609,14 +609,12 @@ impl WorkspaceSidebar {
             })
             .occlude();
         // The observer stays outside the list, whose children are exactly its rows.
-        let release_observer = self.workspace_reorder.dragged().map(|_| {
-            let release_sidebar = sidebar.clone();
-            drag_release_observer(move |window, cx| {
-                let pointer = window.mouse_position();
-                let _ = release_sidebar.update(cx, |sidebar, cx| {
-                    sidebar.finish_workspace_drag(pointer, cx);
-                });
-            })
+        let release_sidebar = sidebar.clone();
+        let release_observer = drag_release_observer(move |window, cx| {
+            let pointer = window.mouse_position();
+            let _ = release_sidebar.update(cx, |sidebar, cx| {
+                sidebar.finish_workspace_drag(pointer, cx);
+            });
         });
         for (row, fade) in self.rows.iter().zip(hovers) {
             rows = rows.child(self.render_workspace_row(
@@ -723,7 +721,7 @@ impl WorkspaceSidebar {
             )))
             .occlude()
             .child(rows)
-            .children(release_observer)
+            .child(release_observer)
             .child(
                 div()
                     .id("workspace-sidebar-footer")

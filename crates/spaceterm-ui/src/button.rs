@@ -1918,7 +1918,7 @@ mod tests {
 
     use gpui::{
         Context, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton,
-        Render, TestAppContext, VisualTestContext, Window, point, rgba,
+        MouseExitEvent, Render, TestAppContext, VisualTestContext, Window, point, rgba,
     };
 
     use super::*;
@@ -2214,6 +2214,46 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(observed.get(), icons[3]);
+    }
+
+    #[gpui::test]
+    fn hover_should_stay_cleared_after_the_pointer_leaves_the_window(cx: &mut TestAppContext) {
+        let icons = [0x11223344, 0x55667788, 0x99aabbcc, 0x12345678].map(rgba);
+        let base = test_variant_style();
+        let mut theme = test_theme();
+        theme.variants.primary = ButtonVariantStyle::new(
+            base.normal.icon_foreground(icons[0]),
+            base.hovered.icon_foreground(icons[1]),
+            base.pressed.icon_foreground(icons[2]),
+            base.disabled.icon_foreground(icons[3]),
+        );
+        cx.set_global(theme);
+        let observed = Rc::new(Cell::new(rgba(0)));
+        let root_observed = observed.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| PaintProbeRoot {
+            icon_color: root_observed,
+            disabled: false,
+        });
+        cx.run_until_parked();
+        let center = cx
+            .debug_bounds("paint-probe")
+            .expect("button is rendered")
+            .center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        crate::hover_fade::settle(cx);
+        assert_eq!(observed.get(), icons[1]);
+
+        // GPUI keeps the last pointer position after the pointer leaves, so later paints must not
+        // read the button as hovered again.
+        cx.simulate_event(MouseExitEvent {
+            position: center,
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        crate::hover_fade::settle(cx);
+        cx.update(|window, _| window.refresh());
+        crate::hover_fade::settle(cx);
+        assert_eq!(observed.get(), icons[0]);
     }
 
     struct TestRoot {

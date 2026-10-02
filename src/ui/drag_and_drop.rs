@@ -6,13 +6,17 @@
 //!
 //! GPUI owns each drag's lifetime: it ends a drag on any release. A [`DragSession`] ties an owner's
 //! state to the one drag it started, so the owner keeps that state only while GPUI still carries
-//! that drag, and only that owner answers Escape. A release the owner never saw, such as one while
-//! it was hidden, cannot strand its state or let it act on a later drag.
+//! that drag. Escape cancels that drag from any window, even once its owner is gone. A release the
+//! owner never saw, such as one while it was hidden, cannot strand its state or let it act on a
+//! later drag.
 
 use gpui::prelude::*;
+use std::rc::Rc;
+
 use gpui::{
-    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, MouseUpEvent, Pixels, Point,
-    ScrollHandle, Size, Subscription, Window, canvas, div, px,
+    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, KeystrokeEvent,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription,
+    Window, WindowId, canvas, div, px,
 };
 
 use super::appearance::gpui_color;
@@ -129,20 +133,15 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
     }
 }
 
-/// The start and end of every item along the strip, when the pointer lies within the strip across
-/// its axis and the container laid out `len` items.
+/// The start and end of every item along the strip, when the pointer lies within the strip and the
+/// container laid out `len` items.
 fn strip_spans(
     items: &ScrollHandle,
     axis: Axis,
     len: usize,
     pointer: Point<Pixels>,
 ) -> Option<Vec<(f32, f32)>> {
-    let strip = items.bounds();
-    let across = axis.invert();
-    let start = strip.origin.along(across);
-    let end = start + strip.size.along(across);
-    let pointer_across = pointer.along(across);
-    if pointer_across < start || pointer_across >= end {
+    if !items.bounds().contains(&pointer) {
         return None;
     }
     let item_bounds = painted_item_bounds(items);
@@ -252,9 +251,15 @@ fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
 
 /// The lifted copy of a dragged item that follows the pointer.
 ///
-/// A Tab or Workspace row paints its own face, so the copy looks exactly like the item it lifts. An
-/// item without a compact face, such as a Pane, lifts a label on the anchored floating material.
+/// A Tab or Workspace row paints its own face, so the copy looks exactly like the item it lifts. A
+/// Pane lifts a card of its Pane Caption. The copy keeps the point the press took it by under the
+/// pointer.
 pub(crate) struct DragPreview {
+    /// How far the pointer moved between the press and the motion that started the drag.
+    ///
+    /// GPUI places the preview from where that motion found the pointer, so the face moves back by
+    /// this much to sit where the press took it.
+    lift: Point<Pixels>,
     face: Box<PreviewFace>,
 }
 
@@ -262,39 +267,82 @@ pub(crate) struct DragPreview {
 type PreviewFace = dyn Fn(&mut Window, &mut App) -> AnyElement;
 
 impl DragPreview {
-    /// A preview that paints `face` at the pointer. The face must not claim the pointer: it lies
-    /// over every drop target while the drag lasts.
-    pub(crate) fn new(face: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
+    /// A preview, for the drag GPUI is starting in `window`, that paints `face` at the pointer.
+    /// The face must not claim the pointer: it lies over every drop target while the drag lasts.
+    pub(crate) fn new(
+        window: &Window,
+        cx: &App,
+        face: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> Self {
         Self {
+            lift: window.mouse_position() - grab_point(window, cx),
             face: Box::new(face),
         }
     }
 
     /// A preview with nothing to paint, for a drag whose owner is gone.
     pub(crate) fn empty() -> Self {
-        Self::new(|_, _| div().into_any_element())
+        Self {
+            lift: Point::default(),
+            face: Box::new(|_, _| div().into_any_element()),
+        }
     }
 }
 
 impl Render for DragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .debug_selector(|| "drag-preview".to_owned())
-            .child((self.face)(window, cx))
+        // GPUI lays the preview out as a root, which ignores its own offset, so the face moves.
+        div().debug_selector(|| "drag-preview".to_owned()).child(
+            div()
+                .relative()
+                .left(self.lift.x)
+                .top(self.lift.y)
+                .child((self.face)(window, cx)),
+        )
     }
 }
 
-/// Calls `on_release` when a button is released anywhere in the window while a drag is active.
+/// Where the press that a drag starting in `window` began from took the pointer.
+///
+/// GPUI starts a drag on the first motion past a small threshold, which can land well past the
+/// press when motion arrives coalesced.
+pub(crate) fn grab_point(window: &Window, cx: &App) -> Point<Pixels> {
+    let window_id = window.window_handle().window_id();
+    cx.try_global::<LastPress>()
+        .filter(|press| press.window_id == window_id)
+        .map_or_else(|| window.mouse_position(), |press| press.position)
+}
+
+/// The latest primary-button press in any window that mounts a drag release observer.
+struct LastPress {
+    window_id: WindowId,
+    position: Point<Pixels>,
+}
+
+impl gpui::Global for LastPress {}
+
+/// Calls `on_release` when a button is released anywhere in the window while a drag is active, and
+/// records each press a drag could start from.
 ///
 /// GPUI ends every drag on any release, including one dropped outside every target, but tells only
-/// the target. Mount this while a drag is in progress so its owner can act on the release point
-/// before GPUI ends the drag; the owner confirms the drag is its own with [`DragSession::is_active`].
+/// the target. The owner acts on the release point before GPUI ends the drag, and confirms the drag
+/// is its own with [`DragSession::is_active`]. Mount this whether or not a drag is in progress: GPUI
+/// dispatches a release to the listeners of the last painted frame, and a release can arrive before
+/// the frame that shows the drag.
 pub(crate) fn drag_release_observer(
     on_release: impl Fn(&mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
+            window.on_mouse_event(|event: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                    cx.set_global(LastPress {
+                        window_id: window.window_handle().window_id(),
+                        position: event.position,
+                    });
+                }
+            });
             let on_release = on_release.clone();
             window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                 if phase == DispatchPhase::Capture && cx.has_active_drag() {
@@ -308,54 +356,53 @@ pub(crate) fn drag_release_observer(
     .into_any_element()
 }
 
-/// The most recent drag a [`DragSession`] began in this application.
+/// The most recent drag a [`DragSession`] began in this application, and how Escape cancels it.
 #[derive(Default)]
 struct CurrentDrag {
     issued: u64,
     current: Option<u64>,
+    on_cancel: Option<Rc<CancelDrag>>,
+    escape: Option<Subscription>,
 }
 
 impl gpui::Global for CurrentDrag {}
 
+/// Tells the owner of a drag that Escape cancelled it.
+type CancelDrag = dyn Fn(&mut Window, &mut App);
+
 /// One drag that one owner started.
 ///
 /// Every Tab, Workspace, and Pane drag begins a session, so the session that began last names the
-/// drag GPUI carries. While the session lasts, Escape cancels its drag before the key reaches any
-/// focused element, so it never reaches a Terminal Session; a session whose drag has ended ignores
-/// Escape.
+/// drag GPUI carries. While GPUI carries it, Escape in any window cancels it before the key reaches
+/// any focused element, so it never reaches a Terminal Session, even when the owner is gone.
 pub(crate) struct DragSession {
     ticket: u64,
-    _escape: Subscription,
 }
 
 impl DragSession {
-    /// Begins a session for the drag GPUI is starting in `window`. Escape stops that drag and then
-    /// calls `on_cancel` on the owner.
+    /// Begins a session for the drag GPUI is starting. Escape stops that drag and then calls
+    /// `on_cancel` on the owner, if the owner still exists.
     pub(crate) fn begin<T: 'static>(
-        window: &Window,
         cx: &mut Context<T>,
         on_cancel: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Self {
-        let drags = cx.default_global::<CurrentDrag>();
-        drags.issued += 1;
-        let ticket = drags.issued;
-        drags.current = Some(ticket);
-        let window_id = window.window_handle().window_id();
         let owner = cx.weak_entity();
-        let escape = cx.intercept_keystrokes(move |event, window, cx| {
-            if window.window_handle().window_id() != window_id
-                || event.keystroke.key != "escape"
-                || !carries(ticket, cx)
-                || !cx.stop_active_drag(window)
-            {
-                return;
-            }
-            cx.stop_propagation();
+        let on_cancel: Rc<CancelDrag> = Rc::new(move |window, cx| {
             let _ = owner.update(cx, |owner, cx| on_cancel(owner, window, cx));
         });
+        if cx
+            .try_global::<CurrentDrag>()
+            .is_none_or(|drags| drags.escape.is_none())
+        {
+            let escape = cx.intercept_keystrokes(cancel_on_escape);
+            cx.default_global::<CurrentDrag>().escape = Some(escape);
+        }
+        let drags = cx.global_mut::<CurrentDrag>();
+        drags.issued += 1;
+        drags.current = Some(drags.issued);
+        drags.on_cancel = Some(on_cancel);
         Self {
-            ticket,
-            _escape: escape,
+            ticket: drags.issued,
         }
     }
 
@@ -363,6 +410,23 @@ impl DragSession {
     pub(crate) fn is_active(&self, cx: &App) -> bool {
         carries(self.ticket, cx)
     }
+}
+
+fn cancel_on_escape(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
+    if event.keystroke.key != "escape" {
+        return;
+    }
+    let Some(on_cancel) = cx
+        .try_global::<CurrentDrag>()
+        .and_then(|drags| drags.on_cancel.clone())
+    else {
+        return;
+    };
+    if !cx.stop_active_drag(window) {
+        return;
+    }
+    cx.stop_propagation();
+    on_cancel(window, cx);
 }
 
 fn carries(ticket: u64, cx: &App) -> bool {
@@ -375,6 +439,127 @@ fn carries(ticket: u64, cx: &App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+
+    struct Payload;
+
+    /// Owns the drag its root's source starts, as a Tab, Workspace sidebar, or Pane host does.
+    #[derive(Default)]
+    struct Owner {
+        session: Option<DragSession>,
+        cancelled: usize,
+    }
+
+    struct Root {
+        owner: Option<Entity<Owner>>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let owner = self.owner.clone();
+            div().size_full().child(drag_release_observer(|_, _| {})).child(
+                div()
+                    .id("source")
+                    .debug_selector(|| "drag-source".to_owned())
+                    .size(px(40.0))
+                    .on_drag(Payload, move |_, _, window, cx| {
+                        if let Some(owner) = &owner {
+                            owner.update(cx, |owner, cx| {
+                                owner.session = Some(DragSession::begin(
+                                    cx,
+                                    |owner: &mut Owner, _, _| owner.cancelled += 1,
+                                ));
+                            });
+                        }
+                        {
+                            let preview =
+                                DragPreview::new(window, cx, |_, _| {
+                                    div()
+                                        .debug_selector(|| "drag-face".to_owned())
+                                        .size(px(40.0))
+                                        .into_any_element()
+                                });
+                            cx.new(|_| preview)
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn drag_from_source(cx: &mut VisualTestContext) {
+        let source = cx.debug_bounds("drag-source").unwrap();
+        cx.simulate_mouse_move(source.center(), None, Modifiers::none());
+        cx.simulate_mouse_down(source.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            source.center() + point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn escape_should_cancel_a_drag_whose_owner_is_gone(cx: &mut TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            owner: Some(cx.new(|_| Owner::default())),
+        });
+        cx.run_until_parked();
+        drag_from_source(cx);
+        assert!(cx.update(|_, cx| cx.has_active_drag()));
+
+        root.update(cx, |root, cx| {
+            root.owner = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    }
+
+    #[gpui::test]
+    fn escape_in_another_window_should_cancel_the_drag(cx: &mut TestAppContext) {
+        let owner = cx.new(|_| Owner::default());
+        let source_owner = owner.clone();
+        let source = cx.add_window(move |_, _| Root {
+            owner: Some(source_owner),
+        });
+        let other = cx.add_window(|_, _| Root { owner: None });
+        let mut source = VisualTestContext::from_window(source.into(), cx);
+        source.run_until_parked();
+        drag_from_source(&mut source);
+
+        let mut other = VisualTestContext::from_window(other.into(), cx);
+        other.simulate_keystrokes("escape");
+
+        assert!(!other.update(|_, cx| cx.has_active_drag()));
+        assert_eq!(owner.read_with(cx, |owner, _| owner.cancelled), 1);
+    }
+
+    #[gpui::test]
+    fn a_preview_should_keep_the_press_point_under_the_pointer(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, cx| Root {
+            owner: Some(cx.new(|_| Owner::default())),
+        });
+        cx.run_until_parked();
+        let source = cx.debug_bounds("drag-source").unwrap();
+        let press = source.origin + point(px(10.0), px(10.0));
+        let far = press + point(px(200.0), px(120.0));
+
+        cx.simulate_mouse_move(press, None, Modifiers::none());
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+        // The first motion GPUI delivers lands far past the press.
+        cx.simulate_mouse_move(far, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(far + point(px(1.0), px(0.0)), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let face = cx.debug_bounds("drag-face").unwrap();
+        assert_eq!(
+            face.origin,
+            far + point(px(1.0), px(0.0)) - (press - source.origin)
+        );
+    }
 
     fn strip(extents: &[f32]) -> Vec<(f32, f32)> {
         let mut start = 0.0;

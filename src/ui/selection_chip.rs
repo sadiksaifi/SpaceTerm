@@ -187,14 +187,11 @@ impl SelectionChip {
 
 /// A paint `hover` of the way from its resting to its hovered color.
 ///
-/// A paint that appears only on hover, or over a transparent resting paint, fades in from a
-/// transparent copy of itself, so its color never passes through black.
+/// A paint that appears only on hover fades in from transparent, keeping its own color.
 pub(crate) fn hovered_paint(rest: Option<Color>, hovered: Option<Color>, hover: f32) -> Option<Color> {
-    let hover = f64::from(hover);
-    match (rest.filter(|rest| rest.a != 0), hovered) {
-        (_, None) => rest,
-        (None, Some(hovered)) => Some(hovered.with_alpha(0).mix(hovered, hover)),
-        (Some(rest), Some(hovered)) => Some(rest.mix(hovered, hover)),
+    match hovered {
+        None => rest,
+        Some(hovered) => Some(rest.unwrap_or(Color::rgba(0)).fade(hovered, f64::from(hover))),
     }
 }
 
