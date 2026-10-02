@@ -5,7 +5,9 @@ use std::rc::Rc;
 use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
 
-use super::keyboard_layout::{KeyboardLayout, KeyboardLayoutAdapter};
+#[cfg(test)]
+use super::keyboard_layout::KeyboardLayout;
+use super::keyboard_layout::KeyboardLayoutAdapter;
 use crate::app::*;
 use crate::keybindings::{
     Command, DefaultBinding, KeymapProfile, KeymapProfileError, SystemReserved, TerminalConventions,
@@ -16,9 +18,6 @@ pub(super) fn profile(
     layout: Rc<dyn KeyboardLayoutAdapter>,
     system_reserved: Vec<SystemReserved>,
 ) -> Result<KeymapProfile, KeymapProfileError> {
-    let snapshot = layout
-        .snapshot()
-        .map_err(|_| KeymapProfileError::KeyboardLayoutUnavailable)?;
     let defaults = [
         (
             Command::SwitchWorkspace,
@@ -151,11 +150,11 @@ pub(super) fn profile(
         ),
         (
             Command::FocusPreviousPane,
-            Some(DefaultBinding::new("ctrl-shift-[", &[])),
+            Some(DefaultBinding::new("ctrl-shift-alt-f6", &["ctrl-shift-["])),
         ),
         (
             Command::FocusNextPane,
-            Some(DefaultBinding::new("ctrl-shift-]", &[])),
+            Some(DefaultBinding::new("ctrl-shift-f6", &["ctrl-shift-]"])),
         ),
         (
             Command::TogglePaneZoom,
@@ -179,11 +178,17 @@ pub(super) fn profile(
         ),
         (
             Command::IncreaseTerminalFontSize,
-            Some(DefaultBinding::new("ctrl-shift-+", &["ctrl-shift-="])),
+            Some(DefaultBinding::new(
+                "ctrl-shift-pageup",
+                &["ctrl-shift-+", "ctrl-shift-="],
+            )),
         ),
         (
             Command::DecreaseTerminalFontSize,
-            Some(DefaultBinding::new("ctrl-shift--", &[])),
+            Some(DefaultBinding::new(
+                "ctrl-shift-pagedown",
+                &["ctrl-shift--"],
+            )),
         ),
         (
             Command::ResetTerminalFontSize,
@@ -203,69 +208,37 @@ pub(super) fn profile(
         TerminalConventions::ControlShiftShortcuts,
         defaults,
         system_reserved,
-        fixed_bindings(&snapshot),
+        fixed_bindings(),
         control_bindings(),
     )
 }
 
-/// A binding in the spelling GPUI dispatches on `layout`. GPUI reports a shifted symbol without
-/// Shift, so `ctrl-shift-,` arrives as `ctrl-<` on US English.
-fn dispatched(
-    source: &str,
-    action: impl gpui::Action,
-    context: Option<&str>,
-    layout: &KeyboardLayout,
-) -> KeyBinding {
-    // GPUI dispatches Shift with an uncased key as the shifted symbol alone, such as `ctrl-<`.
-    let mut keystroke = gpui::Keystroke::parse(source).expect("valid static fixed keystroke");
-    if keystroke.modifiers.shift
-        && let Some(shifted) = layout.shifted(keystroke.modifiers.platform, &keystroke.key)
-    {
-        keystroke.modifiers.shift = false;
-        keystroke.key = shifted.into();
-    }
-    KeyBinding::new(&keystroke.unparse(), action, context)
-}
-
-fn fixed_bindings(layout: &KeyboardLayout) -> Vec<KeyBinding> {
+fn fixed_bindings() -> Vec<KeyBinding> {
     let bindings = vec![
-        dispatched("ctrl-shift-c", EditCopy, Some(TERMINAL_KEY_CONTEXT), layout),
-        dispatched(
-            "ctrl-shift-v",
-            EditPaste,
-            Some(TERMINAL_KEY_CONTEXT),
-            layout,
-        ),
-        dispatched(
-            "shift-insert",
-            EditPaste,
-            Some(TERMINAL_KEY_CONTEXT),
-            layout,
-        ),
-        dispatched(
+        KeyBinding::new("ctrl-shift-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("shift-insert", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
             "ctrl-shift-,",
             crate::ui::settings_window::OpenSettings,
             None,
-            layout,
         ),
-        dispatched("ctrl-shift-q", QuitApplication, None, layout),
-        dispatched("f11", ToggleFullScreen, None, layout),
+        KeyBinding::new("ctrl-shift-q", QuitApplication, None),
+        KeyBinding::new("f11", ToggleFullScreen, None),
     ];
     #[cfg(feature = "developer-tools")]
     let bindings = bindings
         .into_iter()
         .chain([
-            dispatched(
+            KeyBinding::new(
                 "ctrl-shift-alt-a",
                 crate::ui::developer_workbench::OpenDeveloperWorkbench,
                 None,
-                layout,
             ),
-            dispatched(
+            KeyBinding::new(
                 "ctrl-shift-alt-c",
                 crate::ui::developer_workbench::ToggleAppearancePreview,
                 None,
-                layout,
             ),
         ])
         .collect();
@@ -274,7 +247,7 @@ fn fixed_bindings(layout: &KeyboardLayout) -> Vec<KeyBinding> {
 
 fn control_bindings() -> Vec<KeyBinding> {
     let settings = Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT);
-    vec![
+    let bindings = vec![
         KeyBinding::new("shift-enter", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new("escape", CloseTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new(
@@ -323,13 +296,118 @@ fn control_bindings() -> Vec<KeyBinding> {
             crate::ui::settings_window::ClearSettingsSearch,
             settings,
         ),
-    ]
+    ];
+    #[cfg(feature = "developer-tools")]
+    let bindings = bindings.into_iter().chain([
+        KeyBinding::new(
+            "ctrl-shift-w",
+            crate::ui::developer_workbench::CloseDeveloperWorkbench,
+            Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-w",
+            crate::ui::developer_workbench::CloseDeveloperWorkbench,
+            Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+        ),
+    ]).collect();
+    bindings
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::keybindings::KeybindingPreferences;
+
+    #[derive(Debug)]
+    struct ChangingLayout(std::cell::RefCell<KeyboardLayout>);
+
+    impl KeyboardLayoutAdapter for ChangingLayout {
+        fn snapshot(
+            &self,
+            _: &dyn gpui::PlatformKeyboardLayout,
+        ) -> Result<KeyboardLayout, crate::platform::keyboard_layout::KeyboardLayoutUnavailable>
+        {
+            Ok(self.0.borrow().clone())
+        }
+    }
+
+    #[test]
+    fn linux_fixed_shortcuts_follow_the_active_layout() {
+        let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
+            KeyboardLayout::us_english(),
+        )));
+        let mut profile = super::profile(layout.clone(), vec![]).unwrap();
+        let mut german = KeyboardLayout::default();
+        german.insert(false, ",", ";");
+        *layout.0.borrow_mut() = german;
+        assert!(
+            profile
+                .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+                .unwrap()
+        );
+        let settings = profile
+            .fixed_bindings()
+            .iter()
+            .find(|binding| {
+                binding
+                    .action()
+                    .partial_eq(&crate::ui::settings_window::OpenSettings)
+            })
+            .unwrap();
+        assert_eq!(settings.keystrokes()[0].inner().key, ";");
+        assert_eq!(
+            settings.keystrokes()[0].inner().modifiers,
+            gpui::Modifiers::control()
+        );
+    }
+
+    #[test]
+    fn linux_default_commands_resolve_on_us_german_and_french_layouts() {
+        use crate::keybindings::KeybindingState;
+        use crate::platform::keyboard_layout::testing;
+        for (layout, reset) in [
+            (KeyboardLayout::us_english(), "ctrl-)"),
+            (testing::de(), "ctrl-="),
+            (testing::fr_azerty(), "ctrl-0"),
+        ] {
+            let mut profile = super::profile(
+                Rc::new(layout),
+                super::super::linux_reserved_shortcuts::shortcuts(),
+            )
+            .unwrap();
+            profile.refresh_layout(&testing::UnknownLayout).unwrap();
+            let resolved = profile.resolve(&KeybindingPreferences::default());
+            for command in Command::ALL {
+                let expected = if command == Command::CloseWorkspace {
+                    KeybindingState::Unassigned
+                } else {
+                    KeybindingState::Default
+                };
+                assert_eq!(resolved.state(command), expected, "{command:?}");
+            }
+            assert_eq!(
+                resolved
+                    .shortcut(Command::IncreaseTerminalFontSize)
+                    .unwrap()
+                    .to_string(),
+                "ctrl-shift-pageup"
+            );
+            assert_eq!(
+                resolved
+                    .shortcut(Command::DecreaseTerminalFontSize)
+                    .unwrap()
+                    .to_string(),
+                "ctrl-shift-pagedown"
+            );
+            assert_eq!(
+                resolved
+                    .shortcut(Command::ResetTerminalFontSize)
+                    .unwrap()
+                    .to_string(),
+                reset
+            );
+        }
+    }
 
     fn profile() -> KeymapProfile {
         super::profile(
@@ -348,10 +426,10 @@ mod tests {
             (Command::ActivateTab1, "ctrl-!"),
             (Command::ActivateTab9, "ctrl-("),
             (Command::ActivateWorkspace1, "ctrl-alt-!"),
-            (Command::FocusPreviousPane, "ctrl-{"),
-            (Command::FocusNextPane, "ctrl-}"),
-            (Command::IncreaseTerminalFontSize, "ctrl-+"),
-            (Command::DecreaseTerminalFontSize, "ctrl-_"),
+            (Command::FocusPreviousPane, "ctrl-alt-shift-f6"),
+            (Command::FocusNextPane, "ctrl-shift-f6"),
+            (Command::IncreaseTerminalFontSize, "ctrl-shift-pageup"),
+            (Command::DecreaseTerminalFontSize, "ctrl-shift-pagedown"),
             (Command::ResetTerminalFontSize, "ctrl-)"),
             (Command::FocusPaneLeft, "ctrl-shift-left"),
         ] {
@@ -367,9 +445,27 @@ mod tests {
         assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
         assert_eq!(
             resolved.shortcuts(Command::IncreaseTerminalFontSize).len(),
-            1,
-            "an alias that resolves to its primary chord is dropped"
+            2,
+            "aliases that resolve to the same chord are deduplicated"
         );
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn workbench_close_shortcuts_do_not_capture_terminal_control_w() {
+        let bindings = control_bindings();
+        let workbench = gpui::KeyContext::parse(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT).unwrap();
+        let terminal = gpui::KeyContext::parse(TERMINAL_KEY_CONTEXT).unwrap();
+        for shortcut in ["ctrl-w", "ctrl-shift-w"] {
+            let key = gpui::Keystroke::parse(shortcut).unwrap();
+            let binding = bindings.iter().find(|binding| {
+                binding.action().as_any().is::<crate::ui::developer_workbench::CloseDeveloperWorkbench>()
+                    && binding.match_keystrokes(std::slice::from_ref(&key)) == Some(false)
+            }).expect("the Workbench has a close shortcut");
+            let predicate = binding.predicate().unwrap();
+            assert!(predicate.eval(std::slice::from_ref(&workbench)));
+            assert!(!predicate.eval(std::slice::from_ref(&terminal)));
+        }
     }
 
     #[test]

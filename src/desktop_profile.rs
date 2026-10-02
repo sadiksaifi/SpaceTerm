@@ -4,6 +4,7 @@ pub(crate) mod default_keymap;
 use std::rc::Rc;
 
 use crate::keybindings::{KeybindingPreferences, KeymapProfile, Shortcut};
+use crate::platform::keyboard_layout::KeyboardLayout;
 use gpui::{Action, App, KeyContext, Keymap, Modifiers, SharedString};
 use spaceterm_ui::{
     ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, MenuKeybindingProfile,
@@ -21,7 +22,12 @@ pub(crate) struct DesktopWording {
 pub(crate) trait ShortcutFormatter {
     /// Presents one key with its modifiers. The key is GPUI's lowercase key name, such as `k`,
     /// `enter`, or `f5`.
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString;
+    fn format_chord(
+        &self,
+        modifiers: Modifiers,
+        key: &str,
+        layout: &KeyboardLayout,
+    ) -> SharedString;
     fn format_modifiers(&self, modifiers: Modifiers) -> SharedString;
 }
 
@@ -48,6 +54,7 @@ pub(crate) struct DesktopPresentation {
     formatter: Rc<dyn ShortcutFormatter>,
     selection: ShortcutSelection,
     shortcuts: Vec<PresentedShortcut>,
+    layout: KeyboardLayout,
 }
 
 struct PresentedShortcut {
@@ -75,6 +82,7 @@ impl DesktopPresentation {
             formatter,
             selection,
             shortcuts: Vec::new(),
+            layout: KeyboardLayout::default(),
         }
     }
 
@@ -95,13 +103,16 @@ impl DesktopPresentation {
 
     pub(crate) fn format(&self, shortcut: &Shortcut) -> SharedString {
         self.formatter
-            .format_chord(shortcut.modifiers(), shortcut.key())
+            .format_chord(shortcut.modifiers(), shortcut.key(), &self.layout)
     }
 
     /// Presents a chord that need not be a valid [`Shortcut`], such as one a recorder refused.
     pub(crate) fn format_keystroke(&self, keystroke: &gpui::Keystroke) -> SharedString {
-        self.formatter
-            .format_chord(keystroke.modifiers, &keystroke.key.to_ascii_lowercase())
+        self.formatter.format_chord(
+            keystroke.modifiers,
+            &keystroke.key.to_ascii_lowercase(),
+            &self.layout,
+        )
     }
 
     pub(crate) fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
@@ -109,6 +120,11 @@ impl DesktopPresentation {
     }
 
     pub(crate) fn refresh(&mut self, cx: &App) {
+        if cx.has_global::<crate::keybindings::runtime::KeymapRuntime>() {
+            self.layout = crate::keybindings::runtime::KeymapRuntime::profile(cx)
+                .layout()
+                .clone();
+        }
         self.refresh_keymap(&cx.key_bindings().borrow());
     }
 
@@ -140,7 +156,8 @@ impl DesktopPresentation {
 }
 
 /// Match GPUI's native menu selection among presentable bindings: first default-context
-/// match, or first binding. A chord every desktop sends to the terminal is never presented.
+/// match, or first binding. Terminal chords are presented only when the host explicitly
+/// installed a fixed application binding, such as F11 for full screen.
 pub(crate) fn installed_shortcut(keymap: &Keymap, action: &dyn Action) -> Option<Shortcut> {
     selected_shortcut(keymap, action, None)
 }
@@ -161,7 +178,9 @@ fn selected_shortcut(
             return None;
         };
         let shortcut = Shortcut::from_keystroke(keystroke.inner()).ok()?;
-        crate::keybindings::is_presentable(&shortcut).then_some((binding, shortcut))
+        (binding.meta() == Some(crate::keybindings::FIXED_BINDINGS)
+            || crate::keybindings::is_presentable(&shortcut))
+        .then_some((binding, shortcut))
     });
     let first = bindings.next()?;
     let matches = |binding: &gpui::KeyBinding| {
@@ -245,7 +264,24 @@ impl DesktopProfile {
     }
     pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
         cx.set_global(self.fonts.clone());
-        cx.set_global(self.presentation.clone());
+        let mut keymap = self.keymap.clone();
+        if let Err(error) = keymap.refresh_layout(cx.keyboard_layout()) {
+            eprintln!("failed to install keyboard layout: {error}");
+        }
+        let mut presentation = self.presentation.clone();
+        presentation.layout = keymap.layout().clone();
+        cx.set_global(presentation);
+        spaceterm_ui::install_pointer_conventions(
+            cx,
+            match keymap.terminal_conventions() {
+                crate::keybindings::TerminalConventions::CommandShortcuts => {
+                    spaceterm_ui::PointerConventions::ControlClickSecondary
+                }
+                crate::keybindings::TerminalConventions::ControlShiftShortcuts => {
+                    spaceterm_ui::PointerConventions::SecondaryButton
+                }
+            },
+        );
         spaceterm_ui::install_modal_policy(
             cx,
             self.modal_policy
@@ -260,13 +296,13 @@ impl DesktopProfile {
         spaceterm_ui::install_text_input_keybindings(cx, self.control_keys.text_input);
         spaceterm_ui::install_text_area_keybindings(cx, self.control_keys.text_input);
         cx.bind_keys(
-            self.keymap
+            keymap
                 .resolve(&KeybindingPreferences::default())
                 .key_bindings(),
         );
-        cx.bind_keys(self.keymap.control_bindings().iter().cloned());
-        cx.bind_keys(self.keymap.fixed_bindings().iter().cloned());
-        self.keymap.clone()
+        cx.bind_keys(keymap.control_bindings().iter().cloned());
+        cx.bind_keys(keymap.fixed_bindings().iter().cloned());
+        keymap
     }
 }
 
@@ -275,7 +311,7 @@ struct TestingShortcutFormatter;
 
 #[cfg(test)]
 impl ShortcutFormatter for TestingShortcutFormatter {
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
+    fn format_chord(&self, modifiers: Modifiers, key: &str, _: &KeyboardLayout) -> SharedString {
         let key = match key {
             "enter" => "Enter".to_owned(),
             "space" => "Space".to_owned(),
@@ -369,6 +405,31 @@ mod tests {
     use super::*;
     use crate::ui::{NewWorkspace, SwitchWorkspace};
     use gpui::KeyBinding;
+
+    #[gpui::test]
+    fn the_first_layout_snapshot_is_taken_at_installation(cx: &mut gpui::TestAppContext) {
+        #[derive(Debug)]
+        struct CountedLayout(Rc<std::cell::Cell<usize>>);
+        impl crate::platform::keyboard_layout::KeyboardLayoutAdapter for CountedLayout {
+            fn snapshot(
+                &self,
+                _: &dyn gpui::PlatformKeyboardLayout,
+            ) -> Result<KeyboardLayout, crate::platform::keyboard_layout::KeyboardLayoutUnavailable>
+            {
+                self.0.set(self.0.get() + 1);
+                Ok(KeyboardLayout::us_english())
+            }
+        }
+        let snapshots = Rc::new(std::cell::Cell::new(0));
+        let mut profile = testing_profile(spaceterm_ui::TextDirection::LeftToRight);
+        profile.keymap =
+            default_keymap::profile(Rc::new(CountedLayout(snapshots.clone())), vec![]).unwrap();
+        assert_eq!(snapshots.get(), 0);
+        cx.update(|cx| {
+            profile.install(cx);
+        });
+        assert_eq!(snapshots.get(), 1);
+    }
 
     #[gpui::test]
     fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {

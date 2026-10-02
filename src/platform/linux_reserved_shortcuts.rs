@@ -11,6 +11,7 @@ pub(super) fn shortcuts() -> Vec<SystemReserved> {
         ("ctrl-shift-v", Paste),
         ("shift-insert", Paste),
         ("ctrl-shift-q", Quit),
+        ("ctrl-shift-p", CommandPalette),
         ("ctrl-shift-,", Settings),
         ("f11", FullScreen),
         ("ctrl-shift-alt-left", MoveWindowToWorkspace),
@@ -55,7 +56,10 @@ mod tests {
             ("ctrl-<", SystemReservation::Settings),
             ("ctrl-shift-c", SystemReservation::Copy),
             ("ctrl-shift-u", SystemReservation::InputMethod),
-            ("ctrl-shift-alt-left", SystemReservation::MoveWindowToWorkspace),
+            (
+                "ctrl-shift-alt-left",
+                SystemReservation::MoveWindowToWorkspace,
+            ),
         ] {
             assert_eq!(
                 profile.check(&Shortcut::parse(source).unwrap()),
@@ -79,8 +83,14 @@ mod tests {
     fn linux_conventions_leave_plain_control_and_alt_to_the_terminal() {
         let profile = profile();
         for (source, expected) in [
-            ("ctrl-c", Reservation::Terminal(TerminalConvention::ControlCharacter)),
-            ("ctrl-left", Reservation::Terminal(TerminalConvention::ControlNavigation)),
+            (
+                "ctrl-c",
+                Reservation::Terminal(TerminalConvention::ControlCharacter),
+            ),
+            (
+                "ctrl-left",
+                Reservation::Terminal(TerminalConvention::ControlNavigation),
+            ),
             ("alt-f", Reservation::Terminal(TerminalConvention::Meta)),
             ("a", Reservation::Terminal(TerminalConvention::TextInput)),
             (
@@ -96,6 +106,52 @@ mod tests {
         }
         for source in ["ctrl-shift-t", "ctrl-shift-1", "ctrl-shift-alt-n"] {
             assert_eq!(profile.check(&Shortcut::parse(source).unwrap()), Ok(()));
+        }
+    }
+
+    #[test]
+    fn linux_reservations_apply_before_and_after_a_host_layout_arrives() {
+        use crate::platform::keyboard_layout::{KeyboardLayout, testing};
+        for layout in [
+            KeyboardLayout::default(),
+            KeyboardLayout::us_english(),
+            testing::de(),
+            testing::fr_azerty(),
+        ] {
+            let mut profile =
+                super::super::linux_default_keymap::profile(std::rc::Rc::new(layout), shortcuts())
+                    .unwrap();
+            profile.refresh_layout(&testing::UnknownLayout).unwrap();
+            for reserved in shortcuts() {
+                if !reserved.shortcut.modifiers().control {
+                    continue;
+                }
+                for shortcut in [
+                    reserved.shortcut.clone(),
+                    reserved.shortcut.resolve(profile.layout()),
+                ] {
+                    assert_eq!(
+                        profile.check(&shortcut),
+                        Err(Reservation::System(reserved.reason)),
+                        "{shortcut}"
+                    );
+                }
+            }
+            for key in ["ctrl-space", "ctrl-2", "ctrl-6", "ctrl-/", "ctrl--"] {
+                let shortcut = Shortcut::parse(key).unwrap();
+                // On AZERTY digits are Shift-only. Unshifted terminal symbols stay reserved.
+                if !profile.layout().is_shifted_symbol(false, shortcut.key()) {
+                    assert_eq!(
+                        profile.check(&shortcut),
+                        Err(Reservation::Terminal(TerminalConvention::ControlCharacter)),
+                        "{key}"
+                    );
+                }
+            }
+            assert_eq!(
+                profile.check(&Shortcut::parse("cmd-shift-t").unwrap()),
+                Err(Reservation::System(SystemReservation::DesktopShortcut))
+            );
         }
     }
 }

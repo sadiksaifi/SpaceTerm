@@ -280,6 +280,7 @@ struct ChangingLayout(std::cell::RefCell<crate::platform::keyboard_layout::Keybo
 impl crate::platform::keyboard_layout::KeyboardLayoutAdapter for ChangingLayout {
     fn snapshot(
         &self,
+        _: &dyn gpui::PlatformKeyboardLayout,
     ) -> Result<
         crate::platform::keyboard_layout::KeyboardLayout,
         crate::platform::keyboard_layout::KeyboardLayoutUnavailable,
@@ -295,7 +296,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     use crate::keybindings::{KeybindingState, SystemReservation, SystemReserved};
     let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
         crate::platform::keyboard_layout::testing::us()
-            .snapshot()
+            .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
             .unwrap(),
     )));
     let preferences: KeybindingPreferences =
@@ -306,7 +307,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     let observed = dispatches.clone();
     cx.update(|cx| {
         crate::ui::init(cx).unwrap();
-        let profile = crate::desktop_profile::default_keymap::profile(
+        let mut profile = crate::desktop_profile::default_keymap::profile(
             layout.clone(),
             vec![SystemReserved {
                 shortcut: Shortcut::parse("shift-cmd-3").unwrap(),
@@ -314,6 +315,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
             }],
         )
         .unwrap();
+        profile.refresh_layout(cx.keyboard_layout()).unwrap();
         install(profile, cx);
         attach_application_menu(menu.clone(), cx);
         apply(&preferences, cx);
@@ -363,7 +365,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     cx.simulate_keystrokes("cmd-/");
     assert_eq!(dispatches.get(), 2);
     *layout.0.borrow_mut() = crate::platform::keyboard_layout::testing::us()
-        .snapshot()
+        .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
         .unwrap();
     cx.update(|_, cx| {
         refresh_layout(cx);
@@ -376,4 +378,81 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     assert_eq!(dispatches.get(), 2);
     cx.simulate_keystrokes("cmd-&");
     assert_eq!(dispatches.get(), 3);
+}
+
+#[gpui::test]
+fn layout_changes_replace_fixed_and_control_bindings_without_changing_their_positions(
+    cx: &mut TestAppContext,
+) {
+    use crate::keybindings::{SystemReservation, SystemReserved, TerminalConventions};
+    use crate::platform::keyboard_layout::KeyboardLayout;
+    let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
+        KeyboardLayout::us_english(),
+    )));
+    let calls = Rc::new(Cell::new(0));
+    let observed = calls.clone();
+    let menu = Rc::new(RecordingApplicationMenuAdapter::default());
+    cx.update(|cx| {
+        crate::ui::init(cx).unwrap();
+        let profile = KeymapProfile::new(
+            layout.clone(),
+            TerminalConventions::ControlShiftShortcuts,
+            [],
+            vec![SystemReserved {
+                shortcut: Shortcut::parse("ctrl-shift-,").unwrap(),
+                reason: SystemReservation::Settings,
+            }],
+            vec![KeyBinding::new(
+                "ctrl-shift-,",
+                crate::ui::settings_window::OpenSettings,
+                None,
+            )],
+            vec![KeyBinding::new(
+                "ctrl-shift-.",
+                crate::ui::CloseTerminalFind,
+                None,
+            )],
+        )
+        .unwrap();
+        cx.clear_key_bindings();
+        cx.bind_keys([KeyBinding::new("ctrl-shift-a", CreateTab, None)]);
+        cx.bind_keys(profile.control_bindings().iter().cloned());
+        cx.bind_keys(profile.fixed_bindings().iter().cloned());
+        cx.bind_keys([KeyBinding::new("ctrl-shift-b", CreateTab, None)]);
+        install(profile, cx);
+        attach_application_menu(menu.clone(), cx);
+        cx.on_action(move |_: &crate::ui::settings_window::OpenSettings, _| {
+            observed.set(observed.get() + 1)
+        });
+    });
+    let (_, cx) = cx.add_window_view(|_, _| DispatchView);
+    cx.simulate_keystrokes("ctrl-<");
+    assert_eq!(calls.get(), 1);
+    let mut german = KeyboardLayout::default();
+    german.insert(false, ",", ";");
+    german.insert(false, ".", ":");
+    *layout.0.borrow_mut() = german;
+    cx.update(|_, cx| {
+        refresh_layout(cx);
+        let keys = bindings(cx)
+            .iter()
+            .map(|binding| binding.keystrokes()[0].inner().key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["a", ":", ";", "b"]);
+        assert_eq!(
+            DesktopPresentation::get(cx)
+                .shortcut(&crate::ui::settings_window::OpenSettings)
+                .as_deref(),
+            Some("Ctrl+;")
+        );
+    });
+    cx.simulate_keystrokes("ctrl-<");
+    assert_eq!(calls.get(), 1);
+    cx.simulate_keystrokes("ctrl-;");
+    assert_eq!(calls.get(), 2);
+    assert_eq!(
+        menu.installs(),
+        1,
+        "a fixed-only layout change refreshes the native menu"
+    );
 }

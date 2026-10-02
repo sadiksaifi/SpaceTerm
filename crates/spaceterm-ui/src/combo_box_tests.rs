@@ -980,6 +980,27 @@ fn open_by_pointer(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+#[gpui::test]
+fn linux_control_click_opens_and_selects_a_combo_box_choice(cx: &mut TestAppContext) {
+    let (_, events, _, cx) = combo_box_window(cx, None, long_items(), false);
+    cx.update(|_, cx| {
+        crate::install_pointer_conventions(cx, crate::PointerConventions::SecondaryButton)
+    });
+    let trigger = trigger_center(cx);
+    cx.simulate_click(trigger, Modifiers::control());
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("combo-row-2")
+        .expect("second choice painted");
+    cx.simulate_click(row.center(), Modifiers::control());
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&RecordedEvent::Accepted {
+        item_id: 2,
+        source: ComboBoxActivationSource::Pointer,
+        window_was_open: false,
+    }));
+}
+
 fn focus_trigger(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.focus_next(cx));
     cx.update(|window, cx| window.focus_next(cx));
