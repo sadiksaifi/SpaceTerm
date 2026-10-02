@@ -17,7 +17,7 @@ use crate::platform::microphone_access::{
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use super::controls::{action_button, badge};
+use crate::ui::sidebar_window::form::{action_button, badge};
 
 pub(super) const CONTROL_SELECTOR: &str = "settings-microphone-access-control";
 pub(super) const REQUEST_SELECTOR: &str = "settings-microphone-access-request";

@@ -2203,8 +2203,8 @@ fn publish_terminal_preferences(
     cx: &mut App,
 ) {
     use crate::appearance::{
-        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, ThemeCatalog,
-        SystemAppearance,
+        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, SystemAppearance,
+        ThemeCatalog,
     };
     let previous = super::super::appearance_runtime::current(cx);
     let resolved = ThemeCatalog::default()
@@ -5549,7 +5549,7 @@ fn stationary_link_hover_updates_when_the_platform_modifier_changes(cx: &mut Tes
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 }
 
-#[cfg(feature = "appearance-exerciser")]
+#[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     cx: &mut TestAppContext,
@@ -5561,7 +5561,7 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     let commands = records.commands();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 
-    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(true, cx));
+    cx.update(|_, cx| crate::ui::developer_workbench::set_link_preview_fixture(true, cx));
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("terminal-link-preview").is_some());
@@ -5573,7 +5573,7 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     });
     assert_eq!(records.commands(), commands);
 
-    cx.update(|_, cx| crate::ui::appearance_exerciser::set_link_preview_fixture(false, cx));
+    cx.update(|_, cx| crate::ui::developer_workbench::set_link_preview_fixture(false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
 }
@@ -7236,4 +7236,59 @@ fn displayed_directories_should_abbreviate_only_a_local_home_prefix() {
             "{directory}"
         );
     }
+}
+
+#[test]
+fn differentiate_without_color_gives_every_notice_intent_its_own_glyph() {
+    for (index, intent) in StatusIntent::ALL.into_iter().enumerate() {
+        for other in StatusIntent::ALL.into_iter().skip(index + 1) {
+            assert_ne!(
+                std::mem::discriminant(&intent.glyph(true)),
+                std::mem::discriminant(&other.glyph(true)),
+                "{intent:?} and {other:?}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut TestAppContext) {
+    let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
+    cx.update(|cx| {
+        crate::ui::appearance_runtime::install(
+            crate::settings::UserSettings::load(
+                crate::ui::settings_window::test_support::MemoryStorage::with_document(
+                    &crate::appearance::SettingsDocument::default(),
+                ),
+            ),
+            Rc::new(platform.clone()),
+            cx,
+        )
+        .unwrap();
+    });
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let glyph = |intent, cx: &mut VisualTestContext| {
+        pane.update(cx, |pane, cx| {
+            pane.status = Some("Notice".to_owned());
+            pane.status_intent = intent;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        [
+            ("TriangleAlert", "terminal-status-glyph-TriangleAlert"),
+            ("CircleAlert", "terminal-status-glyph-CircleAlert"),
+        ]
+        .into_iter()
+        .filter(|(_, selector)| cx.debug_bounds(selector).is_some())
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
+    assert_eq!(glyph(StatusIntent::Error, cx), ["TriangleAlert"]);
+
+    platform.set_differentiate_without_color(true);
+    cx.run_until_parked();
+
+    assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
+    assert_eq!(glyph(StatusIntent::Error, cx), ["CircleAlert"]);
 }

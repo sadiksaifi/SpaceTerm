@@ -145,6 +145,15 @@ impl SegmentedPaint {
         }
     }
 
+    /// The paint `level` of the way from this paint to `other`.
+    fn mix(self, other: Self, level: f32) -> Self {
+        Self {
+            background: crate::mix_rgba(self.background, other.background, level),
+            label: crate::mix_rgba(self.label, other.label, level),
+            border: crate::mix_rgba(self.border, other.border, level),
+        }
+    }
+
     /// Returns the option fill.
     pub const fn background(self) -> Rgba {
         self.background
@@ -481,7 +490,7 @@ impl std::error::Error for SegmentedBuildError {}
 /// then carries no previous value.
 #[derive(IntoElement)]
 pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     id: ElementId,
     accessibility_name: SharedString,
@@ -499,7 +508,7 @@ pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
 
 impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
     /// Pins only segment presentation for the development acceptance gallery.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.preview_state = Some(state);
         self
@@ -525,7 +534,7 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         }
         let selected = options.iter().position(|option| &option.value == current);
         Ok(Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             id: id.into(),
             accessibility_name: accessibility_name.into(),
@@ -646,7 +655,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             state.synchronize(enabled, self.tab_stop, cx);
         });
         let focused = focus_handle.is_focused(window) && state.read(cx).focus_visible;
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
         let selector = self
             .debug_selector
@@ -701,7 +710,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 } else {
                     style.paints.disabled.resolve(selected)
                 };
-                #[cfg(feature = "appearance-exerciser")]
+                #[cfg(feature = "control-preview")]
                 let paint = self
                     .preview_state
                     .filter(|_| option_enabled)
@@ -716,7 +725,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                         paints.resolve(selected)
                     });
                 let refine_interaction = option_enabled;
-                #[cfg(feature = "appearance-exerciser")]
+                #[cfg(feature = "control-preview")]
                 let refine_interaction = refine_interaction && self.preview_state.is_none();
                 // Selection changes the chip, never the label's glyphs or advance widths.
                 let refinement = |paint: SegmentedPaint| SegmentedPaintRefinement {
@@ -725,12 +734,26 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     font_size: metrics.font_size,
                     line_height: metrics.line_height,
                 };
-                let hovered = refinement(style.paints.hovered.resolve(selected));
                 let pressed = refinement(style.paints.pressed.resolve(selected));
                 let option_selector = option
                     .debug_selector
                     .clone()
                     .unwrap_or_else(|| format!("{selector}-{index}"));
+                // Pointer feedback belongs to the segment under the pointer. Reacting to the
+                // track's hover instead would light every segment at once.
+                let hover = crate::HoverFade::new(
+                    SharedString::from(format!("{option_selector}-hover")),
+                    window,
+                    cx,
+                );
+                let paint = if refine_interaction {
+                    paint.mix(
+                        style.paints.hovered.resolve(selected),
+                        hover.level(window, cx),
+                    )
+                } else {
+                    paint
+                };
                 let pointer_state = state.clone();
                 let activate = request.clone();
                 let value = option.value.clone();
@@ -763,11 +786,9 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
                     })
-                    // Pointer feedback belongs to the segment under the pointer. Reacting to the
-                    // track's hover instead would light every segment at once.
                     .when(refine_interaction, |segment| {
                         segment
-                            .hover(move |style| hovered.segment(style))
+                            .child(hover.tracker())
                             .active(move |style| pressed.segment(style))
                     })
                     .when(option_enabled, |segment| {

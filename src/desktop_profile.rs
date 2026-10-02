@@ -31,7 +31,10 @@ pub(crate) enum ShortcutSelection {
     /// The binding GPUI's native application menu shows, so hints agree with the menu bar.
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop with a native menu bar composes this selection")
+        allow(
+            dead_code,
+            reason = "only a desktop with a native menu bar composes this selection"
+        )
     )]
     NativeMenu,
     /// The binding that reaches the terminal first, for a desktop without a native menu whose
@@ -169,7 +172,9 @@ fn selected_shortcut(
     let (_, shortcut) = if matches(first.0) {
         first
     } else {
-        bindings.find(|(binding, _)| matches(binding)).unwrap_or(first)
+        bindings
+            .find(|(binding, _)| matches(binding))
+            .unwrap_or(first)
     };
     Some(shortcut)
 }
@@ -413,7 +418,7 @@ mod tests {
                 format!("{keys}\t{rest}")
             })
             .collect::<Vec<_>>();
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         let expected = {
             use gpui::Action as _;
             let mut expected = expected;
@@ -421,17 +426,54 @@ mod tests {
                 format!(
                     "{}\tNone\t{}",
                     gpui::Keystroke::parse("alt-cmd-a").unwrap().unparse(),
-                    crate::ui::appearance_exerciser::ShowAppearanceExerciser.name()
+                    crate::ui::developer_workbench::OpenDeveloperWorkbench.name()
                 ),
                 format!(
                     "{}\tNone\t{}",
                     gpui::Keystroke::parse("alt-cmd-c").unwrap().unparse(),
-                    crate::ui::appearance_exerciser::ToggleAppearancePreview.name()
+                    crate::ui::developer_workbench::ToggleAppearancePreview.name()
+                ),
+                format!(
+                    "{}\tSome(Identifier(\"DeveloperWorkbench\"))\t{}",
+                    gpui::Keystroke::parse("cmd-w").unwrap().unparse(),
+                    crate::ui::developer_workbench::CloseDeveloperWorkbench.name()
                 ),
             ]);
             expected
         };
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn develop_menu_chords_are_system_reserved_and_block_retained_overrides() {
+        use crate::keybindings::{
+            Command, KeybindingState, Reservation, Shortcut, SystemReservation,
+        };
+
+        let profile = default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            testing_reserved_shortcuts(),
+        )
+        .unwrap();
+        let workbench = Shortcut::parse("cmd-alt-a").unwrap();
+        assert_eq!(
+            profile.check(&workbench),
+            Err(Reservation::System(SystemReservation::DeveloperWorkbench))
+        );
+        assert_eq!(
+            profile.check(&Shortcut::parse("cmd-alt-c").unwrap()),
+            Err(Reservation::System(SystemReservation::AppearancePreview))
+        );
+
+        let preferences: KeybindingPreferences =
+            serde_json::from_str(r#"{"new_workspace":"cmd-alt-a"}"#).unwrap();
+        let resolved = profile.resolve(&preferences);
+        assert_eq!(
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Blocked(SystemReservation::DeveloperWorkbench)
+        );
+        assert!(resolved.shortcuts(Command::NewWorkspace).is_empty());
     }
 
     #[gpui::test]
@@ -441,18 +483,28 @@ mod tests {
         cx.update(|cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-insert", NewWorkspace, Some("SpaceTermTextInput")),
-                KeyBinding::new("ctrl-shift-y", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
+                KeyBinding::new(
+                    "ctrl-shift-y",
+                    NewWorkspace,
+                    Some(crate::ui::TERMINAL_KEY_CONTEXT),
+                ),
             ]);
             let mut native = testing_presentation();
             native.refresh(cx);
-            assert_eq!(native.shortcut(&NewWorkspace).as_deref(), Some("Ctrl+INSERT"));
+            assert_eq!(
+                native.shortcut(&NewWorkspace).as_deref(),
+                Some("Ctrl+INSERT")
+            );
             let mut terminal = DesktopPresentation::new(
                 native.wording(),
                 Rc::new(TestingShortcutFormatter),
                 ShortcutSelection::TerminalSurface,
             );
             terminal.refresh(cx);
-            assert_eq!(terminal.shortcut(&NewWorkspace).as_deref(), Some("Ctrl+Shift+Y"));
+            assert_eq!(
+                terminal.shortcut(&NewWorkspace).as_deref(),
+                Some("Ctrl+Shift+Y")
+            );
         });
     }
 

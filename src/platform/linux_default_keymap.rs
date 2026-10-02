@@ -8,8 +8,7 @@ use spaceterm_ui::{EditCopy, EditPaste};
 use super::keyboard_layout::{KeyboardLayout, KeyboardLayoutAdapter};
 use crate::app::*;
 use crate::keybindings::{
-    Command, DefaultBinding, KeymapProfile, KeymapProfileError, SystemReserved,
-    TerminalConventions,
+    Command, DefaultBinding, KeymapProfile, KeymapProfileError, SystemReserved, TerminalConventions,
 };
 use crate::ui::*;
 
@@ -231,8 +230,18 @@ fn dispatched(
 fn fixed_bindings(layout: &KeyboardLayout) -> Vec<KeyBinding> {
     let bindings = vec![
         dispatched("ctrl-shift-c", EditCopy, Some(TERMINAL_KEY_CONTEXT), layout),
-        dispatched("ctrl-shift-v", EditPaste, Some(TERMINAL_KEY_CONTEXT), layout),
-        dispatched("shift-insert", EditPaste, Some(TERMINAL_KEY_CONTEXT), layout),
+        dispatched(
+            "ctrl-shift-v",
+            EditPaste,
+            Some(TERMINAL_KEY_CONTEXT),
+            layout,
+        ),
+        dispatched(
+            "shift-insert",
+            EditPaste,
+            Some(TERMINAL_KEY_CONTEXT),
+            layout,
+        ),
         dispatched(
             "ctrl-shift-,",
             crate::ui::settings_window::OpenSettings,
@@ -242,19 +251,19 @@ fn fixed_bindings(layout: &KeyboardLayout) -> Vec<KeyBinding> {
         dispatched("ctrl-shift-q", QuitApplication, None, layout),
         dispatched("f11", ToggleFullScreen, None, layout),
     ];
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "developer-tools")]
     let bindings = bindings
         .into_iter()
         .chain([
             dispatched(
                 "ctrl-shift-alt-a",
-                crate::ui::appearance_exerciser::ShowAppearanceExerciser,
+                crate::ui::developer_workbench::OpenDeveloperWorkbench,
                 None,
                 layout,
             ),
             dispatched(
                 "ctrl-shift-alt-c",
-                crate::ui::appearance_exerciser::ToggleAppearancePreview,
+                crate::ui::developer_workbench::ToggleAppearancePreview,
                 None,
                 layout,
             ),
@@ -294,13 +303,21 @@ fn control_bindings() -> Vec<KeyBinding> {
             crate::ui::settings_window::CloseSettingsWindow,
             settings,
         ),
-        KeyBinding::new("ctrl-w", crate::ui::settings_window::CloseSettingsWindow, settings),
+        KeyBinding::new(
+            "ctrl-w",
+            crate::ui::settings_window::CloseSettingsWindow,
+            settings,
+        ),
         KeyBinding::new(
             "ctrl-shift-f",
             crate::ui::settings_window::FocusSettingsSearch,
             settings,
         ),
-        KeyBinding::new("ctrl-f", crate::ui::settings_window::FocusSettingsSearch, settings),
+        KeyBinding::new(
+            "ctrl-f",
+            crate::ui::settings_window::FocusSettingsSearch,
+            settings,
+        ),
         KeyBinding::new(
             "escape",
             crate::ui::settings_window::ClearSettingsSearch,
@@ -339,7 +356,10 @@ mod tests {
             (Command::FocusPaneLeft, "ctrl-shift-left"),
         ] {
             assert_eq!(
-                resolved.shortcut(command).map(ToString::to_string).as_deref(),
+                resolved
+                    .shortcut(command)
+                    .map(ToString::to_string)
+                    .as_deref(),
                 Some(dispatch),
                 "{command:?}"
             );
@@ -367,7 +387,14 @@ mod tests {
                     .join(" ")
             })
             .collect::<Vec<_>>();
-        for expected in ["ctrl-shift-c", "ctrl-shift-v", "shift-insert", "ctrl-<", "ctrl-shift-q", "f11"] {
+        for expected in [
+            "ctrl-shift-c",
+            "ctrl-shift-v",
+            "shift-insert",
+            "ctrl-<",
+            "ctrl-shift-q",
+            "f11",
+        ] {
             assert!(
                 keystrokes.iter().any(|keystroke| keystroke == expected),
                 "{expected} missing from {keystrokes:?}"

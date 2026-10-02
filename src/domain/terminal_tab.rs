@@ -87,6 +87,36 @@ pub(crate) enum SplitAxis {
     Vertical,
 }
 
+/// The side of a target Pane that another Pane takes when it splits the target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl PaneEdge {
+    /// The edge a new Pane takes when a Split places it after its target along `axis`.
+    const fn trailing(axis: SplitAxis) -> Self {
+        match axis {
+            SplitAxis::Horizontal => Self::Right,
+            SplitAxis::Vertical => Self::Bottom,
+        }
+    }
+
+    const fn axis(self) -> SplitAxis {
+        match self {
+            Self::Left | Self::Right => SplitAxis::Horizontal,
+            Self::Top | Self::Bottom => SplitAxis::Vertical,
+        }
+    }
+
+    const fn leads(self) -> bool {
+        matches!(self, Self::Left | Self::Top)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FocusDirection {
     Left,
@@ -345,10 +375,12 @@ impl<T> TerminalTab<T> {
     ) -> Result<PaneId, PaneError> {
         self.validate_split(target_pane_id, axis, target_size, divider_size)?;
         let (new_pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
-        let Some(new_root) = self
-            .root
-            .with_split(target_pane_id, new_pane_id, split_id, axis)
-        else {
+        let Some(new_root) = self.root.with_split(
+            target_pane_id,
+            new_pane_id,
+            split_id,
+            PaneEdge::trailing(axis),
+        ) else {
             unreachable!("a validated split target must remain in the Pane layout")
         };
         let terminal = create_terminal(new_pane_id);
@@ -356,6 +388,67 @@ impl<T> TerminalTab<T> {
         self.next_split_id = next_split_id;
         self.commit_split(new_root, new_pane_id, terminal);
         Ok(new_pane_id)
+    }
+
+    /// Moves a Pane beside `target_pane_id`, splitting the target so the Pane takes `edge`, and
+    /// reports whether the arrangement changed.
+    ///
+    /// The Split that held the Pane collapses into its other child. The moved Pane keeps its
+    /// Terminal Session and becomes the Focused Pane; the Root Pane is unchanged. A move that
+    /// rebuilds the same arrangement, including a move onto the Pane itself, changes nothing and
+    /// keeps every Split ratio.
+    pub(crate) fn move_pane(
+        &mut self,
+        pane_id: PaneId,
+        target_pane_id: PaneId,
+        edge: PaneEdge,
+        target_size: PaneSize,
+        divider_size: f32,
+    ) -> Result<bool, PaneError> {
+        if !self.root.contains_pane(pane_id) {
+            return Err(PaneError::PaneNotFound(pane_id));
+        }
+        self.validate_split(target_pane_id, edge.axis(), target_size, divider_size)?;
+        if pane_id == target_pane_id {
+            return Ok(false);
+        }
+        let split_id = SplitId::from_raw(self.next_split_id);
+        let next_split_id = self
+            .next_split_id
+            .checked_add(1)
+            .ok_or(PaneError::SplitIdExhausted)?;
+        let Some(PaneRemoval {
+            replacement: Some(remaining),
+            ..
+        }) = self.root.without_pane(pane_id)
+        else {
+            unreachable!("a Pane with a distinct target is never the final Pane")
+        };
+        let Some(new_root) = remaining.with_split(target_pane_id, pane_id, split_id, edge) else {
+            unreachable!("removing another Pane keeps the target in the Pane layout")
+        };
+        if new_root.has_arrangement_of(&self.root) {
+            return Ok(false);
+        }
+
+        self.root = new_root;
+        self.next_split_id = next_split_id;
+        self.zoom_state = ZoomState::Restored;
+        self.set_focused_pane(pane_id);
+        Ok(true)
+    }
+
+    /// Whether a Pane moved onto `edge` of `target_pane_id` fits within the target's
+    /// `target_size`.
+    pub(crate) fn can_receive_pane(
+        &self,
+        target_pane_id: PaneId,
+        edge: PaneEdge,
+        target_size: PaneSize,
+        divider_size: f32,
+    ) -> bool {
+        self.validate_split(target_pane_id, edge.axis(), target_size, divider_size)
+            .is_ok()
     }
 
     pub(crate) fn close_pane(&mut self, pane_id: PaneId) -> Result<ClosePaneOutcome<T>, PaneError> {
@@ -622,21 +715,55 @@ impl PaneNode {
         }
     }
 
+    /// Whether two layouts place the same Panes in the same Splits, whatever their Split
+    /// identities and ratios.
+    fn has_arrangement_of(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Leaf(pane_id), Self::Leaf(other_pane_id)) => pane_id == other_pane_id,
+            (
+                Self::Split {
+                    axis,
+                    first,
+                    second,
+                    ..
+                },
+                Self::Split {
+                    axis: other_axis,
+                    first: other_first,
+                    second: other_second,
+                    ..
+                },
+            ) => {
+                axis == other_axis
+                    && first.has_arrangement_of(other_first)
+                    && second.has_arrangement_of(other_second)
+            }
+            _ => false,
+        }
+    }
+
     fn with_split(
         &self,
         target: PaneId,
         new_pane_id: PaneId,
         split_id: SplitId,
-        axis: SplitAxis,
+        edge: PaneEdge,
     ) -> Option<Self> {
         match self {
-            Self::Leaf(pane_id) if *pane_id == target => Some(Self::Split {
-                id: split_id,
-                axis,
-                ratio: 0.5,
-                first: Box::new(Self::Leaf(*pane_id)),
-                second: Box::new(Self::Leaf(new_pane_id)),
-            }),
+            Self::Leaf(pane_id) if *pane_id == target => {
+                let (first, second) = if edge.leads() {
+                    (new_pane_id, *pane_id)
+                } else {
+                    (*pane_id, new_pane_id)
+                };
+                Some(Self::Split {
+                    id: split_id,
+                    axis: edge.axis(),
+                    ratio: 0.5,
+                    first: Box::new(Self::Leaf(first)),
+                    second: Box::new(Self::Leaf(second)),
+                })
+            }
             Self::Leaf(_) => None,
             Self::Split {
                 id,
@@ -645,7 +772,7 @@ impl PaneNode {
                 first,
                 second,
             } => {
-                if let Some(updated_first) = first.with_split(target, new_pane_id, split_id, axis) {
+                if let Some(updated_first) = first.with_split(target, new_pane_id, split_id, edge) {
                     return Some(Self::Split {
                         id: *id,
                         axis: *current_axis,
@@ -655,7 +782,7 @@ impl PaneNode {
                     });
                 }
                 second
-                    .with_split(target, new_pane_id, split_id, axis)
+                    .with_split(target, new_pane_id, split_id, edge)
                     .map(|updated_second| Self::Split {
                         id: *id,
                         axis: *current_axis,
@@ -984,6 +1111,148 @@ mod tests {
         assert_eq!(tab.root_pane_id(), third);
         tab.close_pane(third).unwrap();
         assert_eq!(tab.root_pane_id(), second);
+    }
+
+    #[test]
+    fn move_pane_should_split_the_target_at_the_edge_and_collapse_the_source_split() {
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(2)).unwrap();
+
+        let moved = tab.move_pane(
+            PaneId::new(4),
+            PaneId::new(1),
+            PaneEdge::Left,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+
+        assert_eq!(
+            (
+                moved,
+                topology(tab.root()),
+                tab.focused_pane_id(),
+                tab.root_pane_id(),
+                tab.pane_count(),
+            ),
+            (
+                Ok(true),
+                "1:Horizontal:0.50(2:Vertical:0.50(4:Horizontal:0.50(4,1),3),2)".to_owned(),
+                PaneId::new(4),
+                PaneId::new(1),
+                4,
+            )
+        );
+    }
+
+    #[test]
+    fn move_pane_should_place_the_pane_after_the_target_at_a_trailing_edge() {
+        let mut tab = four_pane_tab();
+
+        let moved = tab.move_pane(
+            PaneId::new(1),
+            PaneId::new(4),
+            PaneEdge::Right,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+
+        assert_eq!(
+            (moved, topology(tab.root())),
+            (
+                Ok(true),
+                "1:Horizontal:0.50(3,3:Vertical:0.50(2,4:Horizontal:0.50(4,1)))".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn move_pane_should_leave_an_unchanged_arrangement_and_its_ratio_alone() {
+        let mut tab = four_pane_tab();
+        tab.resize_split(SplitId::new(2), size(250.0, 400.0), DIVIDER_SIZE, 0.7)
+            .unwrap();
+        let before = topology(tab.root());
+
+        let onto_sibling = tab.move_pane(
+            PaneId::new(3),
+            PaneId::new(1),
+            PaneEdge::Bottom,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+        let onto_itself = tab.move_pane(
+            PaneId::new(3),
+            PaneId::new(3),
+            PaneEdge::Top,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+
+        assert_eq!(
+            (
+                onto_sibling,
+                onto_itself,
+                topology(tab.root()),
+                tab.focused_pane_id()
+            ),
+            (Ok(false), Ok(false), before, PaneId::new(4))
+        );
+    }
+
+    #[test]
+    fn move_pane_should_reject_unknown_panes_and_insufficient_space_without_mutation() {
+        let mut tab = four_pane_tab();
+        let before = topology(tab.root());
+
+        let unknown_pane = tab.move_pane(
+            PaneId::new(9),
+            PaneId::new(1),
+            PaneEdge::Top,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+        let unknown_target = tab.move_pane(
+            PaneId::new(1),
+            PaneId::new(9),
+            PaneEdge::Top,
+            size(250.0, 200.0),
+            DIVIDER_SIZE,
+        );
+        let cramped = tab.move_pane(
+            PaneId::new(1),
+            PaneId::new(4),
+            PaneEdge::Left,
+            size(150.0, 200.0),
+            DIVIDER_SIZE,
+        );
+
+        assert_eq!(
+            (unknown_pane, unknown_target, cramped, topology(tab.root())),
+            (
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Err(PaneError::InsufficientSpace {
+                    available: size(150.0, 200.0),
+                    required: size(201.0, 50.0),
+                }),
+                before,
+            )
+        );
+    }
+
+    #[test]
+    fn can_receive_pane_should_require_room_along_the_edge_axis() {
+        let tab = four_pane_tab();
+        let cramped = size(150.0, 200.0);
+
+        assert_eq!(
+            [PaneEdge::Left, PaneEdge::Top].map(|edge| tab.can_receive_pane(
+                PaneId::new(4),
+                edge,
+                cramped,
+                DIVIDER_SIZE
+            )),
+            [false, true]
+        );
     }
 
     #[test]

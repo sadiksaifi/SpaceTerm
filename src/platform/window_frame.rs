@@ -15,7 +15,10 @@ pub(crate) struct TrafficLightPlacement {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only desktops with native window controls place them")
+    allow(
+        dead_code,
+        reason = "only desktops with native window controls place them"
+    )
 )]
 impl TrafficLightPlacement {
     pub(crate) const fn new(
@@ -37,10 +40,7 @@ impl TrafficLightPlacement {
 /// Moves the native traffic lights of `window`. Only hosts that supply a
 /// [`TrafficLightPlacement`] produce a position, so other hosts never reach a native effect.
 pub(crate) fn place_traffic_lights(window: &Window, position: Point<Pixels>) {
-    #[cfg(target_os = "macos")]
     window.set_traffic_light_position(position);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, position);
 }
 
 /// Geometry the application needs to make inset surfaces follow their hosting window.
@@ -52,7 +52,7 @@ pub(crate) struct WindowFrameGeometry {
     outer_corner_radius: Option<f32>,
     outer_edge_width: f32,
     workspace_traffic_lights: Option<TrafficLightPlacement>,
-    settings_traffic_lights: Option<TrafficLightPlacement>,
+    sidebar_window_traffic_lights: Option<TrafficLightPlacement>,
 }
 
 impl WindowFrameGeometry {
@@ -61,14 +61,17 @@ impl WindowFrameGeometry {
             outer_corner_radius,
             outer_edge_width: 0.0,
             workspace_traffic_lights: None,
-            settings_traffic_lights: None,
+            sidebar_window_traffic_lights: None,
         }
     }
 
     /// Records the edge the window paints over the outermost points of its own content.
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only desktops with native window controls describe frame placement")
+        allow(
+            dead_code,
+            reason = "only desktops with native window controls describe frame placement"
+        )
     )]
     pub(crate) const fn with_outer_edge_width(mut self, width: f32) -> Self {
         self.outer_edge_width = width;
@@ -77,15 +80,18 @@ impl WindowFrameGeometry {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only desktops with native window controls place them")
+        allow(
+            dead_code,
+            reason = "only desktops with native window controls place them"
+        )
     )]
     pub(crate) const fn with_traffic_lights(
         mut self,
         workspace: TrafficLightPlacement,
-        settings: TrafficLightPlacement,
+        sidebar_window: TrafficLightPlacement,
     ) -> Self {
         self.workspace_traffic_lights = Some(workspace);
-        self.settings_traffic_lights = Some(settings);
+        self.sidebar_window_traffic_lights = Some(sidebar_window);
         self
     }
 
@@ -106,11 +112,11 @@ impl WindowFrameGeometry {
             .map(|placement| placement.resolve(titlebar_height))
     }
 
-    pub(crate) fn settings_traffic_light_position(
+    pub(crate) fn sidebar_window_traffic_light_position(
         self,
         titlebar_height: Pixels,
     ) -> Option<Point<Pixels>> {
-        self.settings_traffic_lights
+        self.sidebar_window_traffic_lights
             .map(|placement| placement.resolve(titlebar_height))
     }
 }
@@ -135,7 +141,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(42.0)),
-                geometry.settings_traffic_light_position(px(36.0)),
+                geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (
                 Some(point(px(15.5), px(14.0))),
@@ -151,7 +157,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(50.0)),
-                geometry.settings_traffic_light_position(px(44.0)),
+                geometry.sidebar_window_traffic_light_position(px(44.0)),
             ),
             (
                 Some(point(px(15.5), px(18.0))),
@@ -167,7 +173,7 @@ mod tests {
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(42.0)),
-                geometry.settings_traffic_light_position(px(36.0)),
+                geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (None, None)
         );

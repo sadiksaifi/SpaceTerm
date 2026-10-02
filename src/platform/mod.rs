@@ -144,6 +144,8 @@ pub(crate) use macos_composition::main;
 mod linux_composition;
 #[cfg(target_os = "linux")]
 pub(crate) use linux_composition::main;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use unix_askpass_transport::dispatch_helper_from_environment;
 
 pub(crate) mod locale;
 
@@ -151,7 +153,11 @@ pub(crate) mod locale;
 #[path = "macos_adapter_tests/mod.rs"]
 pub(crate) mod macos_adapter_tests;
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
 #[path = "unix_adapter_tests/mod.rs"]
 pub(crate) mod unix_adapter_tests;
 
@@ -276,9 +282,6 @@ mod linux_services;
 
 #[cfg(target_os = "linux")]
 mod linux_shortcut_text;
-
-#[cfg(target_os = "linux")]
-mod linux_updates;
 
 #[cfg(target_os = "linux")]
 mod linux_window_drag;

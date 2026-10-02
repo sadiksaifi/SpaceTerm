@@ -228,7 +228,11 @@ A bounded text insertion candidate retained until accepted or cancelled.
 Time-bounded authorization for one unsafe Paste Payload while Terminal Input Focus remains valid.
 
 **OSC 52 Filtering**:
-Bounded recognition and unconditional denial of terminal clipboard read and write escape sequences.
+Bounded recognition of terminal clipboard escape sequences before Terminal Emulation, producing ordered plain-text requests.
+
+**Terminal Clipboard Access**:
+Session-scoped permission to consult the system text clipboard while the originating Pane retains Terminal Input Focus.
+Copying is enabled by default; reading requires the Privacy Setting.
 
 **Terminal Local File Capabilities**:
 Session-scoped authority for local path actions in a Local Pane.
@@ -287,3 +291,8 @@ content behind floating surfaces. Foreground controls and text remain sharp.
 The translucency and neutral shading of a background fill. Window backgrounds admit the desktop;
 floating surfaces combine softened application content with the same window backdrop where available,
 while retaining shading for readability.
+
+**Developer Workbench**:
+The development window, present only in SpaceTerm Development, that previews Appearance changes
+and presents every control, floating surface, and modal family as fixtures. Its previews change
+the Settings Document only when committed.

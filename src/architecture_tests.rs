@@ -146,7 +146,8 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "ui/pane_host.rs",
         "ui/tab_manager.rs",
     ] {
-        let source = without_host_lint_allowances(&std::fs::read_to_string(root.join(name)).unwrap());
+        let source =
+            without_host_lint_allowances(&std::fs::read_to_string(root.join(name)).unwrap());
         let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         for forbidden in [
             "std::os::unix",
@@ -384,29 +385,27 @@ pub(crate) fn portable_verification_source(source: &str) -> String {
     let mut portable = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        let line = lines[index].trim();
-        let mounted = native_suite_gate(line).and_then(|platform| {
+        let mounted = source_attribute(&lines, index).and_then(|(attribute, length)| {
+            let platform = native_suite_gate(&attribute)?;
             let suite = platform.suite();
-            let path_mount = lines
-                .get(index + 1)
-                .is_some_and(|next| {
-                    native_suite_declaration(next.trim(), "#[path = \"", "\"]", platform)
-                })
-                && lines.get(index + 2).is_some_and(|next| {
-                    let next = next.trim();
-                    next == format!("mod {suite};") || next == format!("pub(crate) mod {suite};")
-                });
+            let end = index + length;
+            let path_mount = lines.get(end).is_some_and(|next| {
+                native_suite_declaration(next.trim(), "#[path = \"", "\"]", platform)
+            }) && lines.get(end + 1).is_some_and(|next| {
+                let next = next.trim();
+                next == format!("mod {suite};") || next == format!("pub(crate) mod {suite};")
+            });
             let include_mount = lines
-                .get(index + 1)
+                .get(end)
                 .is_some_and(|next| next.trim() == format!("mod {suite} {{"))
-                && lines.get(index + 2).is_some_and(|next| {
+                && lines.get(end + 1).is_some_and(|next| {
                     native_suite_declaration(next.trim(), "include!(\"", "\");", platform)
                 })
-                && lines.get(index + 3).is_some_and(|next| next.trim() == "}");
+                && lines.get(end + 2).is_some_and(|next| next.trim() == "}");
             if path_mount {
-                Some(3)
+                Some(length + 2)
             } else if include_mount {
-                Some(4)
+                Some(length + 3)
             } else {
                 None
             }
@@ -428,15 +427,8 @@ fn without_host_lint_allowances(source: &str) -> String {
     let mut kept = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        let attribute = (1..=4).find_map(|length| {
-            let candidate = lines.get(index..index + length)?;
-            let compact: String = candidate
-                .concat()
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            is_host_lint_allowance(&compact).then_some(length)
-        });
+        let attribute = source_attribute(&lines, index)
+            .and_then(|(compact, length)| is_host_lint_allowance(&compact).then_some(length));
         if let Some(length) = attribute {
             index += length;
         } else {
@@ -447,7 +439,27 @@ fn without_host_lint_allowances(source: &str) -> String {
     kept.join("\n")
 }
 
+/// Read a complete source attribute without depending on rustfmt's line wrapping. Consumers
+/// still accept only exact approved attributes; unrecognized attributes leave the source intact.
+fn source_attribute(lines: &[&str], index: usize) -> Option<(String, usize)> {
+    let first = lines.get(index)?.trim();
+    if !first.starts_with("#[") && !first.starts_with("#![") {
+        return None;
+    }
+    let length = lines[index..]
+        .iter()
+        .position(|line| line.trim_end().ends_with(']'))?
+        + 1;
+    let compact = lines[index..index + length]
+        .concat()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    Some((compact, length))
+}
+
 fn is_host_lint_allowance(compact: &str) -> bool {
+    let compact = compact.replace(",)", ")");
     let Some(rest) = compact
         .strip_prefix("#[")
         .or_else(|| compact.strip_prefix("#!["))
@@ -464,7 +476,7 @@ fn native_suite_gate(line: &str) -> Option<NativeSuitePlatform> {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    match compact.as_str() {
+    match compact.replace(",)", ")").as_str() {
         "#[cfg(all(test,target_os=\"macos\",feature=\"native-tests\"))]" => {
             Some(NativeSuitePlatform::Macos)
         }
@@ -548,7 +560,10 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
             "CommandPaletteKeybindingProfile::Linux",
             "ExplicitCommandPaletteProfile",
         )
-        .replace("ComboBoxKeybindingProfile::Linux", "ExplicitComboBoxProfile")
+        .replace(
+            "ComboBoxKeybindingProfile::Linux",
+            "ExplicitComboBoxProfile",
+        )
         .replace("TextInputKeybindingProfile::Linux", "ExplicitTextProfile");
     let compact: String = source
         .chars()
@@ -629,6 +644,8 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         );
     }
     for wiring in [
+        "#[cfg(all(\n    test,\n    any(target_os = \"macos\", target_os = \"linux\"),\n    feature = \"native-tests\",\n))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
+        "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(\n        dead_code,\n        reason = \"only a native Adapter consumes it\",\n    )\n)]\nstruct Endpoint;",
         "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
         "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
         "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"platform/macos_adapter_tests/traffic_lights.rs\");\n}",
@@ -687,6 +704,7 @@ fn platform_source_modules_are_target_gated_while_portable_policy_is_not() {
         let owned = |family: &str, main: Option<&str>, gate: fn(&str) -> bool| {
             let declared = (declaration.starts_with(&format!("mod {family}_"))
                 || declaration.starts_with(&format!("pub(crate) mod {family}_"))
+                || declaration.starts_with(&format!("pub(crate) use {family}_"))
                 || main == Some(declaration))
                 && !declaration.contains(&format!("{family}_adapter_tests"));
             !declared || previous.is_some_and(gate)
@@ -719,7 +737,9 @@ fn platform_source_modules_are_target_gated_while_portable_policy_is_not() {
     assert!(!lines[askpass - 1].contains("target_os"));
     let guard = lines
         .iter()
-        .position(|line| line.trim() == "compile_error!(\"SpaceTerm supports macOS and Linux only\");")
+        .position(|line| {
+            line.trim() == "compile_error!(\"SpaceTerm supports macOS and Linux only\");"
+        })
         .unwrap();
     assert_eq!(
         lines[guard - 1].trim(),

@@ -1,4 +1,10 @@
 use super::native_services::PastePayload;
+use crate::terminal::key::InputModifiers;
+mod clipboard;
+mod input;
+pub(crate) use clipboard::ClipboardRequest;
+use clipboard::{ClipboardAuthority, ClipboardCompletion, WorkerClipboard};
+use input::PtyInput;
 mod schedules;
 use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
 mod launch;
@@ -9,6 +15,7 @@ pub(crate) use launch::{
     TerminalLaunchPlan,
 };
 use std::fmt;
+#[cfg(test)]
 use std::io::Write;
 use std::mem;
 use std::path::Path;
@@ -40,8 +47,6 @@ use crate::terminal::emulator::{
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::identity;
-#[cfg(test)]
-use crate::terminal::key::InputModifiers;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{KeyInput, PhysicalKey};
@@ -120,7 +125,7 @@ pub(crate) struct TerminalAppearanceUpdate {
 #[cfg(test)]
 pub(crate) fn test_terminal_appearance_update() -> TerminalAppearanceUpdate {
     use crate::appearance::{
-        AppearancePreferences, AvailableFonts, ThemeCatalog, SystemAppearance,
+        AppearancePreferences, AvailableFonts, SystemAppearance, ThemeCatalog,
     };
 
     let resolved = ThemeCatalog::default()
@@ -258,6 +263,7 @@ pub(crate) struct StartedTerminalSession {
     pub(crate) handle: Box<dyn TerminalSessionHandle>,
     pub(crate) events: async_channel::Receiver<SessionEvent>,
     pub(crate) accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+    pub(crate) clipboard: async_channel::Receiver<ClipboardRequest>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -404,6 +410,9 @@ pub(crate) trait TerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>>;
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.copy_selection()
+    }
     fn copy_selection_at(
         &self,
         generation: PresentationGeneration,
@@ -442,6 +451,8 @@ pub(crate) struct TerminalSession {
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
     schedule_input: ScheduleInput,
+    clipboard_requests: async_channel::Receiver<ClipboardRequest>,
+    clipboard_authority: Arc<ClipboardAuthority>,
 }
 
 type StartedSession = (
@@ -480,6 +491,7 @@ impl TerminalSession {
     }
 
     fn request_shutdown(&mut self) {
+        self.clipboard_authority.focus(false);
         // Request termination before transferring sole responsibility to off-thread PTY cleanup.
         if let Some(close_handle) = self.native_pty_close.take()
             && let Err(error) = close_handle.request_close()
@@ -531,6 +543,7 @@ impl TerminalSessionHandle for TerminalSession {
     }
 
     fn focus(&self, focused: bool) {
+        self.clipboard_authority.focus(focused);
         if let Some(commands) = &self.commands
             && commands.send(Command::Focus(focused)).is_err()
         {
@@ -659,6 +672,20 @@ impl TerminalSessionHandle for TerminalSession {
         self.copy_selection_query(None)
     }
 
+    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        let commands = self
+            .commands
+            .as_ref()
+            .ok_or(SelectionCopyError::WorkerStopped)?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        commands
+            .send(Command::CopyOrForward(reply))
+            .map_err(|_| SelectionCopyError::WorkerStopped)?;
+        receiver
+            .recv()
+            .map_err(|_| SelectionCopyError::WorkerStopped)?
+    }
+
     fn copy_selection_at(
         &self,
         generation: PresentationGeneration,
@@ -717,10 +744,14 @@ struct ReaderTransport {
 }
 
 impl ReaderTransport {
-    fn new(commands: CommandSender<Command>) -> Self {
+    fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
         let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
-            output: Arc::new(SessionNativePtyOutputSink { commands, events }),
+            output: Arc::new(SessionNativePtyOutputSink {
+                commands,
+                events,
+                clipboard_authority,
+            }),
             event_rx,
         }
     }
@@ -731,6 +762,7 @@ impl ReaderTransport {
 }
 
 struct SessionNativePtyOutputSink {
+    clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
     events: mpsc::SyncSender<NativePtyOutput>,
 }
@@ -738,12 +770,13 @@ struct SessionNativePtyOutputSink {
 impl NativePtyOutputSink for SessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
-        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady).is_ok()
+        let epoch = self.clipboard_authority.grant();
+        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady(epoch)).is_ok()
     }
 }
 
 struct ReaderEventBatch {
-    chunks: Vec<Vec<u8>>,
+    chunks: Vec<(Vec<u8>, Option<u64>)>,
     reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
@@ -794,10 +827,15 @@ enum Command {
     GraphicsBudgetAvailable,
     SetPresentable(bool),
     AppearanceChanged,
-    ReaderReady,
+    ReaderReady(Option<u64>),
     CompressScrollback,
     Shutdown,
     PollHiddenInput,
+    CopyOrForward(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    CompleteClipboard(u64, ClipboardCompletion),
+    ClipboardExpired,
+    ResumeOutput(Option<u64>),
+    FlushInput,
 }
 
 impl Command {
@@ -844,10 +882,15 @@ impl fmt::Debug for Command {
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
             Self::AppearanceChanged => "AppearanceChanged",
-            Self::ReaderReady => "ReaderReady",
+            Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
             Self::Shutdown => "Shutdown",
             Self::PollHiddenInput => "PollHiddenInput",
+            Self::CopyOrForward(..) => "CopyOrForward",
+            Self::CompleteClipboard(..) => "CompleteClipboard",
+            Self::ClipboardExpired => "ClipboardExpired",
+            Self::ResumeOutput(_) => "ResumeOutput",
+            Self::FlushInput => "FlushInput",
         };
         formatter.write_str(name)
     }
@@ -856,6 +899,7 @@ impl fmt::Debug for Command {
 struct TerminalWorker {
     metadata_state: SessionMetadataState,
     native_pty: NativePtyOwner,
+    input: PtyInput,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
@@ -866,7 +910,8 @@ struct TerminalWorker {
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
     schedules: WorkerSchedules,
-    osc52_filter: Osc52Filter,
+    osc52_filter: Osc52Filter<Option<u64>>,
+    clipboard: WorkerClipboard,
 }
 
 struct TerminalWorkerContext {
@@ -879,6 +924,7 @@ struct TerminalWorkerContext {
 }
 
 struct TerminalWorkerPublishers {
+    clipboard: WorkerClipboard,
     metadata_state: SessionMetadataState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -948,6 +994,12 @@ impl HeldKeys {
         }
     }
 
+    fn suppress_shortcut_release(&mut self, key: PhysicalKey) {
+        if !self.suppressed_releases.contains(&key) {
+            self.suppressed_releases.push(key);
+        }
+    }
+
     fn take_releases(&mut self) -> Vec<KeyInput> {
         std::mem::take(&mut self.held)
             .into_iter()
@@ -1012,6 +1064,7 @@ impl TerminalWorker {
             initial_appearance,
         } = context;
         let TerminalWorkerPublishers {
+            clipboard,
             metadata_state,
             events,
             accessibility,
@@ -1047,6 +1100,7 @@ impl TerminalWorker {
         let mut worker = Self {
             metadata_state,
             native_pty,
+            input: PtyInput::default(),
             emulator,
             commands,
             reader_events: reader_event_rx,
@@ -1058,6 +1112,7 @@ impl TerminalWorker {
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), schedule_input),
             osc52_filter: Osc52Filter::default(),
+            clipboard,
         };
 
         if !startup.succeeded() {
@@ -1082,7 +1137,7 @@ impl TerminalWorker {
             let postpone_compression = matches!(
                 &command,
                 Command::Key(..)
-                    | Command::ReaderReady
+                    | Command::ReaderReady(_)
                     | Command::RequestPaste(..)
                     | Command::ResolvePaste(..)
                     | Command::Focus(..)
@@ -1112,10 +1167,25 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        if self
+            .input
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(Command::FlushInput);
+        }
+        if self.clipboard.expired() {
+            return Some(Command::ClipboardExpired);
+        }
         // A command removed from the shared queue while batching PTY output owns this
         // single slot. Run it before schedules can install barrier work into the slot.
         if let Some(command) = self.pending_command.take() {
             return Some(self.note_normal_command(command));
+        }
+        if !self.clipboard.pending()
+            && let Some(epoch) = self.clipboard.deferred_readers.pop_front()
+        {
+            return Some(Command::ResumeOutput(epoch));
         }
         if self.schedules.must_continue_accessibility() {
             return self.take_accessibility_continuation();
@@ -1154,6 +1224,8 @@ impl TerminalWorker {
             let deadline = [
                 self.schedules.deadline(synchronized_output_deadline),
                 self.emulator.metadata_status_deadline(),
+                self.clipboard.deadline(),
+                self.input.deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1166,6 +1238,16 @@ impl TerminalWorker {
             match self.commands.recv_timeout(timeout) {
                 Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self
+                        .input
+                        .deadline()
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                    {
+                        return Some(Command::FlushInput);
+                    }
+                    if self.clipboard.expired() {
+                        return Some(Command::ClipboardExpired);
+                    }
                     let now = Instant::now();
                     if self
                         .emulator
@@ -1230,7 +1312,17 @@ impl TerminalWorker {
                 self.apply_emulator_action(action)
             }
             Command::Focus(focused) => self.process_focus(focused),
-            Command::ReaderReady => self.process_reader_events(),
+            Command::ReaderReady(epoch) if self.clipboard.pending() => {
+                self.clipboard.deferred_readers.push_back(epoch);
+                true
+            }
+            Command::ReaderReady(epoch) => self.process_reader_events(epoch),
+            Command::ResumeOutput(epoch) => self.process_reader_events_limit(1, epoch),
+            Command::CompleteClipboard(id, completion) => {
+                self.complete_clipboard(Some(id), completion)
+            }
+            Command::ClipboardExpired => self.complete_clipboard(None, ClipboardCompletion::Denied),
+            Command::FlushInput => self.flush_input(),
             Command::CompressScrollback => {
                 match self.emulator.compress_scrollback() {
                     Ok(result) => self.schedules.complete_compression(Instant::now(), result),
@@ -1331,6 +1423,32 @@ impl TerminalWorker {
                 self.process_paste_resolution(id, decision, reply)
             }
             Command::PasteConfirmationExpired => true,
+            Command::CopyOrForward(reply) => {
+                let selection = self
+                    .emulator
+                    .selection_copy(SelectionCopyOptions::default())
+                    .map_err(|_| SelectionCopyError::Formatting);
+                let forward = matches!(selection, Ok(None))
+                    && self.terminal_input_focused
+                    && self.emulator.enhanced_keyboard_active();
+                let keep_running = !forward
+                    || self.process_shortcut(KeyInput {
+                        action: crate::terminal::key::KeyAction::Press,
+                        physical_key: crate::terminal::key::PhysicalKey::C,
+                        native_key_code: None,
+                        logical_key: "c".into(),
+                        text: None,
+                        unshifted_codepoint: Some('c'),
+                        modifiers: InputModifiers {
+                            platform: true,
+                            ..InputModifiers::default()
+                        },
+                        consumed_modifiers: InputModifiers::default(),
+                        option_as_alt: crate::terminal::key::OptionAsAltPolicy::None,
+                    });
+                let _ = reply.send(selection);
+                keep_running
+            }
             Command::SelectionCopy(generation, reply) => {
                 let selection = if generation.is_some_and(|generation| {
                     generation != self.emulator.presentation_generation()
@@ -1553,8 +1671,12 @@ impl TerminalWorker {
         }
     }
 
-    fn process_reader_events(&mut self) -> bool {
-        let (batch, commands_open) = match self.receive_reader_batch(PTY_OUTPUT_QUEUE_CAPACITY) {
+    fn process_reader_events(&mut self, epoch: Option<u64>) -> bool {
+        self.process_reader_events_limit(PTY_OUTPUT_QUEUE_CAPACITY, epoch)
+    }
+
+    fn process_reader_events_limit(&mut self, limit: usize, epoch: Option<u64>) -> bool {
+        let (batch, commands_open) = match self.receive_reader_batch(limit, epoch) {
             Ok(batch) => batch,
             Err(message) => {
                 self.send_runtime_failure(message);
@@ -1570,28 +1692,41 @@ impl TerminalWorker {
         }
 
         if let Some(read_error) = reader_stopped {
-            if !self.end_synchronized_output() {
-                return false;
+            if self.clipboard.pending() {
+                self.clipboard.reader_stop = Some(read_error);
+                true
+            } else {
+                self.finish_reader_output(read_error)
             }
-            let event = classify_reader_stop(
-                read_error,
-                self.native_pty.wait_for_exit(FINAL_CHILD_WAIT_TIMEOUT),
-            );
-            self.emulator.mark_metadata_stale();
-            if !self.publish_screen() {
-                return false;
-            }
-            if !self.publish_final_accessibility() {
-                return false;
-            }
-            self.send_terminal_event(event);
-            false
         } else {
             commands_open
         }
     }
 
-    fn receive_reader_batch(&mut self, limit: usize) -> Result<(ReaderEventBatch, bool), String> {
+    fn finish_reader_output(
+        &mut self,
+        read_error: Option<crate::platform::native_pty::NativePtyReadFailure>,
+    ) -> bool {
+        if !self.end_synchronized_output() {
+            return false;
+        }
+        let event = classify_reader_stop(
+            read_error,
+            self.native_pty.wait_for_exit(FINAL_CHILD_WAIT_TIMEOUT),
+        );
+        self.emulator.mark_metadata_stale();
+        if !self.publish_screen() || !self.publish_final_accessibility() {
+            return false;
+        }
+        self.send_terminal_event(event);
+        false
+    }
+
+    fn receive_reader_batch(
+        &mut self,
+        limit: usize,
+        mut epoch: Option<u64>,
+    ) -> Result<(ReaderEventBatch, bool), String> {
         let mut batch = ReaderEventBatch {
             chunks: Vec::with_capacity(limit),
             reader_stopped: None,
@@ -1600,7 +1735,7 @@ impl TerminalWorker {
 
         for index in 0..limit {
             match self.reader_events.recv() {
-                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push(bytes),
+                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push((bytes, epoch)),
                 Ok(NativePtyOutput::Stopped(read_error)) => {
                     batch.reader_stopped = Some(read_error);
                     break;
@@ -1616,7 +1751,9 @@ impl TerminalWorker {
                 break;
             }
             match self.commands.try_recv() {
-                Ok(Command::ReaderReady) => {}
+                Ok(Command::ReaderReady(next_epoch)) => {
+                    epoch = next_epoch;
+                }
                 Ok(command) => {
                     self.pending_command = Some(command);
                     break;
@@ -1632,25 +1769,34 @@ impl TerminalWorker {
         Ok((batch, commands_open))
     }
 
-    fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
+    fn process_output_chunks(&mut self, chunks: Vec<(Vec<u8>, Option<u64>)>) -> bool {
         let previous_metadata = self.emulator.metadata();
-        let received_output = !chunks.is_empty();
+        let received_output = !chunks.is_empty() || !self.clipboard.effects.is_empty();
+        for (bytes, epoch) in chunks {
+            self.clipboard
+                .enqueue(self.osc52_filter.feed_with_context(&bytes, epoch));
+        }
         let mut focus_reports = Vec::new();
-        for bytes in chunks {
-            for effect in self.osc52_filter.feed(&bytes) {
-                let continued = match effect {
-                    Osc52Effect::Terminal(bytes) => {
-                        self.feed_terminal_output(&bytes, &mut focus_reports)
-                    }
-                    // Denial still separates earlier replies from later terminal output.
-                    Osc52Effect::Operation(_) => {
-                        self.flush_ordered_terminal_replies(&mut focus_reports)
-                    }
-                    Osc52Effect::Rejected(_) => true,
-                };
-                if !continued {
-                    return false;
+        while !self.clipboard.pending() {
+            let Some((effect, epoch)) = self.clipboard.effects.pop_front() else {
+                break;
+            };
+            let continued = match effect {
+                Osc52Effect::Terminal(bytes) => {
+                    self.feed_terminal_output(&bytes, &mut focus_reports)
                 }
+                Osc52Effect::Operation(operation) => {
+                    if !self.flush_ordered_terminal_replies(&mut focus_reports) {
+                        return false;
+                    }
+                    self.clipboard
+                        .begin(operation, epoch)
+                        .is_none_or(|bytes| self.write_pty(&bytes))
+                }
+                Osc52Effect::Rejected(_) => true,
+            };
+            if !continued {
+                return false;
             }
         }
 
@@ -1680,6 +1826,25 @@ impl TerminalWorker {
             {
                 return false;
             }
+        }
+        true
+    }
+
+    fn complete_clipboard(&mut self, id: Option<u64>, completion: ClipboardCompletion) -> bool {
+        let (completed, response) = self.clipboard.complete(id, completion);
+        if !completed {
+            return true;
+        }
+        if response.is_some_and(|bytes| !self.write_pty(&bytes)) {
+            return false;
+        }
+        if !self.process_output_chunks(Vec::new()) {
+            return false;
+        }
+        if !self.clipboard.pending()
+            && let Some(stop) = self.clipboard.reader_stop.take()
+        {
+            return self.finish_reader_output(stop);
         }
         true
     }
@@ -1733,6 +1898,21 @@ impl TerminalWorker {
                 false
             }
         }
+    }
+
+    fn process_shortcut(&mut self, mut input: KeyInput) -> bool {
+        // Menu key equivalents may never deliver a physical key-up event.
+        // Complete the semantic gesture and suppress any later physical release.
+        if !self.process_key(input.clone()) {
+            return false;
+        }
+        input.action = crate::terminal::key::KeyAction::Release;
+        let key = input.physical_key;
+        if !self.process_key(input) {
+            return false;
+        }
+        self.held_keys.suppress_shortcut_release(key);
+        true
     }
 
     fn cancel_pointer_drag(&mut self) -> bool {
@@ -1817,12 +1997,16 @@ impl TerminalWorker {
     }
 
     fn write_pty(&mut self, bytes: &[u8]) -> bool {
-        if let Err(error) = self
-            .native_pty
-            .write_all(bytes)
-            .and_then(|()| self.native_pty.flush())
-        {
-            let _ = self.send_runtime_failure(format!("failed to write to the shell PTY: {error}"));
+        if self.input.enqueue(bytes).is_err() {
+            let _ = self.send_runtime_failure("PTY input queue is full".to_owned());
+            return false;
+        }
+        self.flush_input()
+    }
+
+    fn flush_input(&mut self) -> bool {
+        if self.input.drain(&mut self.native_pty).is_err() {
+            let _ = self.send_runtime_failure("failed to write to the shell PTY".to_owned());
             return false;
         }
         true

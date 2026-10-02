@@ -13,7 +13,7 @@ use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
-use super::super::controls::CaptionTone;
+use crate::ui::sidebar_window::form::CaptionTone;
 use super::ShortcutDescription;
 
 fn open_keybindings(
@@ -281,6 +281,35 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
             tone: CaptionTone::Error,
         })
     );
+}
+
+#[cfg(feature = "developer-tools")]
+#[gpui::test]
+fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestAppContext) {
+    let owner = crate::application_identity::ApplicationIdentity::current().display_name();
+    let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    for (chord, text) in [
+        (
+            "cmd-alt-a",
+            format!("Primary+Alt+A is reserved by {owner} for the Developer Workbench."),
+        ),
+        (
+            "cmd-alt-c",
+            format!("Primary+Alt+C is reserved by {owner} for Toggle Appearance."),
+        ),
+    ] {
+        record(&window, Command::NewWorkspace, chord, cx);
+
+        assert!(is_recording(&window, Command::NewWorkspace, cx));
+        assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+        assert_eq!(
+            description(&window, Command::NewWorkspace, cx),
+            Some(ShortcutDescription {
+                text: text.into(),
+                tone: CaptionTone::Error,
+            })
+        );
+    }
 }
 
 #[gpui::test]

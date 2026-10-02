@@ -1,6 +1,4 @@
 pub(crate) mod appearance;
-#[cfg(feature = "appearance-exerciser")]
-pub(crate) mod appearance_exerciser;
 pub(crate) mod appearance_runtime;
 mod button_theme;
 pub(crate) mod chrome_geometry;
@@ -11,6 +9,9 @@ pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
+mod drag_and_drop;
+#[cfg(feature = "developer-tools")]
+pub(crate) mod developer_workbench;
 pub(crate) mod directory_picker;
 #[cfg(test)]
 mod floating_surface_tests;
@@ -19,6 +20,8 @@ mod light_hover_tests;
 #[cfg(test)]
 mod light_inactive_tests;
 mod menu_theme;
+#[cfg(test)]
+mod modal_appearance_tests;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
 mod pane_host;
@@ -35,6 +38,7 @@ mod selection_chip;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
+mod sidebar_window;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;
@@ -83,6 +87,16 @@ pub(crate) use terminal_pane::{
 };
 pub(crate) use workspace_frame::WorkspaceFrame;
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
+
+
+/// Finishes every hover transition in progress, since test windows have no frame loop.
+#[cfg(test)]
+pub(crate) fn settle_hover(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(spaceterm_ui::HoverFade::SETTLE);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
 
 actions!(
     terminal,

@@ -22,6 +22,8 @@ pub(crate) struct SettingsDocument {
     pub(crate) updates: crate::updates::policy::UpdatePreferences,
     #[serde(default)]
     pub(crate) keybindings: KeybindingPreferences,
+    #[serde(default)]
+    pub(crate) clipboard: crate::terminal::native_services::clipboard::ClipboardPreferences,
     pub(crate) preferences: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
@@ -34,6 +36,7 @@ impl Default for SettingsDocument {
             revision: 0,
             updates: Default::default(),
             keybindings: Default::default(),
+            clipboard: Default::default(),
             preferences: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
@@ -91,6 +94,7 @@ impl SettingsDocument {
         self.preferences = defaults.preferences;
         self.updates = defaults.updates;
         self.keybindings = defaults.keybindings;
+        self.clipboard = defaults.clipboard;
         self.terminal_themes = defaults.terminal_themes;
     }
 
@@ -100,6 +104,7 @@ impl SettingsDocument {
         self.preferences = imported.preferences;
         self.updates = imported.updates;
         self.keybindings = imported.keybindings;
+        self.clipboard = imported.clipboard;
         self.terminal_themes = imported.terminal_themes;
     }
 }

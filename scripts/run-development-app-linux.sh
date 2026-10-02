@@ -8,30 +8,12 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
 
-PROFILE="${1:-}"
-case "$PROFILE" in
-    dev)
-        CARGO_ARGUMENTS=(
-            --manifest-path "$REPO_ROOT/Cargo.toml"
-            --features development-app
-            --locked
-        )
-        APPLICATION_COMMAND=(env)
-        ;;
-    appearance)
-        CARGO_ARGUMENTS=(
-            --manifest-path "$REPO_ROOT/Cargo.toml"
-            --features appearance-exerciser
-            --locked
-        )
-        APPLICATION_COMMAND=(env SPACETERM_APPEARANCE_EXERCISER=1)
-        ;;
-    *)
-        echo "usage: $(basename -- "$0") dev|appearance" >&2
-        exit 2
-        ;;
-esac
-readonly PROFILE
+if (( $# != 0 )); then
+    echo "usage: $(basename -- "$0")" >&2
+    exit 2
+fi
+
+CARGO_ARGUMENTS=(--manifest-path "$REPO_ROOT/Cargo.toml" --locked)
 
 command -v tic >/dev/null || {
     echo "error: tic is required to compile the SpaceTerm terminfo entry; run mise run doctor:linux" >&2
@@ -51,7 +33,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 "$SCRIPT_DIR/cargo-artifacts.sh" run -- \
-    python3 "$SCRIPT_DIR/cargo-build-executable.py" \
+    python3 "$SCRIPT_DIR/build-cargo-executable.py" \
     --output "$ARTIFACT_PATH" --bin spaceterm -- \
     "${CARGO_ARGUMENTS[@]}"
 EXECUTABLE="$(<"$ARTIFACT_PATH")"
@@ -71,11 +53,10 @@ tic -x -o "$STAGING_ROOT/share/spaceterm/terminfo" "$REPO_ROOT/assets/terminfo/x
     exit 1
 }
 
-PREFIX="$PREFIX_PARENT/$PROFILE"
+PREFIX="$PREFIX_PARENT/development"
 readonly PREFIX
 rm -rf -- "$PREFIX"
 mv -- "$STAGING_ROOT" "$PREFIX"
 STAGING_ROOT=""
 
-APPLICATION_COMMAND+=("$PREFIX/bin/spaceterm")
-exec "${APPLICATION_COMMAND[@]}"
+exec "$PREFIX/bin/spaceterm"

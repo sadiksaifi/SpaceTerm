@@ -1683,3 +1683,17 @@ fn replacing_settings_takes_the_imported_catalog_and_keeps_identity() {
     assert_eq!(document.revision, 4);
     document.validate().unwrap();
 }
+
+#[test]
+fn clipboard_settings_round_trip_import_and_reset() {
+    let mut document = SettingsDocument::default();
+    document.clipboard.allow_write = false;
+    document.clipboard.allow_read = true;
+    let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
+    assert_eq!(restored.clipboard, document.clipboard);
+    let mut imported = SettingsDocument::default();
+    imported.replace_settings(restored);
+    assert_eq!(imported.clipboard, document.clipboard);
+    imported.reset_all();
+    assert_eq!(imported.clipboard, Default::default());
+}

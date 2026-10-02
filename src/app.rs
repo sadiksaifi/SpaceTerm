@@ -150,6 +150,8 @@ pub(crate) fn init(
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
     crate::ui::settings_window::init(cx);
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::init(cx);
     crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
     cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
@@ -507,27 +509,8 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
-    let appearance = crate::ui::appearance::chrome(cx);
-    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
-        .top_chrome_height(appearance.top_height());
-    let workspace_traffic_light_position = host
-        .window_frame
-        .workspace_traffic_light_position(workspace_titlebar_height);
-    let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let result = cx.open_window(
-        WindowOptions {
-            app_id: crate::app::window_application_id(),
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(480.0), px(260.0))),
-            titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
-                title: titlebar.title.clone(),
-                appears_transparent: titlebar.appears_transparent,
-                traffic_light_position: workspace_traffic_light_position
-                    .or(titlebar.traffic_light_position),
-            }),
-            ..WindowOptions::default()
-        },
+        workspace_window_options(host, cx),
         |window, cx| {
             let workspace_manager = cx.new(|cx| {
                 WorkspaceManager::new_with_adapters(
@@ -564,6 +547,32 @@ pub(crate) fn open(
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
     Ok(window)
+}
+
+fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
+    let appearance = crate::ui::appearance::chrome(cx);
+    let workspace_titlebar_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
+        .top_chrome_height(appearance.top_height());
+    let workspace_traffic_light_position = host
+        .window_frame
+        .workspace_traffic_light_position(workspace_titlebar_height);
+    let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
+    WindowOptions {
+        app_id: window_application_id(),
+        window_background: crate::ui::appearance_runtime::window_background(cx),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(480.0), px(260.0))),
+        titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
+            title: titlebar.title.clone(),
+            appears_transparent: titlebar.appears_transparent,
+            traffic_light_position: workspace_traffic_light_position
+                .or(titlebar.traffic_light_position),
+        }),
+        // The Workspace chrome moves the window through its own drag regions. AppKit must not
+        // also move it from the titlebar strip, where a Tab press starts a Tab drag.
+        app_owns_titlebar_drag: true,
+        ..WindowOptions::default()
+    }
 }
 
 /// Every live Workspace window, resolved at call time from GPUI's own registry.
@@ -976,6 +985,8 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     if let Err(error) = host.services.register() {
         eprintln!("failed to register Services: {error}");
     }
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         host.adapters.microphone_access.clone(),
@@ -1023,9 +1034,8 @@ fn open_initial_workspace(
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
     crate::ui::settings_recovery::offer_at_launch(workspace, cx);
-    #[cfg(feature = "appearance-exerciser")]
-    crate::ui::appearance_exerciser::open(workspace, cx)
-        .map_err(|_| RuntimeError::Initialization)?;
+    #[cfg(feature = "developer-tools")]
+    crate::ui::developer_workbench::open_at_launch(cx);
     Ok(workspace)
 }
 
@@ -1194,6 +1204,19 @@ mod runtime_tests {
                 .unwrap()
         });
         assert_eq!(initial_size, size(px(900.0), px(580.0)));
+    }
+
+    #[gpui::test]
+    fn workspace_window_should_leave_titlebar_moves_to_its_drag_regions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let options = cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+            workspace_window_options(&host, cx)
+        });
+
+        assert!(options.app_owns_titlebar_drag);
     }
 
     #[gpui::test]
@@ -1614,6 +1637,84 @@ mod runtime_tests {
             settings_cx.window_title().as_deref(),
             Some("Settings"),
             "transparent client chrome must retain the native window identity"
+        );
+    }
+
+    #[gpui::test]
+    fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::appearance::{ChromeDensity, SettingsDocument};
+        use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+        use gpui::{point, px};
+
+        let geometry = WindowFrameGeometry::new(Some(16.0))
+            .with_outer_edge_width(1.0)
+            .with_traffic_lights(
+                TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
+                TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+            );
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.window_frame = geometry;
+        let host = HostComposition::new(wiring).unwrap().with_appearance(
+            Arc::new(EmptySettingsStorage),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+        );
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+        let settings = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+                .expect("Settings window")
+        });
+
+        assert_eq!(
+            (
+                cx.traffic_light_position_updates(workspace.into()),
+                cx.traffic_light_position_updates(settings.into()),
+            ),
+            (
+                vec![point(px(15.5), px(14.0))],
+                vec![point(px(12.0), px(11.0))],
+            )
+        );
+
+        let user_settings = cx.update(|cx| {
+            cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings
+                .clone()
+        });
+        let token = user_settings.begin_preview(0).unwrap();
+        let mut candidate = SettingsDocument::default();
+        candidate.preferences.window.density = ChromeDensity::Comfortable;
+        user_settings.update_preview(&token, candidate).unwrap();
+        cx.run_until_parked();
+        let (workspace_expected, settings_expected) = cx.update(|cx| {
+            let appearance = crate::ui::appearance::chrome(cx);
+            let workspace_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
+                .top_chrome_height(appearance.top_height());
+            (
+                geometry
+                    .workspace_traffic_light_position(workspace_height)
+                    .unwrap(),
+                geometry
+                    .sidebar_window_traffic_light_position(appearance.top_height())
+                    .unwrap(),
+            )
+        });
+
+        assert_eq!(
+            (
+                cx.traffic_light_position_updates(workspace.into()),
+                cx.traffic_light_position_updates(settings.into()),
+            ),
+            (
+                vec![point(px(15.5), px(14.0)), workspace_expected],
+                vec![point(px(12.0), px(11.0)), settings_expected],
+            )
         );
     }
 

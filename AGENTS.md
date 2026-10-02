@@ -40,5 +40,9 @@ Put task plans and validation reports in issues or PRs.
 - Always write Conventional Commits, for example `fix(updates): preserve active sessions`.
 - Use the tasks in `.mise.toml` through `mise run` as the command authority.
 - Keep generic mise tasks platform-neutral. Give every Operating-System-specific task an explicit
-  platform segment and every Operating-System-specific script an explicit platform marker.
+  platform segment and every Operating-System-specific script an explicit platform marker: a `-<platform>` suffix or a
+  `<platform>/` directory.
+- Name mise tasks `<domain>[:<action>][:<qualifier>][:<platform>]`, with the platform segment last.
+  Name single-purpose scripts `<verb>-<subject>[-<platform>]`; a script with subcommands takes its
+  subject's name.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.

@@ -17,6 +17,7 @@ pub(crate) mod testing;
 
 #[derive(Clone)]
 pub(crate) struct NativeServiceAdapters {
+    pub(crate) text_clipboard: std::rc::Rc<dyn clipboard::TextClipboard>,
     pub(crate) selection_clipboard: std::rc::Rc<dyn clipboard::SelectionClipboard>,
     pub(crate) file_insertion: file_insertion::FileInsertionPolicy,
     pub(crate) file_clipboard: std::rc::Rc<dyn clipboard::FileClipboard>,

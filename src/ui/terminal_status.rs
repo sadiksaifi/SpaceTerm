@@ -18,7 +18,9 @@ use gpui::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
     Pixels, Rgba, Task, Window, div, px,
 };
-use spaceterm_ui::{FrameSpinner, Icon, IconName, ProgressSize};
+use spaceterm_ui::{
+    DeterminateProgress, FrameSpinner, Icon, IconName, ProgressRing, ProgressSize, ProgressState,
+};
 
 use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata, TerminalMetadataSnapshot};
 #[cfg(test)]
@@ -177,9 +179,11 @@ pub(crate) struct StatusGlyph {
     /// Keys the attention blink's clock so it survives across frames.
     pub(crate) id: ElementId,
     /// Names the glyph as `{prefix}-{progress state}`, its attention state as
-    /// `{prefix}-attention`, and the settled additive mark as `{prefix}-attention-badge`.
+    /// `{prefix}-attention`, and the additive badge as `{prefix}-attention-badge`.
     pub(crate) selector_prefix: String,
     pub(crate) colors: StatusColors,
+    /// Gives known-percentage work the determinate ring, so busy is not told by color alone.
+    pub(crate) differentiate_without_color: bool,
 }
 
 impl StatusGlyph {
@@ -189,7 +193,8 @@ impl StatusGlyph {
     /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors:
     /// work with a known percentage keeps the glyph in the busy color, and work whose completion is
     /// unknown takes the frame spinner. Attention blinks the mark, then settles as an additive badge
-    /// so the work shape remains.
+    /// so the work shape remains. Under Differentiate Without Color, known-percentage work takes the
+    /// determinate ring and the attention badge shows from the first blink.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -200,6 +205,7 @@ impl StatusGlyph {
             id,
             selector_prefix,
             colors,
+            differentiate_without_color,
         } = self;
         let state = progress
             .name()
@@ -217,6 +223,7 @@ impl StatusGlyph {
             size,
             progress,
             colors,
+            differentiate_without_color,
             // The animation hangs off this Session's own glyph identity, so one spinner never
             // shares its frame state with another Session's.
             id: ElementId::NamedChild(std::sync::Arc::new(id.clone()), "progress".into()),
@@ -230,7 +237,9 @@ impl StatusGlyph {
             .child(Stepped::new(id, BLINK_STEP, BLINKS * 2, move |step| {
                 let state_selector = selector.clone();
                 let badge_selector = format!("{selector}-badge");
-                let settled = step.is_none();
+                // The blink is a color change, so under Differentiate Without Color the badge
+                // shows from the first step rather than only once the blink settles.
+                let badged = step.is_none() || differentiate_without_color;
                 let blinked = step.is_some_and(|step| step % 2 == 0);
                 let badge_size = attention_badge_size(size);
                 div()
@@ -241,7 +250,7 @@ impl StatusGlyph {
                     .items_center()
                     .justify_center()
                     .child(mark.render(blinked))
-                    .when(settled, |glyph| {
+                    .when(badged, |glyph| {
                         glyph.child(
                             div()
                                 .debug_selector(move || badge_selector)
@@ -314,6 +323,7 @@ struct Mark {
     size: Pixels,
     progress: TerminalProgress,
     colors: StatusColors,
+    differentiate_without_color: bool,
     /// Keys the progress mark's own animation, so a spinner survives across frames.
     id: ElementId,
     /// Names the frame spinner as `{selector}` and its frames as `{selector}-frame`.
@@ -330,15 +340,26 @@ impl Mark {
             size,
             progress,
             colors,
+            differentiate_without_color,
             id,
             selector,
         } = self;
         let (tint, opacity) = treatment(progress, blinked);
-        let mark = match (status_shape(progress), reported) {
+        let mark = match (status_shape(progress, differentiate_without_color), reported) {
             (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
                 .debug_selector(selector)
                 .into_any_element(),
+            (StatusShape::Ring(percent), _) => ProgressRing::new(
+                id,
+                PROGRESS_NAME,
+                DeterminateProgress::new(f64::from(percent) / 100.0)
+                    .map_or(ProgressState::Indeterminate, ProgressState::Determinate),
+            )
+            .size(ProgressSize::Compact)
+            .inherited()
+            .debug_selector(selector)
+            .into_any_element(),
             (StatusShape::Error, _) => {
                 Icon::inherited(IconName::TriangleAlert, size).into_any_element()
             }
@@ -361,13 +382,20 @@ impl Mark {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StatusShape {
     Glyph,
+    /// Determinate progress in percent.
+    Ring(u8),
     Spinner,
     Error,
     Paused,
 }
 
-fn status_shape(progress: TerminalProgress) -> StatusShape {
+fn status_shape(progress: TerminalProgress, differentiate_without_color: bool) -> StatusShape {
     match progress {
+        // Under Differentiate Without Color the busy color cannot be the only cue, so the work
+        // takes the determinate ring, the one shape that also says how far it has come.
+        TerminalProgress::Normal(percent) if differentiate_without_color => {
+            StatusShape::Ring(percent)
+        }
         // A percentage says the work is bounded, which the busy color already carries. A ring in
         // this glyph-sized slot reads as a solid circle rather than as progress, so the glyph stays.
         TerminalProgress::None | TerminalProgress::Normal(_) => StatusShape::Glyph,
@@ -544,6 +572,46 @@ mod tests {
         assert_eq!(notifications.get(), 3);
     }
 
+    #[gpui::test]
+    fn attention_badges_from_its_first_blink_only_under_differentiate_without_color(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Probe;
+        impl gpui::Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let glyph = |prefix: &str, differentiate_without_color| {
+                    StatusGlyph {
+                        icon: IconName::Terminal,
+                        reported: None,
+                        size: px(14.0),
+                        progress: TerminalProgress::None,
+                        attention: true,
+                        id: ElementId::Name(prefix.to_owned().into()),
+                        selector_prefix: prefix.to_owned(),
+                        colors: StatusColors {
+                            host: gpui::rgba(0x000000ff),
+                            attention: gpui::rgba(0xffcc00ff),
+                            busy: gpui::rgba(0x3399ffff),
+                            error: gpui::rgba(0xff3333ff),
+                            paused: gpui::rgba(0x888888ff),
+                        },
+                        differentiate_without_color,
+                    }
+                    .render()
+                };
+                div()
+                    .child(glyph("color", false))
+                    .child(glyph("shape", true))
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Probe);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("color-attention").is_some());
+        assert!(cx.debug_bounds("color-attention-badge").is_none());
+        assert!(cx.debug_bounds("shape-attention-badge").is_some());
+    }
+
     /// A program's own glyph leaves the title and takes the Session's glyph slot instead.
     #[test]
     fn a_title_should_give_up_the_glyph_the_program_draws_at_its_front() {
@@ -641,9 +709,9 @@ mod tests {
     #[test]
     fn semantic_statuses_keep_distinct_shapes_when_their_colors_coincide() {
         let shapes = [
-            status_shape(TerminalProgress::Indeterminate),
-            status_shape(TerminalProgress::Error(30)),
-            status_shape(TerminalProgress::Paused(70)),
+            status_shape(TerminalProgress::Indeterminate, false),
+            status_shape(TerminalProgress::Error(30), false),
+            status_shape(TerminalProgress::Paused(70), false),
         ];
 
         assert!(shapes[0] != shapes[1] && shapes[0] != shapes[2] && shapes[1] != shapes[2]);
@@ -662,10 +730,25 @@ mod tests {
     }
 
     #[test]
+    fn differentiate_without_color_gives_every_tinted_state_a_shape_apart_from_idle() {
+        let idle = status_shape(TerminalProgress::None, true);
+        for progress in [
+            TerminalProgress::Normal(0),
+            TerminalProgress::Normal(42),
+            TerminalProgress::Normal(100),
+            TerminalProgress::Error(30),
+            TerminalProgress::Paused(70),
+        ] {
+            assert_ne!(treatment(progress, false).0, Tint::Inherited, "{progress:?}");
+            assert_ne!(status_shape(progress, true), idle, "{progress:?}");
+        }
+    }
+
+    #[test]
     fn known_percentages_keep_the_glyph_and_unknown_work_spins() {
         for percent in [0, 42, 100] {
             assert_eq!(
-                status_shape(TerminalProgress::Normal(percent)),
+                status_shape(TerminalProgress::Normal(percent), false),
                 StatusShape::Glyph,
                 "{percent}%"
             );
@@ -674,7 +757,7 @@ mod tests {
             TerminalProgress::Indeterminate,
             TerminalProgress::TitleActivity,
         ] {
-            assert_eq!(status_shape(progress), StatusShape::Spinner, "{progress:?}");
+            assert_eq!(status_shape(progress, false), StatusShape::Spinner, "{progress:?}");
         }
     }
 

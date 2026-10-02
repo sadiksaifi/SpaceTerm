@@ -345,7 +345,7 @@ struct ScrollbarDrag<O> {
 /// offset mapping. Callers adapt their scroll model through [`ScrollMetrics`] and apply requested
 /// offsets received through [`OverlayScrollbarEvent`].
 pub struct OverlayScrollbar<O: ScrollOffset> {
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     name: &'static str,
     metrics: Option<ScrollMetrics<O>>,
@@ -361,7 +361,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     /// Creates a hidden scrollbar with a stable name used for element identity and diagnostics.
     pub fn new(name: &'static str) -> Self {
         Self {
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_state: None,
             name,
             metrics: None,
@@ -375,7 +375,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
     }
 
     /// Pins only thumb presentation without starting a drag interaction.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
         self.preview_state = Some(state);
         self
@@ -606,7 +606,12 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         ))
     }
 
-    fn render_thumb(&self, geometry: ThumbGeometry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_thumb(
+        &self,
+        geometry: ThumbGeometry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let scrollbar = cx.entity().downgrade();
         let hover_scrollbar = scrollbar.clone();
         let down_scrollbar = scrollbar.clone();
@@ -620,20 +625,23 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             |catalog| &catalog.scrollbar,
         );
         let (thumb_color, hover_color) = theme.resolve(dragging);
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         let (thumb_color, hover_color) =
             self.preview_state
                 .map_or((thumb_color, hover_color), |state| {
                     let color = theme.thumb_color(state.hovered(), state.pressed());
                     (color, color)
                 });
-        let group = thumb_id.clone();
-        let hover_group = group.clone();
+        let hover = crate::HoverFade::new(
+            SharedString::from(format!("{}-thumb-hover", self.name)),
+            window,
+            cx,
+        );
+        let thumb_color = crate::mix_rgba(thumb_color, hover_color, hover.level(window, cx));
         let thumb_debug = thumb_id.clone();
         let hitbox_debug = hitbox_id.clone();
 
         div()
-            .group(group)
             .id(hitbox_id)
             .debug_selector(move || hitbox_debug.to_string())
             .absolute()
@@ -659,9 +667,9 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     .rounded(theme.metrics.thumb_width / 2.0)
                     .border_1()
                     .border_color(theme.thumb_border)
-                    .bg(thumb_color)
-                    .group_hover(hover_group, move |thumb| thumb.bg(hover_color)),
+                    .bg(thumb_color),
             )
+            .child(hover.tracker())
             .child(
                 canvas(
                     |_, _, _| (),
@@ -715,7 +723,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
 impl<O: ScrollOffset> EventEmitter<OverlayScrollbarEvent<O>> for OverlayScrollbar<O> {}
 
 impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *crate::control_theme_catalog(cx).map_or_else(
             || cx.global::<ScrollbarTheme>(),
             |catalog| &catalog.scrollbar,
@@ -735,7 +743,7 @@ impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
                         .border_l_1()
                         .border_color(theme.track_border),
                 )
-                .child(self.render_thumb(geometry, cx))
+                .child(self.render_thumb(geometry, window, cx))
                 .into_any_element(),
             None => Empty.into_any_element(),
         }

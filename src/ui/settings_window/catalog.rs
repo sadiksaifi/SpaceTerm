@@ -11,7 +11,7 @@ use crate::keybindings::{Command, CommandGroup};
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum SettingsSectionId {
+pub(crate) enum SettingsSectionId {
     /// How SpaceTerm's windows present themselves: density, transparency, and blur.
     Interface,
     /// Terminal typography and text rendering.
@@ -20,7 +20,7 @@ pub(super) enum SettingsSectionId {
     Themes,
     /// The Shortcut each Command resolves to.
     Keybindings,
-    /// System permissions that tools running in SpaceTerm rely on.
+    /// Clipboard access and system permissions for terminal programs.
     Privacy,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
@@ -63,7 +63,7 @@ impl SettingsSectionId {
                 "Shortcuts for SpaceTerm commands. Click a shortcut, then press the new keys. Press Delete to remove it."
             }
             Self::Privacy => {
-                "System permissions that voice and other tools running in SpaceTerm rely on."
+                "Clipboard access and system permissions for programs running in SpaceTerm."
             }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
@@ -108,6 +108,8 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
+    ClipboardWrites,
+    ClipboardReads,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -155,6 +157,8 @@ impl SettingsRowId {
             // through their own field instead of an appearance reset target.
             Self::InstalledThemes
             | Self::MicrophoneAccess
+            | Self::ClipboardWrites
+            | Self::ClipboardReads
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -409,6 +413,38 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-microphone-access",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ClipboardWrites,
+        section: SettingsSectionId::Privacy,
+        group: "Clipboard",
+        label: "Allow terminal programs to copy text",
+        keywords: &[
+            "clipboard",
+            "copy",
+            "paste",
+            "ssh",
+            "osc 52",
+            "neovim",
+            "tui",
+        ],
+        selector: "settings-row-clipboard-writes",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ClipboardReads,
+        section: SettingsSectionId::Privacy,
+        group: "Clipboard",
+        label: "Allow terminal programs to read clipboard text",
+        keywords: &[
+            "clipboard",
+            "copy",
+            "paste",
+            "ssh",
+            "osc 52",
+            "neovim",
+            "tui",
+        ],
+        selector: "settings-row-clipboard-reads",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -485,7 +521,9 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Advanced,
         group: "Transfer",
         label: "Export settings",
-        keywords: &["export", "backup", "save", "copy", "file", "transfer", "migrate"],
+        keywords: &[
+            "export", "backup", "save", "copy", "file", "transfer", "migrate",
+        ],
         selector: "settings-row-export-settings",
     },
     SettingsRowDescriptor {
@@ -493,7 +531,9 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Advanced,
         group: "Transfer",
         label: "Import settings",
-        keywords: &["import", "restore", "backup", "load", "file", "transfer", "migrate"],
+        keywords: &[
+            "import", "restore", "backup", "load", "file", "transfer", "migrate",
+        ],
         selector: "settings-row-import-settings",
     },
     SettingsRowDescriptor {
@@ -501,7 +541,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Advanced,
         group: "Reset",
         label: "Reset all settings",
-        keywords: &["reset", "defaults", "factory", "clear", "start over", "restore"],
+        keywords: &[
+            "reset",
+            "defaults",
+            "factory",
+            "clear",
+            "start over",
+            "restore",
+        ],
         selector: "settings-row-reset-all-settings",
     },
 ];
@@ -592,7 +639,7 @@ mod tests {
     use super::*;
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 22] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 24] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -607,6 +654,8 @@ mod tests {
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
         SettingsRowId::MicrophoneAccess,
+        SettingsRowId::ClipboardWrites,
+        SettingsRowId::ClipboardReads,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -868,6 +917,8 @@ mod tests {
                 row.id,
                 SettingsRowId::InstalledThemes
                     | SettingsRowId::MicrophoneAccess
+                    | SettingsRowId::ClipboardWrites
+                    | SettingsRowId::ClipboardReads
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval

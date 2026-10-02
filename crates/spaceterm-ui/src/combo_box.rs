@@ -229,7 +229,7 @@ pub struct ComboBoxItem<I> {
     shortcut: Option<SharedString>,
     starts_group: bool,
     debug_selector: Option<String>,
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     preview_selected: bool,
 }
 
@@ -247,7 +247,7 @@ impl<I> ComboBoxItem<I> {
             shortcut: None,
             starts_group: false,
             debug_selector: None,
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_selected: false,
         }
     }
@@ -270,10 +270,10 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Paints this row as persistently selected in development acceptance fixtures.
+    /// Paints this row as persistently selected in Developer Workbench fixtures.
     ///
     /// This does not make a disabled item eligible for navigation or activation.
-    #[cfg(feature = "appearance-exerciser")]
+    #[cfg(feature = "control-preview")]
     pub fn preview_selected(mut self, selected: bool) -> Self {
         self.preview_selected = selected;
         self
@@ -340,13 +340,13 @@ impl<I> ComboBoxItem<I> {
             shortcut: self.shortcut,
             starts_group: self.starts_group,
             debug_selector: self.debug_selector,
-            #[cfg(feature = "appearance-exerciser")]
+            #[cfg(feature = "control-preview")]
             preview_selected: self.preview_selected,
         }
     }
 
     fn paints_selected(&self, provisional: bool) -> bool {
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "control-preview")]
         if self.preview_selected {
             return true;
         }
@@ -2446,6 +2446,33 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
             trigger_border
         };
         let ring_id = crate::focus_ring::ring_id(&self.id);
+        let hover = crate::HoverFade::new(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "hover".into()),
+            window,
+            cx,
+        );
+        // An open picker holds its trigger in the open paint, so hover shows only while closed.
+        let hover_level = if enabled && !open {
+            hover.level(window, cx)
+        } else {
+            0.0
+        };
+        // A ringed trigger keeps its resting border, which the ring fades out under its band.
+        let state_borders = paint
+            .trigger_state_borders
+            .filter(|_| focus_ring.is_none() && enabled && !open);
+        let trigger_border = state_borders.map_or(trigger_border, |borders| {
+            crate::mix_rgba(trigger_border, borders.hovered, hover_level)
+        });
+        let trigger_background = if enabled && !open {
+            crate::mix_rgba(
+                trigger_background,
+                paint.trigger_hover_background,
+                hover_level,
+            )
+        } else {
+            trigger_background
+        };
         let trigger = div()
             .id(self.id)
             .debug_selector(move || {
@@ -2496,27 +2523,15 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                         .shadow(trigger_shadow.layers())
                         .shadow_outside_only()
                         .when(enabled && !open, |trigger| {
-                            // A ringed trigger keeps its resting border, which the ring fades out
-                            // under its band.
-                            let state_borders =
-                                paint.trigger_state_borders.filter(|_| focus_ring.is_none());
-                            trigger
-                                .hover(move |style| {
-                                    let style = style.bg(paint.trigger_hover_background);
-                                    match state_borders {
-                                        Some(borders) => style.border_color(borders.hovered),
-                                        None => style,
-                                    }
-                                })
-                                .active(move |style| {
-                                    let style = style
-                                        .bg(paint.trigger_pressed_background)
-                                        .shadow(Vec::new());
-                                    match state_borders {
-                                        Some(borders) => style.border_color(borders.pressed),
-                                        None => style,
-                                    }
-                                })
+                            trigger.child(hover.tracker()).active(move |style| {
+                                let style = style
+                                    .bg(paint.trigger_pressed_background)
+                                    .shadow(Vec::new());
+                                match state_borders {
+                                    Some(borders) => style.border_color(borders.pressed),
+                                    None => style,
+                                }
+                            })
                         })
                 },
             )

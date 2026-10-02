@@ -12,21 +12,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  tag:
+    name: Validate release tag
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    # install_args selects this job's tools; keep mise run from installing the rest.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: node
+      - name: Validate annotated release tag
+        id: release
+        timeout-minutes: 5
+        run: mise run release:validate
+
+  validate:
+    name: Validate macOS
+    needs: tag
     runs-on: macos-26
-    timeout-minutes: 90
-    permissions:
-      contents: write
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
-      - uses: jdx/mise-action@v4
-      - name: Validate the release tag
-        id: release
-        run: mise run release:validate
+      - uses: jdx/mise-action@v5
       - name: Install Xcode Metal tools
+        timeout-minutes: 10
         run: mise run deps:metal:macos
       - name: Identify validation cache
         id: validation-cache-key
@@ -47,11 +66,65 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
           key: ${{ steps.validation-cache-key.outputs.key }}
-      - name: Validate
-        run: mise run validate:macos
-      # Packaging cleans target, so save the validation artifacts first.
-      - name: Save validation build cache before cleanup
-        if: steps.validation-cache.outputs.cache-hit != 'true'
+      - name: Report cache and artifact budget
+        env:
+          CACHE_KEY: ${{ steps.validation-cache-key.outputs.key }}
+          CACHE_HIT: ${{ steps.validation-cache.outputs.cache-hit }}
+        run: |
+          echo "Validation cache: ${CACHE_KEY} (hit: ${CACHE_HIT:-false})"
+          mise run artifacts:status
+      # Keep this list in the same order as validate:macos in .mise.toml. Each
+      # task has its own log and deadline, so a failed test is visible immediately.
+      - name: Test Cargo artifact guard
+        timeout-minutes: 5
+        run: mise run test:artifacts
+      - name: Test repository scripts
+        timeout-minutes: 5
+        run: mise run test:scripts
+      - name: Check Rust formatting
+        timeout-minutes: 5
+        run: mise run fmt:check
+      - name: Check all Rust targets and features
+        timeout-minutes: 20
+        run: mise run check
+      - name: Test all Rust targets and features
+        timeout-minutes: 30
+        run: mise run test
+      - name: Lint Rust
+        timeout-minutes: 20
+        run: mise run lint:rust
+      - name: Lint repository scripts
+        timeout-minutes: 5
+        run: mise run lint:scripts
+      - name: Check diff whitespace
+        timeout-minutes: 5
+        run: mise run lint:diff
+      - name: Test vendored terminal library
+        timeout-minutes: 10
+        run: mise run engine:test
+      - name: Test vendored terminal library without graphics
+        timeout-minutes: 10
+        run: mise run engine:test:no-graphics
+      - name: Check vendored formatting
+        timeout-minutes: 5
+        run: mise run engine:fmt:check
+      - name: Check macOS adapter formatting
+        timeout-minutes: 5
+        run: mise run fmt:check:macos
+      - name: Test macOS adapters
+        timeout-minutes: 12
+        run: mise run test:macos
+      - name: Lint macOS scripts
+        timeout-minutes: 5
+        run: mise run lint:scripts:macos
+      - name: Test macOS packaging
+        timeout-minutes: 5
+        run: mise run test:package:macos
+      - name: Test macOS updater
+        timeout-minutes: 10
+        run: mise run test:updater:macos
+      - name: Save validation cache even if a test fails
+        if: ${{ !cancelled() && steps.validation-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -62,19 +135,125 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
           key: ${{ steps.validation-cache.outputs.cache-primary-key }}
-      - name: Reclaim validation artifacts before packaging
-        run: mise run artifacts:clean
+
+  package:
+    name: Package and sign Apple Silicon
+    needs: tag
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+      - name: Install Xcode Metal tools
+        timeout-minutes: 10
+        run: mise run deps:metal:macos
+      - name: Fetch locked Rust dependencies
+        timeout-minutes: 10
+        run: mise run deps:fetch
       - name: Build and verify Apple Silicon package
+        timeout-minutes: 35
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: mise run release:macos:package "$RELEASE_TAG"
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: mise run release:package:macos "$RELEASE_TAG"
       - name: Sign and verify update assets
+        timeout-minutes: 10
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: mise run release:macos:assets "$RELEASE_TAG"
-      - name: Publish complete GitHub release
+        run: mise run release:assets:macos "$RELEASE_TAG"
+      - name: Record signed asset checksum
+        id: assets
+        run: echo "checksum=$(shasum -a 256 dist/release/SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Upload signed release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: signed-release-assets
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+    outputs:
+      checksum: ${{ steps.assets.outputs.checksum }}
+
+  publish:
+    name: Publish verified release
+    needs: [tag, validate, package]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: "python git-cliff"
+      - name: Download signed release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: signed-release-assets
+          path: dist/release
+      - name: Verify transferred assets
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          CHECKSUM: ${{ needs.package.outputs.checksum }}
+        run: |
+          printf '%s  %s\n' "$CHECKSUM" dist/release/SHA256SUMS | shasum -a 256 -c -
+          cd dist/release
+          shasum -a 256 -c SHA256SUMS
+      - name: Publish complete GitHub release
+        timeout-minutes: 10
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: mise run release:publish "$RELEASE_TAG"
+
+  homebrew:
+    name: Update Homebrew cask
+    needs: [tag, package, publish]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: python
+      - name: Download signed release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: signed-release-assets
+          path: dist/release
+      - name: Verify transferred checksums
+        env:
+          CHECKSUM: ${{ needs.package.outputs.checksum }}
+        run: printf '%s  %s\n' "$CHECKSUM" dist/release/SHA256SUMS | shasum -a 256 -c -
+      - uses: actions/checkout@v7
+        with:
+          repository: sadiksaifi/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
+          path: homebrew-tap
+      - name: Render cask
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: mise run release:cask:macos "$RELEASE_TAG" homebrew-tap/Casks/spaceterm.rb
+      - name: Commit and push cask
+        working-directory: homebrew-tap
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Casks/spaceterm.rb
+          if git diff --cached --quiet; then
+            echo "The cask already matches SpaceTerm ${RELEASE_TAG}."
+            exit 0
+          fi
+          git commit -m "release: spaceterm version ${RELEASE_TAG}" \
+            -m "Release: https://github.com/sadiksaifi/SpaceTerm/releases/tag/${RELEASE_TAG}"
+          git push

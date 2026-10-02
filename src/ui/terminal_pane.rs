@@ -1,4 +1,3 @@
-use crate::ui::appearance::gpui_color;
 use super::pane_lifecycle::PaneLifecycleDependencies;
 #[cfg(test)]
 use super::terminal_focus::TerminalFocusBlocker;
@@ -6,6 +5,7 @@ pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
 #[cfg(test)]
 use crate::terminal::RemoteChannelUnavailable;
+use crate::ui::appearance::gpui_color;
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -124,13 +124,52 @@ impl FullscreenEscapeSequence {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-enum StatusIntent {
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum StatusIntent {
     #[default]
     Information,
     Success,
     Warning,
     Error,
+}
+
+impl StatusIntent {
+    #[cfg(any(test, feature = "developer-tools"))]
+    pub(super) const ALL: [Self; 4] =
+        [Self::Information, Self::Success, Self::Warning, Self::Error];
+
+    #[cfg(feature = "developer-tools")]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Information => "Information",
+            Self::Success => "Success",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+        }
+    }
+
+    /// The intent's semantic color among `colors`.
+    pub(super) const fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
+        match self {
+            Self::Information => colors.info,
+            Self::Success => colors.success,
+            Self::Warning => colors.warning,
+            Self::Error => colors.error,
+        }
+    }
+
+    /// The glyph that leads a notice of this intent.
+    ///
+    /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
+    /// Color an error takes the circle a critical Alert uses.
+    pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
+        match self {
+            Self::Information => IconName::Info,
+            Self::Success => IconName::Check,
+            Self::Error if differentiate_without_color => IconName::CircleAlert,
+            Self::Warning | Self::Error => IconName::TriangleAlert,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -263,6 +302,7 @@ struct PaneSessionLifecycle {
     native_service_session_identity: u64,
     _event_task: Option<Task<()>>,
     _accessibility_task: Option<Task<()>>,
+    _clipboard_task: Option<Task<()>>,
 }
 
 impl PaneSessionLifecycle {
@@ -288,6 +328,7 @@ impl PaneSessionLifecycle {
             native_service_session_identity: 0,
             _event_task: None,
             _accessibility_task: None,
+            _clipboard_task: None,
         }
     }
 
@@ -304,6 +345,10 @@ impl PaneSessionLifecycle {
         self.session_epoch = self.session_epoch.wrapping_add(1);
         self._event_task.take();
         self._accessibility_task.take();
+        self._clipboard_task.take();
+        if let Some(session) = &self.session {
+            session.focus(false);
+        }
     }
 
     fn suspend(&mut self) {
@@ -338,6 +383,7 @@ impl PaneSessionLifecycle {
     fn attach(
         &mut self,
         started: crate::terminal::StartedTerminalSession,
+        window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<TerminalPane>,
     ) {
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
@@ -345,6 +391,27 @@ impl PaneSessionLifecycle {
         let receiver = started.events;
         let accessibility_receiver = started.accessibility;
         let session_epoch = self.session_epoch;
+        let clipboard_receiver = started.clipboard;
+        self._clipboard_task = Some(cx.spawn(async move |this, cx| {
+            while let Ok(request) = clipboard_receiver.recv().await {
+                if cx
+                    .update_window(window_handle, |_, window, cx| {
+                        this.update(cx, |pane, cx| {
+                            let focused = pane.terminal_session.session_epoch == session_epoch
+                                && pane.synchronize_terminal_input_focus(window, cx);
+                            let preferences = cx
+                                .try_global::<super::appearance_runtime::AppearanceRuntime>()
+                                .map(|runtime| runtime.settings.snapshot().candidate.clipboard)
+                                .unwrap_or_default();
+                            request.perform(preferences, pane.text_clipboard.as_ref(), focused, cx);
+                        })
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         self._event_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 let mut events = vec![event];
@@ -433,6 +500,8 @@ impl Drop for PaneSessionLifecycle {
 
 pub(crate) struct TerminalPane {
     terminal_session: PaneSessionLifecycle,
+    window_handle: gpui::AnyWindowHandle,
+    text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
@@ -703,6 +772,8 @@ impl TerminalPane {
 
         Self {
             terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
+            window_handle: window.window_handle(),
+            text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
             screen_session_epoch: 0,
@@ -1856,7 +1927,8 @@ impl TerminalPane {
                         .handle
                         .set_find_query(self.find_generation, input.read(cx).value().to_owned());
                 }
-                self.terminal_session.attach(started, cx);
+                self.terminal_session
+                    .attach(started, self.window_handle, cx);
                 self.flush_pending_file_insertion(cx);
             }
             Err(failure) => {
@@ -2519,6 +2591,14 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
+        // Motion with a button this Terminal never received pressed belongs to the element that
+        // received the press, such as a Pane Caption starting a Pane drag, not to the program.
+        if event.pressed_button.is_some()
+            && self.pressed_button.is_none()
+            && self.pressed_link.is_none()
+        {
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
@@ -2679,8 +2759,11 @@ impl TerminalPane {
     }
 
     fn edit_copy(&mut self, _: &EditCopy, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus_handle.is_focused(window) {
-            self.copy_selection_with_recovery(None, window, cx);
+        if self.synchronize_terminal_input_focus(window, cx)
+            && let Some(session) = self.terminal_session.session.as_ref()
+        {
+            let result = session.copy_or_forward();
+            self.publish_selection_copy(result, None, cx);
         }
     }
 
@@ -3824,12 +3907,12 @@ impl Render for TerminalPane {
         let link_preview_text = active_hovered_link
             .as_ref()
             .map(|link| link.target.value.clone());
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         let link_preview_text = link_preview_text.or_else(|| {
-            // The development fixture exercises this readout without granting hover or
+            // The Developer Workbench fixture exercises this readout without granting hover or
             // activation authority to its synthetic text.
             (displaying_current && self.product_focus.focused_pane)
-                .then(|| super::appearance_exerciser::link_preview_fixture(cx))
+                .then(|| super::developer_workbench::link_preview_fixture(cx))
                 .flatten()
                 .map(str::to_owned)
         });
@@ -3863,17 +3946,18 @@ impl Render for TerminalPane {
         let floating_colors = &appearance.floating_colors;
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
-        let (status_color, status_icon) = match self.pane_state {
-            PaneTerminalState::Failed { .. } => {
-                (floating_control_colors.error, IconName::TriangleAlert)
-            }
-            PaneTerminalState::Exited(_) => (floating_colors.text_muted, IconName::Square),
-            PaneTerminalState::Running => match self.status_intent {
-                StatusIntent::Information => (floating_control_colors.info, IconName::Info),
-                StatusIntent::Success => (floating_control_colors.success, IconName::Check),
-                StatusIntent::Warning => (floating_control_colors.warning, IconName::TriangleAlert),
-                StatusIntent::Error => (floating_control_colors.error, IconName::TriangleAlert),
-            },
+        // A failed Terminal Session reads as an error notice.
+        let status_intent = match self.pane_state {
+            PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
+            PaneTerminalState::Exited(_) => None,
+            PaneTerminalState::Running => Some(self.status_intent),
+        };
+        let (status_color, status_icon) = match status_intent {
+            None => (floating_colors.text_muted, IconName::Square),
+            Some(intent) => (
+                intent.color(floating_control_colors),
+                intent.glyph(appearance.capabilities.differentiate_without_color),
+            ),
         };
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
@@ -4162,11 +4246,20 @@ impl Render for TerminalPane {
                                                 .flex()
                                                 .items_start()
                                                 .gap(appearance.spacing(8.0))
-                                                .child(Icon::new(
-                                                    status_icon,
-                                                    status_icon_size,
-                                                    gpui_color(status_color),
-                                                ))
+                                                .child(
+                                                    div()
+                                                        .debug_selector(move || {
+                                                            format!(
+                                                                "terminal-status-glyph-{status_icon:?}"
+                                                            )
+                                                        })
+                                                        .flex_none()
+                                                        .child(Icon::new(
+                                                            status_icon,
+                                                            status_icon_size,
+                                                            gpui_color(status_color),
+                                                        )),
+                                                )
                                                 .child(
                                                     div()
                                                         .debug_selector(|| {
@@ -4395,7 +4488,6 @@ fn ime_candidate_bounds(
         size(cell_width, line_height),
     )
 }
-
 
 /// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
 /// how far along it reports being.

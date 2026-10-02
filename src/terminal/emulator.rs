@@ -1838,6 +1838,12 @@ impl TerminalEmulator {
         }
     }
 
+    pub(super) fn enhanced_keyboard_active(&self) -> bool {
+        self.terminal
+            .kitty_keyboard_flags()
+            .is_ok_and(|flags| !flags.is_empty())
+    }
+
     fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
         self.keyboard_protocol.encode(&self.terminal, input, bytes)
     }

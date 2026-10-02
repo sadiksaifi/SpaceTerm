@@ -9,6 +9,8 @@ pub(crate) enum TabError {
     TabNotFound(TabId),
     #[error("Tab ID space is exhausted")]
     IdSpaceExhausted,
+    #[error("Tab position {position} is outside a collection of {len} Tabs")]
+    PositionOutOfRange { position: usize, len: usize },
 }
 
 struct TabEntry<T> {
@@ -92,6 +94,28 @@ impl<T> TabCollection<T> {
         Ok(())
     }
 
+    /// Moves a Tab to `position` in the Tab order and reports whether the order changed.
+    ///
+    /// The Active Tab and the Root Tab keep their identities; only presentation order changes.
+    pub(crate) fn move_tab(&mut self, tab_id: TabId, position: usize) -> Result<bool, TabError> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Err(TabError::TabNotFound(tab_id));
+        };
+        if position >= self.tabs.len() {
+            return Err(TabError::PositionOutOfRange {
+                position,
+                len: self.tabs.len(),
+            });
+        }
+        if index == position {
+            return Ok(false);
+        }
+
+        let tab = self.tabs.remove(index);
+        self.tabs.insert(position, tab);
+        Ok(true)
+    }
+
     pub(crate) fn close_tab(&mut self, tab_id: TabId) -> Result<CloseTabOutcome<T>, TabError> {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Err(TabError::TabNotFound(tab_id));
@@ -153,6 +177,62 @@ mod tests {
         fn drop(&mut self) {
             self.drops.update(|drops| drops + 1);
         }
+    }
+
+    #[test]
+    fn move_tab_should_reorder_without_changing_the_active_or_root_tab() {
+        let mut tabs = TabCollection::new(|_| "first");
+        tabs.create_tab(|_| "second").unwrap();
+        let third = tabs.create_tab(|_| "third").unwrap();
+        tabs.activate_tab(TabId::new(2)).unwrap();
+
+        let moved_forward = tabs.move_tab(TabId::new(1), 2).unwrap();
+        let moved_back = tabs.move_tab(third, 0).unwrap();
+        let unchanged = tabs.move_tab(third, 0).unwrap();
+
+        assert_eq!(
+            (
+                moved_forward,
+                moved_back,
+                unchanged,
+                tabs.iter().map(|(_, tab)| *tab).collect::<Vec<_>>(),
+                tabs.active_tab(),
+                tabs.root_tab(),
+            ),
+            (
+                true,
+                true,
+                false,
+                vec!["third", "second", "first"],
+                &"second",
+                &"first",
+            )
+        );
+    }
+
+    #[test]
+    fn move_tab_should_reject_an_unknown_tab_or_position_without_mutation() {
+        let mut tabs = TabCollection::new(|_| "first");
+        tabs.create_tab(|_| "second").unwrap();
+
+        let unknown = tabs.move_tab(TabId::new(99), 0);
+        let beyond = tabs.move_tab(TabId::new(1), 2);
+
+        assert_eq!(
+            (
+                unknown,
+                beyond,
+                tabs.iter().map(|(_, tab)| *tab).collect::<Vec<_>>(),
+            ),
+            (
+                Err(TabError::TabNotFound(TabId::new(99))),
+                Err(TabError::PositionOutOfRange {
+                    position: 2,
+                    len: 2
+                }),
+                vec!["first", "second"],
+            )
+        );
     }
 
     #[test]

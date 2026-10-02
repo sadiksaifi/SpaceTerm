@@ -20,7 +20,7 @@ use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::settings_file::SettingsFile;
 
 use super::SettingsWindow;
-use super::controls::action_button;
+use crate::ui::sidebar_window::form::action_button;
 use super::import::{ImportError, read_selected_document};
 
 /// How many lines of the settings file show before the view scrolls.

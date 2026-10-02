@@ -15,7 +15,7 @@ use spaceterm_ui::{
     ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
 };
 
-use super::controls::{CaptionTone, row_horizontal_inset};
+use crate::ui::sidebar_window::form::{CaptionTone, row_horizontal_inset};
 use super::{SettingsRowId, SettingsWindow, control_selector};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
@@ -279,12 +279,26 @@ fn reservation_message(
             | TerminalConvention::ControlNavigation,
         ) => format!("{chord} is reserved for programs running in the terminal."),
         Reservation::System(reason) => format!(
-            "{chord} is reserved by {} for {}.",
-            presentation.wording().operating_system_name,
-            system_reservation_label(reason),
+            "{chord} is {}.",
+            system_reservation_text(reason, presentation)
         ),
     }
     .into()
+}
+
+/// Who reserves a System Reserved Shortcut, and for what: "reserved by <owner> for <feature>".
+fn system_reservation_text(reason: SystemReservation, presentation: &DesktopPresentation) -> String {
+    let owner = match reason {
+        #[cfg(feature = "developer-tools")]
+        SystemReservation::DeveloperWorkbench | SystemReservation::AppearancePreview => {
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        }
+        _ => presentation.wording().operating_system_name,
+    };
+    format!(
+        "reserved by {owner} for {}",
+        system_reservation_label(reason)
+    )
 }
 
 /// The standard command or system feature a System Reserved Shortcut belongs to.
@@ -325,6 +339,10 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
         SystemReservation::InputMethod => "the input method",
         SystemReservation::Restart => "Restart",
         SystemReservation::ShutDown => "Shut Down",
+        #[cfg(feature = "developer-tools")]
+        SystemReservation::DeveloperWorkbench => "the Developer Workbench",
+        #[cfg(feature = "developer-tools")]
+        SystemReservation::AppearancePreview => "Toggle Appearance",
     }
 }
 
@@ -560,9 +578,8 @@ impl SettingsWindow {
                         .unwrap_or_else(|| "Its default shortcut".into());
                     (
                         format!(
-                            "{chord} is reserved by {} for {} and isn't active.",
-                            presentation.wording().operating_system_name,
-                            system_reservation_label(reason),
+                            "{chord} is {} and isn't active.",
+                            system_reservation_text(reason, presentation)
                         )
                         .into(),
                         CaptionTone::Error,

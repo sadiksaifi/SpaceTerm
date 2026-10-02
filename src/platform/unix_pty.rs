@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 #[cfg(all(test, feature = "native-tests"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +83,12 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     /// Observe one live process. Returns `None` for a missing, exited, or unstable process.
     fn observe_process(&self, process: i32) -> Option<ProcessObservation>;
 
+    /// Capture the identity of a child this owner just spawned and has not reaped. A child may
+    /// already have exited before the parent runs again, while its process identity is retained.
+    fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
+        self.observe_process(process)
+    }
+
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
@@ -150,21 +156,23 @@ impl TerminationTarget {
         let owner_members = process_groups.remove(&owner_group).unwrap_or_default();
         let mut first_error = None;
         for (process_group, members) in process_groups {
-            if let Err(error) =
-                signal_owned_process_group(self.host.as_ref(), process_group, &members, &session, signal)
-            {
+            if let Err(error) = signal_owned_process_group(
+                self.host.as_ref(),
+                process_group,
+                &members,
+                &session,
+                signal,
+            ) {
                 first_error.get_or_insert(error);
             }
         }
-        if let Err(error) =
-            signal_owned_process_group(
+        if let Err(error) = signal_owned_process_group(
             self.host.as_ref(),
             owner_group,
             &owner_members,
             &session,
             signal,
-        )
-        {
+        ) {
             first_error.get_or_insert(error);
         }
         match first_error {
@@ -311,7 +319,10 @@ impl ChildTermination {
                 }
                 Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
                 Err(error) => {
-                    eprintln!("failed to inspect shell process group during shutdown: {error}");
+                    eprintln!(
+                        "failed to inspect shell process group during shutdown: {:?}",
+                        error.kind()
+                    );
                     break;
                 }
             }
@@ -392,11 +403,12 @@ fn signal_owned_process_group(
     signal: i32,
 ) -> io::Result<()> {
     let still_owned = members.iter().any(|member| {
-        host.observe_process(member.process).is_some_and(|observation| {
-            observation.identity == *member
-                && observation.process_group == process_group
-                && observation.session == session.session
-        })
+        host.observe_process(member.process)
+            .is_some_and(|observation| {
+                observation.identity == *member
+                    && observation.process_group == process_group
+                    && observation.session == session.session
+            })
     });
     if still_owned {
         signal_process_group(process_group, signal)
@@ -444,6 +456,35 @@ struct SpawnedPty {
     writer: Box<dyn Write + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
     termination: Arc<ChildTermination>,
+}
+
+struct PtyReader {
+    reader: MasterReader,
+    readiness: OwnedFd,
+}
+
+impl Read for PtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.reader.read(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let mut poll = libc::pollfd {
+                        fd: self.readiness.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: readiness owns a live descriptor and poll points to one initialized entry.
+                    if unsafe { libc::poll(&mut poll, 1, -1) } == -1 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() != io::ErrorKind::Interrupted {
+                            return Err(error);
+                        }
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
 }
 
 impl SpawnedPty {
@@ -508,7 +549,10 @@ impl SpawnedPty {
                     .termination
                     .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
             {
-                eprintln!("failed to retry shell process group shutdown: {error}");
+                eprintln!(
+                    "failed to retry shell process group shutdown: {:?}",
+                    error.kind()
+                );
             }
             return;
         };
@@ -519,12 +563,18 @@ impl SpawnedPty {
                     .termination
                     .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
                 {
-                    eprintln!("failed to complete shell process group shutdown: {error}");
+                    eprintln!(
+                        "failed to complete shell process group shutdown: {:?}",
+                        error.kind()
+                    );
                 }
                 return;
             }
             Ok(None) => {}
-            Err(error) => eprintln!("failed to inspect shell process during cleanup: {error}"),
+            Err(error) => eprintln!(
+                "failed to inspect shell process during cleanup: {:?}",
+                error.kind()
+            ),
         }
 
         let owns_process_group = self
@@ -540,13 +590,19 @@ impl SpawnedPty {
         self.termination.revoke();
 
         if let Err(error) = child.kill() {
-            eprintln!("failed to terminate shell process during cleanup: {error}");
+            eprintln!(
+                "failed to terminate shell process during cleanup: {:?}",
+                error.kind()
+            );
             Self::reap_after_failed_termination(child.as_mut());
             return;
         }
 
         if let Err(error) = child.wait() {
-            eprintln!("failed to reap shell process during cleanup: {error}");
+            eprintln!(
+                "failed to reap shell process during cleanup: {:?}",
+                error.kind()
+            );
         }
     }
 
@@ -554,22 +610,32 @@ impl SpawnedPty {
         if !self.termination.requested()
             && let Err(error) = self.termination.signal()
         {
-            eprintln!("failed to gracefully terminate shell process group: {error}");
+            eprintln!(
+                "failed to gracefully terminate shell process group: {:?}",
+                error.kind()
+            );
         }
 
         let graceful_deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
         if Self::poll_child_until(child, graceful_deadline) {
             if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
-                eprintln!("failed to complete shell process group shutdown: {error}");
+                eprintln!(
+                    "failed to complete shell process group shutdown: {:?}",
+                    error.kind()
+                );
             }
             return;
         }
 
         if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
-            eprintln!("failed to force shell process group shutdown: {error}");
+            eprintln!(
+                "failed to force shell process group shutdown: {:?}",
+                error.kind()
+            );
             if let Err(kill_error) = child.kill() {
                 eprintln!(
-                    "failed to terminate shell process after process-group shutdown failed: {kill_error}"
+                    "failed to terminate shell process after process-group shutdown failed: {:?}",
+                    kill_error.kind()
                 );
             }
         }
@@ -577,11 +643,17 @@ impl SpawnedPty {
         if !Self::poll_child_until(child, forced_deadline) {
             eprintln!("shell process did not become reapable after forced process-group shutdown");
             if let Err(error) = child.wait() {
-                eprintln!("failed to reap shell process after bounded shutdown: {error}");
+                eprintln!(
+                    "failed to reap shell process after bounded shutdown: {:?}",
+                    error.kind()
+                );
             }
         }
         if let Err(error) = self.termination.complete_process_group(Instant::now()) {
-            eprintln!("failed to retry shell process group shutdown: {error}");
+            eprintln!(
+                "failed to retry shell process group shutdown: {:?}",
+                error.kind()
+            );
         }
     }
 
@@ -591,7 +663,10 @@ impl SpawnedPty {
                 Ok(Some(_)) => return true,
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("failed to inspect shell process during shutdown: {error}");
+                    eprintln!(
+                        "failed to inspect shell process during shutdown: {:?}",
+                        error.kind()
+                    );
                     return false;
                 }
             }
@@ -608,13 +683,22 @@ impl SpawnedPty {
             Ok(Some(_)) => {}
             Ok(None) => {
                 if let Err(error) = child.wait() {
-                    eprintln!("failed to reap shell process after termination failed: {error}");
+                    eprintln!(
+                        "failed to reap shell process after termination failed: {:?}",
+                        error.kind()
+                    );
                 }
             }
             Err(error) => {
-                eprintln!("failed to recheck shell process after termination failed: {error}");
+                eprintln!(
+                    "failed to recheck shell process after termination failed: {:?}",
+                    error.kind()
+                );
                 if let Err(wait_error) = child.wait() {
-                    eprintln!("failed to reap shell process after inspection failed: {wait_error}");
+                    eprintln!(
+                        "failed to reap shell process after inspection failed: {:?}",
+                        wait_error.kind()
+                    );
                 }
             }
         }
@@ -687,6 +771,8 @@ pub(super) enum PtyError {
     ReadTermios(#[source] io::Error),
     #[error("failed to enable UTF-8 input on the pseudo-terminal: {0}")]
     ConfigureTermios(#[source] io::Error),
+    #[error("failed to configure nonblocking pseudo-terminal input")]
+    ConfigureInput,
     #[error("failed to apply the initial macOS pseudo-terminal size: {0}")]
     InitialResize(#[source] AnyError),
     #[error("failed to start Shell Process")]
@@ -732,6 +818,7 @@ fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstru
         PtyError::MissingDescriptor
         | PtyError::ReadTermios(_)
         | PtyError::ConfigureTermios(_)
+        | PtyError::ConfigureInput
         | PtyError::InitialResize(_) => {
             NativePtyAdapterConstructionFailure::ResourceConfigurationFailed
         }
@@ -777,6 +864,11 @@ fn spawn_command_in_pty(
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
     initialize_pty(pair.master.as_ref(), size)?;
+    let readiness = pair.master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
+    // SAFETY: pair.master owns this live descriptor throughout cloning.
+    let readiness = unsafe { BorrowedFd::borrow_raw(readiness) }
+        .try_clone_to_owned()
+        .map_err(|error| PtyError::CloneReader(error.into()))?;
 
     let mut child = pair
         .slave
@@ -796,6 +888,7 @@ fn spawn_command_in_pty(
             return Err(PtyError::CloneReader(source));
         }
     };
+    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
     let writer = match pair.master.take_writer() {
         Ok(writer) => writer,
         Err(source) => {
@@ -811,7 +904,7 @@ fn spawn_command_in_pty(
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::MissingProcessGroup);
     };
-    let Some(observation) = host.observe_process(process_group) else {
+    let Some(observation) = host.observe_spawned_child(process_group) else {
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::InspectSession(io::Error::other(
             "the child process identity was unavailable",
@@ -852,6 +945,16 @@ fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError>
     // SAFETY: descriptor remains live and termios contains attributes read from this PTY.
     if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &termios) } == -1 {
         return Err(PtyError::ConfigureTermios(io::Error::last_os_error()));
+    }
+    // Cloned master descriptors share these flags. The reader waits through poll, while input
+    // writes return immediately so child backpressure cannot block Terminal Session commands.
+    // SAFETY: descriptor remains owned by master and F_GETFL takes no additional argument.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    // SAFETY: descriptor remains live and F_SETFL accepts these descriptor status flags.
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(PtyError::ConfigureInput);
     }
     master.resize(size).map_err(PtyError::InitialResize)
 }
@@ -981,11 +1084,17 @@ fn test_host() -> Arc<dyn UnixPtyHost> {
 
 fn terminate_after_startup_failure(child: &mut dyn Child) {
     if let Err(error) = child.kill() {
-        eprintln!("failed to terminate shell after PTY setup failed: {error}");
+        eprintln!(
+            "failed to terminate shell after PTY setup failed: {:?}",
+            error.kind()
+        );
         return;
     }
     if let Err(error) = child.wait() {
-        eprintln!("failed to reap shell after PTY setup failed: {error}");
+        eprintln!(
+            "failed to reap shell after PTY setup failed: {:?}",
+            error.kind()
+        );
     }
 }
 
@@ -1087,6 +1196,34 @@ mod tests {
     const CONTROLLED_CHILD_ACK: &str = "SPACETERM_ACK\n";
 
     #[test]
+    fn unread_native_pty_input_returns_backpressure_without_blocking() {
+        const NAME: &str = "platform::unix_pty::tests::unread_native_pty_input_returns_backpressure_without_blocking";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "stty raw -echo; printf 'READY'; exec sleep 30"]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+        // Unblock an accidentally blocking writer so this regression can fail without hanging.
+        let (cancel, rescue) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if rescue.recv_timeout(Duration::from_secs(1)).is_err() {
+                terminator.terminate().unwrap();
+            }
+        });
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let result = pty.write_all(&vec![b'x'; 1024 * 1024]);
+        let _ = cancel.send(());
+        watchdog.join().unwrap();
+        drop(reader);
+        drop(pty);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
     #[ignore = "runs only as a child of the controlled PTY integration tests"]
     fn controlled_pty_child_reports_runtime_configuration() {
         if env::var_os(CONTROLLED_CHILD_ENV).is_none() {
@@ -1155,24 +1292,31 @@ mod tests {
     }
 
     fn read_controlled_report(pty: &mut SpawnedPty) -> HashMap<String, String> {
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut output = String::new();
+        let report = loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "controlled PTY report was missing from: {output}"
+            );
+            output.push_str(&line);
+            if line.starts_with("SPACETERM_PTY_REPORT ") {
+                break line;
+            }
+        };
+        // The slave echoes input. Acknowledge only after the complete report, or the echoed
+        // acknowledgment can interleave with a field while the child is still writing it.
         pty.write_all(CONTROLLED_CHILD_ACK.as_bytes()).unwrap();
         pty.flush().unwrap();
-        let mut output = String::new();
-        pty.take_reader()
-            .unwrap()
-            .read_to_string(&mut output)
-            .unwrap();
+        reader.read_to_string(&mut output).unwrap();
         let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
         assert!(
             status.status.success(),
             "controlled PTY child failed ({}): {output}",
             status.status,
         );
-        let report = output
-            .lines()
-            .find(|line| line.starts_with("SPACETERM_PTY_REPORT "))
-            .unwrap_or_else(|| panic!("controlled PTY report was missing from: {output}"));
-
         report
             .split_whitespace()
             .skip(1)
@@ -1250,12 +1394,18 @@ mod tests {
             pixel_width: 640,
             pixel_height: 480,
         };
-        let (mut first, _first_terminator) =
-            spawn_command_in_pty(test_host(), size, controlled_child_command(&working_directory, "first"))
-                .unwrap();
-        let (mut second, _second_terminator) =
-            spawn_command_in_pty(test_host(), size, controlled_child_command(&working_directory, "second"))
-                .unwrap();
+        let (mut first, _first_terminator) = spawn_command_in_pty(
+            test_host(),
+            size,
+            controlled_child_command(&working_directory, "first"),
+        )
+        .unwrap();
+        let (mut second, _second_terminator) = spawn_command_in_pty(
+            test_host(),
+            size,
+            controlled_child_command(&working_directory, "second"),
+        )
+        .unwrap();
 
         let first_report = read_controlled_report(&mut first);
         let second_report = read_controlled_report(&mut second);
@@ -1457,7 +1607,7 @@ mod tests {
         assert_process_disappears(child);
     }
 
-/// Observes one process exit through the host kernel's process event facility.
+    /// Observes one process exit through the host kernel's process event facility.
     struct ProcessExitWatch(OwnedFd);
 
     impl ProcessExitWatch {
@@ -1689,12 +1839,20 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         let disappeared = loop {
-            if !test_host().observe_process(child).is_some_and(|process| process.identity == child_identity) {
+            if !test_host()
+                .observe_process(child)
+                .is_some_and(|process| process.identity == child_identity)
+            {
                 break true;
             }
             if Instant::now() >= deadline {
-                let _ =
-                    signal_owned_process_group(test_host().as_ref(), leader, &[child_identity], &session, libc::SIGKILL);
+                let _ = signal_owned_process_group(
+                    test_host().as_ref(),
+                    leader,
+                    &[child_identity],
+                    &session,
+                    libc::SIGKILL,
+                );
                 break false;
             }
             thread::sleep(CHILD_EXIT_POLL_INTERVAL);
@@ -2213,7 +2371,11 @@ mod tests {
     }
 
     fn spawned_pty(child: Box<dyn Child + Send + Sync>) -> (SpawnedPty, PtyTerminator) {
-        let termination = Arc::new(ChildTermination::new(test_host(), None, child.clone_killer()));
+        let termination = Arc::new(ChildTermination::new(
+            test_host(),
+            None,
+            child.clone_killer(),
+        ));
         let terminator = PtyTerminator::new(Arc::clone(&termination));
         (
             SpawnedPty {

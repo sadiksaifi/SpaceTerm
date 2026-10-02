@@ -121,6 +121,7 @@ pub(crate) trait NativePtyOutputSink: Send + Sync + 'static {
     fn publish(&self, output: NativePtyOutput) -> bool;
 }
 
+/// Input writes must be nonblocking and report WouldBlock under PTY backpressure.
 pub(crate) trait NativePtyAdapter: Write + Send {
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure>;

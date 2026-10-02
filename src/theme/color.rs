@@ -173,6 +173,31 @@ impl Color {
         }
     }
 
+    /// Interpolate between two presented paints, as a transition shows them partway.
+    ///
+    /// Channels mix premultiplied by alpha, so fading from or to a transparent paint changes only
+    /// its coverage and never passes through a darker color.
+    pub(crate) fn fade(self, other: Self, amount: f64) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let coverage = |color: Self| f64::from(color.a) / 255.0;
+        let (from, to) = (coverage(self) * (1.0 - amount), coverage(other) * amount);
+        let alpha = from + to;
+        if alpha == 0.0 {
+            return Self::rgba(0);
+        }
+        let channel = |a: u8, b: u8| {
+            ((f64::from(a) * from + f64::from(b) * to) / alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        Self {
+            r: channel(self.r, other.r),
+            g: channel(self.g, other.g),
+            b: channel(self.b, other.b),
+            a: (alpha * 255.0).round() as u8,
+        }
+    }
+
     /// sRGB contrast of opaque presentation colors. Composite alpha before calling.
     pub(crate) fn contrast_ratio(self, other: Self) -> f64 {
         let luminance = |color: Self| {
@@ -462,6 +487,16 @@ impl Color {
 #[cfg(test)]
 mod composition_tests {
     use super::Color;
+    #[test]
+    fn fade_should_keep_a_transparent_paint_from_darkening() {
+        let hovered = Color::rgb(0xd2d2d2);
+        assert_eq!(Color::rgba(0).fade(hovered, 0.5), Color::rgba(0xd2d2d280));
+        assert_eq!(hovered.fade(Color::rgba(0), 0.5), Color::rgba(0xd2d2d280));
+        let rest = Color::rgba(0x11223344);
+        assert_eq!(rest.fade(hovered, 0.0), rest);
+        assert_eq!(rest.fade(hovered, 1.0), hovered);
+        assert_eq!(Color::rgba(0).fade(Color::rgba(0), 0.5), Color::rgba(0));
+    }
     #[test]
     fn alpha_replacement_and_multiplication_have_distinct_meanings() {
         let color = Color::rgba(0x12345680);

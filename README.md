@@ -2,10 +2,6 @@
 
 A native desktop terminal multiplexer currently built for macOS.
 
-> [!WARNING]
-> SpaceTerm is under active development and has not reached its first release. Build it from source
-> to try it today.
-
 SpaceTerm brings terminal multiplexing into a native, keyboard-first desktop application.
 Workspaces organize terminal work, Tabs separate tasks, and split Pane Layouts keep the shells you
 need visible together.
@@ -17,6 +13,20 @@ need visible together.
 - **Remote terminals** through your existing OpenSSH configuration
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 - **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
+
+## Install
+
+SpaceTerm requires macOS 26 or newer on Apple silicon.
+
+```sh
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
+```
+
+Or install with Homebrew:
+
+```sh
+brew install --cask sadiksaifi/tap/spaceterm
+```
 
 ## Workspace hierarchy
 
@@ -49,32 +59,6 @@ flowchart TB
 SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
 one or more Panes through its Pane Layout.
 
-## Built with
+## Documentation
 
-Rust powers the application, GPUI provides the native GPU-rendered interface, and `libghostty-vt`
-provides terminal emulation. Remote Workspaces use the system OpenSSH client.
-
-## Try SpaceTerm
-
-You need macOS, Xcode 26 or newer, and [`mise`](https://mise.jdx.dev/).
-Mise manages the official Zig compiler and the remaining development tools. Xcode supplies
-the Metal compiler, macOS SDK, and icon packaging tools.
-
-```sh
-git clone https://github.com/sadiksaifi/SpaceTerm.git
-cd SpaceTerm
-mise trust
-
-# Install pinned tools, initialize submodules, and verify the macOS development environment
-mise run setup:macos
-
-# Run from source
-mise run dev
-
-# Build, verify, and install to /Applications
-mise run package:macos:install
-```
-
-Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
-development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
-platform segment such as `:macos`.
+See the [SpaceTerm guide](docs/guide.md) for terminal clipboard setup and source builds.

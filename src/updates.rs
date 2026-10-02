@@ -1,6 +1,13 @@
 //! Application-owned update policy. The platform adapter owns transport and installation.
 
-#[cfg(all(feature = "development-app", target_os = "macos"))]
+#[cfg(feature = "developer-tools")]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only the native updater host selects the development simulator"
+    )
+)]
 pub(crate) mod preview;
 
 pub(crate) mod policy;
@@ -88,6 +95,25 @@ pub(crate) enum UpdateEvent {
     Failed(UpdateError),
     /// The adapter has ended its cycle, including cancellation of a staged installer.
     Finished,
+}
+
+/// The adapter of an identity that receives no updates.
+pub(crate) struct UnavailableUpdates;
+
+impl UpdateAdapter for UnavailableUpdates {
+    fn start(&self, _: async_channel::Sender<UpdateEvent>) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn check(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn download(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
+    fn cancel(&self) {}
+    fn install(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Unavailable)
+    }
 }
 
 pub(crate) trait UpdateAdapter {
@@ -794,6 +820,17 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::RecordingAdapter;
     use super::*;
+
+    #[test]
+    fn unavailable_updates_reject_every_operation() {
+        let (sender, _receiver) = async_channel::unbounded();
+        let updates = UnavailableUpdates;
+        assert_eq!(updates.start(sender), Err(UpdateError::Unavailable));
+        assert_eq!(updates.check(), Err(UpdateError::Unavailable));
+        assert_eq!(updates.download(), Err(UpdateError::Unavailable));
+        assert_eq!(updates.install(), Err(UpdateError::Unavailable));
+        assert_eq!(updates.finish_on_quit(), Err(UpdateError::Unavailable));
+    }
 
     #[gpui::test]
     fn ordinary_quit_preserves_verified_update_and_revokes_open_confirmation(

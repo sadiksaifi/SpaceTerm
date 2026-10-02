@@ -706,7 +706,12 @@ state_directory=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spaceterm-list.XXXXXXXXX
 state_file=$state_directory/state
 result_file=$state_directory/result
 enumerator_pid=
+enumerator_settled=0
 cleanup_listing_state() {
+    # A signal can arrive after find starts but before the PID assignment runs.
+    if [ -z "$enumerator_pid" ] && [ "$enumerator_settled" -eq 0 ]; then
+        enumerator_pid=$!
+    fi
     if [ -n "$enumerator_pid" ]; then
         kill -TERM "$enumerator_pid" 2>/dev/null
         wait "$enumerator_pid" 2>/dev/null
@@ -760,6 +765,7 @@ if wait "$enumerator_pid"; then
 else
     enumerator_status=$?
 fi
+enumerator_settled=1
 enumerator_pid=
 IFS=' ' read -r examined emitted listing_truncated < "$state_file" || {
     emit_empty list failed

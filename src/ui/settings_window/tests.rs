@@ -16,6 +16,7 @@ use crate::ui::appearance_runtime;
 
 use super::editor::{COMMIT_DELAY, SaveStatus};
 use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use crate::ui::sidebar_window::SidebarOwner as _;
 
 use super::test_support::MemoryStorage;
 
@@ -1224,12 +1225,24 @@ fn escape_with_an_empty_search_preserves_navigation_focus(cx: &mut TestAppContex
     let (window, _harness, cx) = open_settings(cx);
     cx.simulate_keystrokes("cmd-f tab");
     cx.run_until_parked();
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| {
+        window
+            .read(cx)
+            .navigation
+            .list_focus()
+            .is_focused(gpui_window)
+    }));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    assert!(cx.update(|gpui_window, cx| window.read(cx).navigation_focus.is_focused(gpui_window)));
+    assert!(cx.update(|gpui_window, cx| {
+        window
+            .read(cx)
+            .navigation
+            .list_focus()
+            .is_focused(gpui_window)
+    }));
 }
 
 #[gpui::test]
@@ -1909,7 +1922,11 @@ fn the_footer_carries_only_the_save_status(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     let footer = cx.debug_bounds("settings-footer").unwrap();
 
-    for selector in ["settings-reset-all", "settings-document-export", "settings-import"] {
+    for selector in [
+        "settings-reset-all",
+        "settings-document-export",
+        "settings-import",
+    ] {
         assert!(
             cx.debug_bounds(selector)
                 .is_none_or(|bounds| !footer.intersects(&bounds)),
@@ -3539,4 +3556,28 @@ fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppCont
 
     assert_eq!(document_of(&window, cx), before);
     assert_eq!(harness.storage.writes(), writes);
+}
+
+#[gpui::test]
+fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Privacy, cx);
+    assert!(document_of(&window, cx).clipboard.allow_write);
+    assert!(!document_of(&window, cx).clipboard.allow_read);
+    click("settings-clipboard-reads", cx);
+    click("settings-clipboard-writes", cx);
+    settle(cx);
+    let saved = harness.storage.document().unwrap();
+    assert!(saved.clipboard.allow_read);
+    assert!(!saved.clipboard.allow_write);
+    click("settings-row-clipboard-reads-reset", cx);
+    click("settings-row-clipboard-writes-reset", cx);
+    settle(cx);
+    assert_eq!(
+        harness.storage.document().unwrap().clipboard,
+        Default::default()
+    );
+    set_query(&window, "osc52", cx);
+    assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
+    assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
 }

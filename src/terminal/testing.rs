@@ -418,7 +418,9 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .selection_receivers
             .borrow_mut()
             .insert(session_id, selection_receiver);
+        let (_, clipboard) = async_channel::bounded(1);
         Ok(StartedTerminalSession {
+            clipboard,
             handle: Box::new(TestTerminalSessionHandle {
                 session_id,
                 selection_sender,

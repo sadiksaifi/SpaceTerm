@@ -12,12 +12,9 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
-    let code = match super::unix_askpass_transport::dispatch_helper_from_environment() {
-        Some(code) => code,
-        None => crate::app::launch(capture_startup_dependencies(identity), |startup| {
-            compose(startup, identity)
-        }),
-    };
+    let code = crate::app::launch(capture_startup_dependencies(identity), |startup| {
+        compose(startup, identity)
+    });
     if code != 0 {
         std::process::exit(code);
     }
@@ -142,7 +139,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
-            updates: Rc::new(super::linux_updates::LinuxUpdates),
+            updates: Rc::new(crate::updates::UnavailableUpdates),
             selected_files: None,
             settings_file: Some(settings_file),
             application_menu: Rc::new(
@@ -157,6 +154,7 @@ fn compose(
                 super::linux_accessibility::LinuxTerminalAccessibilityAdapterFactory,
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
+                text_clipboard: Rc::new(super::linux_clipboard::LinuxTextClipboard),
                 selection_clipboard: Rc::new(super::linux_clipboard::LinuxSelectionClipboard),
                 file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
                     paths,
