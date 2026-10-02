@@ -1117,9 +1117,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn middle_and_navigation_buttons_should_pass_through_unchanged(
-        cx: &mut TestAppContext,
-    ) {
+    fn middle_and_navigation_buttons_should_pass_through_unchanged(cx: &mut TestAppContext) {
         let DragWindow {
             events,
             parent_events,
