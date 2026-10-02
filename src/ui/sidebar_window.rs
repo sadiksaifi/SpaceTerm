@@ -19,7 +19,7 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
-    Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    HoverFade, Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::platform::window_movement::{
@@ -444,7 +444,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
         self,
         owner: &mut T,
         surface: &SettingsAppearance,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<T>,
     ) -> AnyElement {
         let appearance = &surface.chrome;
@@ -517,7 +517,7 @@ fn render_navigation_list<T: SidebarOwner>(
     entries: Vec<NavigationEntry<T::Section>>,
     owner: &mut T,
     appearance: &ChromeAppearance,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<T>,
 ) -> AnyElement {
     let active = owner.active_section();
@@ -549,7 +549,16 @@ fn render_navigation_list<T: SidebarOwner>(
                 available,
             } = entry;
             let selected = active == section && available;
-            let row_group = format!("{prefix}-row-state-{selector}");
+            let fade = HoverFade::new(
+                SharedString::from(format!("{prefix}-navigation-hover-{selector}")),
+                window,
+                cx,
+            );
+            let hover = if available && appearance.active {
+                fade.level(window, cx)
+            } else {
+                0.0
+            };
             let colors = panel_colors;
             let (foreground, icon_color, hover_foreground, hover_icon) = if selected {
                 (
@@ -569,13 +578,15 @@ fn render_navigation_list<T: SidebarOwner>(
             // The same chip the Workspace sidebar rests its current row on, so the two navigation
             // surfaces read as one material rather than as two conventions.
             let chip = navigation_chip(selected, available, emphasized, appearance, &selection_colors);
+            // Text and icon follow the chip's hover paint.
+            let foreground = foreground.mix(hover_foreground, f64::from(hover));
+            let icon_color = icon_color.mix(hover_icon, f64::from(hover));
             let chip_selector = format!("{prefix}-navigation-chip-{selector}");
             let selecting = cx.weak_entity();
             div()
                 .id(SharedString::from(format!("{prefix}-navigation-{title}")))
                 .debug_selector(move || format!("{prefix}-navigation-{selector}"))
                 .relative()
-                .group(row_group.clone())
                 .text_color(gpui_color(foreground))
                 .flex()
                 .flex_row()
@@ -587,10 +598,9 @@ fn render_navigation_list<T: SidebarOwner>(
                 .px(appearance.spacing(8.0))
                 .cursor_default()
                 .chrome_text(appearance.typography.style(TextRole::Navigation))
-                .child(chip.render(chip_selector, &row_group))
+                .child(chip.render(chip_selector, hover))
                 .when(available, |row| {
-                    row.hover(move |row| row.text_color(gpui_color(hover_foreground)))
-                        .on_click(move |_, window, cx| {
+                    row.child(fade.tracker()).on_click(move |_, window, cx| {
                             let _ = selecting.update(cx, |owner, cx| {
                                 // A completed pointer selection is authoritative even if native
                                 // focus moved between the press and release.
@@ -610,11 +620,6 @@ fn render_navigation_list<T: SidebarOwner>(
                         } else {
                             colors.icon_disabled
                         }))
-                        .when(available, |icon| {
-                            icon.group_hover(row_group, |style| {
-                                style.text_color(gpui_color(hover_icon))
-                            })
-                        })
                         .child(Icon::inherited(
                             icon,
                             appearance.icons.metrics(IconRole::Row).glyph_size,

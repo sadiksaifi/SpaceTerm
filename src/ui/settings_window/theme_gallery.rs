@@ -11,7 +11,7 @@ use gpui::{
     div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Icon, IconName, ModalAction, ModalActionEmphasis,
+    Alert, AlertIntent, AlertOutcome, HoverFade, Icon, IconName, ModalAction, ModalActionEmphasis,
     ModalActionIntent, ModalActionRole, ModalId, SearchField, TextInput, TextInputEscapeBehavior,
     TextInputEvent, TextInputReturnBehavior, TextInputVariant, fuzzy_filter,
 };
@@ -163,7 +163,7 @@ impl SettingsWindow {
     pub(super) fn render_current_theme(
         &mut self,
         appearance: &ChromeAppearance,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summaries = self.editor.theme_summaries().unwrap_or_default();
@@ -222,7 +222,7 @@ impl SettingsWindow {
         selected: bool,
         font: Font,
         appearance: &ChromeAppearance,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
@@ -234,6 +234,9 @@ impl SettingsWindow {
         let name = preview_name(&preview);
         let focus = &self.theme_gallery.slot_focus[usize::from(slot == Appearance::Dark)];
         let selector = format!("settings-theme-slot-{}", label.to_ascii_lowercase());
+        let hover = HoverFade::new(SharedString::from(format!("{selector}-hover")), window, cx);
+        let hover_level = hover.level(window, cx);
+        let focused = focus.is_focused(window) && window.last_input_was_keyboard();
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
@@ -245,9 +248,11 @@ impl SettingsWindow {
             .child(selection_ring(
                 terminal_preview(&preview.colors, font, PreviewSize::Small, appearance).w_full(),
                 selected,
+                &hover,
+                hover_level,
                 RadiusRole::Card,
                 appearance,
-                focus.is_focused(window) && window.last_input_was_keyboard(),
+                focused,
             ))
             .child(
                 div()
@@ -735,12 +740,14 @@ fn theme_origin(summary: &ThemeSummary) -> SharedString {
 fn selection_ring(
     content: gpui::Div,
     selected: bool,
+    hover: &HoverFade,
+    hover_level: f32,
     radius: RadiusRole,
     appearance: &ChromeAppearance,
     focused: bool,
 ) -> impl IntoElement {
     let accent = appearance.colors.border_focused;
-    let hover = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
+    let hover_ring = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
     let outer_radius = radius.pixels() + px(RING_GAP + RING_WIDTH);
     // Keyboard focus surrounds the selection ring so the two states stay distinct: the focus ring
     // treats the selection ring's outer edge as the control's edge.
@@ -761,12 +768,10 @@ fn selection_ring(
         .border_color(gpui_color(if selected {
             accent
         } else {
-            Color::rgba(0x0000_0000)
+            hover_ring.with_alpha(0).mix(hover_ring, f64::from(hover_level))
         }))
-        .when(!selected, |ring| {
-            ring.hover(move |ring| ring.border_color(gpui_color(hover)))
-        })
-        .child(content.rounded(radius.pixels()));
+        .child(content.rounded(radius.pixels()))
+        .when(!selected, |ring| ring.child(hover.tracker()));
     spaceterm_ui::Ringed::new(tile, focus_ring)
 }
 

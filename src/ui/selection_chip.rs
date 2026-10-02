@@ -164,33 +164,37 @@ impl SelectionChip {
 
     /// The chip itself, painted under the item's own content.
     ///
-    /// Hover is carried by the owning item's group rather than by the chip, so pointing anywhere in
-    /// the item lights the one shape that item presents.
-    pub(crate) fn render(self, selector: String, group: &str) -> AnyElement {
-        let hover_fill = self.paint.hover_fill;
-        // The chip has no content, so omitting transparent rims does not alter layout.
-        let hover_rim = self.paint.hover_rim.filter(|rim| rim.a != 0);
-        let rim = self.paint.rim.filter(|rim| rim.a != 0);
+    /// `hover` is how far the owning item has eased toward its hovered look, so pointing anywhere
+    /// in the item lights the one shape that item presents. A lifted copy of an item is always
+    /// under the pointer and paints fully hovered.
+    pub(crate) fn render(self, selector: String, hover: f32) -> AnyElement {
+        let paint = self.paint;
+        let fill = hovered_paint(paint.fill, paint.hover_fill.or(paint.fill), hover);
+        // A rim describes the edge of a fill, and a transparent hover rim leaves the resting rim
+        // in place.
+        let rest_rim = paint.fill.and(paint.rim).filter(|rim| rim.a != 0);
+        let hover_rim = paint.hover_rim.filter(|rim| rim.a != 0).or(rest_rim);
+        let rim = hovered_paint(rest_rim, hover_rim, hover);
         Self::body(self.shape)
             .debug_selector(move || selector.clone())
-            .when_some(self.paint.fill, |chip, fill| {
-                chip.bg(gpui_color(fill)).when_some(rim, |chip, rim| {
-                    chip.border(px(HAIRLINE)).border_color(gpui_color(rim))
-                })
-            })
-            .group_hover(group.to_owned(), move |style| {
-                let style = match hover_fill {
-                    Some(fill) => style.bg(gpui_color(fill)),
-                    None => style,
-                };
-                match hover_rim {
-                    Some(rim) => style
-                        .border(px(HAIRLINE))
-                        .border_color(gpui_color(rim)),
-                    None => style,
-                }
+            .when_some(fill, |chip, fill| chip.bg(gpui_color(fill)))
+            .when_some(rim, |chip, rim| {
+                chip.border(px(HAIRLINE)).border_color(gpui_color(rim))
             })
             .into_any_element()
+    }
+}
+
+/// A paint `hover` of the way from its resting to its hovered color.
+///
+/// A paint that appears only on hover, or over a transparent resting paint, fades in from a
+/// transparent copy of itself, so its color never passes through black.
+pub(crate) fn hovered_paint(rest: Option<Color>, hovered: Option<Color>, hover: f32) -> Option<Color> {
+    let hover = f64::from(hover);
+    match (rest.filter(|rest| rest.a != 0), hovered) {
+        (_, None) => rest,
+        (None, Some(hovered)) => Some(hovered.with_alpha(0).mix(hovered, hover)),
+        (Some(rest), Some(hovered)) => Some(rest.mix(hovered, hover)),
     }
 }
 

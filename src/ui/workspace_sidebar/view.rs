@@ -3,7 +3,23 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::drag_and_drop::{MarkerSide, drag_release_observer, insertion_marker};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
+use spaceterm_ui::HoverFade;
+
+/// Where the pointer stands over one row.
+pub(super) struct RowHover {
+    /// How far the row has eased toward its hovered paint.
+    pub(super) level: f32,
+    /// What follows the pointer over the row; the lifted copy has none.
+    pub(super) tracker: Option<HoverFade>,
+}
+
+/// A row's hover as read at the start of a frame.
+pub(super) struct RowFade {
+    fade: HoverFade,
+    level: f32,
+}
 
 /// The chip carrying a Workspace row's hover and persistent selection.
 ///
@@ -137,10 +153,68 @@ pub(super) fn row_background(
     })
 }
 
+/// Whether a row face is the row in the Workspace list or its lifted copy following the pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RowRole {
+    InList,
+    Lifted,
+}
+
 impl WorkspaceSidebar {
-    fn render_workspace_row(
+    /// The accent lines on a row that mark the slot a dragged row would land in.
+    fn row_insertion_markers(
+        &self,
+        workspace_id: WorkspaceId,
+        role: RowRole,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let len = self.rows.len();
+        let (Some(slot), Some(index), RowRole::InList) = (
+            self.workspace_reorder.insertion(len),
+            self.row_position(workspace_id),
+            role,
+        ) else {
+            return Vec::new();
+        };
+        let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let inset = (
+            frame.sidebar_chip_leading_inset(),
+            frame.sidebar_chip_trailing_inset(),
+        );
+        let side = if slot == index {
+            MarkerSide::Leading
+        } else if slot == len && index + 1 == len {
+            MarkerSide::Trailing
+        } else {
+            return Vec::new();
+        };
+        vec![insertion_marker(
+            gpui::Axis::Vertical,
+            side,
+            slot == 0 || slot == len,
+            inset,
+            format!("workspace-insertion-marker-{slot}"),
+            appearance,
+        )]
+    }
+}
+
+impl WorkspaceSidebar {
+    /// One Workspace row, or the lifted copy of it that follows the pointer during a drag.
+    ///
+    /// Both paint the same face, so a lifted row looks exactly like the row it lifts. The copy is
+    /// always under the pointer, so it keeps the paint a row has there, and it claims no pointer
+    /// input because it lies over every drop target.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one row render step needs its model, role, hover, owner, presentation, and host geometry"
+    )]
+    pub(super) fn render_workspace_row(
         &self,
         row: WorkspaceRowViewModel,
+        role: RowRole,
+        hover: RowHover,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
@@ -164,7 +238,6 @@ impl WorkspaceSidebar {
         let mut row_colors = appearance
             .host_colors(spaceterm_ui::ControlHost::Panel)
             .clone();
-        let row_group = format!("workspace-row-state-{}", workspace_id.get());
         // Hover and selection are carried by an inset chip rather than by the row's own fill, so
         // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
         // with air around it. The chip's paints are read before the selected colors are promoted
@@ -181,6 +254,12 @@ impl WorkspaceSidebar {
         } else {
             row_colors.clone()
         };
+        let lifted = role == RowRole::Lifted;
+        let RowHover {
+            level: hover,
+            tracker,
+        } = hover;
+        let hover = if appearance.active { hover } else { 0.0 };
         let chip = row_chip(
             active,
             emphasized,
@@ -200,6 +279,15 @@ impl WorkspaceSidebar {
             row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
             row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
         }
+        // Text and icons follow the chip's hover paint.
+        let level = f64::from(hover);
+        row_colors.row_foreground = row_colors
+            .row_foreground
+            .mix(row_colors.row_hover_foreground, level);
+        row_colors.row_secondary = row_colors
+            .row_secondary
+            .mix(row_colors.row_hover_secondary, level);
+        row_colors.row_icon = row_colors.row_icon.mix(row_colors.row_hover_icon, level);
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -229,14 +317,18 @@ impl WorkspaceSidebar {
         } else {
             (path, None, None)
         };
-        let detail_paint =
-            detail_color.map(|color| workspace_row_status_paint(color, active, 4.5, &row_colors));
+        let under_pointer = |paint: WorkspaceStatusPaint| WorkspaceStatusPaint {
+            normal: paint.normal.mix(paint.hovered, level),
+            ..paint
+        };
+        let detail_paint = detail_color
+            .map(|color| under_pointer(workspace_row_status_paint(color, active, 4.5, &row_colors)));
         // The row icon carries one status in the same precedence as the collapsed identity: an
         // unavailable directory first, then the Remote connection.
         let icon_paint = (!available)
             .then_some(row_colors.warning)
             .or(remote_color)
-            .map(|color| workspace_row_status_paint(color, active, 3.0, &row_colors));
+            .map(|color| under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors)));
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -262,11 +354,6 @@ impl WorkspaceSidebar {
                 .truncate()
                 .chrome_text(appearance.typography.style(TextRole::Navigation))
                 .text_color(gpui_color(row_colors.row_foreground))
-                .when(appearance.active, |label| {
-                    label.group_hover(row_group.clone(), |style| {
-                        style.text_color(gpui_color(row_colors.row_hover_foreground))
-                    })
-                })
                 .child(name.clone())
                 .into_any_element()
         };
@@ -288,13 +375,17 @@ impl WorkspaceSidebar {
         let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
         let drag_sidebar = sidebar.clone();
         let owner = sidebar.entity_id();
-        // The lifted row follows the pointer, so its slot keeps only the gap it leaves behind.
-        let lifted = self.workspace_reorder.dragged() == Some(workspace_id);
+        let markers = self.row_insertion_markers(workspace_id, role, appearance, cx);
+        let element_name = if lifted {
+            "workspace-row-preview"
+        } else {
+            "workspace-row"
+        };
         let row_content = div()
-            .id(("workspace-row", workspace_id.get()))
+            .id((element_name, workspace_id.get()))
             .debug_selector(move || {
                 format!(
-                    "workspace-row-{}-{}",
+                    "{element_name}-{}-{}",
                     workspace_id.get(),
                     if active { "active" } else { "inactive" }
                 )
@@ -309,25 +400,26 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(appearance.spacing(10.0))
-            .block_mouse_except_scroll()
-            .group(row_group.clone())
+            .when(!lifted, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
             .child(chip.render(
-                format!("workspace-row-selection-{}", workspace_id.get()),
-                &row_group,
+                format!("{element_name}-selection-{}", workspace_id.get()),
+                hover,
             ))
-            .on_click(move |_, _, cx| {
-                let _ = click_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Activate {
-                        workspace_id,
-                        focus_pane: true,
+            .when(!lifted, |row| {
+                row.on_click(move |_, _, cx| {
+                    let _ = click_sidebar.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::Activate {
+                            workspace_id,
+                            focus_pane: true,
+                        });
                     });
-                });
-                cx.stop_propagation();
+                    cx.stop_propagation();
+                })
             })
-            .when(!renaming, |row| {
+            .when(!renaming && !lifted, |row| {
                 row.on_drag(
                     DraggedWorkspace {
                         workspace_id,
@@ -338,12 +430,11 @@ impl WorkspaceSidebar {
                             .update(cx, |sidebar, cx| {
                                 sidebar.begin_workspace_drag(workspace_id, window, cx)
                             })
-                            .unwrap_or_else(|_| DragPreview::new("", None));
+                            .unwrap_or_else(|_| DragPreview::empty());
                         cx.new(|_| preview)
                     },
                 )
             })
-            .when(lifted, |row| row.opacity(0.0))
             .child(
                 div()
                     .w(appearance.spacing(18.0))
@@ -356,15 +447,6 @@ impl WorkspaceSidebar {
                             .text_color(gpui_color(
                                 icon_paint.map_or(row_colors.row_icon, |paint| paint.normal),
                             ))
-                            .when(appearance.active, |icon| {
-                                icon.group_hover(row_group.clone(), |style| {
-                                    style.text_color(gpui_color(
-                                        icon_paint.map_or(row_colors.row_hover_icon, |paint| {
-                                            paint.hovered
-                                        }),
-                                    ))
-                                })
-                            })
                             .child(Icon::inherited(
                                 if remote_connection_phase.is_some() {
                                     IconName::Globe
@@ -401,7 +483,11 @@ impl WorkspaceSidebar {
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
-            ;
+            .children(markers)
+            .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
+        if lifted {
+            return row_content.into_any_element();
+        }
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
             .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))
@@ -467,8 +553,23 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
+    /// Each row's hover, in list order.
+    pub(super) fn row_hovers(&self, window: &mut Window, cx: &mut App) -> Vec<RowFade> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let fade = HoverFade::new(("workspace-row-hover", row.workspace_id.get()), window, cx);
+                RowFade {
+                    level: fade.level(window, cx),
+                    fade,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn render_body(
         &self,
+        hovers: Vec<RowFade>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         cx: &App,
@@ -507,9 +608,24 @@ impl WorkspaceSidebar {
                 });
             })
             .occlude();
-        for row in &self.rows {
+        // The observer stays outside the list, whose children are exactly its rows.
+        let release_observer = self.workspace_reorder.dragged().map(|_| {
+            let release_sidebar = sidebar.clone();
+            drag_release_observer(move |window, cx| {
+                let pointer = window.mouse_position();
+                let _ = release_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.finish_workspace_drag(pointer, cx);
+                });
+            })
+        });
+        for (row, fade) in self.rows.iter().zip(hovers) {
             rows = rows.child(self.render_workspace_row(
                 row.clone(),
+                RowRole::InList,
+                RowHover {
+                    level: fade.level,
+                    tracker: Some(fade.fade),
+                },
                 sidebar.clone(),
                 presentation,
                 window,
@@ -607,6 +723,7 @@ impl WorkspaceSidebar {
             )))
             .occlude()
             .child(rows)
+            .children(release_observer)
             .child(
                 div()
                     .id("workspace-sidebar-footer")

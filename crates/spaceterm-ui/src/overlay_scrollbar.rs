@@ -606,7 +606,12 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         ))
     }
 
-    fn render_thumb(&self, geometry: ThumbGeometry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_thumb(
+        &self,
+        geometry: ThumbGeometry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let scrollbar = cx.entity().downgrade();
         let hover_scrollbar = scrollbar.clone();
         let down_scrollbar = scrollbar.clone();
@@ -627,13 +632,16 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     let color = theme.thumb_color(state.hovered(), state.pressed());
                     (color, color)
                 });
-        let group = thumb_id.clone();
-        let hover_group = group.clone();
+        let hover = crate::HoverFade::new(
+            SharedString::from(format!("{}-thumb-hover", self.name)),
+            window,
+            cx,
+        );
+        let thumb_color = crate::mix_rgba(thumb_color, hover_color, hover.level(window, cx));
         let thumb_debug = thumb_id.clone();
         let hitbox_debug = hitbox_id.clone();
 
         div()
-            .group(group)
             .id(hitbox_id)
             .debug_selector(move || hitbox_debug.to_string())
             .absolute()
@@ -659,9 +667,9 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     .rounded(theme.metrics.thumb_width / 2.0)
                     .border_1()
                     .border_color(theme.thumb_border)
-                    .bg(thumb_color)
-                    .group_hover(hover_group, move |thumb| thumb.bg(hover_color)),
+                    .bg(thumb_color),
             )
+            .child(hover.tracker())
             .child(
                 canvas(
                     |_, _, _| (),
@@ -715,7 +723,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
 impl<O: ScrollOffset> EventEmitter<OverlayScrollbarEvent<O>> for OverlayScrollbar<O> {}
 
 impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *crate::control_theme_catalog(cx).map_or_else(
             || cx.global::<ScrollbarTheme>(),
             |catalog| &catalog.scrollbar,
@@ -735,7 +743,7 @@ impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
                         .border_l_1()
                         .border_color(theme.track_border),
                 )
-                .child(self.render_thumb(geometry, cx))
+                .child(self.render_thumb(geometry, window, cx))
                 .into_any_element(),
             None => Empty.into_any_element(),
         }

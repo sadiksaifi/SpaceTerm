@@ -88,6 +88,16 @@ pub(crate) use terminal_pane::{
 pub(crate) use workspace_frame::WorkspaceFrame;
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 
+
+/// Finishes every hover transition in progress, since test windows have no frame loop.
+#[cfg(test)]
+pub(crate) fn settle_hover(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(spaceterm_ui::HoverFade::SETTLE);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
 actions!(
     terminal,
     [

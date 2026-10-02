@@ -985,11 +985,21 @@ fn render_alert_suppression(
         ModalSuppressionInteraction::Space | ModalSuppressionInteraction::Pointer { inside: true }
     );
     let toggle_theme = *ControlHost::Floating.toggle_theme(cx);
-    let toggle_paint = toggle_theme.paint(selected, enabled, false, pressed);
-    let hover_label = toggle_theme.paint(selected, enabled, true, false).label();
+    let hover = crate::HoverFade::new(
+        ("modal-suppression-hover", presentation.value()),
+        window,
+        cx,
+    );
+    let toggle_paint = if enabled && !pressed {
+        toggle_theme.paint(selected, enabled, false, false).mix(
+            toggle_theme.paint(selected, enabled, true, false),
+            hover.level(window, cx),
+        )
+    } else {
+        toggle_theme.paint(selected, enabled, false, pressed)
+    };
     let pressed_label = toggle_theme.paint(selected, enabled, false, true).label();
     let font = crate::control_typography(cx).regular().clone();
-    let hover_font = font.clone();
     let pressed_font = font.clone();
     let key_down_state = state.clone();
     let key_up_state = state;
@@ -1045,6 +1055,7 @@ fn render_alert_suppression(
         .child(crate::toggle::modal_checkbox_indicator(
             toggle_theme,
             selected,
+            toggle_paint,
             enabled,
             pressed,
             focused,
@@ -1061,28 +1072,19 @@ fn render_alert_suppression(
                 .text_color(toggle_paint.label())
                 .child(label)
                 .when(enabled && !pressed, |label| {
-                    label
-                        .group_hover(crate::toggle::INTERACTION_GROUP, move |style| {
-                            crate::refine_control_text(
-                                style,
-                                &hover_font,
-                                metrics.body_size,
-                                1.2,
-                                hover_label,
-                            )
-                        })
-                        .group_active(crate::toggle::INTERACTION_GROUP, move |style| {
-                            crate::refine_control_text(
-                                style,
-                                &pressed_font,
-                                metrics.body_size,
-                                1.2,
-                                pressed_label,
-                            )
-                        })
+                    label.group_active(crate::toggle::INTERACTION_GROUP, move |style| {
+                        crate::refine_control_text(
+                            style,
+                            &pressed_font,
+                            metrics.body_size,
+                            1.2,
+                            pressed_label,
+                        )
+                    })
                 }),
         )
         .child(pointer_tracker)
+        .child(hover.tracker())
         .child(focus_anchor.bounds_tracker(shell.hairline()));
 
     div().flex().min_w_0().child(control).into_any_element()

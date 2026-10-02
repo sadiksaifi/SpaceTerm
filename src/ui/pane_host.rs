@@ -58,7 +58,7 @@ use gpui::{
     Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonVariant, Icon, IconButton, IconName, ModalAction,
+    Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName, ModalAction,
     ModalActionRole, ModalId, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
     Tooltip,
 };
@@ -332,6 +332,12 @@ struct DraggedPane {
     pane_id: PaneId,
     owner: gpui::EntityId,
 }
+
+/// The widest a lifted Pane Caption grows, so a wide Pane lifts a card rather than a bar.
+const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
+
+/// Each Pane's hover and how far it has eased, as read at the start of a frame.
+type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
 
 /// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
 /// that carries it.
@@ -1103,15 +1109,108 @@ impl PaneHost {
             drop_target: None,
             session,
         });
-        self.drag_pane_to(pane_id, window.mouse_position(), cx);
+        let pointer = window.mouse_position();
+        self.drag_pane_to(pane_id, pointer, cx);
         cx.notify();
-        let label = self
+        let Some(pane) = self.pane_bounds.get(&pane_id).copied() else {
+            return DragPreview::empty();
+        };
+        let caption = Bounds::new(
+            pane.origin,
+            gpui::size(pane.size.width, super::appearance::chrome(cx).caption_height()),
+        );
+        let host = cx.entity().downgrade();
+        DragPreview::new(move |window, cx| {
+            host.upgrade()
+                .map(|host| {
+                    host.read(cx)
+                        .render_lifted_caption(pane_id, caption, pointer, window, cx)
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
+    }
+
+    /// The copy of a dragged Pane's caption that follows the pointer.
+    ///
+    /// It shows the Pane's identity exactly as the caption does, without the controls, which act
+    /// on a Pane in place. A caption wider than a card lifts a card's width of itself, placed so
+    /// the pointer keeps its share of the caption's width. `caption` is where the caption was
+    /// painted and `grab` where the pointer took it, both in window coordinates.
+    fn render_lifted_caption(
+        &self,
+        pane_id: PaneId,
+        caption: Bounds<Pixels>,
+        grab: Point<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
+            return div().into_any_element();
+        };
+        let appearance = super::appearance::chrome(cx);
+        let mut text = self
             .pane_captions
             .get(&pane_id)
-            .map(|caption| caption.name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Terminal".into());
-        DragPreview::new(label, None)
+            .cloned()
+            .unwrap_or_default();
+        text.glyph = drawable_reported_glyph(text.glyph.as_ref(), |glyph| {
+            let caption_style = appearance.typography.style(TextRole::Body);
+            reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
+        });
+        let focused = self.terminal_tab.focused_pane_id() == pane_id;
+        let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
+        let background = terminal.read(cx).surface_background();
+        let paint = appearance.colors.caption(background, focused);
+        let card_width = caption
+            .size
+            .width
+            .min(appearance.spacing(LIFTED_CAPTION_MAXIMUM_WIDTH));
+        let grab_x = (grab.x - caption.origin.x).clamp(px(0.0), caption.size.width);
+        let card_left = grab_x * (1.0 - card_width / caption.size.width.max(card_width));
+        let layout = CaptionLayout::resolve(
+            &PaneCaption {
+                pane_id,
+                terminal,
+                text: text.clone(),
+                focused,
+                zoomed: false,
+                attention,
+                has_multiple_panes: true,
+            },
+            card_width,
+            window,
+            appearance,
+        );
+        // The Pane's surface as the window shows it, so the card reads the same over any Pane.
+        let surface = appearance
+            .pane_surface(background)
+            .source_over(appearance.control_host_background(spaceterm_ui::ControlHost::Window));
+        let radius =
+            super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).pane_radius();
+        let shell =
+            spaceterm_ui::floating_surface_theme(cx).shell(spaceterm_ui::FloatingRole::Popover);
+        let card = shell
+            .frame(
+                caption_row(appearance, paint.foreground)
+                    .child(render_caption_identity(
+                        pane_id, text, attention, layout, appearance, &paint,
+                    )),
+            )
+            .debug_selector(move || format!("pane-caption-preview-{}", pane_id.get()))
+            .absolute()
+            .top_0()
+            .left(card_left)
+            .w(card_width)
+            .h(caption.size.height)
+            .rounded(radius)
+            .bg(gpui_color(surface))
+            .border_color(gpui_color(appearance.pane_rim_on(background)));
+        div()
+            .relative()
+            .w(caption.size.width)
+            .h(caption.size.height)
+            .child(card)
+            .into_any_element()
     }
 
     fn drag_pane_to(&mut self, pane_id: PaneId, pointer: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1596,25 +1695,50 @@ impl PaneHost {
     fn render_tree(
         &self,
         tree: PaneTreeRef<'_>,
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => self.render_leaf(pane_id, host, appearance, cx),
+            PaneNodeRef::Leaf { pane_id } => {
+                self.render_leaf(pane_id, hovers, host, appearance, cx)
+            }
             PaneNodeRef::Split {
                 split_id,
                 axis,
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, (first, second), host, appearance, cx),
+            } => self.render_split(
+                split_id,
+                axis,
+                ratio,
+                (first, second),
+                hovers,
+                host,
+                appearance,
+                cx,
+            ),
         }
+    }
+
+    /// Each Pane's hover, read once per frame.
+    fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
+        self.terminal_tab
+            .terminals_with_ids()
+            .map(|(pane_id, _)| {
+                let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
+                let level = fade.level(window, cx);
+                (pane_id, (fade, level))
+            })
+            .collect()
     }
 
     fn render_leaf(
         &self,
         pane_id: PaneId,
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
@@ -1638,7 +1762,8 @@ impl PaneHost {
             .get(&pane_id)
             .cloned()
             .unwrap_or_default();
-        let pane_group = format!("pane-group-{}", pane_id.get());
+        let hover = hovers.get(&pane_id).cloned();
+        let hover_level = hover.as_ref().map_or(0.0, |(_, level)| *level);
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let drop_edge = self
             .pane_drag
@@ -1685,7 +1810,6 @@ impl PaneHost {
             })
             .id(("pane", pane_id.get()))
             .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
-            .group(pane_group.clone())
             .relative()
             .size_full()
             .min_w_0()
@@ -1723,7 +1847,7 @@ impl PaneHost {
                     attention,
                     has_multiple_panes,
                 },
-                &pane_group,
+                hover_level,
                 host.clone(),
                 appearance.clone(),
             ))
@@ -1741,6 +1865,7 @@ impl PaneHost {
             .when_some(drop_edge, |leaf, edge| {
                 leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
             })
+            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()))
             .into_any_element()
     }
 
@@ -1754,13 +1879,14 @@ impl PaneHost {
         axis: SplitAxis,
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
+        hovers: &PaneHovers,
         host: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, host.clone(), appearance, cx);
-        let second = self.render_tree(second, host.clone(), appearance, cx);
+        let first = self.render_tree(first, hovers, host.clone(), appearance, cx);
+        let second = self.render_tree(second, hovers, host.clone(), appearance, cx);
         let measure_host = host.clone();
         let mut split = div()
             .relative()
@@ -1856,7 +1982,7 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
 }
 
 impl Render for PaneHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A drag GPUI no longer carries ended without this Tab seeing the release, such as while
         // the Tab was hidden, so it moves nothing.
         if self
@@ -1888,11 +2014,18 @@ impl Render for PaneHost {
                 }
             },
         };
+        let hovers = self.pane_hovers(window, cx);
         let content = match zoom_state {
-            ZoomState::Restored => {
-                self.render_tree(self.terminal_tab.root(), host.clone(), &appearance, cx)
+            ZoomState::Restored => self.render_tree(
+                self.terminal_tab.root(),
+                &hovers,
+                host.clone(),
+                &appearance,
+                cx,
+            ),
+            ZoomState::Zoomed(pane_id) => {
+                self.render_leaf(pane_id, &hovers, host, &appearance, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host, &appearance, cx),
         };
 
         div()
@@ -2101,12 +2234,11 @@ struct PaneCaption {
 
 fn render_pane_caption(
     caption: PaneCaption,
-    pane_group: &str,
+    hover: f32,
     host: gpui::WeakEntity<PaneHost>,
     appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
     let caption_height = appearance.caption_height();
-    let pane_group = pane_group.to_owned();
     // Resolve controls from this frame's actual width, including during split resizing.
     gpui::canvas(
         move |bounds, window, cx| {
@@ -2144,7 +2276,7 @@ fn render_pane_caption(
             let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
-                &pane_group,
+                hover,
                 host,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
@@ -2192,7 +2324,7 @@ pub(super) fn drawable_reported_glyph(
 
 fn render_pane_caption_content(
     caption: PaneCaption,
-    pane_group: &str,
+    hover: f32,
     host: gpui::WeakEntity<PaneHost>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
@@ -2245,10 +2377,9 @@ fn render_pane_caption_content(
         .gap(appearance.spacing(PANE_CONTROL_GAP))
         .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
+        // An unfocused Pane shows its controls only under the pointer.
         .when(!focused, |controls| {
-            controls.opacity(0.0).when(appearance.active, |controls| {
-                controls.group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
-            })
+            controls.opacity(if appearance.active { hover } else { 0.0 })
         });
     let actions = [
         (
@@ -2328,6 +2459,50 @@ fn render_pane_caption_content(
             controls.child(button)
         };
     }
+    let caption_content =
+        render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+    caption_row(appearance, color)
+        .id(("pane-caption", pane_id.get()))
+        .debug_selector(move || {
+            format!(
+                "pane-caption-{}-{}",
+                pane_id.get(),
+                if focused { "focused" } else { "unfocused" }
+            )
+        })
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            let _ = focus_host.update(cx, |host, cx| {
+                host.focus_pane(pane_id, cx);
+                host.focus(window, cx);
+            });
+            cx.stop_propagation();
+        })
+        // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
+        .when(has_multiple_panes && !zoomed, |row| {
+            let owner = drag_host.entity_id();
+            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
+                let preview = drag_host
+                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, window, cx))
+                    .unwrap_or_else(|_| DragPreview::empty());
+                cx.new(|_| preview)
+            })
+        })
+        .child(caption_content)
+        .child(controls)
+        .into_any_element()
+}
+
+/// The Pane's identity as its caption shows it: origin, directory, name, status, and label.
+fn render_caption_identity(
+    pane_id: PaneId,
+    text: PaneCaptionText,
+    attention: bool,
+    layout: CaptionLayout,
+    appearance: &super::appearance::ChromeAppearance,
+    paint: &crate::appearance::CaptionPaint,
+) -> gpui::Div {
+    let color = paint.foreground;
     let mut caption_content = div()
         .flex_1()
         .min_w_0()
@@ -2374,7 +2549,7 @@ fn render_pane_caption_content(
             .child(render_pane_status(
                 pane_id,
                 (text.progress, text.glyph, attention),
-                &paint,
+                paint,
                 appearance,
             ))
             .when(layout.show_label && !text.label.is_empty(), |row| {
@@ -2392,7 +2567,7 @@ fn render_pane_caption_content(
             .child(render_pane_status(
                 pane_id,
                 (text.progress, text.glyph, attention),
-                &paint,
+                paint,
                 appearance,
             ))
             .child(
@@ -2403,15 +2578,12 @@ fn render_pane_caption_content(
                     .child(text.name),
             );
     }
+    caption_content
+}
+
+/// The caption strip's row: full height, padded, and set in the caption's text style.
+fn caption_row(appearance: &super::appearance::ChromeAppearance, color: crate::appearance::Color) -> gpui::Div {
     div()
-        .id(("pane-caption", pane_id.get()))
-        .debug_selector(move || {
-            format!(
-                "pane-caption-{}-{}",
-                pane_id.get(),
-                if focused { "focused" } else { "unfocused" }
-            )
-        })
         // The row fills the caption strip rather than restating its height, so the contents centre
         // on the strip's own middle and the whole strip stays one hit target.
         .h_full()
@@ -2426,27 +2598,6 @@ fn render_pane_caption_content(
         .py(appearance.spacing(PANE_CAPTION_VERTICAL_PADDING))
         .chrome_text(appearance.typography.style(TextRole::Body))
         .text_color(gpui_color(color))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, window, cx| {
-            let _ = focus_host.update(cx, |host, cx| {
-                host.focus_pane(pane_id, cx);
-                host.focus(window, cx);
-            });
-            cx.stop_propagation();
-        })
-        // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
-        .when(has_multiple_panes && !zoomed, |row| {
-            let owner = drag_host.entity_id();
-            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
-                let preview = drag_host
-                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, window, cx))
-                    .unwrap_or_else(|_| DragPreview::new("", None));
-                cx.new(|_| preview)
-            })
-        })
-        .child(caption_content)
-        .child(controls)
-        .into_any_element()
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.

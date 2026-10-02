@@ -145,6 +145,15 @@ impl SegmentedPaint {
         }
     }
 
+    /// The paint `level` of the way from this paint to `other`.
+    fn mix(self, other: Self, level: f32) -> Self {
+        Self {
+            background: crate::mix_rgba(self.background, other.background, level),
+            label: crate::mix_rgba(self.label, other.label, level),
+            border: crate::mix_rgba(self.border, other.border, level),
+        }
+    }
+
     /// Returns the option fill.
     pub const fn background(self) -> Rgba {
         self.background
@@ -725,12 +734,26 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     font_size: metrics.font_size,
                     line_height: metrics.line_height,
                 };
-                let hovered = refinement(style.paints.hovered.resolve(selected));
                 let pressed = refinement(style.paints.pressed.resolve(selected));
                 let option_selector = option
                     .debug_selector
                     .clone()
                     .unwrap_or_else(|| format!("{selector}-{index}"));
+                // Pointer feedback belongs to the segment under the pointer. Reacting to the
+                // track's hover instead would light every segment at once.
+                let hover = crate::HoverFade::new(
+                    SharedString::from(format!("{option_selector}-hover")),
+                    window,
+                    cx,
+                );
+                let paint = if refine_interaction {
+                    paint.mix(
+                        style.paints.hovered.resolve(selected),
+                        hover.level(window, cx),
+                    )
+                } else {
+                    paint
+                };
                 let pointer_state = state.clone();
                 let activate = request.clone();
                 let value = option.value.clone();
@@ -763,11 +786,9 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
                     })
-                    // Pointer feedback belongs to the segment under the pointer. Reacting to the
-                    // track's hover instead would light every segment at once.
                     .when(refine_interaction, |segment| {
                         segment
-                            .hover(move |style| hovered.segment(style))
+                            .child(hover.tracker())
                             .active(move |style| pressed.segment(style))
                     })
                     .when(option_enabled, |segment| {

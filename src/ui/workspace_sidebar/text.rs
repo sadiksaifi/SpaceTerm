@@ -54,9 +54,6 @@ pub(super) fn title(
                             .truncate()
                             .chrome_text(appearance.typography.style(TextRole::Secondary))
                             .text_color(gpui_color(appearance.colors.row_secondary))
-                            .group_hover(format!("workspace-row-state-{id}"), |style| {
-                                style.text_color(gpui_color(appearance.colors.row_hover_secondary))
-                            })
                             .child(machine),
                     )
                 })
@@ -113,7 +110,6 @@ pub(super) fn detail(
                 .into()
             };
             let status_normal = status_paint.map(|paint| paint.normal);
-            let status_hovered = status_paint.map(|paint| paint.hovered);
             let path = div()
                 .min_w_0()
                 .flex_1()
@@ -127,9 +123,6 @@ pub(super) fn detail(
                             .id(("workspace-row-pin", id))
                             .debug_selector(move || format!("workspace-row-pin-{id}"))
                             .text_color(gpui_color(appearance.colors.row_secondary))
-                            .group_hover(format!("workspace-row-state-{id}"), |style| {
-                                style.text_color(gpui_color(appearance.colors.row_hover_secondary))
-                            })
                             .child(Icon::inherited(
                                 IconName::Pin,
                                 appearance.icons.metrics(IconRole::Caption).glyph_size,
@@ -148,11 +141,6 @@ pub(super) fn detail(
                         .text_color(gpui_color(
                             status_normal.unwrap_or(appearance.colors.row_secondary),
                         ))
-                        .group_hover(format!("workspace-row-state-{id}"), |style| {
-                            style.text_color(gpui_color(
-                                status_hovered.unwrap_or(appearance.colors.row_hover_secondary),
-                            ))
-                        })
                         .child(fitted),
                 );
             let mut content = div()
@@ -171,9 +159,6 @@ pub(super) fn detail(
                         .id(("workspace-counts", id))
                         .debug_selector(move || format!("workspace-counts-{id}"))
                         .text_color(gpui_color(appearance.colors.row_secondary))
-                        .group_hover(format!("workspace-row-state-{id}"), |style| {
-                            style.text_color(gpui_color(appearance.colors.row_hover_secondary))
-                        })
                         .child(counts),
                 )
                 .into_any_element();

@@ -1,8 +1,8 @@
 //! Pointer drag and drop shared by the Tab bar, the Workspace sidebar, and Pane Layouts.
 //!
-//! A reorderable strip moves its dragged item live: the item takes a neighbour's place as soon as
-//! the pointer crosses that neighbour's midpoint, so the gap it leaves follows the pointer the way
-//! an AppKit tab bar and source list do. The lifted item follows the pointer as a [`DragPreview`].
+//! A dragged item stays in its place until release. A copy of it follows the pointer as a
+//! [`DragPreview`], and the strip or Pane Layout marks in the accent color where a release would put
+//! it. Releasing anywhere else, or pressing Escape, moves nothing.
 //!
 //! GPUI owns each drag's lifetime: it ends a drag on any release. A [`DragSession`] ties an owner's
 //! state to the one drag it started, so the owner keeps that state only while GPUI still carries
@@ -12,30 +12,36 @@
 use gpui::prelude::*;
 use gpui::{
     Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, MouseUpEvent, Pixels, Point,
-    ScrollHandle, SharedString, Size, Subscription, Window, canvas, div,
+    ScrollHandle, Size, Subscription, Window, canvas, div, px,
 };
 
 use super::appearance::gpui_color;
-use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
-/// The leading and trailing air inside a lifted item that has no shape of its own to copy.
-const PREVIEW_HORIZONTAL_PADDING: f32 = 10.0;
+/// The thickness of the accent line that marks where a dragged strip item would land.
+const INSERTION_MARKER_THICKNESS: f32 = 2.0;
 
-/// The live reorder state of one scrolling strip of items laid out along one axis.
+/// The drop state of one scrolling strip of items laid out along one axis.
 ///
 /// The strip reads its items' painted bounds from the scroll container that lays them out, so
-/// the geometry follows scrolling. Items are equal in size along the axis, so a move between
-/// frames leaves every slot where the last frame painted it.
+/// the geometry follows scrolling.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
     lift: Option<Lift<Id>>,
 }
 
-/// The item a strip's drag carries, the order the strip had when it was lifted, and its session.
+/// The item a strip's drag carries, its session, and the slot a release would put it in.
 struct Lift<Id> {
     id: Id,
-    origin: Vec<Id>,
     session: DragSession,
+    insertion: Option<Insertion>,
+}
+
+/// A slot between the items of a strip that held `len` items, numbered from zero before the first
+/// item to `len` after the last.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Insertion {
+    slot: usize,
+    len: usize,
 }
 
 impl<Id: Copy + Eq> ReorderableStrip<Id> {
@@ -43,19 +49,19 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         Self { axis, lift: None }
     }
 
-    /// Lifts the item `id` from the strip whose items are in `order`.
-    pub(crate) fn begin(&mut self, id: Id, order: Vec<Id>, session: DragSession) {
+    /// Lifts the item `id`. It keeps its place until a release lands it elsewhere.
+    pub(crate) fn begin(&mut self, id: Id, session: DragSession) {
         self.lift = Some(Lift {
             id,
-            origin: order,
             session,
+            insertion: None,
         });
     }
 
     /// Ends a lift whose drag GPUI no longer carries.
     ///
     /// Call it on every render, so a drag released anywhere, including while the strip was
-    /// hidden, leaves no lifted item behind.
+    /// hidden, leaves no marker behind.
     pub(crate) fn end_released(&mut self, cx: &App) {
         if self
             .lift
@@ -66,61 +72,166 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         }
     }
 
-    /// Cancels the drag, returning the dragged item and the position among `current` that returns
-    /// it between the same surviving neighbours it was lifted from.
-    pub(crate) fn cancel(&mut self, current: &[Id]) -> Option<(Id, usize)> {
-        let lift = self.lift.take()?;
-        Some((lift.id, restored_position(&lift.origin, lift.id, current)))
+    /// Drops the lift without moving anything.
+    pub(crate) fn cancel(&mut self) {
+        self.lift = None;
     }
 
     pub(crate) fn dragged(&self) -> Option<Id> {
         self.lift.as_ref().map(|lift| lift.id)
     }
 
-    /// Returns the position the dragged item takes for the pointer, when it differs from
-    /// `current`, the item's position among the `items` the strip's scroll container laid out.
+    /// The slot the insertion marker shows, numbered among the `len` items the strip presents.
+    pub(crate) fn insertion(&self, len: usize) -> Option<usize> {
+        self.lift
+            .as_ref()
+            .and_then(|lift| lift.insertion)
+            .filter(|insertion| insertion.len == len)
+            .map(|insertion| insertion.slot)
+    }
+
+    /// Follows the pointer with the slot a release would land the dragged item in. Returns whether
+    /// the slot changed.
     ///
-    /// A container that laid out a different number of items describes a stale frame and moves
-    /// nothing.
-    pub(crate) fn reorder(
-        &self,
+    /// `current` is the dragged item's position among the `len` items the strip's scroll container
+    /// laid out. A pointer outside the strip across its axis, a slot beside the item's own place,
+    /// and a container that laid out a different number of items show no slot.
+    pub(crate) fn track(
+        &mut self,
         items: &ScrollHandle,
         current: usize,
         len: usize,
         pointer: Point<Pixels>,
-    ) -> Option<usize> {
-        let item_bounds = painted_item_bounds(items);
-        if self.lift.is_none() || item_bounds.len() != len || current >= len {
+    ) -> bool {
+        let axis = self.axis;
+        let Some(lift) = self.lift.as_mut() else {
+            return false;
+        };
+        let insertion = strip_spans(items, axis, len, pointer)
+            .and_then(|spans| insertion_slot(&spans, current, f32::from(pointer.along(axis))))
+            .map(|slot| Insertion { slot, len });
+        let changed = lift.insertion != insertion;
+        lift.insertion = insertion;
+        changed
+    }
+
+    /// Ends the drag on its release, returning the dragged item and the position it lands at among
+    /// the `len` items the strip now presents, when it lands somewhere new.
+    ///
+    /// A drag GPUI no longer carries, such as one cancelled with Escape, lands nowhere.
+    pub(crate) fn finish(&mut self, current: usize, len: usize, cx: &App) -> Option<(Id, usize)> {
+        let lift = self.lift.take()?;
+        if !lift.session.is_active(cx) {
             return None;
         }
-        let spans = item_bounds
-            .iter()
-            .map(|bounds| {
-                let start = bounds.origin.along(self.axis);
-                (
-                    f32::from(start),
-                    f32::from(start + bounds.size.along(self.axis)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let position = reorder_position(&spans, current, f32::from(pointer.along(self.axis)));
-        (position != current).then_some(position)
+        let insertion = lift.insertion.filter(|insertion| insertion.len == len)?;
+        Some((lift.id, landing_position(insertion.slot, current)))
     }
 }
 
-/// The position among `current` that puts `dragged` back after the items that preceded it in
-/// `origin` and still remain.
+/// The start and end of every item along the strip, when the pointer lies within the strip across
+/// its axis and the container laid out `len` items.
+fn strip_spans(
+    items: &ScrollHandle,
+    axis: Axis,
+    len: usize,
+    pointer: Point<Pixels>,
+) -> Option<Vec<(f32, f32)>> {
+    let strip = items.bounds();
+    let across = axis.invert();
+    let start = strip.origin.along(across);
+    let end = start + strip.size.along(across);
+    let pointer_across = pointer.along(across);
+    if pointer_across < start || pointer_across >= end {
+        return None;
+    }
+    let item_bounds = painted_item_bounds(items);
+    (item_bounds.len() == len).then(|| {
+        item_bounds
+            .iter()
+            .map(|bounds| {
+                let start = bounds.origin.along(axis);
+                (
+                    f32::from(start),
+                    f32::from(start + bounds.size.along(axis)),
+                )
+            })
+            .collect()
+    })
+}
+
+/// The slot a release at `pointer` lands the item at `dragged` in, or `None` when that slot is
+/// beside the item's own place.
 ///
-/// Only the dragged item moves during a drag, so the remaining items keep their relative order and
-/// the surviving predecessors lead the strip once the dragged item is set aside. Items closed during
-/// the drag drop out of the count instead of shifting the item past its neighbours.
-fn restored_position<Id: Copy + Eq>(origin: &[Id], dragged: Id, current: &[Id]) -> usize {
-    let predecessors = origin
+/// `spans` are the start and end of every item in presentation order. The slot follows every item
+/// whose midpoint the pointer has passed.
+fn insertion_slot(spans: &[(f32, f32)], dragged: usize, pointer: f32) -> Option<usize> {
+    if dragged >= spans.len() {
+        return None;
+    }
+    let slot = spans
         .iter()
-        .take_while(|id| **id != dragged)
-        .filter(|id| current.contains(id))
+        .take_while(|(start, end)| pointer > (start + end) / 2.0)
         .count();
-    predecessors.min(current.len().saturating_sub(1))
+    (slot != dragged && slot != dragged + 1).then_some(slot)
+}
+
+/// The position an item at `current` takes when it lands in `slot`.
+///
+/// The item leaves its own place first, so a slot after it is one position earlier.
+fn landing_position(slot: usize, current: usize) -> usize {
+    if slot > current { slot - 1 } else { slot }
+}
+
+/// Which side of its item a strip's insertion marker sits on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MarkerSide {
+    Leading,
+    Trailing,
+}
+
+/// The accent line that marks the slot a dragged strip item would land in.
+///
+/// It sits on the `side` of the item it is mounted in, across a strip laid out along `axis`, and
+/// keeps `inset` from its two ends so it spans the item's shape rather than its hit target. A marker
+/// between two items is centred on their shared edge; one at either end of the strip stays inside
+/// it.
+pub(crate) fn insertion_marker(
+    axis: Axis,
+    side: MarkerSide,
+    at_strip_end: bool,
+    inset: (Pixels, Pixels),
+    selector: String,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let thickness = px(INSERTION_MARKER_THICKNESS);
+    let offset = if at_strip_end {
+        px(0.0)
+    } else {
+        -thickness / 2.0
+    };
+    let marker = div()
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .rounded_full()
+        .bg(gpui_color(appearance.colors.primary_background));
+    match (axis, side) {
+        (Axis::Horizontal, side) => {
+            let marker = marker.top(inset.0).bottom(inset.1).w(thickness);
+            match side {
+                MarkerSide::Leading => marker.left(offset),
+                MarkerSide::Trailing => marker.right(offset),
+            }
+        }
+        (Axis::Vertical, side) => {
+            let marker = marker.left(inset.0).right(inset.1).h(thickness);
+            match side {
+                MarkerSide::Leading => marker.top(offset),
+                MarkerSide::Trailing => marker.bottom(offset),
+            }
+        }
+    }
+    .into_any_element()
 }
 
 /// The size the scroll container painted its item at `position`, used to lift it at that size.
@@ -139,65 +250,37 @@ fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
         .collect()
 }
 
-/// The position the item at `dragged` takes when the pointer is at `pointer` along the strip.
-///
-/// `spans` are the start and end of every item in presentation order. The item passes each
-/// neighbour whose midpoint the pointer has crossed, so items of different sizes neither skip nor
-/// oscillate.
-fn reorder_position(spans: &[(f32, f32)], dragged: usize, pointer: f32) -> usize {
-    let midpoint = |(start, end): (f32, f32)| (start + end) / 2.0;
-    let later = spans[dragged + 1..]
-        .iter()
-        .take_while(|span| pointer > midpoint(**span))
-        .count();
-    if later > 0 {
-        return dragged + later;
-    }
-    let earlier = spans[..dragged]
-        .iter()
-        .rev()
-        .take_while(|span| pointer < midpoint(**span))
-        .count();
-    dragged - earlier
-}
-
 /// The lifted copy of a dragged item that follows the pointer.
 ///
-/// It rests on the anchored floating material, so a lifted Tab, Workspace, or Pane reads as one
-/// family of raised shapes, and it takes the size of the item it lifts when that size is known.
+/// A Tab or Workspace row paints its own face, so the copy looks exactly like the item it lifts. An
+/// item without a compact face, such as a Pane, lifts a label on the anchored floating material.
 pub(crate) struct DragPreview {
-    label: SharedString,
-    size: Option<Size<Pixels>>,
+    face: Box<PreviewFace>,
 }
 
+/// Paints a dragged item's face for one frame.
+type PreviewFace = dyn Fn(&mut Window, &mut App) -> AnyElement;
+
 impl DragPreview {
-    pub(crate) fn new(label: impl Into<SharedString>, size: Option<Size<Pixels>>) -> Self {
+    /// A preview that paints `face` at the pointer. The face must not claim the pointer: it lies
+    /// over every drop target while the drag lasts.
+    pub(crate) fn new(face: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
         Self {
-            label: label.into(),
-            size,
+            face: Box::new(face),
         }
+    }
+
+    /// A preview with nothing to paint, for a drag whose owner is gone.
+    pub(crate) fn empty() -> Self {
+        Self::new(|_, _| div().into_any_element())
     }
 }
 
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = super::appearance::chrome(cx);
-        let shell =
-            spaceterm_ui::floating_surface_theme(cx).shell(spaceterm_ui::FloatingRole::Popover);
-        let label = self.label.clone();
-        let frame = div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
             .debug_selector(|| "drag-preview".to_owned())
-            .h(self
-                .size
-                .map_or(appearance.top_height(), |size| size.height))
-            .when_some(self.size, |frame, size| frame.w(size.width))
-            .px(appearance.spacing(PREVIEW_HORIZONTAL_PADDING))
-            .flex()
-            .items_center()
-            .chrome_text(appearance.typography.style(TextRole::Navigation))
-            .text_color(gpui_color(appearance.colors.text))
-            .child(div().min_w_0().truncate().child(label));
-        shell.mount(frame)
+            .child((self.face)(window, cx))
     }
 }
 
@@ -306,45 +389,45 @@ mod tests {
     }
 
     #[test]
-    fn reorder_position_should_pass_each_neighbour_whose_midpoint_the_pointer_crossed() {
+    fn insertion_slot_should_follow_each_item_whose_midpoint_the_pointer_passed() {
         let spans = strip(&[100.0, 100.0, 100.0, 100.0]);
 
         assert_eq!(
             [
-                reorder_position(&spans, 1, 120.0),
-                reorder_position(&spans, 1, 251.0),
-                reorder_position(&spans, 1, 399.0),
-                reorder_position(&spans, 1, 49.0),
-                reorder_position(&spans, 2, -40.0),
+                insertion_slot(&spans, 1, 40.0),
+                insertion_slot(&spans, 1, 251.0),
+                insertion_slot(&spans, 1, 399.0),
+                insertion_slot(&spans, 1, 520.0),
+                insertion_slot(&spans, 2, -40.0),
             ],
-            [1, 2, 3, 0, 0]
+            [Some(0), Some(3), Some(4), Some(4), Some(0)]
         );
     }
 
     #[test]
-    fn restored_position_should_follow_surviving_neighbours() {
-        // D was lifted from the end of A B C D and dragged to the front.
-        let origin = ['A', 'B', 'C', 'D'];
+    fn insertion_slot_should_show_nothing_beside_the_items_own_place() {
+        let spans = strip(&[100.0, 100.0, 100.0]);
 
         assert_eq!(
             [
-                restored_position(&origin, 'D', &['D', 'A', 'B', 'C']),
-                restored_position(&origin, 'D', &['D', 'A', 'C']),
-                restored_position(&origin, 'B', &['B', 'A', 'C', 'D']),
-                restored_position(&origin, 'B', &['B', 'C', 'D']),
+                insertion_slot(&spans, 1, 60.0),
+                insertion_slot(&spans, 1, 150.0),
+                insertion_slot(&spans, 1, 240.0),
             ],
-            [3, 2, 1, 0]
+            [None, None, None]
         );
     }
 
     #[test]
-    fn reorder_position_should_not_oscillate_across_items_of_different_sizes() {
-        // A wide item dragged past the midpoint of a narrow neighbour takes its place. In the new
-        // order the narrow neighbour lies behind the pointer, so the item stays put.
-        let before = strip(&[200.0, 40.0]);
-        let moved = reorder_position(&before, 0, 221.0);
-        let after = strip(&[40.0, 200.0]);
-
-        assert_eq!((moved, reorder_position(&after, 1, 221.0)), (1, 1));
+    fn landing_position_should_account_for_the_place_the_item_leaves() {
+        // B is lifted from A B C D.
+        assert_eq!(
+            [
+                landing_position(0, 1),
+                landing_position(3, 1),
+                landing_position(4, 1),
+            ],
+            [0, 2, 3]
+        );
     }
 }

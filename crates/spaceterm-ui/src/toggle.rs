@@ -153,6 +153,23 @@ impl TogglePaint {
     pub const fn label(self) -> Rgba {
         self.label
     }
+
+    /// The paint `level` of the way from this paint to `other`.
+    ///
+    /// A shadow has no partial state, so it switches halfway.
+    pub(crate) fn mix(self, other: Self, level: f32) -> Self {
+        let mix = |from, to| crate::mix_rgba(from, to, level);
+        let halfway = |from, to| if level < 0.5 { from } else { to };
+        Self {
+            background: mix(self.background, other.background),
+            foreground: mix(self.foreground, other.foreground),
+            border: mix(self.border, other.border),
+            label: mix(self.label, other.label),
+            shadow: halfway(self.shadow, other.shadow),
+            thumb_shadow: halfway(self.thumb_shadow, other.thumb_shadow),
+            thumb_border: mix(self.thumb_border, other.thumb_border),
+        }
+    }
 }
 
 /// Paint for off and on values in one interaction state.
@@ -693,12 +710,17 @@ impl ToggleCore {
         let (keyboard_pressed, focus_visible) =
             state.read_with(cx, |state, _| (state.keyboard_pressed, state.focus_visible));
         let focused = focus_handle.is_focused(window) && focus_visible;
+        let hover = crate::HoverFade::new(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "hover".into()),
+            window,
+            cx,
+        );
         let paint = if !enabled {
             style.disabled
         } else if keyboard_pressed {
             style.pressed
         } else {
-            style.normal
+            style.normal.mix(style.hovered, hover.level(window, cx))
         };
         #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
@@ -744,10 +766,8 @@ impl ToggleCore {
                 focus_selector,
             ),
         };
-        let hovered = TogglePaintRefinement(style.hovered);
         let pressed = TogglePaintRefinement(style.pressed);
         let font = crate::control_typography(cx).regular().clone();
-        let hover_font = font.clone();
         let pressed_font = font.clone();
         let font_size = style.metrics.font_size;
         let line_height = style.metrics.line_height;
@@ -760,13 +780,9 @@ impl ToggleCore {
             .font(font)
             .child(self.label.clone())
             .when(enabled && !keyboard_pressed, |label| {
-                label
-                    .group_hover(INTERACTION_GROUP, move |style| {
-                        hovered.label(style, &hover_font, font_size, line_height)
-                    })
-                    .group_active(INTERACTION_GROUP, move |style| {
-                        pressed.label(style, &pressed_font, font_size, line_height)
-                    })
+                label.group_active(INTERACTION_GROUP, move |style| {
+                    pressed.label(style, &pressed_font, font_size, line_height)
+                })
             });
         let is_switch = matches!(kind, ToggleKind::Switch);
         let content = if self.label_hidden {
@@ -839,6 +855,7 @@ impl ToggleCore {
                     })
                     .group(INTERACTION_GROUP)
                     .on_click(click_handler)
+                    .child(hover.tracker())
             })
             .children(content);
 
@@ -915,9 +932,16 @@ impl TogglePaintRefinement {
 }
 
 /// Shares checkbox presentation with composites that retain specialized interaction ownership.
+///
+/// `paint` is the checkbox's paint in its current state, hover included.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the indicator consumes one resolved control state"
+)]
 pub(crate) fn modal_checkbox_indicator(
     theme: ToggleTheme,
     selected: bool,
+    paint: TogglePaint,
     enabled: bool,
     pressed: bool,
     focused: bool,
@@ -932,7 +956,7 @@ pub(crate) fn modal_checkbox_indicator(
             CheckboxState::Unchecked
         },
         style,
-        theme.paint(selected, enabled, false, pressed),
+        paint,
         enabled,
         pressed,
         focused,
@@ -956,7 +980,6 @@ fn checkbox_indicator(
     focus_selector: String,
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
-    let hovered = TogglePaintRefinement(style.hovered);
     let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
     let mark_state_id = SharedString::from(format!("{selector}-mark-state"));
@@ -977,9 +1000,7 @@ fn checkbox_indicator(
         .shadow(paint.shadow.layers())
         .shadow_outside_only()
         .when(enabled && !keyboard_pressed, |indicator| {
-            indicator
-                .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
-                .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
+            indicator.group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
         })
         .when(value == CheckboxState::Checked, |indicator| {
             indicator.child(
@@ -993,10 +1014,7 @@ fn checkbox_indicator(
                     .when(enabled && !keyboard_pressed, |mark| {
                         let size = metrics.checkbox_extent * 0.8;
                         let line_height = metrics.checkbox_extent;
-                        mark.group_hover(INTERACTION_GROUP, move |style| {
-                            hovered.foreground_text(style, size, line_height)
-                        })
-                        .group_active(INTERACTION_GROUP, move |style| {
+                        mark.group_active(INTERACTION_GROUP, move |style| {
                             pressed.foreground_text(style, size, line_height)
                         })
                     }),
@@ -1011,10 +1029,7 @@ fn checkbox_indicator(
                     .rounded(metrics.border_width)
                     .bg(paint.foreground)
                     .when(enabled && !keyboard_pressed, |mark| {
-                        mark.group_hover(INTERACTION_GROUP, move |style| {
-                            hovered.foreground_fill(style)
-                        })
-                        .group_active(INTERACTION_GROUP, move |style| {
+                        mark.group_active(INTERACTION_GROUP, move |style| {
                             pressed.foreground_fill(style)
                         })
                     }),
@@ -1052,7 +1067,6 @@ fn switch_indicator(
     focus_selector: String,
 ) -> gpui::AnyElement {
     let metrics = style.metrics;
-    let hovered = TogglePaintRefinement(style.hovered);
     let pressed = TogglePaintRefinement(style.pressed);
     let state_id = format!("{selector}-state");
     let thumb_state_id = SharedString::from(format!("{thumb_selector}-state"));
@@ -1085,9 +1099,7 @@ fn switch_indicator(
         .shadow(paint.shadow.layers())
         .shadow_outside_only()
         .when(enabled && !keyboard_pressed, |indicator| {
-            indicator
-                .group_hover(INTERACTION_GROUP, move |style| hovered.indicator(style))
-                .group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
+            indicator.group_active(INTERACTION_GROUP, move |style| pressed.indicator(style))
         })
         .child(
             div()
@@ -1103,9 +1115,7 @@ fn switch_indicator(
                 .shadow(paint.thumb_shadow.layers())
                 .shadow_outside_only()
                 .when(enabled && !keyboard_pressed, |thumb| {
-                    thumb
-                        .group_hover(INTERACTION_GROUP, move |style| hovered.thumb(style))
-                        .group_active(INTERACTION_GROUP, move |style| pressed.thumb(style))
+                    thumb.group_active(INTERACTION_GROUP, move |style| pressed.thumb(style))
                 }),
         );
     crate::Ringed::new(

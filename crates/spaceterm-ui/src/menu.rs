@@ -1661,6 +1661,11 @@ impl<A: Clone + 'static> MenuControl<A> {
             }) as InternalActivation
         });
         let state = window.use_keyed_state(self.id.clone(), cx, MenuState::new);
+        let hover = crate::HoverFade::new(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "hover".into()),
+            window,
+            cx,
+        );
         let closed_reservation = state.update(cx, |state, cx| {
             let should_close = state.open && !enabled;
             state.synchronize(
@@ -1837,6 +1842,13 @@ impl<A: Clone + 'static> MenuControl<A> {
                 cx.stop_propagation();
             });
 
+        // An open menu holds its trigger in the pressed paint, so hover shows only while closed.
+        let hover_level = if enabled && !open {
+            hover.level(window, cx)
+        } else {
+            0.0
+        };
+        trigger = trigger.child(hover.tracker());
         let mut ring = None;
         if let Some(style) = self.button_segment {
             let corner_radii = JoinedEdge::Leading.corner_radii(style.corner_radius);
@@ -1855,7 +1867,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             } else if open {
                 style.pressed
             } else {
-                style.normal
+                style.normal.mix(style.hovered, hover_level)
             };
             trigger = trigger
                 .flex()
@@ -1866,14 +1878,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .border(style.border_width)
                 .border_l(px(0.0))
                 .border_color(paint.border())
-                .bg(paint.background())
-                .when(enabled && !open, |trigger| {
-                    trigger.hover(move |hovered| {
-                        hovered
-                            .bg(style.hovered.background())
-                            .border_color(style.hovered.border())
-                    })
-                });
+                .bg(paint.background());
         } else if self.kind != TriggerKind::Context {
             let paint = menu_trigger_paint(cx);
             let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
@@ -1915,7 +1920,11 @@ impl<A: Clone + 'static> MenuControl<A> {
                 .bg(if enabled && open {
                     paint.trigger_hover_background
                 } else {
-                    paint.trigger_background
+                    crate::mix_rgba(
+                        paint.trigger_background,
+                        paint.trigger_hover_background,
+                        hover_level,
+                    )
                 })
                 .text_color(if enabled {
                     paint.foreground
@@ -1924,10 +1933,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 })
                 .text_size(style.metrics.font_size)
                 .line_height(style.metrics.label_line_height)
-                .font(font)
-                .when(enabled && !open, |trigger| {
-                    trigger.hover(move |style| style.bg(paint.trigger_hover_background))
-                });
+                .font(font);
         }
 
         div()

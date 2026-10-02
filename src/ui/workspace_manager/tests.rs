@@ -5793,7 +5793,7 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
     let resting = surface("workspace-switcher", cx);
     let switcher = cx.debug_bounds("workspace-switcher").unwrap();
     cx.simulate_mouse_move(switcher.center(), None, Modifiers::none());
-    redraw(cx);
+    crate::ui::settle_hover(cx);
     assert_ne!(
         surface("workspace-switcher", cx),
         resting,
@@ -5802,7 +5802,7 @@ fn workspace_switcher_uses_ghost_then_active_tab_surface(cx: &mut TestAppContext
 
     click("toggle-sidebar-button", cx);
     cx.simulate_mouse_move(point(px(0.0), px(200.0)), None, Modifiers::none());
-    redraw(cx);
+    crate::ui::settle_hover(cx);
     let tab = surface("tab-item-1-chip", cx).expect("active Tab surface");
     assert_eq!(
         surface("workspace-switcher", cx),
@@ -7300,31 +7300,52 @@ fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContex
 }
 
 #[gpui::test]
-fn dragging_a_workspace_row_should_reorder_live_without_activating_it(cx: &mut TestAppContext) {
+fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
+    cx: &mut TestAppContext,
+) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
 
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
-    for position in [
+    cx.simulate_mouse_move(
         first.center() + point(px(0.0), px(8.0)),
-        third.center() + point(px(0.0), px(4.0)),
-    ] {
-        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-    }
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(
+        second.center() + point(px(0.0), px(4.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let between = cx.debug_bounds("workspace-insertion-marker-2");
+    let release = third.center() + point(px(0.0), px(4.0));
+    cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
     let during = (
         workspace_order(&manager, cx),
-        cx.debug_bounds("drag-preview").map(|preview| preview.size),
+        cx.debug_bounds("workspace-row-1-inactive"),
+        cx.debug_bounds("workspace-row-preview-1-inactive")
+            .map(|preview| preview.size),
+        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
     );
-    cx.simulate_mouse_up(third.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
-    assert_eq!(during, (vec![2, 3, 1], Some(first.size)));
+    assert_eq!(
+        during,
+        (vec![1, 2, 3], Some(first), Some(first.size), true),
+        "a dragged row must keep its place, lift an exact copy, and mark where it lands"
+    );
+    // The marker between two rows stands on the edge they share.
+    assert_eq!(between.map(|marker| marker.center().y), Some(third.top()));
     assert_eq!(
         (
             workspace_order(&manager, cx),
@@ -7333,6 +7354,7 @@ fn dragging_a_workspace_row_should_reorder_live_without_activating_it(cx: &mut T
         (vec![2, 3, 1], WorkspaceId::new(3))
     );
     assert!(cx.debug_bounds("drag-preview").is_none());
+    assert!(cx.debug_bounds("workspace-insertion-marker-3").is_none());
     let moved = cx
         .debug_bounds("workspace-row-1-inactive")
         .expect("the moved Workspace must render in its new place");
@@ -7348,7 +7370,7 @@ fn dragging_a_workspace_row_should_reorder_live_without_activating_it(cx: &mut T
 }
 
 #[gpui::test]
-fn escape_should_cancel_a_workspace_row_drag_and_restore_its_place(cx: &mut TestAppContext) {
+fn escape_should_cancel_a_workspace_row_drag_without_moving_it(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7363,28 +7385,28 @@ fn escape_should_cancel_a_workspace_row_drag_and_restore_its_place(cx: &mut Test
         cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
     }
-    let moved = workspace_order(&manager, cx);
+    let marked = cx.debug_bounds("workspace-insertion-marker-3").is_some();
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     let cancelled = (
-        workspace_order(&manager, cx),
         cx.debug_bounds("drag-preview").is_some(),
+        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
     );
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
     assert_eq!(
-        (moved, cancelled, workspace_order(&manager, cx)),
-        (vec![2, 3, 1], (vec![1, 2, 3], false), vec![1, 2, 3])
+        (marked, cancelled, workspace_order(&manager, cx)),
+        (true, (false, false), vec![1, 2, 3])
     );
-    let restored = cx
+    let unmoved = cx
         .debug_bounds("workspace-row-1-inactive")
         .expect("the cancelled Workspace must render in its original place");
-    assert_eq!(restored.origin, first.origin);
+    assert_eq!(unmoved.origin, first.origin);
 }
 
 #[gpui::test]
-fn a_single_motion_should_reorder_a_workspace_row_before_release(cx: &mut TestAppContext) {
+fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7431,22 +7453,29 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(past_second, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
-    let moved = visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids());
+    let marked = cx.debug_bounds("tab-insertion-marker-2").is_some();
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+    let cancelled = (
+        visible_tabs.read_with(cx, |tabs, _| tabs.dragged_tab()),
+        cx.debug_bounds("tab-insertion-marker-2").is_some(),
+    );
     cx.simulate_mouse_up(past_second, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
+    // The hidden Tab bar never saw its release, so its drag landed nowhere.
     assert_eq!(
         (
-            moved,
+            marked,
+            cancelled,
             visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
             hidden_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
         ),
         (
-            vec![TabId::new(2), TabId::new(1)],
+            true,
+            (None, false),
             vec![TabId::new(1), TabId::new(2)],
-            vec![TabId::new(2), TabId::new(1)],
+            vec![TabId::new(1), TabId::new(2)],
         )
     );
 }

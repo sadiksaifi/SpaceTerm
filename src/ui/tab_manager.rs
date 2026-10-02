@@ -12,7 +12,10 @@ use thiserror::Error;
 
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
+use super::drag_and_drop::{
+    DragPreview, DragSession, MarkerSide, ReorderableStrip, drag_release_observer, insertion_marker,
+    painted_item_size,
+};
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
@@ -69,8 +72,8 @@ use gpui::{
     ScrollHandle, Task, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, CustomIconName, Icon, IconButton,
-    IconName, ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion,
+    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, CustomIconName, HoverFade, Icon,
+    IconButton, IconName, ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion,
     WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
@@ -329,6 +332,16 @@ impl TabChromePresentation {
         self.control_style(false, false, colors, materials, self.background)
     }
 
+    /// The close glyph's color while the close control itself is not under the pointer.
+    fn close_icon(&self, active: bool, ancestor_hovered: bool) -> Color {
+        match (active, ancestor_hovered) {
+            (true, true) => self.active_tab_hover_icon,
+            (false, true) => self.hover_icon,
+            (true, false) => self.active_tab_icon,
+            (false, false) => self.inactive_tab_icon,
+        }
+    }
+
     fn control_style(
         &self,
         active: bool,
@@ -338,17 +351,7 @@ impl TabChromePresentation {
         host: Color,
     ) -> spaceterm_ui::ButtonVariantStyle {
         let clear = gpui::rgba(0);
-        let icon = if ancestor_hovered {
-            if active {
-                self.active_tab_hover_icon
-            } else {
-                self.hover_icon
-            }
-        } else if active {
-            self.active_tab_icon
-        } else {
-            self.inactive_tab_icon
-        };
+        let icon = self.close_icon(active, ancestor_hovered);
         let normal = spaceterm_ui::ButtonPaint::new(clear, gpui_color(icon), clear);
         let hover_background = materials.paint(
             crate::appearance::SurfaceRole::Surface,
@@ -386,6 +389,22 @@ impl std::fmt::Debug for TabManagerEvent {
     }
 }
 
+/// Whether a Tab face is the Tab in the Tab bar or its lifted copy following the pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabItemRole {
+    InBar,
+    Lifted,
+}
+
+/// Where the pointer stands over one Tab.
+#[derive(Clone, Copy)]
+struct TabHover {
+    /// How far the Tab has eased toward its hovered paint.
+    level: f32,
+    /// Whether the pointer is over the Tab now, which selects the glyph paints at once.
+    under_pointer: bool,
+}
+
 /// The value a Tab drag carries, scoped to the Tab bar that owns the Tab.
 struct DraggedTab {
     tab_id: TabId,
@@ -403,7 +422,6 @@ pub(crate) struct TabManager {
     trailing_accessory: Option<gpui::AnyView>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
-    hovered_tab: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
@@ -489,7 +507,6 @@ impl TabManager {
             trailing_accessory: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
-            hovered_tab: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
@@ -1004,10 +1021,11 @@ impl TabManager {
         cx.notify();
     }
 
-    /// Lifts a Tab for reordering. A press that becomes a drag never selects its Tab.
+    /// Lifts a Tab to move it in the Tab bar. A press that becomes a drag never selects its Tab.
     ///
-    /// The motion that starts the drag already reorders, so a quick drag released on its first
-    /// move still lands.
+    /// The Tab keeps its place until release, and an exact copy of it follows the pointer. The
+    /// motion that starts the drag already marks a slot, so a quick drag released on its first move
+    /// still lands.
     fn begin_tab_drag(
         &mut self,
         tab_id: TabId,
@@ -1015,22 +1033,27 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> DragPreview {
         self.cancel_tab_selector(tab_id, cx);
-        let position = self.tab_position(tab_id);
-        let size =
-            position.and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
-        let label = self
-            .tabs
-            .tab(tab_id)
-            .map(|pane_host| pane_host.read(cx).tab_identity().activity)
-            .filter(|activity| !activity.is_empty())
-            .unwrap_or_else(|| "Terminal".into());
+        let size = self
+            .tab_position(tab_id)
+            .and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
         let session = DragSession::begin(window, cx, |manager: &mut Self, _, cx| {
-            manager.cancel_tab_drag(cx);
+            manager.tab_reorder.cancel();
+            cx.notify();
         });
-        self.tab_reorder.begin(tab_id, self.tab_ids(), session);
+        self.tab_reorder.begin(tab_id, session);
         self.drag_tab_to(tab_id, window.mouse_position(), cx);
         cx.notify();
-        DragPreview::new(label, size)
+        let manager = cx.entity().downgrade();
+        DragPreview::new(move |window, cx| {
+            manager
+                .upgrade()
+                .map(|owner| {
+                    owner
+                        .read(cx)
+                        .render_lifted_tab(tab_id, size, manager.clone(), window, cx)
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        })
     }
 
     fn drag_tab_to(&mut self, tab_id: TabId, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
@@ -1040,25 +1063,38 @@ impl TabManager {
         let Some(current) = self.tab_position(tab_id) else {
             return;
         };
-        let Some(position) = self.tab_reorder.reorder(
+        if self.tab_reorder.track(
             &self.tab_bar_scroll_handle,
             current,
             self.tabs.len(),
             pointer,
-        ) else {
-            return;
-        };
-        self.move_tab(tab_id, position, cx);
-    }
-
-    /// Returns a Tab whose drag was cancelled to the place it was lifted from.
-    fn cancel_tab_drag(&mut self, cx: &mut Context<Self>) {
-        if let Some((tab_id, position)) = self.tab_reorder.cancel(&self.tab_ids()) {
-            self.move_tab(tab_id, position, cx);
+        ) {
             cx.notify();
         }
     }
 
+    /// Lands the dragged Tab in the slot marked at the release point.
+    fn finish_tab_drag(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.tab_reorder.dragged() else {
+            return;
+        };
+        self.drag_tab_to(tab_id, pointer, cx);
+        let landing = self.tab_position(tab_id).and_then(|current| {
+            self.tab_reorder.finish(current, self.tabs.len(), cx)
+        });
+        self.tab_reorder.cancel();
+        if let Some((tab_id, position)) = landing {
+            self.move_tab(tab_id, position, cx);
+        }
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn dragged_tab(&self) -> Option<TabId> {
+        self.tab_reorder.dragged()
+    }
+
+    #[cfg(test)]
     pub(super) fn tab_ids(&self) -> Vec<TabId> {
         self.tabs.iter().map(|(tab_id, _)| tab_id).collect()
     }
@@ -1369,49 +1405,103 @@ impl TabManager {
         self.activate_tab_at(8, window, cx);
     }
 
+    /// The copy of a dragged Tab that follows the pointer, at the size its Tab was painted.
+    fn render_lifted_tab(
+        &self,
+        tab_id: TabId,
+        size: Option<gpui::Size<Pixels>>,
+        manager: gpui::WeakEntity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(pane_host) = self.tabs.tab(tab_id) else {
+            return div().into_any_element();
+        };
+        let appearance = super::appearance::chrome(cx);
+        let presentation = TabChromePresentation::resolve(
+            window.is_window_active(),
+            appearance.capabilities.show_borders,
+            &appearance.colors,
+        );
+        self.render_tab_item(
+            tab_id,
+            pane_host.read(cx).tab_identity(),
+            tab_id == self.tabs.active_tab_id(),
+            TabItemRole::Lifted,
+            TabHover {
+                level: 1.0,
+                under_pointer: true,
+            },
+            &presentation,
+            manager,
+            appearance,
+            window,
+            cx,
+        )
+        .h(size.map_or_else(
+            || {
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height())
+            },
+            |size| size.height,
+        ))
+        .when_some(size, |item, size| item.w(size.width))
+        .into_any_element()
+    }
+
+    /// One Tab in the Tab bar, or the lifted copy of it that follows the pointer during a drag.
+    ///
+    /// Both paint the same face, so a lifted Tab looks exactly like the Tab it lifts. The copy is
+    /// always under the pointer, so it keeps the paint a Tab has there, and it claims no pointer
+    /// input because it lies over every drop target.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one Tab render step needs its identity, presentation, owner, appearance, and host geometry"
+        reason = "one Tab render step needs its identity, role, hover, presentation, owner, appearance, and host geometry"
     )]
     fn render_tab_item(
         &self,
         tab_id: TabId,
         identity: TabIdentity,
         active: bool,
+        role: TabItemRole,
+        hover: TabHover,
         presentation: &TabChromePresentation,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
         window: &Window,
         cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
+        let lifted = role == TabItemRole::Lifted;
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
-        let hover_manager = manager.clone();
         let drag_manager = manager.clone();
         let owner = manager.entity_id();
         let close_manager = manager;
-        let chip = presentation.tab_chip(active, appearance, cx);
-        let foreground = presentation.tab_foreground(active);
         let hover_active = appearance.active && presentation.window_active;
-        let ancestor_hovered = hover_active && self.hovered_tab == Some(tab_id);
+        let under_pointer = hover_active && hover.under_pointer;
+        let hover = if hover_active { hover.level } else { 0.0 };
+        let chip = presentation.tab_chip(active, appearance, cx);
+        // Content follows the chip's paired hover paint, preserving selected identity.
+        let foreground = presentation
+            .tab_foreground(active)
+            .mix(presentation.tab_hover_foreground(active), f64::from(hover));
         let control_style = presentation.close_control_style(
             active,
-            ancestor_hovered,
+            under_pointer,
             &appearance.colors,
             appearance.materials,
         );
-        let hover_foreground = presentation.tab_hover_foreground(active);
         // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
         // this action was visible in the pre-activation frame so a hidden inactive-Tab control
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
         let close_action_available = active || appearance.active;
-        let status = presentation.tab_status(active, ancestor_hovered, &appearance.colors);
-        let status_host = presentation.tab_surface(active, ancestor_hovered);
-        let close_clearance = cx
+        let status = presentation.tab_status(active, under_pointer, &appearance.colors);
+        let status_host = presentation.tab_surface(active, under_pointer);
+        let close_button_size = cx
             .global::<ButtonTheme>()
-            .icon_button_size(ButtonSize::Compact)
-            + appearance.spacing(TAB_TRAILING_GAP);
+            .icon_button_size(ButtonSize::Compact);
+        let close_clearance = close_button_size + appearance.spacing(TAB_TRAILING_GAP);
         let close_icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         #[cfg(test)]
         let rendered_active_close_icon = Rc::clone(&self.rendered_active_close_icon);
@@ -1428,20 +1518,68 @@ impl TabManager {
                     window,
                 )
             });
-        let tab_group = format!("tab-item-{}", tab_id.get());
-        // The lifted Tab follows the pointer, so its slot keeps only the gap it leaves behind.
-        let lifted = self.tab_reorder.dragged() == Some(tab_id);
-        div()
-            .id(("tab-item", tab_id.get()))
+        let element_name = if lifted { "tab-preview" } else { "tab-item" };
+        let close_control = if lifted {
+            // The close control's glyph at rest, without a control that could take the pointer.
+            div()
+                .size(close_button_size)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(
+                    IconName::X,
+                    close_icon_size,
+                    gpui_color(presentation.close_icon(active, under_pointer)),
+                ))
+                .into_any_element()
+        } else {
+            IconButton::new(
+                ("tab-close-button", tab_id.get()),
+                "Close Tab",
+                move |foreground| {
+                    #[cfg(test)]
+                    if active {
+                        rendered_active_close_icon.set(foreground);
+                    } else {
+                        rendered_inactive_close_icon.set(foreground);
+                    }
+                    Icon::new(IconName::X, close_icon_size, foreground).into_any_element()
+                },
+            )
+            .variant(ButtonVariant::Ghost)
+            .disabled(!close_action_available)
+            .accept_first_mouse(active)
+            .contextual_style(
+                control_style,
+                gpui_color(title_bar_control_focus_ring(appearance)),
+            )
+            .size(ButtonSize::Compact)
+            .preserve_ancestor_hover()
+            .debug_selector(format!("tab-close-button-{}", tab_id.get()))
+            .tooltip(
+                Tooltip::new(("tab-close-tooltip", tab_id.get()), "Close Tab")
+                    .debug_selector(format!("tab-close-tooltip-{}", tab_id.get())),
+            )
+            .on_activate(move |_, _, cx| {
+                if !close_action_available {
+                    return;
+                }
+                let _ = close_manager.update(cx, |manager, cx| {
+                    manager.request_close_tab(tab_id, cx);
+                });
+            })
+            .into_any_element()
+        };
+        let face = div()
+            .id((element_name, tab_id.get()))
             .debug_selector(move || {
                 format!(
-                    "tab-item-{}-{}",
+                    "{element_name}-{}-{}",
                     tab_id.get(),
                     if active { "active" } else { "inactive" }
                 )
             })
             .relative()
-            .group(tab_group.clone())
             .h_full()
             .flex_none()
             .w(appearance.spacing(TAB_ITEM_WIDTH))
@@ -1451,28 +1589,35 @@ impl TabManager {
             .pr(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
             .flex()
             .items_center()
-            .cursor_pointer()
-            .block_mouse_except_scroll()
-            .on_hover(move |hovered, _, cx| {
-                let _ = hover_manager.update(cx, |manager, cx| {
-                    if *hovered {
-                        if manager.hovered_tab != Some(tab_id) {
-                            manager.hovered_tab = Some(tab_id);
-                            cx.notify();
-                        }
-                    } else if manager.hovered_tab == Some(tab_id) {
-                        manager.hovered_tab = None;
-                        cx.notify();
-                    }
-                });
-            })
             .chrome_text(text_style)
             .text_color(gpui_color(foreground))
-            // Content follows the chip's paired hover paint, preserving selected identity.
-            .when(hover_active, |item| {
-                item.hover(move |item| item.text_color(gpui_color(hover_foreground)))
-            })
-            .child(chip.render(format!("tab-item-{}-chip", tab_id.get()), &tab_group))
+            .child(chip.render(format!("{element_name}-{}-chip", tab_id.get()), hover))
+            .child(render_tab_identity(
+                tab_id,
+                identity,
+                status,
+                status_host,
+                close_clearance,
+                appearance,
+            ))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
+                    .flex()
+                    .items_center()
+                    // An inactive Tab shows its close control only under the pointer, where its
+                    // lifted copy always is.
+                    .when(!active, |button| button.opacity(hover))
+                    .child(close_control),
+            );
+        if lifted {
+            return face;
+        }
+        face.cursor_pointer()
+            .block_mouse_except_scroll()
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
                     manager.begin_tab_selector(tab_id, cx);
@@ -1493,75 +1638,30 @@ impl TabManager {
             .on_drag(DraggedTab { tab_id, owner }, move |_, _, window, cx| {
                 let preview = drag_manager
                     .update(cx, |manager, cx| manager.begin_tab_drag(tab_id, window, cx))
-                    .unwrap_or_else(|_| DragPreview::new("", None));
+                    .unwrap_or_else(|_| DragPreview::empty());
                 cx.new(|_| preview)
             })
-            .when(lifted, |item| item.opacity(0.0))
-            .child(render_tab_identity(
-                tab_id,
-                identity,
-                status,
-                status_host,
-                close_clearance,
-                appearance,
-            ))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
-                    .flex()
-                    .items_center()
-                    .when(!active, |button| {
-                        button.opacity(0.0).when(hover_active, |button| {
-                            button.group_hover(tab_group, |button| button.opacity(1.0))
-                        })
-                    })
-                    .child(
-                        IconButton::new(
-                            ("tab-close-button", tab_id.get()),
-                            "Close Tab",
-                            move |foreground| {
-                                #[cfg(test)]
-                                if active {
-                                    rendered_active_close_icon.set(foreground);
-                                } else {
-                                    rendered_inactive_close_icon.set(foreground);
-                                }
-                                Icon::new(IconName::X, close_icon_size, foreground)
-                                    .into_any_element()
-                            },
-                        )
-                        .variant(ButtonVariant::Ghost)
-                        .disabled(!close_action_available)
-                        .accept_first_mouse(active)
-                        .contextual_style(
-                            control_style,
-                            gpui_color(title_bar_control_focus_ring(appearance)),
-                        )
-                        .size(ButtonSize::Compact)
-                        .preserve_ancestor_hover()
-                        .debug_selector(format!("tab-close-button-{}", tab_id.get()))
-                        .tooltip(
-                            Tooltip::new(("tab-close-tooltip", tab_id.get()), "Close Tab")
-                                .debug_selector(format!("tab-close-tooltip-{}", tab_id.get())),
-                        )
-                        .on_activate(move |_, _, cx| {
-                            if !close_action_available {
-                                return;
-                            }
-                            let _ = close_manager.update(cx, |manager, cx| {
-                                manager.request_close_tab(tab_id, cx);
-                            });
-                        }),
-                    ),
-            )
+    }
+
+    /// Each Tab's hover, in Tab bar order.
+    fn tab_hovers(&self, window: &mut Window, cx: &mut App) -> Vec<(HoverFade, TabHover)> {
+        self.tabs
+            .iter()
+            .map(|(tab_id, _)| {
+                let fade = HoverFade::new(("tab-hover", tab_id.get()), window, cx);
+                let hover = TabHover {
+                    level: fade.level(window, cx),
+                    under_pointer: fade.is_hovered(cx),
+                };
+                (fade, hover)
+            })
+            .collect()
     }
 
     fn render_tab_bar(
         &self,
         presentation: &TabChromePresentation,
+        hovers: Vec<(HoverFade, TabHover)>,
         manager: gpui::WeakEntity<Self>,
         window: &Window,
         cx: &App,
@@ -1601,8 +1701,10 @@ impl TabManager {
                 });
             });
         let last_index = self.tabs.len() - 1;
+        let insertion = self.tab_reorder.insertion(self.tabs.len());
+        let marker_inset = tab_chip_shape(appearance, cx).inset_y;
         let mut previous_inactive_tab = None;
-        for (index, (tab_id, pane_host)) in self.tabs.iter().enumerate() {
+        for (index, ((tab_id, pane_host), (fade, hover))) in self.tabs.iter().zip(hovers).enumerate() {
             let active = tab_id == active_tab_id;
             // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
             // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
@@ -1621,20 +1723,51 @@ impl TabManager {
                 .chain(trailing_boundary)
                 .map(|boundary| render_tab_separator(boundary, presentation, appearance));
             previous_inactive_tab = (!active).then_some(tab_id);
+            let markers = [
+                (index, MarkerSide::Leading, index == 0),
+                (index + 1, MarkerSide::Trailing, true),
+            ]
+            .into_iter()
+            .filter(|(slot, side, _)| {
+                insertion == Some(*slot) && (*side == MarkerSide::Leading || index == last_index)
+            })
+            .map(|(slot, side, at_strip_end)| {
+                insertion_marker(
+                    gpui::Axis::Horizontal,
+                    side,
+                    at_strip_end,
+                    (marker_inset, marker_inset),
+                    format!("tab-insertion-marker-{slot}"),
+                    appearance,
+                )
+            });
             items = items.child(
                 self.render_tab_item(
                     tab_id,
                     pane_host.read(cx).tab_identity(),
                     active,
+                    TabItemRole::InBar,
+                    hover,
                     presentation,
                     manager.clone(),
                     appearance,
                     window,
                     cx,
                 )
-                .children(separators),
+                .children(separators)
+                .children(markers)
+                .child(fade.tracker()),
             );
         }
+        let release_manager = manager.clone();
+        let release_observer = self.tab_reorder.dragged().map(|_| {
+            drag_release_observer(move |window, cx| {
+                let pointer = window.mouse_position();
+                let _ = release_manager.update(cx, |manager, cx| {
+                    manager.finish_tab_drag(pointer, cx);
+                });
+            })
+        });
 
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
@@ -1654,6 +1787,7 @@ impl TabManager {
             .flex_row()
             .items_center()
             .child(items)
+            .children(release_observer)
             .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
@@ -1759,13 +1893,14 @@ impl Render for TabManager {
         }
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
+        let hovers = self.tab_hovers(window, cx);
         let appearance = super::appearance::chrome(cx);
         let presentation = TabChromePresentation::resolve(
             window.is_window_active(),
             appearance.capabilities.show_borders,
             &appearance.colors,
         );
-        let tab_bar = self.render_tab_bar(&presentation, manager.clone(), window, cx);
+        let tab_bar = self.render_tab_bar(&presentation, hovers, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
 
@@ -2544,7 +2679,7 @@ mod tests {
         if pressed {
             cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
         }
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         let foreground = rendered.get();
         if pressed {
             let outside = cx
@@ -2651,7 +2786,7 @@ mod tests {
             .center();
 
         cx.simulate_mouse_move(title, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(
             rendered.get(),
             parent_hover,
@@ -2659,7 +2794,7 @@ mod tests {
         );
 
         cx.simulate_mouse_move(close, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(
             rendered.get(),
             direct_hover,
@@ -2667,12 +2802,12 @@ mod tests {
         );
 
         cx.simulate_mouse_move(title, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         cx.deactivate_window();
         cx.run_until_parked();
         let inactive_resting = rendered.get();
         cx.simulate_mouse_move(title, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert!(!manager.read_with(cx, |manager, _| manager.rendered_window_active));
         assert_eq!(
             rendered.get(),
@@ -2681,7 +2816,7 @@ mod tests {
         );
 
         cx.simulate_mouse_move(close, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(
             rendered.get(),
             inactive_resting,
@@ -2703,19 +2838,19 @@ mod tests {
 
         let inactive_tab_resting = rendered_inactive.get();
         cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(rendered_inactive.get(), inactive_tab_resting);
         cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(rendered_inactive.get(), inactive_tab_resting);
 
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.simulate_mouse_move(inactive_title, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(rendered_inactive.get(), direct_hover);
         cx.simulate_mouse_move(inactive_close, None, Modifiers::none());
-        cx.run_until_parked();
+        crate::ui::settle_hover(cx);
         assert_eq!(rendered_inactive.get(), direct_hover);
     }
     use crate::domain::PaneId;
@@ -4714,7 +4849,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dragging_a_tab_should_reorder_live_without_selecting_it(cx: &mut TestAppContext) {
+    fn dragging_a_tab_should_mark_its_slot_and_land_there_on_release(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
@@ -4722,22 +4857,23 @@ mod tests {
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
         let lift = first.center() + point(px(8.0), px(0.0));
 
-        drag_tab(
-            first.center(),
-            &[lift, third.center() + point(px(4.0), px(0.0))],
-            cx,
-        );
+        let release = third.center() + point(px(4.0), px(0.0));
+
+        drag_tab(first.center(), &[lift, release], cx);
         let during = (
             tab_order(&manager, cx),
-            manager.read_with(cx, |manager, _| manager.tab_reorder.dragged()),
-            cx.debug_bounds("drag-preview").map(|preview| preview.size),
+            cx.debug_bounds("tab-item-1-inactive"),
+            cx.debug_bounds("tab-preview-1-inactive")
+                .map(|preview| preview.size),
+            cx.debug_bounds("tab-insertion-marker-3").is_some(),
         );
-        cx.simulate_mouse_up(third.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
             during,
-            (vec![2, 3, 1], Some(TabId::new(1)), Some(first.size))
+            (vec![1, 2, 3], Some(first), Some(first.size), true),
+            "a dragged Tab must keep its place, lift an exact copy, and mark where it lands"
         );
         assert_eq!(
             (
@@ -4753,16 +4889,31 @@ mod tests {
         cx.debug_bounds("tab-item-1-inactive")
             .expect("the moved Tab must render in its new place");
         assert!(cx.debug_bounds("drag-preview").is_none());
+        assert!(cx.debug_bounds("tab-insertion-marker-3").is_none());
     }
 
     #[gpui::test]
-    fn dragging_a_tab_back_should_restore_its_place(cx: &mut TestAppContext) {
+    fn the_tab_marker_should_follow_the_pointer_and_vanish_over_the_tabs_own_place(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
+        let markers = |cx: &mut VisualTestContext| {
+            [
+                "tab-insertion-marker-0",
+                "tab-insertion-marker-1",
+                "tab-insertion-marker-2",
+                "tab-insertion-marker-3",
+            ]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(slot, selector)| cx.debug_bounds(selector).map(|_| slot))
+            .collect::<Vec<_>>()
+        };
 
         drag_tab(
             third.center(),
@@ -4772,28 +4923,53 @@ mod tests {
             ],
             cx,
         );
-        let moved = tab_order(&manager, cx);
+        let before_second = markers(cx);
+        let marker = cx.debug_bounds("tab-insertion-marker-1").unwrap();
         cx.simulate_mouse_move(
             first.center() - point(px(4.0), px(0.0)),
             Some(MouseButton::Left),
             Modifiers::none(),
         );
         cx.run_until_parked();
-        let leading = tab_order(&manager, cx);
+        let before_first = markers(cx);
         let release = third.center() + point(px(4.0), px(0.0));
         cx.simulate_mouse_move(release, Some(MouseButton::Left), Modifiers::none());
         cx.run_until_parked();
+        let over_itself = markers(cx);
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
-            (moved, leading, tab_order(&manager, cx)),
-            (vec![1, 3, 2], vec![3, 1, 2], vec![1, 2, 3])
+            (before_second, before_first, over_itself, tab_order(&manager, cx)),
+            (vec![1], vec![0], vec![], vec![1, 2, 3])
         );
+        // The marker stands on the edge the first and second Tabs share.
+        assert_eq!(marker.center().x, second.left());
     }
 
     #[gpui::test]
-    fn escape_should_cancel_a_tab_drag_and_restore_its_place(cx: &mut TestAppContext) {
+    fn releasing_a_tab_outside_the_tab_bar_should_move_nothing(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let third = cx.debug_bounds("tab-item-3-active").unwrap();
+        let below = point(third.center().x, third.bottom() + px(120.0));
+
+        drag_tab(
+            first.center(),
+            &[third.center() + point(px(4.0), px(0.0)), below],
+            cx,
+        );
+        let marked = cx.debug_bounds("tab-insertion-marker-3").is_some();
+        cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!((marked, tab_order(&manager, cx)), (false, vec![1, 2, 3]));
+    }
+
+    #[gpui::test]
+    fn escape_should_cancel_a_tab_drag_without_moving_it(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
@@ -4806,26 +4982,25 @@ mod tests {
             &[first.center() + point(px(8.0), px(0.0)), release],
             cx,
         );
+        let marked = cx.debug_bounds("tab-insertion-marker-3").is_some();
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         let cancelled = (
-            tab_order(&manager, cx),
             manager.read_with(cx, |manager, _| manager.tab_reorder.dragged()),
             cx.debug_bounds("drag-preview").is_some(),
+            cx.debug_bounds("tab-insertion-marker-3").is_some(),
         );
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
-            (cancelled, tab_order(&manager, cx)),
-            ((vec![1, 2, 3], None, false), vec![1, 2, 3])
+            (marked, cancelled, tab_order(&manager, cx)),
+            (true, (None, false, false), vec![1, 2, 3])
         );
-        cx.debug_bounds("tab-item-1-inactive")
-            .expect("the cancelled Tab must render in its original place");
     }
 
     #[gpui::test]
-    fn a_single_motion_should_reorder_a_tab_before_release(cx: &mut TestAppContext) {
+    fn a_single_motion_should_move_a_tab_on_release(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
