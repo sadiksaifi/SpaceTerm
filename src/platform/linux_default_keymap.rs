@@ -225,6 +225,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         ),
         KeyBinding::new("ctrl-shift-q", QuitApplication, None),
         KeyBinding::new("f11", ToggleFullScreen, None),
+        KeyBinding::new("ctrl-shift-p", crate::ui::application_commands::OpenApplicationCommands, None),
     ];
     #[cfg(feature = "developer-tools")]
     let bindings = bindings

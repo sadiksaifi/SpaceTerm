@@ -31,7 +31,17 @@ pub(crate) enum ApplicationMenuError {
 pub(crate) trait ApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError>;
 
-    fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError>;
+    fn uses_command_palette(&self) -> bool {
+        false
+    }
+
+    fn perform(
+        &self,
+        command: ApplicationMenuCommand,
+        cx: &mut App,
+    ) -> Result<(), ApplicationMenuError> {
+        crate::ui::application_commands::perform(command, cx)
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +73,11 @@ pub(crate) mod testing {
             Ok(())
         }
 
-        fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+        fn perform(
+            &self,
+            command: ApplicationMenuCommand,
+            _: &mut App,
+        ) -> Result<(), ApplicationMenuError> {
             self.commands.borrow_mut().push(command);
             Ok(())
         }

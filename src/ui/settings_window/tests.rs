@@ -1191,10 +1191,10 @@ fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
+fn every_available_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         assert!(
@@ -1759,7 +1759,7 @@ fn the_themes_page_warns_only_when_something_could_not_be_resolved(cx: &mut Test
 fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -1896,8 +1896,8 @@ fn assert_the_footer_closes_only_the_content_column(
     document: SettingsDocument,
     cx: &mut TestAppContext,
 ) {
-    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    for section in SettingsSectionId::ALL {
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
         let surface = cx.debug_bounds("settings-window-surface").unwrap();
         let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
@@ -2031,9 +2031,9 @@ fn client_chrome_geometry_tracks_comfortable_density(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
+    let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
         let title_selector = leaked_owned(format!("{}-title", section.selector()));
         let description_selector = leaked_owned(format!("{}-description", section.selector()));
@@ -2107,7 +2107,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
 fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -2151,7 +2151,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 ) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
@@ -2579,7 +2579,6 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     let handle = cx.update(|native, _| native.window_handle());
 
     click("window-close", cx);
-    request_window_close(&window, cx);
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 
@@ -3695,4 +3694,39 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
     cx.run_until_parked();
 
     assert_eq!(settings_windows(cx).len(), 1);
+}
+
+#[gpui::test]
+fn absent_privacy_and_updates_capabilities_remove_sections_and_search_results(
+    cx: &mut TestAppContext,
+) {
+    let (window, _, cx) = open_settings(cx);
+    window.read_with(cx, |settings, _| {
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Privacy)
+        );
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Updates)
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-privacy")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_none()
+    );
+    set_query(&window, "microphone", cx);
+    window.read_with(cx, |settings, _| {
+        assert!(settings.matching_rows().is_empty())
+    });
+    set_query(&window, "updates", cx);
+    window.read_with(cx, |settings, _| {
+        assert!(settings.matching_rows().is_empty())
+    });
 }
