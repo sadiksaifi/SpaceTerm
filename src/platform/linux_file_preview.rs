@@ -16,6 +16,7 @@ struct Preview {
     owner: Option<u64>,
     uri: String,
     release_parent: Option<async_channel::Sender<()>>,
+    close_queued: bool,
 }
 pub(super) struct LinuxFilePreviewFactory {
     bus: Option<SessionBus>,
@@ -207,13 +208,18 @@ impl FilePreviewPanel for Panel {
                 return;
             }
             state.owner = None;
+            if state.close_queued {
+                return;
+            }
+            state.close_queued = true;
         }
         let pending = state.clone();
-        let result = bus.dispatch(move |connection| {
+        let result = bus.dispatch_cleanup(move |connection| {
             let parent = {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.close_queued = false;
                 if state.owner.is_some() {
                     return;
                 }
@@ -229,6 +235,7 @@ impl FilePreviewPanel for Panel {
             let mut state = pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.close_queued = false;
             if state.owner.is_none() {
                 state.uri.clear();
                 state.release_parent.take();
@@ -328,6 +335,7 @@ mod linux_adapter_tests {
             owner: Some(1),
             uri: "file:///first".into(),
             release_parent: None,
+            close_queued: false,
         }));
         let exporting = Arc::new(AtomicBool::new(true));
         let parent = "x11:123".to_owned();
@@ -386,13 +394,25 @@ mod linux_adapter_tests {
         );
         assert!(shows.try_recv().is_err());
 
-        // A rejected Close must still retire the foreground lease instead of retaining it forever.
+        // Retirement must close an already-visible preview even when regular work is full.
         let (release_parent, retired_parent) = async_channel::bounded::<()>(1);
         {
             let mut state = panel.state.lock().unwrap();
             state.owner = Some(1);
-            state.release_parent = Some(release_parent);
+            state.uri = "file:///queue-saturated".into();
         }
+        panel.exporting.store(true, Ordering::Release);
+        present_latest(
+            bus.clone(),
+            panel.state.clone(),
+            1,
+            "wayland:queue-saturated".into(),
+            release_parent,
+            panel.exporting.clone(),
+        );
+        shows.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.send(()).unwrap();
+        bus.query(|_| Ok(())).unwrap();
         let (entered, running) = mpsc::channel();
         let (release_bus, resume_bus) = mpsc::channel();
         bus.dispatch(move |_| {
@@ -414,8 +434,18 @@ mod linux_adapter_tests {
         panel.dismiss();
         let retired = retired_parent.try_recv();
         release_bus.send(()).unwrap();
-        assert_eq!(retired, Err(async_channel::TryRecvError::Closed));
+        assert_eq!(retired, Err(async_channel::TryRecvError::Empty));
+        closes.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            retired_parent.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
+        release.send(()).unwrap();
         queue_drained.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            retired_parent.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        );
 
         // First service activation can time out even though Sushi later opens the file.
         // Keep the exported parent until explicit retirement, including this ambiguous reply.
