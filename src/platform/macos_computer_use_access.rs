@@ -3,11 +3,16 @@ use std::marker::PhantomData;
 use std::process::{Command, ExitStatus, Stdio};
 use std::rc::Rc;
 
-use objc2::MainThreadMarker;
-use objc2_foundation::{NSBundle, NSDictionary, NSNumber, NSString};
+use objc2::rc::Retained;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_foundation::{
+    NSBundle, NSDictionary, NSDistributedNotificationCenter, NSNotification,
+    NSNotificationSuspensionBehavior, NSNumber, NSObject, NSObjectProtocol, NSString,
+};
 
 use super::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
+    ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
     ComputerUseResetCompletion,
 };
 use super::permission_recovery::{
@@ -23,6 +28,10 @@ const ACCESSIBILITY_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility";
 const LEGACY_ACCESSIBILITY_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+/// The distributed notification the system posts when an application's Accessibility grant
+/// changes. HIServices observes it to clear the trust value `AXIsProcessTrusted` caches.
+const ACCESSIBILITY_CHANGED_NOTIFICATION: &str = "com.apple.accessibility.api";
 
 /// The system's own privacy reset tool, addressed by absolute path so no search path can replace it.
 const TCCUTIL: &str = "/usr/bin/tccutil";
@@ -91,6 +100,36 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         })
     }
 
+    fn observe(&self) -> Option<ComputerUseAccessObservation> {
+        let mtm = MainThreadMarker::new()?;
+        let (sender, changed) = async_channel::bounded(1);
+        let observer = AccessChangeObserver::new(mtm, sender);
+        let center = NSDistributedNotificationCenter::defaultCenter();
+        let name = NSString::from_str(ACCESSIBILITY_CHANGED_NOTIFICATION);
+        // HIServices clears its cached trust value from this notification with coalesced delivery,
+        // which the system holds while SpaceTerm is inactive. Matching that delivery signals the
+        // owner in the same pass, so its read follows the cache clear instead of preceding it.
+        // SAFETY: The selector belongs to this retained observer, and the subscription removes the
+        // registration before releasing it.
+        unsafe {
+            center.addObserver_selector_name_object_suspensionBehavior(
+                &observer,
+                sel!(accessChanged:),
+                Some(&name),
+                None,
+                NSNotificationSuspensionBehavior::Coalesce,
+            );
+        }
+        Some(ComputerUseAccessObservation {
+            changed,
+            subscription: Box::new(MacosComputerUseAccessSubscription {
+                center,
+                observer,
+                name,
+            }),
+        })
+    }
+
     fn request_authorization(
         &self,
         permission: ComputerUsePermission,
@@ -113,9 +152,7 @@ impl ComputerUseAccess for MacosComputerUseAccess {
                 // SAFETY: NSDictionary is toll-free bridged to the CFDictionary this function
                 // reads during the call, and `options` outlives the call.
                 unsafe {
-                    AXIsProcessTrustedWithOptions(
-                        objc2::rc::Retained::as_ptr(&options).cast::<c_void>(),
-                    )
+                    AXIsProcessTrustedWithOptions(Retained::as_ptr(&options).cast::<c_void>())
                 };
             }
         }
@@ -159,6 +196,54 @@ impl ComputerUseAccess for MacosComputerUseAccess {
             })
             .map(drop)
             .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
+    }
+}
+
+struct AccessChangeObserverIvars {
+    sender: async_channel::Sender<()>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and define_class! drops the sender ivar.
+    #[unsafe(super(NSObject))]
+    #[name = "SpaceTermComputerUseAccessObserver"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AccessChangeObserverIvars]
+    struct AccessChangeObserver;
+
+    impl AccessChangeObserver {
+        #[unsafe(method(accessChanged:))]
+        fn access_changed(&self, _notification: &NSNotification) {
+            let _ = self.ivars().sender.try_send(());
+        }
+    }
+
+    unsafe impl NSObjectProtocol for AccessChangeObserver {}
+);
+
+impl AccessChangeObserver {
+    fn new(mtm: MainThreadMarker, sender: async_channel::Sender<()>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AccessChangeObserverIvars { sender });
+        // SAFETY: NSObject's init is its designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct MacosComputerUseAccessSubscription {
+    center: Retained<NSDistributedNotificationCenter>,
+    observer: Retained<AccessChangeObserver>,
+    name: Retained<NSString>,
+}
+
+impl ComputerUseAccessSubscription for MacosComputerUseAccessSubscription {}
+
+impl Drop for MacosComputerUseAccessSubscription {
+    fn drop(&mut self) {
+        // SAFETY: The observer and name remain alive until the registration is removed.
+        unsafe {
+            self.center
+                .removeObserver_name_object(&self.observer, Some(&self.name), None);
+        }
     }
 }
 

@@ -82,7 +82,7 @@ use crate::ui::sidebar_window::form::{
 };
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
-use computer_use::ComputerUseAccessRows;
+use computer_use::{ComputerUseAccessChanges, ComputerUseAccessRows};
 use microphone::MicrophoneAccessRow;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -258,6 +258,7 @@ pub(crate) struct SettingsWindow {
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
     computer_use_access: ComputerUseAccessRows,
+    _computer_use_changes: Option<ComputerUseAccessChanges>,
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
@@ -463,6 +464,8 @@ impl SettingsWindow {
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
         let settings_file = advanced::SettingsFileView::new(window, cx);
+        let computer_use_changes =
+            ComputerUseAccessChanges::observe(permissions.computer_use.as_ref(), cx);
         Self {
             window_appearance,
             window_traffic_lights,
@@ -483,6 +486,7 @@ impl SettingsWindow {
                 permissions.computer_use,
                 crate::application_identity::ApplicationIdentity::current().display_name(),
             ),
+            _computer_use_changes: computer_use_changes,
             theme_gallery,
             theme_store,
             shortcuts,

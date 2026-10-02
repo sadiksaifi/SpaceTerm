@@ -9,7 +9,8 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
+    ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
     ComputerUseResetCompletion,
 };
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -43,6 +44,20 @@ struct ScriptedComputerUseAccess {
     opened: RefCell<Vec<ComputerUsePermission>>,
     resets: RefCell<Vec<ComputerUsePermission>>,
     pending_resets: RefCell<Vec<ComputerUseResetCompletion>>,
+    /// Reports a change to the observing window, as the system does after a grant changes.
+    changes: RefCell<Option<async_channel::Sender<()>>>,
+    observing: Rc<Cell<bool>>,
+}
+
+/// Records that the observing window still holds its observation.
+struct ScriptedSubscription(Rc<Cell<bool>>);
+
+impl ComputerUseAccessSubscription for ScriptedSubscription {}
+
+impl Drop for ScriptedSubscription {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
 }
 
 impl ScriptedComputerUseAccess {
@@ -58,7 +73,19 @@ impl ScriptedComputerUseAccess {
             opened: RefCell::default(),
             resets: RefCell::default(),
             pending_resets: RefCell::default(),
+            changes: RefCell::default(),
+            observing: Rc::default(),
         })
+    }
+
+    /// Reports a change the way the system does: without the window becoming active.
+    fn report_change(&self) {
+        self.changes
+            .borrow()
+            .as_ref()
+            .expect("the window should observe changes")
+            .try_send(())
+            .expect("the window should receive the change");
     }
 
     fn set(&self, permission: ComputerUsePermission, authorization: Authorization) {
@@ -82,6 +109,16 @@ impl ComputerUseAccess for ScriptedComputerUseAccess {
             ScreenRecording => self.screen_recording.get(),
             Accessibility => self.accessibility.get(),
         }
+    }
+
+    fn observe(&self) -> Option<ComputerUseAccessObservation> {
+        let (sender, changed) = async_channel::bounded(1);
+        *self.changes.borrow_mut() = Some(sender);
+        self.observing.set(true);
+        Some(ComputerUseAccessObservation {
+            changed,
+            subscription: Box::new(ScriptedSubscription(self.observing.clone())),
+        })
     }
 
     fn request_authorization(
@@ -388,6 +425,36 @@ fn a_revoked_grant_is_read_on_return_and_reauthorized_through_system_settings(
     return_to_settings(cx);
     click(DEVICE_CONTROL.request, cx);
     assert!(!explanation(&window, Accessibility, cx).contains("quit and reopen"));
+}
+
+/// The system caches a read until it reports the change, which can arrive after the window became
+/// active again, so the reported change refreshes the rows without another activation.
+#[gpui::test]
+fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestAppContext) {
+    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let (window, cx) = open_privacy(&access, cx);
+    assert!(access.observing.get());
+
+    access.set(Accessibility, Ok(Granted));
+    cx.run_until_parked();
+    assert_eq!(
+        status(&window, Accessibility, cx),
+        ComputerUseAccessStatus::Authorization(NotGranted)
+    );
+
+    access.report_change();
+    cx.run_until_parked();
+    assert_eq!(
+        status(&window, Accessibility, cx),
+        ComputerUseAccessStatus::Authorization(Granted)
+    );
+    assert!(cx.debug_bounds(DEVICE_CONTROL.state_allowed).is_some());
+
+    // Closing the window ends the observation with it.
+    drop(window);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    assert!(!access.observing.get());
 }
 
 /// An apparently allowed grant can still fail, so Troubleshoot reaches System Settings from it.

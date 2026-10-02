@@ -37,6 +37,17 @@ pub(crate) enum ComputerUseAccessError {
 pub(crate) type ComputerUseResetCompletion =
     Box<dyn FnOnce(Result<(), ComputerUseAccessError>) + Send>;
 
+/// Keeps a native authorization-change observation alive until its owner drops it.
+pub(crate) trait ComputerUseAccessSubscription {}
+
+/// Signals that the Operating System reported a computer-use authorization change.
+///
+/// Each signal means authorization may differ from the last read, so the owner reads it again.
+pub(crate) struct ComputerUseAccessObservation {
+    pub(crate) changed: async_channel::Receiver<()>,
+    pub(crate) subscription: Box<dyn ComputerUseAccessSubscription>,
+}
+
 /// Native computer-use authorization and its explicit recovery operations.
 ///
 /// Every operation acts on the running application's own grant for one permission. None of them
@@ -46,6 +57,13 @@ pub(crate) trait ComputerUseAccess {
         &self,
         permission: ComputerUsePermission,
     ) -> Result<ComputerUseAuthorization, ComputerUseAccessError>;
+
+    /// Observes authorization changes the Operating System reports.
+    ///
+    /// A read can return a value the system cached before the change until the system delivers its
+    /// change report, so a read made only when the application becomes active can miss a grant.
+    /// `None` means the platform reports no changes.
+    fn observe(&self) -> Option<ComputerUseAccessObservation>;
 
     /// Asks the Operating System to prompt for the permission.
     ///

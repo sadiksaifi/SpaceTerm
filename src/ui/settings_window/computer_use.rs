@@ -18,7 +18,8 @@ use spaceterm_ui::{
 };
 
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessSubscription,
+    ComputerUseAuthorization, ComputerUsePermission,
 };
 use crate::ui::appearance::ChromeAppearance;
 
@@ -442,6 +443,40 @@ impl ComputerUseAccessRow {
 }
 
 /// Both computer-use permission rows.
+/// Keeps the rows current with authorization changes the system reports while the window is open.
+///
+/// The system can answer a read with a value cached before a change until it reports that change,
+/// which can arrive after the window became active again.
+pub(super) struct ComputerUseAccessChanges {
+    _subscription: Box<dyn ComputerUseAccessSubscription>,
+    _refresh: Task<()>,
+}
+
+impl ComputerUseAccessChanges {
+    pub(super) fn observe(
+        access: Option<&Rc<dyn ComputerUseAccess>>,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Option<Self> {
+        let observation = access?.observe()?;
+        let changed = observation.changed;
+        let refresh = cx.spawn(async move |settings, cx| {
+            while changed.recv().await.is_ok() {
+                while changed.try_recv().is_ok() {}
+                let refreshed = settings.update(cx, |settings, cx| {
+                    settings.refresh_computer_use_access(cx);
+                });
+                if refreshed.is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Self {
+            _subscription: observation.subscription,
+            _refresh: refresh,
+        })
+    }
+}
+
 pub(super) struct ComputerUseAccessRows {
     screen_recording: ComputerUseAccessRow,
     accessibility: ComputerUseAccessRow,
