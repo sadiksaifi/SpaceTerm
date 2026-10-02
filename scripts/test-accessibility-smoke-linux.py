@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Linux regressions for the accessibility smoke observer and private cleanup.
 
-Requires system Python, the installed Orca debug.py source and kernel pidfds.
+Requires system Python 3.11+, the installed Orca debug.py source and kernel pidfds.
 No display, D-Bus, application or screen reader is launched. Retained evidence
 stays under --output-dir; temporary runtime ownership markers stay under NOTES.
 """
@@ -32,7 +32,6 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTES = ROOT.parent / ".linux-port"
-ORCA_DEBUG = Path("/usr/lib/python3/dist-packages/orca/debug.py")
 
 
 def check(condition, classification):
@@ -77,13 +76,20 @@ class FragmentWriter:
 def parser_regression(smoke, directory, proof):
     # Compile the unchanged installed formatter only. Importing the Orca package
     # would initialize dependencies unrelated to this bus-free observer test.
-    source = ORCA_DEBUG.read_bytes()
+    package = importlib.util.find_spec("orca")
+    check(package is not None and package.submodule_search_locations,
+          "installed_orca_package_missing")
+    candidates = [Path(location) / "debug.py" for location in package.submodule_search_locations]
+    paths = [path for path in candidates if path.is_file()]
+    check(len(paths) == 1, "installed_orca_debug_source_missing")
+    orca_debug = paths[0]
+    source = orca_debug.read_bytes()
     tree = ast.parse(source)
     definitions = [node for node in tree.body
                    if isinstance(node, ast.FunctionDef) and node.name == "_print_text"]
     check(len(definitions) == 1, "installed_formatter_definition_missing")
     formatter = definitions[0]
-    proof.update(formatter_source=str(ORCA_DEBUG), formatter_function="_print_text",
+    proof.update(formatter_source=str(orca_debug), formatter_function="_print_text",
                  formatter_source_sha256=hashlib.sha256(source).hexdigest(),
                  formatter_definition_sha256=hashlib.sha256(
                      ast.dump(formatter, include_attributes=False).encode()).hexdigest(),
@@ -115,7 +121,7 @@ def parser_regression(smoke, directory, proof):
             writer = os.open(output.fifo, os.O_WRONLY)
             fragmenter = FragmentWriter(writer, output.stream, width)
             namespace = {"datetime": datetime, "debugLevel": 0, "debugFile": fragmenter}
-            exec(compile(ast.Module(body=[formatter], type_ignores=[]), str(ORCA_DEBUG), "exec"),
+            exec(compile(ast.Module(body=[formatter], type_ignores=[]), str(orca_debug), "exec"),
                  namespace)
             namespace["_print_text"](
                 0, "SPEECH: Using speech server factory: speechdispatcherfactory", True)
@@ -371,9 +377,10 @@ def cleanup_failure_regression(smoke, directory, proof):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=NOTES / "wave2/w4-smoke-regressions")
+    parser.add_argument("--output-dir", type=Path, default=NOTES / "accessibility-regressions")
     args = parser.parse_args()
     check(sys.platform == "linux", "linux_required")
+    check(sys.version_info >= (3, 11), "system_python_3_11_required")
     output = args.output_dir.resolve()
     check(output.is_relative_to(NOTES.resolve()), "output_must_be_under_linux_port")
     check(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "pidfd_required")

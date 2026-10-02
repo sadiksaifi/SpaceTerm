@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the source Terminal accessibility tree on private Linux displays.
 
-Requires system python3-pyatspi, python3-dbus, python3-speechd, at-spi2-core,
+Requires system Python 3.11+, python3-pyatspi, python3-dbus, python3-speechd, at-spi2-core,
 Xvfb, xdpyinfo, xdotool, ImageMagick, gnome-shell, Orca and Speech Dispatcher.
 Measurements contain counts and timings only.
 """
@@ -1714,6 +1714,7 @@ def prepare_binary(args, output):
 def main():
     args = parse_args()
     require(sys.platform == "linux", "linux_required")
+    require(sys.version_info >= (3, 11), "system_python_3_11_required")
     require(1 <= args.session_timeout <= 1800, "session_timeout_out_of_range")
     output = args.output_dir.resolve()
     require(output.is_relative_to(NOTES.resolve()), "output_must_be_under_linux_port")
@@ -1774,9 +1775,6 @@ def main():
         environment.update(ALSA_CONFIG_PATH=str(null_audio),
                            PULSE_SERVER="unix:" + str(runtime / "private-null-pulse.sock"),
                            PIPEWIRE_REMOTE="spaceterm-accessibility-null")
-        environment.update(MISE_DATA_DIR="/home/sdk/.local/share/mise",
-                           MISE_CONFIG_DIR="/home/sdk/.config/mise",
-                           MISE_CACHE_DIR="/home/sdk/.cache/mise")
         environment["DISPLAY" if backend == "x11" else "WAYLAND_DISPLAY"] = (
             f":{DISPLAY_NUMBER}" if backend == "x11" else WAYLAND_SOCKET)
         command = ["dbus-run-session", "--", "/usr/bin/python3", str(Path(__file__).resolve()),

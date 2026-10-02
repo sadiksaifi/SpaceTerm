@@ -103,6 +103,32 @@ mise run development
 mise run preflight:install:macos
 ```
 
+### Linux
+
+Wayland and X11 are supported. On Debian or Ubuntu, install:
+
+```sh
+sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
+  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils
+
+mise run setup:linux
+mise run doctor:linux
+mise run development
+```
+
+`setup:linux` installs pinned tools, initializes submodules, and runs the environment checks.
+`doctor:linux` repeats those checks. Development uses Wayland when available;
+`mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
+for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview.
+Ctrl+Shift+P opens application commands, including About, Help, and Export Terminal Diagnostics.
+Linux currently supports source builds only, with no packaging, distribution, or updates.
+
+`mise run validate:linux` includes the native adapters and retained AccessKit patch tests.
+For terminal screen-reader checks on private X11 and Wayland displays, install system Python 3.11+
+and the dependencies listed in `scripts/accessibility-smoke-linux.py`, then run
+`mise run test:accessibility:regressions:linux` and `mise run test:accessibility:linux`.
+
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
 development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
 platform segment such as `:macos` or `:linux`.
