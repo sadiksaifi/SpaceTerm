@@ -42,11 +42,17 @@ pub(crate) trait SetupGuideHost: Send + Sync {
     /// main thread.
     fn application_bundle(&self) -> Option<ApplicationBundle>;
 
+    /// Places the Operating System's glass material behind the guide's content, rounded to
+    /// `corner_radius`, so the guide floats on System Settings like part of it. Returns `false`
+    /// when the host has no such material; the guide then paints its own surface. It is called on
+    /// the main thread, once for each guide window.
+    fn install_glass(&self, window: &gpui::Window, corner_radius: Pixels) -> bool;
 }
 
 #[cfg(test)]
 pub(crate) mod testing {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -54,6 +60,7 @@ pub(crate) mod testing {
     pub(crate) struct ScriptedSetupGuideHost {
         window: Mutex<SystemSettingsWindow>,
         bundle: Option<ApplicationBundle>,
+        glass: AtomicUsize,
     }
 
     impl ScriptedSetupGuideHost {
@@ -67,6 +74,7 @@ pub(crate) mod testing {
                         Vec::new(),
                     )),
                 }),
+                glass: AtomicUsize::new(0),
             })
         }
 
@@ -74,6 +82,10 @@ pub(crate) mod testing {
             *self.window.lock().expect("window lock") = window;
         }
 
+        /// How many guide windows asked for glass.
+        pub(crate) fn glass_requests(&self) -> usize {
+            self.glass.load(Ordering::Relaxed)
+        }
     }
 
     impl SetupGuideHost for ScriptedSetupGuideHost {
@@ -85,5 +97,9 @@ pub(crate) mod testing {
             self.bundle.clone()
         }
 
+        fn install_glass(&self, _: &gpui::Window, _: Pixels) -> bool {
+            self.glass.fetch_add(1, Ordering::Relaxed);
+            false
+        }
     }
 }

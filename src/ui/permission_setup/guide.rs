@@ -26,7 +26,7 @@ use spaceterm_ui::{
 
 use super::{GuidePresentation, PermissionSetup, permission_copy};
 use crate::platform::computer_use_access::ComputerUsePermission;
-use crate::platform::setup_guide_host::ApplicationBundle;
+use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
@@ -41,6 +41,9 @@ const LINE_HEIGHT: f32 = 20.0;
 /// The application row's height, close to a row of the System Settings list.
 const ROW_HEIGHT: f32 = 40.0;
 const ROW_ICON_SIZE: f32 = 24.0;
+/// The application row's tint of the text color, at rest and under the pointer.
+const ROW_TINT: u8 = 0x14;
+const ROW_HOVER_TINT: u8 = 0x24;
 /// The icon that follows the pointer while a person drags SpaceTerm.
 const DRAG_ICON_SIZE: f32 = 32.0;
 /// How long the arrow takes to point at the list again after a click that did not drag.
@@ -54,6 +57,7 @@ pub(super) fn open(
     bounds: Bounds<Pixels>,
     presentation: GuidePresentation,
     bundle: Option<ApplicationBundle>,
+    host: Arc<dyn SetupGuideHost>,
     setup: WeakEntity<PermissionSetup>,
     cx: &mut App,
 ) -> Option<WindowHandle<SetupGuide>> {
@@ -74,10 +78,12 @@ pub(super) fn open(
         },
         |window, cx| {
             window.set_window_title("Setup Guide");
+            let glass = host.install_glass(window, RadiusRole::SurfaceLarge.pixels());
             cx.new(|_| SetupGuide {
                 presentation,
                 bundle,
                 setup,
+                glass,
                 nudges: 0,
             })
         },
@@ -95,6 +101,9 @@ pub(crate) struct SetupGuide {
     presentation: GuidePresentation,
     bundle: Option<ApplicationBundle>,
     setup: WeakEntity<PermissionSetup>,
+    /// Whether the host's glass material lies behind the guide. Without it the guide paints its
+    /// own surface.
+    glass: bool,
     /// Counts clicks on the application row that did not drag it. Each one points the arrow at
     /// the list again.
     nudges: usize,
@@ -201,10 +210,10 @@ impl SetupGuide {
             .gap(appearance.spacing(8.0))
             .px(appearance.spacing(8.0))
             .rounded(RadiusRole::Control.pixels())
-            .border_1()
-            .border_color(gpui_color(colors.border_variant))
-            .bg(gpui_color(colors.element_background))
-            .hover(|style| style.bg(gpui_color(colors.element_hover)))
+            // A tint of the text color rather than a fill, so the row lets the material behind
+            // the guide through in either appearance.
+            .bg(gpui_color(colors.text.with_alpha(ROW_TINT)))
+            .hover(|style| style.bg(gpui_color(colors.text.with_alpha(ROW_HOVER_TINT))))
             .cursor(CursorStyle::OpenHand)
             .child(img(bundle.icon.clone()).size(px(ROW_ICON_SIZE)).flex_none())
             .child(
@@ -360,11 +369,6 @@ impl SetupGuide {
             }
         };
 
-        // The guide floats over another application's window without a backdrop blur, so its
-        // surface is opaque; the rows behind it would otherwise show through.
-        let base = colors.elevated_surface_background;
-        let surface = appearance.floating_surface(base).source_over(base.with_alpha(255));
-
         div()
             .debug_selector(|| "setup-guide".to_owned())
             .size_full()
@@ -373,9 +377,17 @@ impl SetupGuide {
             .gap(appearance.spacing(8.0))
             .p(px(PADDING))
             .rounded(RadiusRole::SurfaceLarge.pixels())
-            .border_1()
-            .border_color(gpui_color(colors.border_variant))
-            .bg(gpui_color(surface))
+            // Glass draws its own edge and surface. Without it, the guide floats over another
+            // application's window with no blur, so its surface is opaque; the rows behind it would
+            // otherwise show through.
+            .when(!self.glass, |panel| {
+                let base = colors.elevated_surface_background;
+                let surface = appearance.floating_surface(base).source_over(base.with_alpha(255));
+                panel
+                    .border_1()
+                    .border_color(gpui_color(colors.border_variant))
+                    .bg(gpui_color(surface))
+            })
             .text_color(gpui_color(colors.text))
             .chrome_text(appearance.typography.style(TextRole::Body))
             .child(header)

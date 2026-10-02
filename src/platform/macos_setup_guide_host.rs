@@ -1,18 +1,21 @@
-//! macOS adapter for the Setup Guide: System Settings' window from the window server's list, and
-//! the running application's bundle and icon from AppKit.
+//! macOS adapter for the Setup Guide: System Settings' window from the window server's list, the
+//! running application's bundle and icon from AppKit, and the Liquid Glass material behind the
+//! guide.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{Bounds, DisplayId, ImageFormat, Pixels, point, px, size};
-use objc2::AnyThread as _;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
+use objc2::{AnyThread as _, MainThreadMarker, MainThreadOnly as _};
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
-    NSRunningApplication, NSWorkspace,
+    NSAutoresizingMaskOptions, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSGraphicsContext, NSRunningApplication, NSView,
+    NSWindowOrderingMode, NSWorkspace,
 };
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use objc2_foundation::{
     NSArray, NSBundle, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString,
 };
@@ -72,6 +75,37 @@ impl SetupGuideHost for MacosSetupGuideHost {
         })
     }
 
+    fn install_glass(&self, window: &gpui::Window, corner_radius: Pixels) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return false;
+        };
+        // SAFETY: GPUI owns this live NSView for the synchronous call.
+        let rendering_view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+        let Some(content_view) = rendering_view
+            .window()
+            .and_then(|window| window.contentView())
+        else {
+            return false;
+        };
+        // An ordinary, unmodified glass view below GPUI's rendering view, which paints the guide
+        // over it with transparency wherever the guide draws nothing.
+        let glass =
+            NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), content_view.bounds());
+        glass.setStyle(NSGlassEffectViewStyle::Regular);
+        glass.setCornerRadius(f64::from(corner_radius.as_f32()));
+        glass.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        content_view.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
+        true
+    }
 }
 
 fn system_settings_processes() -> Vec<i32> {

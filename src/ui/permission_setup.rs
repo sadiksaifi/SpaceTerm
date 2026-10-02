@@ -488,7 +488,8 @@ impl PermissionSetup {
             run.guide = None;
         }
         let setup = cx.weak_entity();
-        run.guide = guide::open(display, bounds, presentation, bundle, setup, cx).map(|handle| {
+        let host = Arc::clone(&self.host);
+        run.guide = guide::open(display, bounds, presentation, bundle, host, setup, cx).map(|handle| {
             GuideWindow {
                 handle,
                 display,

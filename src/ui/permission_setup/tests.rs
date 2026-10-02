@@ -164,6 +164,7 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
     assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
     assert_eq!(frame.size.height, super::guide::GUIDE_HEIGHT);
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
+    assert_eq!(fixture.host.glass_requests(), 1);
 }
 
 #[gpui::test]
