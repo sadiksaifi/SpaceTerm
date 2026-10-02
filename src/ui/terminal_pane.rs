@@ -2314,7 +2314,9 @@ impl TerminalPane {
         } else {
             self.fullscreen_escape.reset();
         }
-        let input = self.key_input_adapter.key_down(event);
+        let input = self
+            .key_input_adapter
+            .key_down_with_native(event, window.native_key_event());
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -2336,7 +2338,9 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let input = self.key_input_adapter.key_up(event);
+        let input = self
+            .key_input_adapter
+            .key_up_with_native(event, window.native_key_event());
         if let KeyTranslation::Encoded(input) = &input
             && let Some(index) = self
                 .ime_suppressed_keys
@@ -2372,7 +2376,10 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        if let Some(translation) = self.key_input_adapter.modifiers_changed(event) {
+        if let Some(translation) = self
+            .key_input_adapter
+            .modifiers_changed_with_native(event, window.native_key_event())
+        {
             self.send_key_translation(translation, cx);
         }
     }
