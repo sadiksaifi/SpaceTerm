@@ -248,6 +248,9 @@ mod linux_file_preview;
 mod linux_keyboard;
 
 #[cfg(target_os = "linux")]
+mod linux_keycodes;
+
+#[cfg(target_os = "linux")]
 mod linux_keyboard_layout;
 
 #[cfg(target_os = "linux")]
