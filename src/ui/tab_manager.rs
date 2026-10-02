@@ -4849,6 +4849,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let release = cx.debug_bounds("tab-item-3-active").unwrap().center() + point(px(4.0), px(0.0));
+
+        drag_tab(first.center(), &[release], cx);
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
+    }
+
+    #[gpui::test]
     fn dragging_a_tab_should_mark_its_slot_and_land_there_on_release(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);

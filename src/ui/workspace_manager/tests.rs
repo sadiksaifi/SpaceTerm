@@ -7300,6 +7300,25 @@ fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContex
 }
 
 #[gpui::test]
+fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let release = cx.debug_bounds("workspace-row-3-active").unwrap().center() + point(px(0.0), px(4.0));
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(workspace_order(&manager, cx), vec![2, 3, 1]);
+}
+
+#[gpui::test]
 fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
     cx: &mut TestAppContext,
 ) {
