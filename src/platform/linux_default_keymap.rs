@@ -224,6 +224,11 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             None,
         ),
         KeyBinding::new("ctrl-shift-q", QuitApplication, None),
+        KeyBinding::new(
+            "ctrl-shift-p",
+            crate::ui::application_commands::OpenApplicationCommands,
+            None,
+        ),
         KeyBinding::new("f11", ToggleFullScreen, None),
     ];
     #[cfg(feature = "developer-tools")]
@@ -298,18 +303,21 @@ fn control_bindings() -> Vec<KeyBinding> {
         ),
     ];
     #[cfg(feature = "developer-tools")]
-    let bindings = bindings.into_iter().chain([
-        KeyBinding::new(
-            "ctrl-shift-w",
-            crate::ui::developer_workbench::CloseDeveloperWorkbench,
-            Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "ctrl-w",
-            crate::ui::developer_workbench::CloseDeveloperWorkbench,
-            Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
-        ),
-    ]).collect();
+    let bindings = bindings
+        .into_iter()
+        .chain([
+            KeyBinding::new(
+                "ctrl-shift-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+            ),
+        ])
+        .collect();
     bindings
 }
 
@@ -454,14 +462,21 @@ mod tests {
     #[test]
     fn workbench_close_shortcuts_do_not_capture_terminal_control_w() {
         let bindings = control_bindings();
-        let workbench = gpui::KeyContext::parse(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT).unwrap();
+        let workbench =
+            gpui::KeyContext::parse(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT).unwrap();
         let terminal = gpui::KeyContext::parse(TERMINAL_KEY_CONTEXT).unwrap();
         for shortcut in ["ctrl-w", "ctrl-shift-w"] {
             let key = gpui::Keystroke::parse(shortcut).unwrap();
-            let binding = bindings.iter().find(|binding| {
-                binding.action().as_any().is::<crate::ui::developer_workbench::CloseDeveloperWorkbench>()
-                    && binding.match_keystrokes(std::slice::from_ref(&key)) == Some(false)
-            }).expect("the Workbench has a close shortcut");
+            let binding = bindings
+                .iter()
+                .find(|binding| {
+                    binding
+                        .action()
+                        .as_any()
+                        .is::<crate::ui::developer_workbench::CloseDeveloperWorkbench>()
+                        && binding.match_keystrokes(std::slice::from_ref(&key)) == Some(false)
+                })
+                .expect("the Workbench has a close shortcut");
             let predicate = binding.predicate().unwrap();
             assert!(predicate.eval(std::slice::from_ref(&workbench)));
             assert!(!predicate.eval(std::slice::from_ref(&terminal)));

@@ -185,4 +185,5 @@ ctrl-shift-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
 shift-insert	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
 ctrl-<	None	spaceterm::OpenSettings
 ctrl-shift-q	None	spaceterm::QuitApplication
+ctrl-shift-p	None	application::OpenApplicationCommands
 f11	None	spaceterm::ToggleFullScreen

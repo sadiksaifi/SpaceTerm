@@ -149,7 +149,7 @@ fn compose(
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
-            selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
+            selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
@@ -168,6 +168,7 @@ fn compose(
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 text_clipboard: Rc::new(super::macos_pasteboard::MacosTextClipboard),
+        primary_selection: None,
                 selection_clipboard: Rc::new(super::macos_pasteboard::MacosSelectionClipboard),
                 file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
                     paths,
@@ -184,7 +185,7 @@ fn compose(
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },
-        services: Rc::new(super::macos_services::NativeServicesRegistration),
+        services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
         window_frame: super::macos_window_frame::window_frame_geometry(),
         window_chrome: super::window_chrome::WindowChrome::native(Some(TitlebarOptions {
@@ -194,7 +195,7 @@ fn compose(
         })),
     })
     .map(|host| {
-        host.with_appearance(
+        host.with_modal_prompts(false).with_appearance(
             settings_storage,
             Rc::new(super::macos_appearance::MacosAppearancePlatform),
         )

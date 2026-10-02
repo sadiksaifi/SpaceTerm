@@ -474,7 +474,11 @@ fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppC
             ]
         );
         for slot in ["settings-theme-slot-light", "settings-theme-slot-dark"] {
-            assert_eq!(cx.debug_bounds(slot).is_some(), automatic, "{mode:?} {slot}");
+            assert_eq!(
+                cx.debug_bounds(slot).is_some(),
+                automatic,
+                "{mode:?} {slot}"
+            );
         }
         assert_eq!(
             cx.debug_bounds("settings-current-theme-name").is_some(),
@@ -949,8 +953,8 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
 ) {
     let mut document = SettingsDocument::default();
     document.preferences.window.density = ChromeDensity::Comfortable;
-    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
-        .expect("fixture Zed family");
+    document.terminal_themes =
+        crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     assert!(
         installed_count(&window, cx) > 0,
@@ -1187,10 +1191,10 @@ fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
+fn every_available_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         assert!(
@@ -1623,9 +1627,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
             settings
                 .row_description(SettingsRowId::Transparency, cx)
                 .unwrap(),
-            settings
-                .row_description(SettingsRowId::Blur, cx)
-                .unwrap(),
+            settings.row_description(SettingsRowId::Blur, cx).unwrap(),
         )
     });
     assert!(transparency.contains("window and floating surfaces opaque"));
@@ -1678,9 +1680,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
                 settings
                     .row_description(SettingsRowId::Transparency, cx)
                     .unwrap(),
-                settings
-                    .row_description(SettingsRowId::Blur, cx)
-                    .unwrap(),
+                settings.row_description(SettingsRowId::Blur, cx).unwrap(),
             )
         });
         assert!(transparency.contains("opaque at 0"));
@@ -1759,7 +1759,7 @@ fn the_themes_page_warns_only_when_something_could_not_be_resolved(cx: &mut Test
 fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -1896,8 +1896,8 @@ fn assert_the_footer_closes_only_the_content_column(
     document: SettingsDocument,
     cx: &mut TestAppContext,
 ) {
-    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    for section in SettingsSectionId::ALL {
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
         let surface = cx.debug_bounds("settings-window-surface").unwrap();
         let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
@@ -2031,9 +2031,9 @@ fn client_chrome_geometry_tracks_comfortable_density(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
+    let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
         let title_selector = leaked_owned(format!("{}-title", section.selector()));
         let description_selector = leaked_owned(format!("{}-description", section.selector()));
@@ -2107,7 +2107,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
 fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -2151,7 +2151,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 ) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in SettingsSectionId::ALL {
+    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
         select_section(section, cx);
 
         let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
@@ -3174,7 +3174,10 @@ fn a_loading_registry_listing_shows_a_bar_above_its_caption(cx: &mut TestAppCont
     let caption = cx
         .debug_bounds("settings-theme-store-loading-caption")
         .expect("the loading listing shows its caption");
-    assert!(caption.top() >= bar.bottom(), "the caption sits below the bar");
+    assert!(
+        caption.top() >= bar.bottom(),
+        "the caption sits below the bar"
+    );
 
     cx.run_until_parked();
     assert!(
@@ -3259,7 +3262,10 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
         text,
         crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
     );
-    assert!(text.contains("comfortable"), "the text should follow the change");
+    assert!(
+        text.contains("comfortable"),
+        "the text should follow the change"
+    );
 }
 
 /// A compact settings file within the storage limit can print past the text view's limit.
@@ -3339,7 +3345,11 @@ fn edit_json_opens_the_settings_file_and_shows_where_it_lives(cx: &mut TestAppCo
     click("settings-file-edit", cx);
 
     assert_eq!(file.opened.get(), 1);
-    assert_eq!(harness.storage.writes(), writes, "an existing file is opened as it is");
+    assert_eq!(
+        harness.storage.writes(),
+        writes,
+        "an existing file is opened as it is"
+    );
 }
 
 #[gpui::test]
@@ -3351,7 +3361,10 @@ fn edit_json_writes_a_missing_settings_file_before_opening_it(cx: &mut TestAppCo
     click("settings-file-edit", cx);
 
     assert_eq!(
-        harness.storage.document().map(|document| document.preferences),
+        harness
+            .storage
+            .document()
+            .map(|document| document.preferences),
         Some(SettingsDocument::default().preferences)
     );
     assert_eq!(file.opened.get(), 1);
@@ -3375,7 +3388,13 @@ fn edit_json_saves_pending_changes_before_opening_the_file(cx: &mut TestAppConte
     click("settings-file-edit", cx);
 
     assert_eq!(
-        harness.storage.document().unwrap().preferences.window.density,
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .window
+            .density,
         ChromeDensity::Comfortable,
         "the editor opens what the window shows"
     );
@@ -3418,10 +3437,16 @@ fn a_malformed_save_pauses_editing_until_a_valid_save(cx: &mut TestAppContext) {
     let file = install_settings_file(&harness, cx);
     let before = document_of(&window, cx);
 
-    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    harness
+        .storage
+        .save_bytes_elsewhere(b"{ half typed".to_vec());
     follow_outside_save(&file, cx);
 
-    assert_eq!(document_of(&window, cx), before, "the last valid settings stay in effect");
+    assert_eq!(
+        document_of(&window, cx),
+        before,
+        "the last valid settings stay in effect"
+    );
     assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
     assert!(!window.read_with(cx, |window, _| window.editor.editable()));
 
@@ -3472,7 +3497,13 @@ fn reload_writes_a_pending_change_before_reading_the_file(cx: &mut TestAppContex
     click("settings-file-reload", cx);
 
     assert_eq!(
-        harness.storage.document().unwrap().preferences.window.density,
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .window
+            .density,
         ChromeDensity::Comfortable
     );
     assert_eq!(
@@ -3488,7 +3519,9 @@ fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAp
     select_section(SettingsSectionId::Advanced, cx);
     let before = document_of(&window, cx);
 
-    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    harness
+        .storage
+        .save_bytes_elsewhere(b"{ half typed".to_vec());
     click("settings-file-reload", cx);
 
     assert_eq!(document_of(&window, cx), before);
@@ -3509,8 +3542,8 @@ fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAp
 fn exported_document_with_a_theme() -> Vec<u8> {
     let mut document = SettingsDocument::default();
     document.preferences.window.density = ChromeDensity::Comfortable;
-    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
-        .expect("fixture Zed family");
+    document.terminal_themes =
+        crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
     crate::appearance::export_settings(&document)
         .unwrap()
         .into_bytes()
@@ -3543,7 +3576,10 @@ fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext
     settle(cx);
 
     let retained = harness.storage.document().unwrap();
-    assert_eq!(retained.preferences.window.density, ChromeDensity::Comfortable);
+    assert_eq!(
+        retained.preferences.window.density,
+        ChromeDensity::Comfortable
+    );
     assert_eq!(retained.terminal_themes.len(), 1);
 }
 
@@ -3576,8 +3612,14 @@ fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppCont
         Err(super::import::ImportError::Unreadable),
     ] {
         finish_import(&window, read, cx);
-        assert!(cx.debug_bounds("modal-action-settings-import-failed-ok").is_some());
-        assert!(cx.debug_bounds("modal-action-settings-import-confirm").is_none());
+        assert!(
+            cx.debug_bounds("modal-action-settings-import-failed-ok")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-settings-import-confirm")
+                .is_none()
+        );
         click("modal-action-settings-import-failed-ok", cx);
     }
     settle(cx);
@@ -3608,4 +3650,39 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
     set_query(&window, "osc52", cx);
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+}
+
+#[gpui::test]
+fn absent_host_capabilities_hide_their_rows_but_keep_clipboard_privacy(cx: &mut TestAppContext) {
+    let (window, _, cx) = open_settings(cx);
+    window.read_with(cx, |settings, _| {
+        assert!(
+            settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Privacy)
+        );
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Updates)
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-privacy")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_none()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    assert!(cx.debug_bounds("settings-row-microphone-access").is_none());
+    assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
+    assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+    for query in ["microphone", "updates"] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(settings.matching_rows().is_empty())
+        });
+    }
 }

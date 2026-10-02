@@ -118,6 +118,73 @@ fn opening_twice_keeps_one_window_and_selects_the_requested_section(cx: &mut Tes
 }
 
 #[gpui::test]
+fn application_palette_in_workbench_dispatches_about_and_restores_focus(cx: &mut TestAppContext) {
+    use crate::platform::application_menu::{ApplicationMenuAdapter, ApplicationMenuError};
+
+    struct PaletteMenu;
+    impl ApplicationMenuAdapter for PaletteMenu {
+        fn install(&self, _: &mut App) -> Result<(), ApplicationMenuError> {
+            Ok(())
+        }
+        fn uses_command_palette(&self) -> bool {
+            true
+        }
+    }
+
+    install(cx);
+    cx.update(|cx| {
+        crate::app::init(
+            cx,
+            Rc::new(PaletteMenu),
+            Rc::new(crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default()),
+        )
+        .unwrap();
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-shift-p",
+            crate::ui::application_commands::OpenApplicationCommands,
+            None,
+        )]);
+    });
+    let (workbench, cx) = open_workbench_window(cx);
+    let fixture_palette = workbench.read_with(cx, |workbench, _| workbench.palette.clone());
+    cx.simulate_keystrokes("ctrl-shift-p");
+    cx.run_until_parked();
+    let application_palette = cx.update(|window, cx| {
+        crate::ui::application_commands::layer(window, cx).expect("application palette owner")
+    });
+    assert_ne!(application_palette.entity_id(), fixture_palette.entity_id());
+    assert!(cx.debug_bounds("command-palette-panel").is_some());
+    assert!(cx.update(|window, cx| application_palette.read(cx).editor_is_focused(window, cx)));
+    assert!(!fixture_palette.read_with(cx, |palette, _| palette.is_open()));
+
+    cx.simulate_input("About");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!application_palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(
+        cx.debug_bounds("modal-action-application-about-close")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-application-about-help")
+            .is_some()
+    );
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+
+    cx.simulate_keystrokes("escape");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("escape").unwrap(),
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert!(cx.update(|window, cx| workbench.read(cx).focus_handle.is_focused(window)));
+    assert_eq!(
+        fixture_palette.read_with(cx, |palette, _| palette.query().to_owned()),
+        ""
+    );
+}
+
+#[gpui::test]
 fn sections_present_their_own_fixtures(cx: &mut TestAppContext) {
     install(cx);
     let (workbench, cx) = open_workbench_window(cx);

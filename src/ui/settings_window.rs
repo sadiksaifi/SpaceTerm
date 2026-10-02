@@ -105,7 +105,7 @@ impl Global for OpenSettingsWindow {}
 ///
 /// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
 /// Settings portable and gives each opened window one independent pointer-interaction owner. A
-/// host without microphone authorization composes none, and the Privacy section says so.
+/// host without microphone authorization omits that row while retaining the clipboard controls.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
     microphone_access: Option<Rc<dyn MicrophoneAccess>>,
@@ -242,6 +242,7 @@ pub(crate) struct SettingsWindow {
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
+    available_sections: Vec<SettingsSectionId>,
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
@@ -264,7 +265,7 @@ impl SidebarOwner for SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = self.matching_rows();
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -461,6 +462,20 @@ impl SettingsWindow {
             focus_handle,
             navigation,
             window_movement,
+            available_sections: SettingsSectionId::ALL
+                .into_iter()
+                .filter(|section| {
+                    *section != SettingsSectionId::Updates
+                        || cx
+                            .try_global::<crate::updates::UpdateService>()
+                            .is_some_and(|service| {
+                                !matches!(
+                                    service.0.read(cx).state(),
+                                    crate::updates::UpdateState::Unavailable
+                                )
+                            })
+                })
+                .collect(),
             microphone_access: MicrophoneAccessRow::new(microphone_access),
             theme_gallery,
             theme_store,
@@ -564,15 +579,26 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+    fn matching_rows(&self) -> Vec<SettingsRowId> {
         catalog::matching_rows(&self.query)
+            .into_iter()
+            .filter(|row| {
+                self.available_sections.contains(&row.descriptor().section)
+                    && (*row != SettingsRowId::MicrophoneAccess
+                        || self.microphone_access.is_supported())
+            })
+            .collect()
+    }
+
+    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+        self.matching_rows()
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = self.matching_rows();
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -729,7 +755,13 @@ impl SettingsWindow {
                     .child(self.render_detail(&settings, window, cx))
                     .child(self.render_footer(&settings)),
             );
-        ModalLayer::new(content).into_any_element()
+        let mut layer = ModalLayer::new(content);
+        if let Some(palette) = super::application_commands::layer(window, cx)
+            && palette.read(cx).is_open()
+        {
+            layer = layer.transient(div().absolute().inset_0().child(palette));
+        }
+        layer.into_any_element()
     }
 }
 
@@ -772,8 +804,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let available = self.navigable_sections();
-        let entries = SettingsSectionId::ALL
-            .into_iter()
+        let entries = self
+            .available_sections
+            .iter()
+            .copied()
             .map(|section| NavigationEntry {
                 section,
                 title: section.title(),

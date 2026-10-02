@@ -5714,6 +5714,7 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "yeslogic-fontconfig-sys",
+ "zbus",
  "zeroize",
 ]
 

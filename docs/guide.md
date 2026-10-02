@@ -92,6 +92,7 @@ mise run development
 `doctor:linux` repeats those checks. Development uses Wayland when available;
 `mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
 for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview.
+Ctrl+Shift+P opens application commands, including About, Help, and Export Terminal Diagnostics.
 Linux currently supports source builds only, with no packaging, distribution, or updates.
 
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and

@@ -4,7 +4,10 @@ use super::FilePreviewTarget;
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native preview Adapter observes thread affinity")
+    allow(
+        dead_code,
+        reason = "only a native preview Adapter observes thread affinity"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FilePreviewError {
@@ -16,10 +19,25 @@ pub(crate) enum FilePreviewError {
 /// Only presentation mechanics cross this capability boundary.
 pub(crate) trait FilePreviewPanel {
     fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError>;
+    /// Deferred adapters retain this authority and revalidate at their final native handoff.
+    fn preview_file_in_window(
+        &mut self,
+        target: FilePreviewTarget,
+        _: &gpui::Window,
+        _: &mut gpui::App,
+    ) -> Result<(), FilePreviewError> {
+        let path = target
+            .revalidated_path()
+            .ok_or(FilePreviewError::StaleTarget)?;
+        self.preview_file(&path)
+    }
     fn dismiss(&mut self);
 }
 
 pub(crate) trait FilePreviewFactory {
+    fn is_available(&self) -> bool {
+        true
+    }
     fn create(&self) -> Box<dyn FilePreviewPanel>;
 }
 
@@ -33,12 +51,32 @@ impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
         Self { panel }
     }
 
+    #[cfg(test)]
     pub(crate) fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError> {
         let Some(path) = target.revalidated_path() else {
             self.panel.dismiss();
             return Err(FilePreviewError::StaleTarget);
         };
         if let Err(error) = self.panel.preview_file(&path) {
+            self.panel.dismiss();
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub(crate) fn preview_in_window(
+        &mut self,
+        target: &FilePreviewTarget,
+        window: &gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Result<(), FilePreviewError> {
+        if target.revalidated_path().is_none() {
+            self.panel.dismiss();
+            return Err(FilePreviewError::StaleTarget);
+        }
+        if let Err(error) = self
+            .panel
+            .preview_file_in_window(target.clone(), window, cx)
+        {
             self.panel.dismiss();
             return Err(error);
         }
@@ -52,6 +90,14 @@ impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
 impl FilePreviewPanel for Box<dyn FilePreviewPanel> {
     fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
         (**self).preview_file(path)
+    }
+    fn preview_file_in_window(
+        &mut self,
+        target: FilePreviewTarget,
+        window: &gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Result<(), FilePreviewError> {
+        (**self).preview_file_in_window(target, window, cx)
     }
     fn dismiss(&mut self) {
         (**self).dismiss();

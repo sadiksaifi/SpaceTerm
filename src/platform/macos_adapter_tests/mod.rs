@@ -1,5 +1,4 @@
 //! Original native corpus oracles, separate from the portable release gate.
-mod selected_file;
 mod shortcut_glyphs;
 
 use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
