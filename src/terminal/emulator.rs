@@ -1357,9 +1357,11 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         if winsize_changed {
+            self.capture_accessibility_if_needed()?;
             self.accessibility_capture_needed = true;
             self.terminal
                 .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+            self.capture_accessibility_if_needed()?;
         } else {
             debug_assert_eq!(grid, self.geometry.grid());
             debug_assert_eq!(cell, self.geometry.backing_cell_size());
@@ -2182,6 +2184,14 @@ impl TerminalEmulator {
         }
     }
 
+    fn capture_accessibility_if_needed(&mut self) -> Result<(), Error> {
+        if self.accessibility_capture_needed {
+            self.ghostty_accessibility.capture(&self.terminal)?;
+            self.accessibility_capture_needed = false;
+        }
+        Ok(())
+    }
+
     pub(crate) fn accessibility_snapshot(
         &mut self,
         bind_next_presentation: bool,
@@ -2253,10 +2263,7 @@ impl TerminalEmulator {
         // Rendering consumes Ghostty's dirty flags. Retain semantic invalidation
         // now; the worker still extracts text only when accessibility is due.
         // A semantic update may already have observed this content before rendering.
-        if self.accessibility_capture_needed {
-            self.ghostty_accessibility.capture(&self.terminal)?;
-            self.accessibility_capture_needed = false;
-        }
+        self.capture_accessibility_if_needed()?;
         let snapshot = self.render_state.update(&self.terminal)?;
         let dirty = snapshot.dirty()?;
         let rows = snapshot.rows()?;

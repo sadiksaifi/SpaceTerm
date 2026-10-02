@@ -173,6 +173,177 @@ fn accessibility_text_survives_visual_snapshots_before_semantic_publication() {
     assert_eq!(current.generation(), screen.generation);
 }
 
+fn drain_accessibility(emulator: &mut TerminalEmulator) -> Arc<TerminalAccessibilityModel> {
+    for _ in 0..128 {
+        let (model, more) = emulator
+            .accessibility_snapshot_for_current_presentation()
+            .unwrap();
+        if !more {
+            return model.expect("completed native publication must produce the current model");
+        }
+    }
+    panic!("bounded native accessibility publication did not converge");
+}
+
+#[test]
+fn accessibility_retains_an_edited_row_scrolled_into_history_in_one_feed() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(b"\rnew\r\n1\r\n2\r\n3\r\n4");
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.text(), "new\n1\n2\n3\n4");
+}
+
+#[test]
+fn accessibility_retains_an_edited_row_compressed_before_observation() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(format!("\rnew{}", "\r\nrow".repeat(5_000)).as_bytes());
+    assert_eq!(
+        emulator
+            .terminal
+            .compress(libghostty_vt::terminal::CompressionMode::Full)
+            .unwrap(),
+        libghostty_vt::terminal::CompressionResult::Complete,
+    );
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.rows().count(), 5_001);
+    assert_eq!(current.text().lines().next(), Some("new"));
+    assert_eq!(current.text(), format!("new{}", "\nrow".repeat(5_000)));
+}
+
+#[test]
+fn accessibility_retains_primary_edits_when_compression_runs_on_alternate_screen() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(
+        format!(
+            "\rnew{}\x1b[?1049h\x1b[2J\x1b[Halternate",
+            "\r\nrow".repeat(5_000)
+        )
+        .as_bytes(),
+    );
+    for step in 0..128 {
+        match emulator.compress_scrollback().unwrap() {
+            libghostty_vt::terminal::CompressionResult::Pending => assert!(step < 127),
+            libghostty_vt::terminal::CompressionResult::Complete => break,
+            other => panic!("unexpected native compression result: {other:?}"),
+        }
+    }
+    emulator.snapshot().unwrap().unwrap();
+    assert!(
+        drain_accessibility(&mut emulator)
+            .text()
+            .starts_with("alternate")
+    );
+    emulator.feed(b"\x1b[?1049l");
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.rows().count(), 5_001);
+    assert!(current.text().starts_with("new\nrow\n"));
+    assert!(!current.text().contains("old"));
+}
+
+#[test]
+fn accessibility_retains_bounded_progress_with_offscreen_dirty_rows_and_new_input() {
+    let mut emulator = emulator(512, 25);
+    emulator.feed("row\r\n".repeat(80).as_bytes());
+    emulator.snapshot().unwrap().unwrap();
+    drain_accessibility(&mut emulator);
+    emulator
+        .terminal
+        .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Top);
+    emulator.feed(b"changed");
+    emulator.snapshot().unwrap().unwrap();
+
+    let (_, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(
+        more,
+        "wide rows must use multiple bounded extraction passes"
+    );
+    emulator.feed(b"\rnewest!");
+    // The viewport is unchanged by this offscreen write. Rendering can return
+    // None while capture must still retain the native semantic invalidation.
+    emulator.snapshot().unwrap();
+    let current = drain_accessibility(&mut emulator);
+    assert!(current.text().ends_with("newest!"));
+    assert_eq!(current.rows().count(), 81);
+
+    // No new input must complete immediately even though offscreen renderer
+    // dirty flags remain set. A fresh native observer confirms the exact text.
+    let (unchanged, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    assert!(
+        unchanged.is_none(),
+        "unchanged semantics reuse the existing model"
+    );
+    let mut fresh = ghostty_accessibility::State::new().unwrap();
+    let mut state = TerminalAccessibilityState::default();
+    for _ in 0..128 {
+        let update = fresh
+            .update(
+                &emulator.terminal,
+                ghostty_accessibility::UpdateOptions {
+                    max_cells: 16_384,
+                    max_rows: 256,
+                },
+            )
+            .unwrap();
+        let more = update.more;
+        if let Some(model) = state.apply(
+            accessibility_update(update).unwrap(),
+            emulator.presentation_generation,
+        ) {
+            assert_eq!(model.text(), current.text());
+            assert!(!more);
+            return;
+        }
+    }
+    panic!("fresh native observer did not converge");
+}
+
+#[test]
+fn accessibility_retains_edits_after_history_rows_become_active_on_resize() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old\r\n1\r\n2\r\n3\r\n4");
+    emulator.snapshot().unwrap().unwrap();
+    drain_accessibility(&mut emulator);
+    emulator.resize(geometry(32, 5, 10.0, 20.0)).unwrap();
+    // Edit the newly active first row, then move it back into history before
+    // either the visual snapshot or the semantic observer runs.
+    emulator.feed(b"\x1b[1;1Hnew\x1b[5;1H\r\n5\r\n6\r\n7");
+    emulator.resize(geometry(32, 3, 10.0, 20.0)).unwrap();
+    emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        drain_accessibility(&mut emulator).text(),
+        "new\n1\n2\n3\n4\n5\n6\n7"
+    );
+}
+
 #[test]
 fn terminal_find_rejects_matches_across_hard_lines() {
     let mut emulator = emulator(4, 2);
