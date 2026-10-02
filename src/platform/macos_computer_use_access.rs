@@ -1,20 +1,21 @@
-use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::process::{Command, ExitStatus, Stdio};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_foundation::{
-    NSBundle, NSDictionary, NSDistributedNotificationCenter, NSNotification,
-    NSNotificationSuspensionBehavior, NSNumber, NSObject, NSObjectProtocol, NSString,
+    NSBundle, NSDistributedNotificationCenter, NSNotification, NSNotificationSuspensionBehavior,
+    NSObject, NSObjectProtocol, NSString,
 };
 
 use super::computer_use_access::{
     ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
     ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
-    ComputerUseResetCompletion,
+    ComputerUseResetCompletion, ComputerUseSetupCompletion, ComputerUseSetupReadiness,
 };
+use super::macos_computer_use_probe::{ProbeReport, run_probe};
 use super::permission_recovery::{
     PermissionRecovery, PermissionRecoveryError, PermissionRecoveryOpener,
 };
@@ -39,14 +40,23 @@ const TCCUTIL: &str = "/usr/bin/tccutil";
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
-    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
-    static kAXTrustedCheckOptionPrompt: *const NSString;
+}
+
+/// Reads the calling process's own authorization.
+///
+/// The Screen Recording answer keeps its launch value for the life of the process, so only a
+/// process started after a change reads that change.
+pub(super) fn in_process_granted(permission: ComputerUsePermission) -> bool {
+    // SAFETY: Both functions read the calling process's own authorization and take no input.
+    match permission {
+        ComputerUsePermission::ScreenRecording => unsafe { CGPreflightScreenCaptureAccess() },
+        ComputerUsePermission::Accessibility => unsafe { AXIsProcessTrusted() != 0 },
+    }
 }
 
 pub(crate) struct MacosComputerUseAccess {
@@ -55,6 +65,7 @@ pub(crate) struct MacosComputerUseAccess {
     /// The bundle identifier a reset may name, present only when the running bundle is this build's
     /// own identity, so a reset can never reach another application's grant.
     reset_bundle_identifier: Option<&'static str>,
+    verification: Arc<Verification>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -78,6 +89,7 @@ impl MacosComputerUseAccess {
                 running.as_deref(),
                 identity.bundle_identifier(),
             ),
+            verification: Arc::default(),
             _not_send_or_sync: PhantomData,
         }
     }
@@ -88,27 +100,30 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         &self,
         permission: ComputerUsePermission,
     ) -> Result<ComputerUseAuthorization, ComputerUseAccessError> {
-        // SAFETY: Both functions read the calling process's own authorization and take no input.
-        let granted = match permission {
-            ComputerUsePermission::ScreenRecording => unsafe { CGPreflightScreenCaptureAccess() },
-            ComputerUsePermission::Accessibility => unsafe { AXIsProcessTrusted() != 0 },
-        };
-        Ok(if granted {
-            ComputerUseAuthorization::Granted
-        } else {
-            ComputerUseAuthorization::NotGranted
-        })
+        let verified = self.verification.latest();
+        Verification::start(&self.verification);
+        Ok(verified.map_or_else(
+            || {
+                if in_process_granted(permission) {
+                    ComputerUseAuthorization::Granted
+                } else {
+                    ComputerUseAuthorization::NotGranted
+                }
+            },
+            |report| report.authorization(permission),
+        ))
     }
 
     fn observe(&self) -> Option<ComputerUseAccessObservation> {
         let mtm = MainThreadMarker::new()?;
         let (sender, changed) = async_channel::bounded(1);
-        let observer = AccessChangeObserver::new(mtm, sender);
+        self.verification.subscribe(sender.clone());
+        let observer = AccessChangeObserver::new(mtm, sender, Arc::clone(&self.verification));
         let center = NSDistributedNotificationCenter::defaultCenter();
         let name = NSString::from_str(ACCESSIBILITY_CHANGED_NOTIFICATION);
-        // HIServices clears its cached trust value from this notification with coalesced delivery,
-        // which the system holds while SpaceTerm is inactive. Matching that delivery signals the
-        // owner in the same pass, so its read follows the cache clear instead of preceding it.
+        // A Permission Setup runs while System Settings is the active application, so the report
+        // must arrive while SpaceTerm is inactive. Each report also starts a verification, which
+        // reads from a fresh process instead of from this process's cached trust value.
         // SAFETY: The selector belongs to this retained observer, and the subscription removes the
         // registration before releasing it.
         unsafe {
@@ -117,7 +132,7 @@ impl ComputerUseAccess for MacosComputerUseAccess {
                 sel!(accessChanged:),
                 Some(&name),
                 None,
-                NSNotificationSuspensionBehavior::Coalesce,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
             );
         }
         Some(ComputerUseAccessObservation {
@@ -130,33 +145,37 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         })
     }
 
-    fn request_authorization(
+    fn prepare_setup(
         &self,
         permission: ComputerUsePermission,
+        completion: ComputerUseSetupCompletion,
     ) -> Result<(), ComputerUseAccessError> {
-        if MainThreadMarker::new().is_none() {
-            return Err(ComputerUseAccessError::OffMainThread);
-        }
-        match permission {
-            ComputerUsePermission::ScreenRecording => {
-                // SAFETY: Called on the main thread; the system presents its own prompt at most
-                // once and the immediate result is read again by the caller.
-                unsafe { CGRequestScreenCaptureAccess() };
-            }
-            ComputerUsePermission::Accessibility => {
-                // SAFETY: HIServices exports this immutable option key when available.
-                let key = unsafe { kAXTrustedCheckOptionPrompt.as_ref() }
-                    .ok_or(ComputerUseAccessError::PlatformUnavailable)?;
-                let prompt = NSNumber::new_bool(true);
-                let options = NSDictionary::from_slices(&[key], &[&*prompt]);
-                // SAFETY: NSDictionary is toll-free bridged to the CFDictionary this function
-                // reads during the call, and `options` outlives the call.
-                unsafe {
-                    AXIsProcessTrustedWithOptions(Retained::as_ptr(&options).cast::<c_void>())
+        let reset_bundle_identifier = self.reset_bundle_identifier;
+        let verification = Arc::clone(&self.verification);
+        std::thread::Builder::new()
+            .name("spaceterm-permission-setup".to_owned())
+            .spawn(move || {
+                // Only a verified NotGranted clears the entry, so a grant made since the last
+                // read is never reset.
+                let readiness = match run_probe() {
+                    Ok(report) => {
+                        verification.record(report);
+                        if report.authorization(permission) == ComputerUseAuthorization::Granted {
+                            ComputerUseSetupReadiness::AlreadyGranted
+                        } else {
+                            if let Some(bundle_identifier) = reset_bundle_identifier {
+                                // A failed reset leaves an entry the person turns on instead.
+                                let _ = run_reset(permission, bundle_identifier);
+                            }
+                            ComputerUseSetupReadiness::Ready
+                        }
+                    }
+                    Err(_) => ComputerUseSetupReadiness::Ready,
                 };
-            }
-        }
-        Ok(())
+                completion(Ok(readiness));
+            })
+            .map(drop)
+            .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
     }
 
     fn open_settings(
@@ -182,25 +201,109 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         let bundle_identifier = self
             .reset_bundle_identifier
             .ok_or(ComputerUseAccessError::PlatformUnavailable)?;
-        let arguments = reset_arguments(permission, bundle_identifier);
+        let verification = Arc::clone(&self.verification);
         std::thread::Builder::new()
             .name("spaceterm-permission-reset".to_owned())
             .spawn(move || {
-                let status = Command::new(TCCUTIL)
-                    .args(arguments)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                completion(reset_result(status));
+                let result = run_reset(permission, bundle_identifier);
+                Verification::start(&verification);
+                completion(result);
             })
             .map(drop)
             .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
     }
 }
 
+fn run_reset(
+    permission: ComputerUsePermission,
+    bundle_identifier: &'static str,
+) -> Result<(), ComputerUseAccessError> {
+    let status = Command::new(TCCUTIL)
+        .args(reset_arguments(permission, bundle_identifier))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    reset_result(status)
+}
+
+/// The latest probe report and the probe that refreshes it.
+///
+/// At most one probe runs at a time. A request made while one runs starts one more afterward, so
+/// the last report always follows the last request.
+#[derive(Default)]
+struct Verification {
+    state: Mutex<VerificationState>,
+}
+
+#[derive(Default)]
+struct VerificationState {
+    latest: Option<ProbeReport>,
+    running: bool,
+    requested_again: bool,
+    subscribers: Vec<async_channel::Sender<()>>,
+}
+
+impl Verification {
+    fn lock(&self) -> std::sync::MutexGuard<'_, VerificationState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn latest(&self) -> Option<ProbeReport> {
+        self.lock().latest
+    }
+
+    fn subscribe(&self, sender: async_channel::Sender<()>) {
+        let mut state = self.lock();
+        state.subscribers.retain(|subscriber| !subscriber.is_closed());
+        state.subscribers.push(sender);
+    }
+
+    /// Keeps a report and signals every subscriber when it differs from the last one.
+    fn record(&self, report: ProbeReport) {
+        let mut state = self.lock();
+        if state.latest.replace(report) != Some(report) {
+            state.subscribers.retain(|subscriber| !subscriber.is_closed());
+            for subscriber in &state.subscribers {
+                let _ = subscriber.try_send(());
+            }
+        }
+    }
+
+    fn start(this: &Arc<Self>) {
+        {
+            let mut state = this.lock();
+            if state.running {
+                state.requested_again = true;
+                return;
+            }
+            state.running = true;
+        }
+        let verification = Arc::clone(this);
+        let spawned = std::thread::Builder::new()
+            .name("spaceterm-permission-probe".to_owned())
+            .spawn(move || {
+                loop {
+                    // A failed probe keeps the last report rather than inventing one.
+                    if let Ok(report) = run_probe() {
+                        verification.record(report);
+                    }
+                    let mut state = verification.lock();
+                    if !std::mem::take(&mut state.requested_again) {
+                        state.running = false;
+                        break;
+                    }
+                }
+            });
+        if spawned.is_err() {
+            this.lock().running = false;
+        }
+    }
+}
+
 struct AccessChangeObserverIvars {
     sender: async_channel::Sender<()>,
+    verification: Arc<Verification>,
 }
 
 define_class!(
@@ -215,6 +318,7 @@ define_class!(
         #[unsafe(method(accessChanged:))]
         fn access_changed(&self, _notification: &NSNotification) {
             let _ = self.ivars().sender.try_send(());
+            Verification::start(&self.ivars().verification);
         }
     }
 
@@ -222,8 +326,15 @@ define_class!(
 );
 
 impl AccessChangeObserver {
-    fn new(mtm: MainThreadMarker, sender: async_channel::Sender<()>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(AccessChangeObserverIvars { sender });
+    fn new(
+        mtm: MainThreadMarker,
+        sender: async_channel::Sender<()>,
+        verification: Arc<Verification>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AccessChangeObserverIvars {
+            sender,
+            verification,
+        });
         // SAFETY: NSObject's init is its designated initializer.
         unsafe { msg_send![super(this), init] }
     }

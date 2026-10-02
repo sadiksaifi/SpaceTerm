@@ -16,6 +16,8 @@ pub(crate) struct DesktopWording {
     pub(crate) operating_system_name: &'static str,
     /// The command that opens System Directory Selection.
     pub(crate) system_directory_selection: &'static str,
+    /// The command that selects a file in the host's file manager.
+    pub(crate) reveal_file: &'static str,
 }
 
 pub(crate) trait ShortcutFormatter {
@@ -269,6 +271,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             file_preview: "Preview File",
             operating_system_name: "Operating System",
             system_directory_selection: "Choose Directory…",
+            reveal_file: "Show in File Manager",
         },
         Rc::new(TestingShortcutFormatter),
     );

@@ -2,16 +2,16 @@
 //! computer-use tools running in its Terminal Sessions, and how to set them up and recover them.
 //!
 //! A tool running in a Terminal Session takes screenshots and sends input through SpaceTerm's
-//! grants, so these rows are where a person learns why such a tool reports missing access. The
-//! Operating System reports only whether a grant is usable now, and a grant can stay switched on
-//! after it stops working, so every readable state keeps a way to troubleshoot. Nothing here
-//! captures the screen or sends input to test access, and a reset reaches one permission of the
-//! running application only, after the person confirms it.
+//! grants, so these rows are where a person learns why such a tool reports missing access and
+//! starts a Permission Setup. The Operating System reports only whether a grant is usable, and a
+//! grant can stay switched on after it stops working, so every readable state keeps a way to
+//! troubleshoot. Nothing here captures the screen or sends input to test access, and a reset
+//! reaches one permission of the running application only, after the person confirms it.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, SharedString, Task, Window, div};
+use gpui::{AnyElement, App, Entity, SharedString, Task, Window, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,
@@ -22,22 +22,18 @@ use crate::platform::computer_use_access::{
     ComputerUseAuthorization, ComputerUsePermission,
 };
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::permission_setup::{
+    PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, permission_copy,
+};
 
 use super::SettingsWindow;
 use crate::ui::sidebar_window::form::{action_button, badge};
 
-/// The fixed copy and selectors of one permission's row.
+/// The selectors of one permission's row.
 pub(super) struct PermissionText {
-    /// The permission's name in running text.
-    pub(super) name: &'static str,
-    /// The System Settings list that holds the grant.
-    pub(super) pane: &'static str,
-    /// What a computer-use tool does with the grant.
-    pub(super) purpose: &'static str,
-    /// The system applies a changed grant only after the application reopens.
-    pub(super) applies_after_reopen: bool,
     pub(super) control: &'static str,
-    pub(super) request: &'static str,
+    pub(super) set_up: &'static str,
+    pub(super) cancel_setup: &'static str,
     pub(super) open_settings: &'static str,
     pub(super) check_again: &'static str,
     pub(super) troubleshoot: &'static str,
@@ -54,12 +50,9 @@ pub(super) struct PermissionText {
 }
 
 pub(super) const SCREEN_RECORDING: PermissionText = PermissionText {
-    name: "Screen Recording",
-    pane: "Screen & System Audio Recording",
-    purpose: "take screenshots",
-    applies_after_reopen: true,
     control: "settings-screen-recording-access-control",
-    request: "settings-screen-recording-access-request",
+    set_up: "settings-screen-recording-access-set-up",
+    cancel_setup: "settings-screen-recording-access-cancel-setup",
     open_settings: "settings-screen-recording-access-open-settings",
     check_again: "settings-screen-recording-access-check-again",
     troubleshoot: "settings-screen-recording-access-troubleshoot",
@@ -76,12 +69,9 @@ pub(super) const SCREEN_RECORDING: PermissionText = PermissionText {
 };
 
 pub(super) const DEVICE_CONTROL: PermissionText = PermissionText {
-    name: "Device Control",
-    pane: "Device Control and Data Access",
-    purpose: "click and type in other apps",
-    applies_after_reopen: false,
     control: "settings-device-control-access-control",
-    request: "settings-device-control-access-request",
+    set_up: "settings-device-control-access-set-up",
+    cancel_setup: "settings-device-control-access-cancel-setup",
     open_settings: "settings-device-control-access-open-settings",
     check_again: "settings-device-control-access-check-again",
     troubleshoot: "settings-device-control-access-troubleshoot",
@@ -119,14 +109,19 @@ pub(super) enum ComputerUseAccessStatus {
     /// No capability is composed, so access is neither readable nor changeable here.
     Unsupported,
     Authorization(ComputerUseAuthorization),
-    /// Authorization could not be read or requested.
+    /// Authorization could not be read.
     Failed(ComputerUseAccessError),
 }
 
 /// The primary action the row offers for its status, when there is one worth offering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComputerUseAccessAction {
-    Request,
+    /// Starts a Permission Setup.
+    SetUp,
+    /// Ends the running Permission Setup.
+    CancelSetup,
+    /// Opens the permission's list in System Settings, for a host that composes no Permission
+    /// Setup.
     OpenSettings,
     CheckAgain,
 }
@@ -174,9 +169,8 @@ pub(super) struct ComputerUseAccessRow {
     /// The running application, which is what a person turns on in System Settings.
     application_name: &'static str,
     status: ComputerUseAccessStatus,
-    /// The system prompts at most once per application identity, so after one request the row
-    /// sends the person to System Settings instead of offering a request that may do nothing.
-    requested: bool,
+    /// The permission's Permission Setup, or `None` when the host composes none.
+    setup: Option<PermissionSetupStatus>,
     notice: Option<RecoveryNotice>,
     /// Returns the reset result to GPUI. Dropping the window drops the bridge.
     _reset: Option<Task<()>>,
@@ -187,13 +181,14 @@ impl ComputerUseAccessRow {
         permission: ComputerUsePermission,
         access: Option<Rc<dyn ComputerUseAccess>>,
         application_name: &'static str,
+        setup: Option<PermissionSetupStatus>,
     ) -> Self {
         let mut row = Self {
             permission,
             access,
             application_name,
             status: ComputerUseAccessStatus::Unsupported,
-            requested: false,
+            setup,
             notice: None,
             _reset: None,
         };
@@ -241,26 +236,6 @@ impl ComputerUseAccessRow {
         matches!(self.status, ComputerUseAccessStatus::Authorization(_))
     }
 
-    fn request(&mut self) {
-        if self.status
-            != ComputerUseAccessStatus::Authorization(ComputerUseAuthorization::NotGranted)
-            || self.requested
-        {
-            return;
-        }
-        let Some(access) = self.access.clone() else {
-            return;
-        };
-        match access.request_authorization(self.permission) {
-            Ok(()) => {
-                self.requested = true;
-                self.notice = None;
-                self.refresh();
-            }
-            Err(error) => self.apply(ComputerUseAccessStatus::Failed(error)),
-        }
-    }
-
     fn open_settings(&mut self) {
         if !self.readable() {
             return;
@@ -282,7 +257,6 @@ impl ComputerUseAccessRow {
 
     fn finish_reset(&mut self, result: Option<Result<(), ComputerUseAccessError>>) {
         self.notice = None;
-        self.requested = false;
         self.refresh();
         self.notice = Some(match result {
             Some(Ok(())) => RecoveryNotice::ResetCompleted,
@@ -295,24 +269,17 @@ impl ComputerUseAccessRow {
         use ComputerUseAuthorization as Authorization;
 
         let text = permission_text(self.permission);
-        let name = text.name;
+        let copy = permission_copy(self.permission);
+        let name = copy.name;
         let application = self.application_name;
-        let pane = text.pane;
-        let reopen = if text.applies_after_reopen {
-            format!(", then quit and reopen {application}")
-        } else {
-            String::new()
-        };
+        let pane = copy.pane;
         let notice = self.notice.map(|notice| match notice {
-            RecoveryNotice::OpenFailed => format!(
-                "System Settings could not be opened. Open it yourself and turn on \
-                 {application} under Privacy & Security > {pane}{reopen}."
-            ),
+            RecoveryNotice::OpenFailed => open_failed(application, pane),
             RecoveryNotice::Resetting => {
                 format!("Resetting {name} for {application}…")
             }
             RecoveryNotice::ResetCompleted => format!(
-                "The system no longer has a {name} decision for {application}. Request access to add \
+                "The system no longer has a {name} decision for {application}. Choose Set Up to add \
                  {application} again."
             ),
             RecoveryNotice::ResetFailed => format!(
@@ -342,41 +309,58 @@ impl ComputerUseAccessRow {
                     format!(
                         "Computer-use tools running in SpaceTerm can {}. If a tool still reports \
                          missing access, choose Troubleshoot.",
-                        text.purpose
+                        copy.purpose
                     )
                 }),
                 None,
             ),
-            ComputerUseAccessStatus::Authorization(Authorization::NotGranted) if !self.requested => (
-                "Not Allowed",
-                text.state_not_allowed,
-                notice.unwrap_or_else(|| {
-                    let steps = if text.applies_after_reopen {
+            ComputerUseAccessStatus::Authorization(Authorization::NotGranted) => {
+                let (explanation, action) = match self.setup {
+                    Some(PermissionSetupStatus::Running) => (
                         format!(
-                            "Request access, turn on {application} in System Settings, then quit \
-                             and reopen {application}."
+                            "Follow the guide beside System Settings to add {application} to \
+                             {pane}."
+                        ),
+                        Action::CancelSetup,
+                    ),
+                    Some(status) => {
+                        let failure = match status {
+                            PermissionSetupStatus::Failed(
+                                PermissionSetupFailure::SettingsUnavailable,
+                            ) => Some(open_failed(application, pane)),
+                            PermissionSetupStatus::Failed(
+                                PermissionSetupFailure::SettingsNotShown,
+                            ) => Some(format!(
+                                "System Settings did not come forward. Choose Set Up to try \
+                                 again, or turn on {application} under Privacy & Security > \
+                                 {pane}."
+                            )),
+                            PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
+                        };
+                        (
+                            notice.or(failure).unwrap_or_else(|| {
+                                format!(
+                                    "Computer-use tools running in SpaceTerm need this to {}. \
+                                     Choose Set Up to add {application} in System Settings.",
+                                    copy.purpose
+                                )
+                            }),
+                            Action::SetUp,
                         )
-                    } else {
-                        format!("Request access, then turn on {application} in System Settings.")
-                    };
-                    format!(
-                        "Computer-use tools running in SpaceTerm need this to {}. {steps}",
-                        text.purpose
-                    )
-                }),
-                Some(Action::Request),
-            ),
-            ComputerUseAccessStatus::Authorization(Authorization::NotGranted) => (
-                "Not Allowed",
-                text.state_not_allowed,
-                notice.unwrap_or_else(|| {
-                    format!(
-                        "Turn on {application} under Privacy & Security > {pane}{reopen}. If it is \
-                         already on, choose Troubleshoot."
-                    )
-                }),
-                Some(Action::OpenSettings),
-            ),
+                    }
+                    None => (
+                        notice.unwrap_or_else(|| {
+                            format!(
+                                "Computer-use tools running in SpaceTerm need this to {}. Turn on \
+                                 {application} under Privacy & Security > {pane}.",
+                                copy.purpose
+                            )
+                        }),
+                        Action::OpenSettings,
+                    ),
+                };
+                ("Not Allowed", text.state_not_allowed, explanation, Some(action))
+            }
             ComputerUseAccessStatus::Failed(error) => (
                 "Unavailable",
                 text.state_unavailable,
@@ -388,7 +372,7 @@ impl ComputerUseAccessRow {
                         format!("The system did not report {name} access.")
                     }
                     ComputerUseAccessError::PlatformRejected => {
-                        format!("The system rejected the {name} access request.")
+                        format!("The system rejected the {name} access check.")
                     }
                 },
                 Some(Action::CheckAgain),
@@ -405,26 +389,20 @@ impl ComputerUseAccessRow {
 
     /// The step-by-step recovery a person follows when a tool reports missing access.
     fn troubleshooting(&self) -> (String, String, String) {
-        let text = permission_text(self.permission);
-        let name = text.name;
+        let copy = permission_copy(self.permission);
+        let name = copy.name;
         let application = self.application_name;
-        let pane = text.pane;
+        let pane = copy.pane;
         let title = format!("Troubleshoot {name}");
         let message = format!(
             "The {name} grant can stop working after {application} is updated or signed again, \
              while its switch stays on. SpaceTerm cannot detect this. If a tool reports {name} \
              access missing, try these steps in order, even while access shows Allowed."
         );
-        let reopen = if text.applies_after_reopen {
-            format!(
-                "3. Quit and reopen {application}. The system applies {name} changes only after the \
-                 app reopens."
-            )
-        } else {
-            format!("3. If the tool still reports missing access, quit and reopen {application}.")
-        };
+        let reopen =
+            format!("3. If the tool still reports missing access, quit and reopen {application}.");
         let reset = if self.access.as_ref().is_some_and(|access| access.can_reset()) {
-            " Alternatively, choose Reset Permission to clear the entry, then request access again."
+            " Alternatively, choose Reset Permission to clear the entry, then choose Set Up."
         } else {
             ""
         };
@@ -442,7 +420,13 @@ impl ComputerUseAccessRow {
     }
 }
 
-/// Both computer-use permission rows.
+fn open_failed(application: &str, pane: &str) -> String {
+    format!(
+        "System Settings could not be opened. Open it yourself and turn on {application} under \
+         Privacy & Security > {pane}."
+    )
+}
+
 /// Keeps the rows current with authorization changes the system reports while the window is open.
 ///
 /// The system can answer a read with a value cached before a change until it reports that change,
@@ -477,27 +461,61 @@ impl ComputerUseAccessChanges {
     }
 }
 
+/// Both computer-use permission rows and the Permission Setup they start.
 pub(super) struct ComputerUseAccessRows {
     screen_recording: ComputerUseAccessRow,
     accessibility: ComputerUseAccessRow,
+    setup: Option<Entity<PermissionSetup>>,
 }
 
 impl ComputerUseAccessRows {
     pub(super) fn new(
         access: Option<Rc<dyn ComputerUseAccess>>,
+        setup: Option<Entity<PermissionSetup>>,
         application_name: &'static str,
+        cx: &App,
     ) -> Self {
+        // A Permission Setup acts through the access capability, so it applies only beside one.
+        let setup = setup.filter(|_| access.is_some());
+        let status = |permission| {
+            setup
+                .as_ref()
+                .map(|setup| setup.read(cx).status(permission))
+        };
         Self {
             screen_recording: ComputerUseAccessRow::new(
                 ComputerUsePermission::ScreenRecording,
                 access.clone(),
                 application_name,
+                status(ComputerUsePermission::ScreenRecording),
             ),
             accessibility: ComputerUseAccessRow::new(
                 ComputerUsePermission::Accessibility,
                 access,
                 application_name,
+                status(ComputerUsePermission::Accessibility),
             ),
+            setup,
+        }
+    }
+
+    pub(super) fn setup(&self) -> Option<&Entity<PermissionSetup>> {
+        self.setup.as_ref()
+    }
+
+    /// Reads each permission's setup and authorization after the Permission Setup changed.
+    pub(super) fn synchronize_setup(&mut self, cx: &App) {
+        let Some(setup) = &self.setup else {
+            return;
+        };
+        let setup = setup.read(cx);
+        for permission in [
+            ComputerUsePermission::ScreenRecording,
+            ComputerUsePermission::Accessibility,
+        ] {
+            let row = self.row_mut(permission);
+            row.setup = Some(setup.status(permission));
+            row.refresh();
         }
     }
 
@@ -522,13 +540,29 @@ impl ComputerUseAccessRows {
 }
 
 impl SettingsWindow {
-    /// Asks the system to prompt for one permission, then reads what it reports.
-    pub(super) fn request_computer_use_access(
+    /// Starts a Permission Setup of one permission. The setup reports its progress back to the
+    /// row through its own notifications.
+    pub(super) fn set_up_computer_use_access(
         &mut self,
         permission: ComputerUsePermission,
         cx: &mut Context<Self>,
     ) {
-        self.computer_use_access.row_mut(permission).request();
+        let row = self.computer_use_access.row_mut(permission);
+        if row.status != ComputerUseAccessStatus::Authorization(ComputerUseAuthorization::NotGranted)
+        {
+            return;
+        }
+        row.notice = None;
+        if let Some(setup) = self.computer_use_access.setup().cloned() {
+            setup.update(cx, |setup, cx| setup.start(&[permission], cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cancel_computer_use_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(setup) = self.computer_use_access.setup().cloned() {
+            setup.update(cx, |setup, cx| setup.cancel(cx));
+        }
         cx.notify();
     }
 
@@ -629,7 +663,7 @@ impl SettingsWindow {
             return;
         }
         let text = permission_text(permission);
-        let name = text.name;
+        let name = permission_copy(permission).name;
         let application = row.application_name;
         let title = format!("Reset {name} for {application}?");
         let owner = cx.weak_entity();
@@ -655,8 +689,8 @@ impl SettingsWindow {
         )
         .intent(AlertIntent::Warning)
         .detail(format!(
-            "Afterward, request access again and turn on {application} in System Settings. \
-             Running terminal sessions keep running."
+            "Afterward, choose Set Up to add {application} in System Settings again. Running \
+             terminal sessions keep running."
         ))
         .present(window, cx, move |outcome, cx| {
             if matches!(
@@ -729,10 +763,17 @@ impl SettingsWindow {
         let action = presentation.action.map(|action| {
             let owner = owner.clone();
             match action {
-                ComputerUseAccessAction::Request => {
-                    action_button(text.request, "Request Access…", true, move |_, cx| {
+                ComputerUseAccessAction::SetUp => {
+                    action_button(text.set_up, "Set Up…", true, move |_, cx| {
                         let _ = owner.update(cx, |settings, cx| {
-                            settings.request_computer_use_access(permission, cx);
+                            settings.set_up_computer_use_access(permission, cx);
+                        });
+                    })
+                }
+                ComputerUseAccessAction::CancelSetup => {
+                    action_button(text.cancel_setup, "Cancel Setup", true, move |_, cx| {
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.cancel_computer_use_setup(cx);
                         });
                     })
                 }

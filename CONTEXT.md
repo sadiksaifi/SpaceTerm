@@ -234,6 +234,15 @@ Bounded recognition of terminal clipboard escape sequences before Terminal Emula
 Session-scoped permission to consult the system text clipboard while the originating Pane retains Terminal Input Focus.
 Copying is enabled by default; reading requires the Privacy Setting.
 
+**Permission Setup**:
+One guided pass through System Settings that adds SpaceTerm to the computer-use privacy lists,
+started only from a Settings Row. Computer-use permissions stay off until
+then; onboarding never asks for them.
+
+**Setup Guide**:
+The non-activating panel a Permission Setup docks beside System Settings' window while it is in
+front. It offers SpaceTerm to drag into the privacy list and reports the grant.
+
 **Terminal Local File Capabilities**:
 Session-scoped authority for local path actions in a Local Pane.
 

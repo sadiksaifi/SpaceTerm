@@ -472,6 +472,16 @@ impl SettingsWindow {
         let settings_file = advanced::SettingsFileView::new(window, cx);
         let computer_use_changes =
             ComputerUseAccessChanges::observe(permissions.computer_use.as_ref(), cx);
+        // A Permission Setup reports its progress and the grant it finds while this window waits
+        // in the background.
+        let permission_setup = super::permission_setup::installed(cx);
+        if let Some(setup) = &permission_setup {
+            cx.observe(setup, |settings, _, cx| {
+                settings.computer_use_access.synchronize_setup(cx);
+                cx.notify();
+            })
+            .detach();
+        }
         Self {
             window_appearance,
             window_traffic_lights,
@@ -490,7 +500,9 @@ impl SettingsWindow {
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             computer_use_access: ComputerUseAccessRows::new(
                 permissions.computer_use,
+                permission_setup,
                 crate::application_identity::ApplicationIdentity::current().display_name(),
+                cx,
             ),
             _computer_use_changes: computer_use_changes,
             theme_gallery,

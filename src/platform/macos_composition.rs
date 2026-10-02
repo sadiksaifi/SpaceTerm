@@ -77,6 +77,7 @@ fn desktop_profile(
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
                 system_directory_selection: "Choose in Finder…",
+                reveal_file: "Show in Finder",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
         ),
@@ -172,6 +173,8 @@ fn compose(
                 super::macos_computer_use_access::MacosComputerUseAccess::new(identity),
             )
                 as Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>),
+            setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
+                as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },

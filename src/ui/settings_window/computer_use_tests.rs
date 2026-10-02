@@ -1,18 +1,19 @@
 //! Screen Recording and Device Control access in the Privacy section, driven through a scripted
 //! capability.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
+use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
-    ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
-    ComputerUseResetCompletion,
+    ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
 };
+use crate::platform::setup_guide_host::SystemSettingsWindow;
+use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ui::appearance_runtime;
 
@@ -30,133 +31,10 @@ const SCREEN_RECORDING_ROW: &str = "settings-row-screen-recording-access";
 const DEVICE_CONTROL_ROW: &str = "settings-row-device-control-access";
 const APPLICATION: &str = crate::application_identity::ApplicationIdentity::current().display_name();
 
-type Authorization = Result<ComputerUseAuthorization, ComputerUseAccessError>;
-
-/// A capability whose authorization, failures, and pending resets the test controls.
-struct ScriptedComputerUseAccess {
-    screen_recording: Cell<Authorization>,
-    accessibility: Cell<Authorization>,
-    request_failure: Cell<Option<ComputerUseAccessError>>,
-    open_failure: Cell<Option<ComputerUseAccessError>>,
-    resettable: Cell<bool>,
-    reset_failure: Cell<Option<ComputerUseAccessError>>,
-    requests: RefCell<Vec<ComputerUsePermission>>,
-    opened: RefCell<Vec<ComputerUsePermission>>,
-    resets: RefCell<Vec<ComputerUsePermission>>,
-    pending_resets: RefCell<Vec<ComputerUseResetCompletion>>,
-    /// Reports a change to the observing window, as the system does after a grant changes.
-    changes: RefCell<Option<async_channel::Sender<()>>>,
-    observing: Rc<Cell<bool>>,
-}
-
-/// Records that the observing window still holds its observation.
-struct ScriptedSubscription(Rc<Cell<bool>>);
-
-impl ComputerUseAccessSubscription for ScriptedSubscription {}
-
-impl Drop for ScriptedSubscription {
-    fn drop(&mut self) {
-        self.0.set(false);
-    }
-}
-
-impl ScriptedComputerUseAccess {
-    fn new(screen_recording: Authorization, accessibility: Authorization) -> Rc<Self> {
-        Rc::new(Self {
-            screen_recording: Cell::new(screen_recording),
-            accessibility: Cell::new(accessibility),
-            request_failure: Cell::new(None),
-            open_failure: Cell::new(None),
-            resettable: Cell::new(true),
-            reset_failure: Cell::new(None),
-            requests: RefCell::default(),
-            opened: RefCell::default(),
-            resets: RefCell::default(),
-            pending_resets: RefCell::default(),
-            changes: RefCell::default(),
-            observing: Rc::default(),
-        })
-    }
-
-    /// Reports a change the way the system does: without the window becoming active.
-    fn report_change(&self) {
-        self.changes
-            .borrow()
-            .as_ref()
-            .expect("the window should observe changes")
-            .try_send(())
-            .expect("the window should receive the change");
-    }
-
-    fn set(&self, permission: ComputerUsePermission, authorization: Authorization) {
-        match permission {
-            ScreenRecording => self.screen_recording.set(authorization),
-            Accessibility => self.accessibility.set(authorization),
-        }
-    }
-
-    fn take_reset(&self) -> ComputerUseResetCompletion {
-        self.pending_resets
-            .borrow_mut()
-            .pop()
-            .expect("a reset should be awaiting its result")
-    }
-}
-
-impl ComputerUseAccess for ScriptedComputerUseAccess {
-    fn authorization(&self, permission: ComputerUsePermission) -> Authorization {
-        match permission {
-            ScreenRecording => self.screen_recording.get(),
-            Accessibility => self.accessibility.get(),
-        }
-    }
-
-    fn observe(&self) -> Option<ComputerUseAccessObservation> {
-        let (sender, changed) = async_channel::bounded(1);
-        *self.changes.borrow_mut() = Some(sender);
-        self.observing.set(true);
-        Some(ComputerUseAccessObservation {
-            changed,
-            subscription: Box::new(ScriptedSubscription(self.observing.clone())),
-        })
-    }
-
-    fn request_authorization(
-        &self,
-        permission: ComputerUsePermission,
-    ) -> Result<(), ComputerUseAccessError> {
-        self.requests.borrow_mut().push(permission);
-        self.request_failure.get().map_or(Ok(()), Err)
-    }
-
-    fn open_settings(
-        &self,
-        permission: ComputerUsePermission,
-    ) -> Result<(), ComputerUseAccessError> {
-        self.opened.borrow_mut().push(permission);
-        self.open_failure.get().map_or(Ok(()), Err)
-    }
-
-    fn can_reset(&self) -> bool {
-        self.resettable.get()
-    }
-
-    fn reset(
-        &self,
-        permission: ComputerUsePermission,
-        completion: ComputerUseResetCompletion,
-    ) -> Result<(), ComputerUseAccessError> {
-        self.resets.borrow_mut().push(permission);
-        if let Some(error) = self.reset_failure.get() {
-            return Err(error);
-        }
-        self.pending_resets.borrow_mut().push(completion);
-        Ok(())
-    }
-}
-
+/// Opens Settings beside `access`. A `host` also installs the Permission Setup the rows start.
 fn open_settings(
-    access: Option<Rc<dyn ComputerUseAccess>>,
+    access: Option<Rc<ScriptedComputerUseAccess>>,
+    host: Option<Arc<ScriptedSetupGuideHost>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
@@ -164,10 +42,14 @@ fn open_settings(
     ));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
+    let access = access.map(|access| access as Rc<dyn ComputerUseAccess>);
     cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
+        if let (Some(access), Some(host)) = (&access, host) {
+            crate::ui::permission_setup::install(access.clone(), host, cx);
+        }
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -186,13 +68,21 @@ fn open_settings(
     (window, cx)
 }
 
+fn open_privacy_with<'a>(
+    access: &Rc<ScriptedComputerUseAccess>,
+    host: Arc<ScriptedSetupGuideHost>,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
+    let (window, cx) = open_settings(Some(access.clone()), Some(host), cx);
+    click("settings-navigation-settings-section-privacy", cx);
+    (window, cx)
+}
+
 fn open_privacy<'a>(
     access: &Rc<ScriptedComputerUseAccess>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
-    let (window, cx) = open_settings(Some(access.clone()), cx);
-    click("settings-navigation-settings-section-privacy", cx);
-    (window, cx)
+    open_privacy_with(access, ScriptedSetupGuideHost::new(), cx)
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -295,7 +185,7 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
         SCREEN_RECORDING_ROW,
         SCREEN_RECORDING.control,
         SCREEN_RECORDING.state_not_allowed,
-        SCREEN_RECORDING.request,
+        SCREEN_RECORDING.set_up,
         SCREEN_RECORDING.troubleshoot,
         DEVICE_CONTROL_ROW,
         DEVICE_CONTROL.control,
@@ -316,15 +206,15 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
     }
     // The guidance names the application the person turns on in System Settings.
     assert!(explanation(&window, ScreenRecording, cx).contains(APPLICATION));
-    // Reading authorization is not a request: the system prompt waits for the explicit action.
-    assert!(access.requests.borrow().is_empty());
+    // Reading authorization starts nothing: a Permission Setup waits for the explicit action.
+    assert!(access.prepared.borrow().is_empty());
     assert!(access.opened.borrow().is_empty());
 }
 
 #[gpui::test]
 fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(NotGranted));
-    let (window, cx) = open_settings(Some(access), cx);
+    let (window, cx) = open_settings(Some(access), Some(ScriptedSetupGuideHost::new()), cx);
 
     cx.update(|_, cx| {
         let search = window.read(cx).search.clone();
@@ -339,48 +229,49 @@ fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppCon
         assert_eq!(settings.revealed, Some(SettingsRowId::DeviceControlAccess));
     });
     assert!(cx.debug_bounds(DEVICE_CONTROL_ROW).is_some());
-    assert!(cx.debug_bounds(DEVICE_CONTROL.request).is_some());
+    assert!(cx.debug_bounds(DEVICE_CONTROL.set_up).is_some());
 }
 
-/// First authorization: the request prompts once, System Settings is where the grant is made, and
-/// only a later read reports it.
+/// Set Up starts a Permission Setup, the row follows it, and only a read reports the grant.
 #[gpui::test]
-fn a_request_leads_to_system_settings_and_only_a_read_reports_the_grant(cx: &mut TestAppContext) {
+fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
-    let (window, cx) = open_privacy(&access, cx);
+    let host = ScriptedSetupGuideHost::new();
+    let (window, cx) = open_privacy_with(&access, host.clone(), cx);
 
-    click(SCREEN_RECORDING.request, cx);
+    click(SCREEN_RECORDING.set_up, cx);
 
-    assert_eq!(*access.requests.borrow(), [ScreenRecording]);
+    assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(ComputerUseAccessAction::OpenSettings)
+        Some(ComputerUseAccessAction::CancelSetup)
     );
-    // The other permission is untouched by this row's request.
+    assert!(explanation(&window, ScreenRecording, cx).contains("Follow the guide"));
+    // The other permission is untouched by this row's setup.
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::Request)
+        Some(ComputerUseAccessAction::SetUp)
     );
-    let guidance = explanation(&window, ScreenRecording, cx);
-    assert!(guidance.contains("Privacy & Security > Screen & System Audio Recording"));
-    assert!(guidance.contains(&format!("quit and reopen {APPLICATION}")));
-
-    click(SCREEN_RECORDING.open_settings, cx);
-
-    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
-    // Opening the pane alone never reports access as allowed.
-    assert_eq!(
-        status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
-    );
+    // Opening System Settings alone never reports access as allowed.
     return_to_settings(cx);
     assert_eq!(
         status(&window, ScreenRecording, cx),
         ComputerUseAccessStatus::Authorization(NotGranted)
     );
 
+    host.set_window(SystemSettingsWindow::Frontmost {
+        display: cx.update(|_, cx| cx.primary_display().expect("a display").id()),
+        bounds: gpui::bounds(
+            gpui::point(gpui::px(100.0), gpui::px(100.0)),
+            gpui::size(gpui::px(715.0), gpui::px(560.0)),
+        ),
+    });
+    cx.executor().advance_clock(std::time::Duration::from_millis(33));
+    cx.run_until_parked();
     access.set(ScreenRecording, Ok(Granted));
-    return_to_settings(cx);
+    access.report_change();
+    cx.run_until_parked();
 
     assert_eq!(
         status(&window, ScreenRecording, cx),
@@ -392,12 +283,49 @@ fn a_request_leads_to_system_settings_and_only_a_read_reports_the_grant(cx: &mut
         Some(TroubleshootAvailability::Enabled)
     );
     assert!(cx.debug_bounds(SCREEN_RECORDING.state_allowed).is_some());
-    assert_eq!(access.requests.borrow().len(), 1);
+}
+
+#[gpui::test]
+fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
+    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let (window, cx) = open_privacy(&access, cx);
+    click(DEVICE_CONTROL.set_up, cx);
+
+    click(DEVICE_CONTROL.cancel_setup, cx);
+
+    assert_eq!(
+        action(&window, Accessibility, cx),
+        Some(ComputerUseAccessAction::SetUp)
+    );
+    assert!(!explanation(&window, Accessibility, cx).contains("Follow the guide"));
+    assert_eq!(access.observers(), 1, "only the window still observes changes");
+}
+
+/// A host without a Permission Setup still leads to the permission's list in System Settings.
+#[gpui::test]
+fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppContext) {
+    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let (window, cx) = open_settings(Some(access.clone()), None, cx);
+    click("settings-navigation-settings-section-privacy", cx);
+
+    assert_eq!(
+        action(&window, ScreenRecording, cx),
+        Some(ComputerUseAccessAction::OpenSettings)
+    );
+    assert!(
+        explanation(&window, ScreenRecording, cx)
+            .contains("Privacy & Security > Screen & System Audio Recording")
+    );
+
+    click(SCREEN_RECORDING.open_settings, cx);
+
+    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
+    assert!(access.prepared.borrow().is_empty());
 }
 
 /// Revocation and reauthorization both arrive through reads on return.
 #[gpui::test]
-fn a_revoked_grant_is_read_on_return_and_reauthorized_through_system_settings(
+fn a_revoked_grant_is_read_on_return_and_offers_a_setup(
     cx: &mut TestAppContext,
 ) {
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
@@ -411,7 +339,7 @@ fn a_revoked_grant_is_read_on_return_and_reauthorized_through_system_settings(
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::Request)
+        Some(ComputerUseAccessAction::SetUp)
     );
 
     access.set(Accessibility, Ok(Granted));
@@ -420,11 +348,6 @@ fn a_revoked_grant_is_read_on_return_and_reauthorized_through_system_settings(
         status(&window, Accessibility, cx),
         ComputerUseAccessStatus::Authorization(Granted)
     );
-    // Device Control applies without reopening, so its guidance never asks for a relaunch first.
-    access.set(Accessibility, Ok(NotGranted));
-    return_to_settings(cx);
-    click(DEVICE_CONTROL.request, cx);
-    assert!(!explanation(&window, Accessibility, cx).contains("quit and reopen"));
 }
 
 /// The system caches a read until it reports the change, which can arrive after the window became
@@ -433,7 +356,7 @@ fn a_revoked_grant_is_read_on_return_and_reauthorized_through_system_settings(
 fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
-    assert!(access.observing.get());
+    assert_eq!(access.observers(), 1);
 
     access.set(Accessibility, Ok(Granted));
     cx.run_until_parked();
@@ -454,17 +377,17 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
     drop(window);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
-    assert!(!access.observing.get());
+    assert_eq!(access.observers(), 0);
 }
 
-/// A system permission prompt is an ordinary window of another application. Settings stays at the
-/// normal window level, so the prompt a request raises appears above Settings instead of behind it.
+/// System Settings is an ordinary window of another application. Settings stays at the normal
+/// window level, so System Settings and its prompts appear above Settings instead of behind it.
 #[gpui::test]
-fn settings_opens_at_the_normal_window_level_so_permission_prompts_stay_visible(
+fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     cx: &mut TestAppContext,
 ) {
     let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
-    let (_window, cx) = open_settings(Some(access), cx);
+    let (_window, cx) = open_settings(Some(access), None, cx);
 
     let options = cx.update(|_, cx| {
         crate::ui::sidebar_window::window_options("Settings", gpui::size(gpui::px(1.), gpui::px(1.)), cx)
@@ -496,9 +419,9 @@ fn troubleshooting_an_allowed_grant_opens_system_settings(cx: &mut TestAppContex
 }
 
 /// Stale-grant recovery: a confirmed reset clears one permission of this application, then the
-/// row offers a fresh request.
+/// row offers a new setup.
 #[gpui::test]
-fn a_confirmed_reset_clears_one_permission_and_offers_a_new_request(cx: &mut TestAppContext) {
+fn a_confirmed_reset_clears_one_permission_and_offers_a_new_setup(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
@@ -536,7 +459,7 @@ fn a_confirmed_reset_clears_one_permission_and_offers_a_new_request(cx: &mut Tes
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::Request)
+        Some(ComputerUseAccessAction::SetUp)
     );
     assert_eq!(
         notice(&window, Accessibility, cx),
@@ -648,33 +571,33 @@ fn the_guide_omits_reset_when_the_identity_cannot_be_reset(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn a_failed_open_keeps_the_status_and_explains_where_to_go(cx: &mut TestAppContext) {
+fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
     access
         .open_failure
         .set(Some(ComputerUseAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
-    click(DEVICE_CONTROL.request, cx);
     let guidance = explanation(&window, Accessibility, cx);
 
-    click(DEVICE_CONTROL.open_settings, cx);
+    click(DEVICE_CONTROL.set_up, cx);
 
     assert_eq!(
         status(&window, Accessibility, cx),
         ComputerUseAccessStatus::Authorization(NotGranted)
     );
     assert_eq!(
-        notice(&window, Accessibility, cx),
-        Some(RecoveryNotice::OpenFailed)
+        action(&window, Accessibility, cx),
+        Some(ComputerUseAccessAction::SetUp)
     );
     let failure = explanation(&window, Accessibility, cx);
     assert_ne!(failure, guidance);
+    assert!(failure.contains("could not be opened"));
     assert!(failure.contains("Privacy & Security > Device Control and Data Access"));
     assert!(failure.contains(APPLICATION));
 
     access.open_failure.set(None);
-    click(DEVICE_CONTROL.open_settings, cx);
-    assert_eq!(explanation(&window, Accessibility, cx), guidance);
+    click(DEVICE_CONTROL.set_up, cx);
+    assert!(explanation(&window, Accessibility, cx).contains("Follow the guide"));
 }
 
 #[gpui::test]
@@ -705,34 +628,14 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
         status(&window, ScreenRecording, cx),
         ComputerUseAccessStatus::Authorization(NotGranted)
     );
-    assert!(cx.debug_bounds(SCREEN_RECORDING.request).is_some());
-}
-
-#[gpui::test]
-fn a_rejected_request_reports_failure(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
-    access
-        .request_failure
-        .set(Some(ComputerUseAccessError::OffMainThread));
-    let (window, cx) = open_privacy(&access, cx);
-
-    click(SCREEN_RECORDING.request, cx);
-
-    assert_eq!(
-        status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Failed(ComputerUseAccessError::OffMainThread)
-    );
-    assert_eq!(
-        action(&window, ScreenRecording, cx),
-        Some(ComputerUseAccessAction::CheckAgain)
-    );
+    assert!(cx.debug_bounds(SCREEN_RECORDING.set_up).is_some());
 }
 
 /// Every failure explanation is fixed product copy, never a native error's text.
 #[gpui::test]
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
-    let (window, cx) = open_settings(Some(access.clone()), cx);
+    let (window, cx) = open_settings(Some(access.clone()), None, cx);
     let mut explanations = Vec::new();
     for error in [
         ComputerUseAccessError::OffMainThread,
@@ -755,7 +658,7 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
 fn a_host_without_the_capability_presents_both_permissions_as_unavailable(
     cx: &mut TestAppContext,
 ) {
-    let (window, cx) = open_settings(None, cx);
+    let (window, cx) = open_settings(None, Some(ScriptedSetupGuideHost::new()), cx);
     click("settings-navigation-settings-section-privacy", cx);
 
     for (permission, text) in [
@@ -770,7 +673,8 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(
         assert_eq!(action(&window, permission, cx), None);
         assert_eq!(troubleshoot(&window, permission, cx), None);
         for selector in [
-            text.request,
+            text.set_up,
+            text.cancel_setup,
             text.open_settings,
             text.check_again,
             text.troubleshoot,

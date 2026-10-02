@@ -812,6 +812,8 @@ pub(crate) struct ApplicationCapabilities {
     /// Reads and recovers the grants computer-use tools in a Terminal Session inherit.
     pub(crate) computer_use_access:
         Option<Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>>,
+    /// Docks the Setup Guide beside System Settings during a Permission Setup.
+    pub(crate) setup_guide: Option<Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
     pub(crate) remote_workspace:
@@ -975,6 +977,12 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     }
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    if let (Some(access), Some(guide)) = (
+        &host.adapters.computer_use_access,
+        &host.adapters.setup_guide,
+    ) {
+        crate::ui::permission_setup::install(Rc::clone(access), Arc::clone(guide), cx);
+    }
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         crate::ui::settings_window::PermissionCapabilities {
@@ -1116,6 +1124,7 @@ mod runtime_tests {
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 microphone_access: None,
                 computer_use_access: None,
+                setup_guide: None,
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },

@@ -26,6 +26,7 @@ mod modal_theme;
 mod native_remote_workspace_flow_backend;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
+pub(crate) mod permission_setup;
 mod progress_theme;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;

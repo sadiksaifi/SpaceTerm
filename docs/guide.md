@@ -43,6 +43,14 @@ after changing these settings. Nested multiplexers must forward OSC 52 at every 
 Codex CLI, Claude Code, pi, and Herdr can use their own Selection and copy commands when they emit
 OSC 52. Their paste behavior also depends on the program and multiplexer configuration.
 
+## Computer-use permissions
+
+Computer-use tools that take screenshots or control other apps inherit macOS Screen & System Audio
+Recording and Device Control and Data Access from SpaceTerm. SpaceTerm never asks for them on its
+own. To grant them, choose Set Up next to a permission in Settings > Privacy. SpaceTerm opens the
+privacy list in System Settings and docks a guide beside it. Drag SpaceTerm from the guide into the
+list. The guide reports the grant, and tools started afterward receive it.
+
 ## Built with
 
 Rust powers the application, GPUI provides the native GPU-rendered interface, and `libghostty-vt`
