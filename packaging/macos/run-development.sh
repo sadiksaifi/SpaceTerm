@@ -92,4 +92,12 @@ if [[ "$LAUNCH" == false ]]; then
     echo "$BUNDLE"
     exit 0
 fi
-exec "$BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+# LaunchServices makes the bundle the responsible process for its own privacy checks, as it is for
+# an installed SpaceTerm. Executing the binary from here would attribute those checks to the
+# terminal that ran this script, so computer-use permissions would follow that terminal instead.
+OUTPUT=/dev/null
+if [[ -t 0 ]]; then
+    OUTPUT="$(tty)"
+fi
+readonly OUTPUT
+exec open -W -n --stdout "$OUTPUT" --stderr "$OUTPUT" "$BUNDLE"
