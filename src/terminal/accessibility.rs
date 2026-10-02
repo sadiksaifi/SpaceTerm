@@ -159,7 +159,10 @@ pub(crate) struct AccessibilityNotifications(u8);
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter posts notifications")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter posts notifications"
+    )
 )]
 impl AccessibilityNotifications {
     const ORDERED: [AccessibilityNotification; 3] = [
@@ -329,7 +332,10 @@ impl AccessibilityRowBlock {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter materializes document text")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter materializes document text"
+    )
 )]
 #[derive(Debug)]
 struct AccessibilityDocument {
@@ -480,7 +486,10 @@ impl AccessibilityDocument {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter materializes document text")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter materializes document text"
+        )
     )]
     fn text(&self) -> &str {
         self.materialized
@@ -792,7 +801,10 @@ impl TerminalAccessibilityModel {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter answers text queries"
+        )
     )]
     pub(crate) fn text(&self) -> &str {
         self.data.document.text()
@@ -823,7 +835,10 @@ impl TerminalAccessibilityModel {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter answers text queries"
+        )
     )]
     pub(crate) fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
         self.data.document.range_for_line(line)
@@ -835,7 +850,10 @@ impl TerminalAccessibilityModel {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter answers text queries"
+        )
     )]
     pub(crate) fn range_for_index(&self, index: usize) -> Option<Range<usize>> {
         if index >= self.len_utf16() {
@@ -858,7 +876,10 @@ impl TerminalAccessibilityModel {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter answers text queries"
+        )
     )]
     pub(crate) fn selection_request(
         &self,
@@ -1009,7 +1030,10 @@ impl TerminalAccessibilityModel {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter answers text queries")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter answers text queries"
+        )
     )]
     pub(crate) fn range_for_point(
         &self,
@@ -1024,6 +1048,7 @@ impl TerminalAccessibilityModel {
 #[derive(Debug)]
 struct AccessibilityScreenState {
     topology: Arc<[AccessibilityRowId]>,
+    live_rows: BTreeSet<AccessibilityRowId>,
     rows: BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>,
     document: Arc<AccessibilityDocument>,
     content_revision: u64,
@@ -1033,6 +1058,7 @@ impl Default for AccessibilityScreenState {
     fn default() -> Self {
         Self {
             topology: Arc::from([]),
+            live_rows: BTreeSet::new(),
             rows: BTreeMap::new(),
             document: AccessibilityDocument::empty(),
             content_revision: 0,
@@ -1077,11 +1103,12 @@ impl TerminalAccessibilityState {
             state.rows.retain(|id, _| live.contains(id));
             document_dirty = state.topology.as_ref() != topology.as_slice();
             state.topology = Arc::from(topology.clone());
+            state.live_rows = live;
         }
         for changed in update.changed_rows {
             if changed.id.screen != update.screen
                 || changed.id.screen_generation != update.screen_generation
-                || !state.topology.contains(&changed.id)
+                || !state.live_rows.contains(&changed.id)
             {
                 continue;
             }
@@ -1734,6 +1761,25 @@ mod tests {
         assert_eq!(primary.text(), "primary");
         assert_eq!(alternate.text(), "alternate");
         assert!(Arc::ptr_eq(&primary_document, &state.primary.document));
+        let resumed = state
+            .apply(
+                AccessibilityUpdate {
+                    revision: 3,
+                    screen: AccessibilityScreen::Primary,
+                    screen_generation: 1,
+                    complete: true,
+                    more: false,
+                    topology: None,
+                    visible_lines: 0..1,
+                    cursor: None,
+                    selection: None,
+                    changed_rows: vec![update_row(primary_id, 2, "resumed", false)],
+                },
+                PresentationGeneration::test(3),
+            )
+            .unwrap();
+        assert_eq!(resumed.text(), "resumed");
+        assert_eq!(alternate.text(), "alternate");
     }
 
     #[test]
@@ -2061,5 +2107,203 @@ mod tests {
             AccessibilityNotifications::ORDERED
         );
         assert!(notifications.is_empty());
+    }
+    #[test]
+    fn retained_membership_tracks_trim_and_incomplete_topology_replacement() {
+        let a = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let b = row_id(AccessibilityScreen::Primary, 1, 10, 1);
+        let c = row_id(AccessibilityScreen::Primary, 1, 10, 2);
+        let update = |topology, changed_rows, complete| AccessibilityUpdate {
+            revision: 1,
+            screen: AccessibilityScreen::Primary,
+            screen_generation: 1,
+            complete,
+            more: !complete,
+            topology,
+            visible_lines: 0..4,
+            cursor: None,
+            selection: None,
+            changed_rows,
+        };
+        let mut state = TerminalAccessibilityState::default();
+        let initial = state
+            .apply(
+                update(
+                    Some(vec![a, b]),
+                    vec![update_row(a, 1, "a", false), update_row(b, 1, "b", false)],
+                    true,
+                ),
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+        assert_eq!(initial.text(), "a\nb");
+        assert!(
+            state
+                .apply(
+                    update(Some(vec![b, c]), vec![update_row(b, 2, "B", false)], false),
+                    PresentationGeneration::test(2),
+                )
+                .is_none()
+        );
+        let replaced = state
+            .apply(
+                update(
+                    None,
+                    vec![
+                        update_row(a, 2, "stale", false),
+                        update_row(c, 1, "C", false),
+                    ],
+                    true,
+                ),
+                PresentationGeneration::test(3),
+            )
+            .unwrap();
+        assert_eq!(replaced.text(), "B\nC");
+
+        // A trimmed row's rejected continuation cannot satisfy a later topology.
+        assert!(
+            state
+                .apply(
+                    update(Some(vec![a, b, c]), vec![], false),
+                    PresentationGeneration::test(4)
+                )
+                .is_none()
+        );
+        assert!(
+            state
+                .apply(update(None, vec![], true), PresentationGeneration::test(5))
+                .is_none()
+        );
+        let restored = state
+            .apply(
+                update(None, vec![update_row(a, 3, "A", false)], true),
+                PresentationGeneration::test(6),
+            )
+            .unwrap();
+        assert_eq!(restored.text(), "A\nB\nC");
+
+        // Membership is unordered; publication must retain the topology's order.
+        let reordered = state
+            .apply(
+                update(Some(vec![c, b, a, c]), vec![], true),
+                PresentationGeneration::test(7),
+            )
+            .unwrap();
+        assert_eq!(reordered.text(), "C\nB\nA\nC");
+        let empty = state
+            .apply(
+                update(Some(vec![]), vec![], true),
+                PresentationGeneration::test(8),
+            )
+            .unwrap();
+        assert_eq!(empty.text(), "");
+        let still_empty = state
+            .apply(
+                update(None, vec![update_row(c, 2, "stale", false)], true),
+                PresentationGeneration::test(9),
+            )
+            .unwrap();
+        assert_eq!(still_empty.text(), "");
+        assert!(
+            state
+                .apply(
+                    update(Some(vec![c]), vec![], true),
+                    PresentationGeneration::test(10)
+                )
+                .is_none()
+        );
+        let fresh = state
+            .apply(
+                update(None, vec![update_row(c, 3, "fresh", false)], true),
+                PresentationGeneration::test(11),
+            )
+            .unwrap();
+        assert_eq!(fresh.text(), "fresh");
+    }
+
+    #[test]
+    fn retained_membership_rejects_stale_generations_and_invalid_topologies() {
+        let old = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let new = row_id(AccessibilityScreen::Primary, 2, 10, 0);
+        let other_screen = row_id(AccessibilityScreen::Alternate, 2, 10, 0);
+        let update = |screen_generation, topology, changed_rows, complete| AccessibilityUpdate {
+            revision: 1,
+            screen: AccessibilityScreen::Primary,
+            screen_generation,
+            complete,
+            more: !complete,
+            topology,
+            visible_lines: 0..1,
+            cursor: None,
+            selection: None,
+            changed_rows,
+        };
+        let mut state = TerminalAccessibilityState::default();
+        assert_eq!(
+            state
+                .apply(
+                    update(
+                        1,
+                        Some(vec![old]),
+                        vec![update_row(old, 1, "old", false)],
+                        true
+                    ),
+                    PresentationGeneration::test(1)
+                )
+                .unwrap()
+                .text(),
+            "old"
+        );
+        assert!(
+            state
+                .apply(
+                    update(
+                        2,
+                        Some(vec![new]),
+                        vec![update_row(old, 2, "stale", false)],
+                        false
+                    ),
+                    PresentationGeneration::test(2)
+                )
+                .is_none()
+        );
+        assert!(
+            state
+                .apply(
+                    update(2, None, vec![update_row(old, 3, "stale", false)], true),
+                    PresentationGeneration::test(3)
+                )
+                .is_none()
+        );
+        let current = state
+            .apply(
+                update(2, None, vec![update_row(new, 1, "new", false)], true),
+                PresentationGeneration::test(4),
+            )
+            .unwrap();
+        assert_eq!(current.text(), "new");
+
+        for invalid in [old, other_screen] {
+            assert!(
+                state
+                    .apply(
+                        update(
+                            2,
+                            Some(vec![invalid]),
+                            vec![update_row(new, 2, "rejected", false)],
+                            true
+                        ),
+                        PresentationGeneration::test(5)
+                    )
+                    .is_none()
+            );
+        }
+        let retained = state
+            .apply(
+                update(2, None, vec![update_row(new, 2, "retained", false)], true),
+                PresentationGeneration::test(6),
+            )
+            .unwrap();
+        assert_eq!(retained.text(), "retained");
     }
 }
