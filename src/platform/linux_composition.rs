@@ -173,7 +173,7 @@ fn compose(
             local_filesystem,
             key_input: Rc::new(super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new()),
             accessibility: Rc::new(
-                super::linux_accessibility::LinuxTerminalAccessibilityAdapterFactory,
+                super::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 text_clipboard: Rc::new(super::linux_clipboard::LinuxTextClipboard),

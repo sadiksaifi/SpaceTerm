@@ -4393,7 +4393,7 @@ impl Render for TerminalPane {
             }
         });
 
-        div()
+        let pane_root = div()
             .debug_selector(move || native_context_selector.clone())
             .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
@@ -4414,7 +4414,9 @@ impl Render for TerminalPane {
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.focus_handle);
+        self.accessibility_element
+            .decorate(pane_root)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))

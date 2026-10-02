@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use super::PresentationGeneration;
 use super::emulator::ActiveScreenSnapshot;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum AccessibilityScreen {
     Primary,
     Alternate,
@@ -20,7 +20,7 @@ impl From<ActiveScreenSnapshot> for AccessibilityScreen {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct AccessibilityRowId {
     pub(crate) screen: AccessibilityScreen,
     pub(crate) screen_generation: usize,
@@ -526,7 +526,62 @@ pub(crate) struct TerminalAccessibilityModel {
     data: Arc<TerminalAccessibilityData>,
 }
 
+/// Read-only projection of a retained terminal row, including its document offsets.
+pub(crate) struct AccessibilityRowView<'a> {
+    pub(crate) id: AccessibilityRowId,
+    pub(crate) revision: u64,
+    pub(crate) soft_wrapped: bool,
+    pub(crate) range: Range<usize>,
+    pub(crate) text: &'a str,
+    pub(crate) len_utf16: usize,
+    row: &'a AccessibilityRow,
+}
+
+pub(crate) struct AccessibilityCellView<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) utf16: Range<usize>,
+    pub(crate) columns: Range<u16>,
+}
+
+impl<'a> AccessibilityRowView<'a> {
+    pub(crate) fn cells(&self) -> impl Iterator<Item = AccessibilityCellView<'a>> + '_ {
+        self.row.cells.iter().map(|cell| AccessibilityCellView {
+            text: &self.row.text
+                [self.row.utf16_bytes[cell.utf16.start]..self.row.utf16_bytes[cell.utf16.end]],
+            utf16: cell.utf16.clone(),
+            columns: cell.columns.clone(),
+        })
+    }
+}
+
 impl TerminalAccessibilityModel {
+    pub(crate) fn rows(&self) -> impl Iterator<Item = AccessibilityRowView<'_>> {
+        let document = &self.data.document;
+        document
+            .blocks
+            .iter()
+            .flat_map(|block| block.rows.iter())
+            .enumerate()
+            .map(|(line, row)| AccessibilityRowView {
+                id: row.id,
+                revision: row.revision,
+                soft_wrapped: row.soft_wrapped,
+                range: document
+                    .range_for_line(line)
+                    .expect("retained row has a document range"),
+                text: &row.text,
+                len_utf16: row.len_utf16,
+                row,
+            })
+    }
+
+    pub(crate) fn visible_lines(&self) -> Range<usize> {
+        self.data.visible_lines.clone()
+    }
+
+    pub(crate) fn cursor_cell(&self) -> Option<(usize, u16)> {
+        self.data.cursor_cell
+    }
     pub(crate) fn from_screen(screen: &super::ScreenSnapshot) -> Self {
         let lines = screen
             .rows

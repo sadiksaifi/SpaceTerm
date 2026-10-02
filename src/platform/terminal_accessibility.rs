@@ -3,7 +3,7 @@ use crate::terminal::{
     AccessibilityDemandSender, AccessibilityNotifications, AccessibilitySelectionSender,
     TerminalAccessibilityModel,
 };
-use gpui::{Bounds, Pixels, Window};
+use gpui::{Bounds, Div, Pixels, Stateful, Window};
 
 /// Owns one Pane's native accessibility resources. Dropping it retires those resources.
 pub(crate) trait TerminalAccessibilityAdapter {
@@ -11,6 +11,11 @@ pub(crate) trait TerminalAccessibilityAdapter {
     fn set_hierarchy(&mut self, presented: bool, order: usize);
     /// Publishes current facts and returns notifications that could not yet be delivered.
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications;
+    /// Describes this Pane inside the Window's portable accessibility tree.
+    /// Adapters publishing native accessibility outside that tree keep the element unchanged.
+    fn decorate(&self, pane: Stateful<Div>) -> Stateful<Div> {
+        pane
+    }
 }
 
 /// Selected by application composition and invoked once per Pane.
@@ -24,10 +29,6 @@ pub(crate) trait TerminalAccessibilityAdapterFactory {
     ) -> Box<dyn TerminalAccessibilityAdapter>;
 }
 
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "an inert accessibility Adapter reads no update facts")
-)]
 pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) window: &'a Window,
     pub(crate) model: &'a TerminalAccessibilityModel,
@@ -36,6 +37,13 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) line_height: Pixels,
     pub(crate) font: &'a crate::appearance::ResolvedFontDescriptor,
     pub(crate) font_size: Pixels,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "portable accessibility uses GPUI's tracked focus handle"
+        )
+    )]
     pub(crate) focused: bool,
     pub(crate) notifications: AccessibilityNotifications,
     pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
