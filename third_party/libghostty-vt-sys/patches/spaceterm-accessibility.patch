@@ -13,7 +13,7 @@ diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibili
 new file mode 100644
 --- /dev/null
 +++ b/include/ghostty/vt/accessibility.h
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,147 @@
 +#ifndef GHOSTTY_VT_ACCESSIBILITY_H
 +#define GHOSTTY_VT_ACCESSIBILITY_H
 +
@@ -112,12 +112,13 @@ new file mode 100644
 +    GhosttyAccessibilityState* state);
 +
 +/**
-+ * Retain dirty row identities and topology before visual rendering.
++ * Retain dirty row identities and topology before rendering or compression.
 + *
 + * Call this before Ghostty render-state update clears page/row dirty bits
 + * when semantic extraction is deferred. It does not extract text, invoke
 + * callbacks, or decode compressed pages. Later state_update calls retain
-+ * their bounded topology and row extraction behavior.
++ * their bounded topology and row extraction behavior. Capture before and
++ * after resizing so rows exposed from history retain mutation coverage.
 + */
 +GHOSTTY_API GhosttyResult ghostty_accessibility_state_capture(
 +    GhosttyAccessibilityState* state,
@@ -164,7 +165,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,746 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -273,6 +274,8 @@ new file mode 100644
 +const ScreenState = struct {
 +    generation: u64 = 0,
 +    initialized: bool = false,
++    observed_revision: ?u64 = null,
++    active_rows: std.ArrayListUnmanaged(RowId) = .empty,
 +    pages: std.ArrayListUnmanaged(PageInfo) = .empty,
 +    rows: std.ArrayListUnmanaged(RowState) = .empty,
 +    pending: std.ArrayListUnmanaged(RowId) = .empty,
@@ -287,6 +290,7 @@ new file mode 100644
 +    topology_active: bool = false,
 +
 +    fn deinit(self: *ScreenState, alloc: std.mem.Allocator) void {
++        self.active_rows.deinit(alloc);
 +        self.pages.deinit(alloc);
 +        self.rows.deinit(alloc);
 +        self.pending.deinit(alloc);
@@ -411,17 +415,35 @@ new file mode 100644
 +    terminal_: terminal_c.Terminal,
 +) callconv(lib.calling_conv) Result {
 +    const state = state_ orelse return .invalid_value;
-+    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
-+    return capture(state, t);
++    const wrapper = terminal_ orelse return .invalid_value;
++    return capture(state, wrapper);
 +}
 +
-+fn capture(state: *State, t: anytype) Result {
-+    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
-+    const screen_index = screenIndex(screen_tag);
-+    const screen_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
-+    const screen = t.screens.active;
-+    const current = &state.screens[screen_index];
++fn capture(state: *State, wrapper: anytype) Result {
++    const t = wrapper.terminal;
++    inline for (.{ Screen.primary, Screen.alternate }) |screen_tag| {
++        const key: @TypeOf(t.screens.active_key) = if (screen_tag == .primary) .primary else .alternate;
++        const current = &state.screens[screenIndex(screen_tag)];
++        // Inactive screens can still own edits made before an alternate-screen
++        // switch. Compression must retain their invalidations as well.
++        if (key == t.screens.active_key or current.initialized or current.topology_active) {
++            if (t.screens.get(key)) |screen| {
++                const result = captureScreen(state, current, screen, screen_tag, @intCast(t.screens.generation(key)), wrapper.accessibility_revision);
++                if (result != .success) return result;
++            }
++        }
++    }
++    return .success;
++}
 +
++fn captureScreen(
++    state: *State,
++    current: *ScreenState,
++    screen: anytype,
++    screen_tag: Screen,
++    screen_generation: u64,
++    revision: u64,
++) Result {
 +    var observed: std.ArrayListUnmanaged(PageInfo) = .empty;
 +    defer observed.deinit(state.alloc);
 +    var first_row: u32 = 0;
@@ -461,7 +483,15 @@ new file mode 100644
 +            state.topology_epoch,
 +        ) catch return .out_of_memory;
 +    }
-+    observeDirtyRows(current, screen, state.alloc, screen_tag) catch return .out_of_memory;
++    // Render dirtiness can remain set on offscreen rows. Observe it once per
++    // input mutation, rather than requeueing consumed rows on every paced update.
++    if (current.observed_revision == null or current.observed_revision.? != revision or
++        compared_generation != screen_generation)
++    {
++        observeDirtyRows(current, screen, state.alloc, screen_tag, screen_generation) catch
++            return .out_of_memory;
++        current.observed_revision = revision;
++    }
 +    return .success;
 +}
 +
@@ -476,7 +506,8 @@ new file mode 100644
 +    out_snapshot_: ?*Snapshot,
 +) callconv(lib.calling_conv) Result {
 +    const state = state_ orelse return .invalid_value;
-+    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
++    const wrapper = terminal_ orelse return .invalid_value;
++    const t = wrapper.terminal;
 +    const options = options_ orelse return .invalid_value;
 +    const topology_callback = topology_callback_ orelse return .invalid_value;
 +    const row_callback = row_callback_ orelse return .invalid_value;
@@ -484,7 +515,7 @@ new file mode 100644
 +    const out = out_snapshot_ orelse return .invalid_value;
 +    if (options.size < @sizeOf(UpdateOptions) or out.size < @sizeOf(Snapshot)) return .invalid_value;
 +    if (options.max_cells == 0 or options.max_rows == 0) return .invalid_value;
-+    const captured = capture(state, t);
++    const captured = capture(state, wrapper);
 +    if (captured != .success) return captured;
 +
 +    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
@@ -668,14 +699,47 @@ new file mode 100644
 +    return null;
 +}
 +
++fn queueDirtyRow(state: *ScreenState, alloc: std.mem.Allocator, id: RowId) !void {
++    if (state.row(id)) |row_state| {
++        if (!row_state.pending) {
++            try state.pending.append(alloc, id);
++            row_state.pending = true;
++        }
++    }
++    if (state.topology_active) {
++        if (state.topologyRow(id)) |row_state| {
++            if (!row_state.pending) {
++                try state.topology_pending.append(alloc, id);
++                row_state.pending = true;
++            }
++        }
++    }
++}
++
 +fn observeDirtyRows(
 +    state: *ScreenState,
 +    screen: anytype,
 +    alloc: std.mem.Allocator,
 +    screen_tag: Screen,
++    generation: u64,
 +) !void {
-+    try observeDirtyRegion(state, screen, alloc, screen_tag, .{ .active = .{} });
-+    try observeDirtyRegion(state, screen, alloc, screen_tag, .{ .viewport = .{} });
++    // A published active row may be edited and moved into history within one
++    // input slice. Retain its identity until the next observation. If it has
++    // already compressed, invalidate it conservatively without decoding here.
++    for (state.active_rows.items) |id| {
++        if (id.screen_generation != generation) continue;
++        const node = findNodeForRow(&screen.pages, screen_tag, id.node_serial, id.page_row) orelse continue;
++        if (node.pageIfResident()) |page| {
++            if (!page.dirty and !page.rows.ptr(page.memory)[id.page_row].dirty) continue;
++        }
++        try queueDirtyRow(state, alloc, id);
++    }
++    var active_rows: std.ArrayListUnmanaged(RowId) = .empty;
++    defer active_rows.deinit(alloc);
++    try observeDirtyRegion(state, screen, alloc, screen_tag, generation, .{ .active = .{} }, &active_rows);
++    try observeDirtyRegion(state, screen, alloc, screen_tag, generation, .{ .viewport = .{} }, null);
++    // Publish coverage only after all queue and coverage allocations succeed.
++    std.mem.swap(@TypeOf(active_rows), &state.active_rows, &active_rows);
 +}
 +
 +fn observeDirtyRegion(
@@ -683,35 +747,28 @@ new file mode 100644
 +    screen: anytype,
 +    alloc: std.mem.Allocator,
 +    screen_tag: Screen,
++    generation: u64,
 +    top: point.Point,
++    coverage: ?*std.ArrayListUnmanaged(RowId),
 +) !void {
++    var remaining: usize = screen.pages.rows;
 +    var it = screen.pages.pageIterator(.right_down, top, null);
-+    while (it.next()) |chunk| {
-+        const page = chunk.node.pageIfResident() orelse continue;
-+        const rows = page.rows.ptr(page.memory)[chunk.start..chunk.end];
-+        for (rows, chunk.start..) |row, page_row| {
-+            if (!page.dirty and !row.dirty) continue;
-+            const committed_id: RowId = .{
++    while (remaining > 0) {
++        const chunk = it.next() orelse break;
++        const count = @min(remaining, chunk.end - chunk.start);
++        remaining -= count;
++        const page = chunk.node.pageIfResident();
++        for (chunk.start..chunk.start + count) |page_row| {
++            const id: RowId = .{
 +                .screen = screen_tag,
-+                .screen_generation = state.generation,
++                .screen_generation = generation,
 +                .node_serial = chunk.node.serial,
 +                .page_row = @intCast(page_row),
 +            };
-+            if (state.row(committed_id)) |row_state| {
-+                if (!row_state.pending) {
-+                    row_state.pending = true;
-+                    try state.pending.append(alloc, committed_id);
-+                }
-+            }
-+            if (state.topology_active) {
-+                var topology_id = committed_id;
-+                topology_id.screen_generation = state.topology_generation;
-+                if (state.topologyRow(topology_id)) |row_state| {
-+                    if (!row_state.pending) {
-+                        row_state.pending = true;
-+                        try state.topology_pending.append(alloc, topology_id);
-+                    }
-+                }
++            if (coverage) |rows| try rows.append(alloc, id);
++            if (page) |resident| {
++                if (!resident.dirty and !resident.rows.ptr(resident.memory)[page_row].dirty) continue;
++                try queueDirtyRow(state, alloc, id);
 +            }
 +        }
 +    }
@@ -886,3 +943,57 @@ diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
  pub const allocator = @import("allocator.zig");
  pub const cell = @import("cell.zig");
  pub const color = @import("color.zig");
+diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
+--- a/src/terminal/c/terminal.zig
++++ b/src/terminal/c/terminal.zig
+@@ -101,6 +101,9 @@
+ /// across multiple vt_write calls.
+ const TerminalWrapper = struct {
+     terminal: *ZigTerminal,
++    /// Observer-local consumers use this mutation epoch without consuming the
++    /// renderer's shared dirty flags. The C terminal handle remains opaque.
++    accessibility_revision: u64 = 0,
+     /// C construction has no I/O argument, so the wrapper retains the owner
+     /// created by `new` or transferred from snapshot decoding until `free`.
+     /// Freestanding owners contain no native allocation and expose failing I/O.
+@@ -891,6 +894,7 @@
+     len: usize,
+ ) callconv(lib.calling_conv) void {
+     const wrapper = terminal_ orelse return;
++    if (len != 0) wrapper.accessibility_revision +%= 1;
+     wrapper.stream.nextSlice(ptr[0..len]);
+ }
+ 
+@@ -912,10 +916,12 @@
+         return .invalid_value;
+ 
+     if (wrapper.stream.nextSliceUntilGround(input)) |consumed| {
++        if (consumed != 0) wrapper.accessibility_revision +%= 1;
+         out_consumed.* = consumed;
+         return .success;
+     }
+ 
++    if (len != 0) wrapper.accessibility_revision +%= 1;
+     out_consumed.* = len;
+     return .no_value;
+ }
+@@ -1518,6 +1524,7 @@
+     cell_height_px: u32,
+ ) callconv(lib.calling_conv) Result {
+     const wrapper = terminal_ orelse return .invalid_value;
++    wrapper.accessibility_revision +%= 1;
+     wrapper.stream.handler.resize(.{
+         .cols = cols,
+         .rows = rows,
+@@ -1534,8 +1541,9 @@
+ }
+ 
+ pub fn reset(terminal_: Terminal) callconv(lib.calling_conv) void {
+-    const t: *ZigTerminal = (terminal_ orelse return).terminal;
+-    t.fullReset();
++    const wrapper = terminal_ orelse return;
++    wrapper.accessibility_revision +%= 1;
++    wrapper.terminal.fullReset();
+ }
+ 
+ /// C: GhosttyKittyGraphics

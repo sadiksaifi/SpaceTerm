@@ -52,7 +52,7 @@ diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 --- a/src/terminal/c/terminal.zig
 +++ b/src/terminal/c/terminal.zig
-@@ -1533,6 +1533,37 @@ pub fn resize(
+@@ -1533,6 +1533,39 @@ pub fn resize(
      return .success;
  }
  
@@ -60,9 +60,11 @@ diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 +    terminal_: Terminal,
 +    history: bool,
 +) callconv(lib.calling_conv) bool {
-+    const t: *ZigTerminal = (terminal_ orelse return false).terminal;
++    const wrapper = terminal_ orelse return false;
++    const t = wrapper.terminal;
 +
 +    if (t.screens.active_key == .alternate) return false;
++    wrapper.accessibility_revision +%= 1;
 +
 +    t.screens.active.clearSelection();
 +    if (history) t.eraseDisplay(.scrollback, false);
@@ -88,5 +90,5 @@ diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 +}
 +
  pub fn reset(terminal_: Terminal) callconv(lib.calling_conv) void {
-     const t: *ZigTerminal = (terminal_ orelse return).terminal;
-     t.fullReset();
+     const wrapper = terminal_ orelse return;
+     wrapper.accessibility_revision +%= 1;
