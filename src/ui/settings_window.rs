@@ -141,6 +141,16 @@ pub(crate) fn configure_window_chrome(
     });
 }
 
+/// The open Settings Window. Membership, not a root-view read, decides this: the root view is
+/// leased while an action dispatches inside Settings, so a read would miss the open window.
+fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
+    let handle = cx.try_global::<OpenSettingsWindow>()?.0;
+    cx.windows()
+        .iter()
+        .any(|window| window.window_id() == handle.window_id())
+        .then_some(handle)
+}
+
 /// Opens Settings, or activates it when it is already open.
 pub(crate) fn open_or_activate(cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
@@ -149,11 +159,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         eprintln!("SpaceTerm Settings is unavailable because appearance is not installed");
         return;
     }
-    if let Some(existing) = cx
-        .try_global::<OpenSettingsWindow>()
-        .map(|global| global.0)
-        .filter(|handle| handle.read(cx).is_ok())
-    {
+    if let Some(existing) = open_settings_window(cx) {
         cx.defer(move |cx| {
             let _ = existing.update(cx, |_, window, _| window.activate_window());
         });

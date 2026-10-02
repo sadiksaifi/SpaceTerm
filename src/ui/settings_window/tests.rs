@@ -3581,3 +3581,47 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
 }
+
+struct RecordingMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
+    fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+    }
+}
+
+#[gpui::test]
+fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext) {
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        &SettingsDocument::default(),
+    ));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::open_or_activate(cx);
+    });
+    cx.run_until_parked();
+    let settings_windows = |cx: &mut TestAppContext| {
+        cx.windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<SettingsWindow>())
+            .collect::<Vec<_>>()
+    };
+    let [opened] = settings_windows(cx)[..] else {
+        panic!("Settings should open one window");
+    };
+
+    // The Settings shortcut dispatches inside Settings once Settings is the main window.
+    opened
+        .update(cx, |_, _, cx| super::open_or_activate(cx))
+        .expect("Settings should stay open");
+    cx.run_until_parked();
+
+    assert_eq!(settings_windows(cx).len(), 1);
+}
