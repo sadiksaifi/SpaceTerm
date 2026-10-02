@@ -5683,6 +5683,37 @@ fn modal_scrim_blocks_underlay_pointer_click_through(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn alert_static_content_click_keeps_keyboard_focus(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = alert_window(cx);
+    cx.simulate_keystrokes("tab tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-cancel-keyboard-focus")
+            .is_some(),
+        "Tab traversal should reach the non-first Cancel action"
+    );
+
+    for selector in ["modal-header-title", "modal-alert-message"] {
+        let target = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should render"));
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        let cancel_focused = cx
+            .debug_bounds("modal-action-cancel-keyboard-focus")
+            .is_some();
+        let suppression_focused = cx
+            .debug_bounds("modal-alert-suppression-keyboard-focus")
+            .is_some();
+        assert!(
+            cancel_focused && !suppression_focused,
+            "click on {selector} moved keyboard focus: cancel_focused={cancel_focused}, suppression_focused={suppression_focused}"
+        );
+    }
+}
+
+#[gpui::test]
 fn modal_scrim_blocks_underlay_move_wheel_and_keyboard_input(cx: &mut TestAppContext) {
     let (_, underlay, _, cx) = alert_window(cx);
     let underlay_bounds = cx
@@ -6870,6 +6901,132 @@ fn right_to_left_dialog_tab_order_follows_logical_policy_not_button_geometry(
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
+    );
+}
+
+struct DialogCustomClickBody {
+    first: FocusHandle,
+    second: FocusHandle,
+}
+
+impl Render for DialogCustomClickBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(crate::DialogFocusTarget::new(
+                div()
+                    .debug_selector(|| "dialog-custom-click-first".to_owned())
+                    .h(px(28.0))
+                    .track_focus(&self.first)
+                    .child("First custom control"),
+                self.first.clone(),
+            ))
+            .child(crate::DialogFocusTarget::new(
+                div()
+                    .debug_selector(|| "dialog-custom-click-second".to_owned())
+                    .h(px(28.0))
+                    .track_focus(&self.second)
+                    .child("Second custom control"),
+                self.second.clone(),
+            ))
+    }
+}
+
+struct DialogCustomClickFixture {
+    body: Entity<DialogCustomClickBody>,
+    presentation: Option<super::super::DialogCompletion>,
+}
+
+impl DialogCustomClickFixture {
+    fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let initial = self.body.read(cx).second.clone();
+        self.presentation = Some(
+            Dialog::new(
+                ModalId::new("dialog-custom-click"),
+                "Custom Dialog click focus",
+                "Custom Click Focus",
+                vec![
+                    ModalAction::new(
+                        "save",
+                        "Save",
+                        ModalActionRole::Affirmative,
+                        "custom-click-save",
+                    )
+                    .default_action(true),
+                    ModalAction::new(
+                        "cancel",
+                        "Cancel",
+                        ModalActionRole::Cancel,
+                        "custom-click-cancel",
+                    ),
+                ],
+                DialogInitialFocus::Body(initial),
+            )
+            .body(self.body.clone())
+            .present(
+                window,
+                cx,
+                |_, _, _| DialogCloseDecision::Deny {
+                    first_invalid: None,
+                },
+                |_, _| {},
+            )
+            .expect("custom click Dialog should present"),
+        );
+    }
+}
+
+impl Render for DialogCustomClickFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        ModalLayer::new(div().size_full())
+    }
+}
+
+// The adapted controls rely on GPUI's default click-to-focus, which the modal surface suppresses
+// only for presses that no descendant has already claimed.
+#[gpui::test]
+fn dialog_static_content_click_keeps_body_keyboard_focus(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|_, cx| DialogCustomClickFixture {
+        body: cx.new(|cx| DialogCustomClickBody {
+            first: cx.focus_handle().tab_stop(true),
+            second: cx.focus_handle().tab_stop(true),
+        }),
+        presentation: None,
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| root.present(window, cx));
+    });
+    cx.run_until_parked();
+    let (first, second) = root.read_with(cx, |root, cx| {
+        let body = root.body.read(cx);
+        (body.first.clone(), body.second.clone())
+    });
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| (first.is_focused(window), second.is_focused(window)))
+    };
+    let initial = focused(cx);
+
+    let title = cx
+        .debug_bounds("modal-header-title")
+        .expect("Dialog title should render");
+    cx.simulate_click(title.center(), Modifiers::default());
+    cx.run_until_parked();
+    let after_static_click = focused(cx);
+
+    let control = cx
+        .debug_bounds("dialog-custom-click-first")
+        .expect("first custom control should render");
+    cx.simulate_click(control.center(), Modifiers::default());
+    cx.run_until_parked();
+    let after_control_click = focused(cx);
+
+    assert_eq!(
+        (initial, after_static_click, after_control_click),
+        ((false, true), (false, true), (true, false))
     );
 }
 

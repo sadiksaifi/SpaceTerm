@@ -343,6 +343,7 @@ fn render_overlay(
     let default_owner = owner.clone();
     let cancel_owner = owner.clone();
     let platform_cancel_owner = owner;
+    let press_scope = scope.clone();
 
     let surface = div()
         .id(("modal-surface", presentation.value()))
@@ -359,6 +360,13 @@ fn render_overlay(
         .text_color(paint.primary_text)
         .font(typography.regular().clone())
         .track_focus(&scope)
+        // Static content accepts no keyboard focus. A press that no control claims would
+        // otherwise focus the containment scope, which focus repair moves to the first tab stop.
+        .on_any_mouse_down(move |_, window, cx| {
+            if press_scope.contains_focused(window, cx) {
+                window.prevent_default();
+            }
+        })
         .key_context(MODAL_KEY_CONTEXT)
         .on_action(move |_: &TraverseForward, window, cx| {
             if !super::window_has_owned_popup(window, cx) {
