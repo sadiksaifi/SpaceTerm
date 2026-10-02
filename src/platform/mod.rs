@@ -24,6 +24,14 @@ pub(crate) mod settings_file;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "selected by Linux composition and portable accessibility tests"
+    )
+)]
+pub(crate) mod accesskit_terminal_accessibility;
 pub(crate) mod local_filesystem;
 pub(crate) mod native_pty;
 pub(crate) mod terminal_accessibility;
@@ -214,9 +222,6 @@ mod macos_peer_credentials;
 mod macos_pty_host;
 
 // Linux host adapters.
-#[cfg(target_os = "linux")]
-mod linux_accessibility;
-
 #[cfg(target_os = "linux")]
 mod linux_appearance;
 

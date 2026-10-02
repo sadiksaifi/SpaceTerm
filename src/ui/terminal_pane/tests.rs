@@ -1517,6 +1517,70 @@ fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
 }
 
 #[gpui::test]
+fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_panes(
+    cx: &mut TestAppContext,
+) {
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(records)),
+        test_local_directory(PathBuf::from("/")),
+    );
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        TerminalPane::new_with_services(
+            session_factory,
+            None,
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
+            crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true, 0);
+            pane.handle_accessibility(accessibility_model(42));
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.activate_accessibility();
+    cx.run_until_parked();
+    let tree: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    let nodes = tree["nodes"].as_object().unwrap();
+    let (terminal_id, terminal) = nodes
+        .iter()
+        .find(|(_, node)| node["aria"]["role"] == "Terminal")
+        .expect("the Pane must publish a Terminal node after activation");
+    assert_eq!(terminal["aria"]["label"], "Terminal Pane");
+    assert_eq!(tree["gpui_focus"], *terminal_id);
+    let runs: Vec<_> = nodes
+        .values()
+        .filter(|node| node["aria"]["role"] == "TextRun")
+        .collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["aria"]["value"], "update-42x");
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(false, usize::MAX);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let hidden: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    assert!(
+        hidden["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|node| node["aria"]["role"] != "Terminal")
+    );
+}
+
+#[gpui::test]
 fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut TestAppContext) {
     let (_, cx) = terminal_pane(cx);
     let factory =
