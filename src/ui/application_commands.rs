@@ -192,21 +192,20 @@ fn about_alert() -> Alert<AboutAction> {
         ),
         vec![
             ModalAction::new(
-                AboutAction::Help,
-                "Help",
-                ModalActionRole::Auxiliary,
-                "application-about-help",
-            ),
-            ModalAction::new(
                 AboutAction::Close,
                 "OK",
                 ModalActionRole::Cancel,
                 "application-about-close",
             )
-            .with_emphasis(ModalActionEmphasis::Prominent)
-            .default_action(true),
+            .with_emphasis(ModalActionEmphasis::Prominent),
         ],
     )
+    .help_action(ModalAction::new(
+        AboutAction::Help,
+        "Help",
+        ModalActionRole::Help,
+        "application-about-help",
+    ))
 }
 
 #[cfg(test)]
@@ -254,6 +253,42 @@ mod tests {
                     )),
             )
             .transient(div().absolute().inset_0().children(layer(window, cx)))
+        }
+    }
+
+    #[gpui::test]
+    fn about_presents_help_and_closes_with_return_or_escape(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            window.activate_window();
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            CommandsWindow {
+                focus,
+                invoked: Vec::new(),
+            }
+        });
+        cx.run_until_parked();
+        for key in ["enter", "escape"] {
+            root.update_in(cx, |_, window, cx| present_about(window, cx))
+                .expect("About must present a valid acknowledgement");
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+            assert!(
+                cx.debug_bounds("modal-action-application-about-close")
+                    .is_some()
+            );
+            assert!(
+                cx.debug_bounds("modal-action-application-about-help")
+                    .is_some()
+            );
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            });
+            cx.run_until_parked();
+            assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+            assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
         }
     }
 
