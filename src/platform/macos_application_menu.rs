@@ -1,25 +1,14 @@
-use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString, SystemMenuType};
-use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
-
 use super::application_menu::{
     ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError,
 };
-use crate::app::{
-    BringAllWindowsToFront, HideApplication, HideOtherApplications, MinimizeWindow,
-    OpenApplicationHelp, QuitApplication, ShowAboutApplication, ShowAllApplications,
-    ZoomActiveWindow,
-};
 use crate::application_identity::ApplicationIdentity;
-use crate::ui::updates::{
-    CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
-};
+use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, RELEASE_NOTES_TITLE};
+#[cfg(test)]
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
-    ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, NewWorkspace, OpenTerminalFind,
-    ResetTerminalFontSize, SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus,
+    ClosePane, CloseTab, CloseWorkspace, CreateTab, ExportTerminalDiagnostics, NewWorkspace,
+    SwitchWorkspace,
 };
+use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString};
 
 pub(crate) struct MacosApplicationMenuAdapter {
     identity: ApplicationIdentity,
@@ -31,7 +20,11 @@ impl MacosApplicationMenuAdapter {
     }
 }
 
-const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
+use super::application_menu_model::{TOGGLE_PANE_ZOOM_TITLE, menus};
+#[cfg(test)]
+use super::application_menu_model::{
+    application_menu, file_menu, help_menu, view_menu, window_menu,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MenuItemIcon<'a> {
@@ -287,143 +280,12 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
         native::decorate(application_name, &native_keys)
     }
 
-    fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+    fn perform(
+        &self,
+        command: ApplicationMenuCommand,
+        _: &mut App,
+    ) -> Result<(), ApplicationMenuError> {
         native::perform(command, self.identity.display_name())
-    }
-}
-
-fn menus(application_name: &str) -> Vec<Menu> {
-    vec![
-        application_menu(application_name),
-        file_menu(),
-        edit_menu(),
-        view_menu(),
-        window_menu(),
-        help_menu(),
-    ]
-}
-
-fn application_menu(application_name: &str) -> Menu {
-    Menu {
-        disabled: false,
-        name: application_name.to_owned().into(),
-        items: vec![
-            MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
-            MenuItem::action(CHECK_FOR_UPDATES_TITLE, CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::action("Settings…", crate::ui::settings_window::OpenSettings),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action(format!("Hide {application_name}"), HideApplication),
-            MenuItem::action("Hide Others", HideOtherApplications),
-            MenuItem::action("Show All", ShowAllApplications),
-            MenuItem::separator(),
-            MenuItem::action(format!("Quit {application_name}"), QuitApplication),
-        ],
-    }
-}
-
-fn file_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "File".into(),
-        items: vec![
-            MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("New Remote Workspace", crate::ui::NewRemoteWorkspace),
-            MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
-            MenuItem::action("Open Remote Directory…", crate::ui::OpenRemoteDirectory),
-            MenuItem::action("Switch Workspace", SwitchWorkspace),
-            MenuItem::separator(),
-            MenuItem::action("New Tab", CreateTab),
-            MenuItem::separator(),
-            MenuItem::action("Close Pane", ClosePane),
-            MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Close Workspace", CloseWorkspace),
-            MenuItem::separator(),
-            MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-        ],
-    }
-}
-
-fn edit_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "Edit".into(),
-        items: vec![
-            MenuItem::action("Undo", EditUndo),
-            MenuItem::action("Redo", EditRedo),
-            MenuItem::separator(),
-            MenuItem::action("Cut", EditCut),
-            MenuItem::action("Copy", EditCopy),
-            MenuItem::action("Paste", EditPaste),
-            MenuItem::action("Select All", EditSelectAll),
-            MenuItem::separator(),
-            MenuItem::submenu(Menu {
-                disabled: false,
-                name: "Find".into(),
-                items: vec![
-                    MenuItem::action("Find…", OpenTerminalFind),
-                    MenuItem::action("Find Next", FindNext),
-                    MenuItem::action("Find Previous", FindPrevious),
-                ],
-            }),
-        ],
-    }
-}
-
-fn view_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "View".into(),
-        items: vec![
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
-            MenuItem::action("Toggle Sidebar Focus", ToggleSidebarFocus),
-            MenuItem::separator(),
-            MenuItem::action("Increase Terminal Font Size", IncreaseTerminalFontSize),
-            MenuItem::action("Decrease Terminal Font Size", DecreaseTerminalFontSize),
-            MenuItem::action("Reset Terminal Font Size", ResetTerminalFontSize),
-            MenuItem::separator(),
-            MenuItem::action("Split Right", SplitRight),
-            MenuItem::action("Split Down", SplitDown),
-            MenuItem::submenu(Menu {
-                disabled: false,
-                name: "Focus Pane".into(),
-                items: vec![
-                    MenuItem::action("Left", FocusPaneLeft),
-                    MenuItem::action("Right", FocusPaneRight),
-                    MenuItem::action("Up", FocusPaneUp),
-                    MenuItem::action("Down", FocusPaneDown),
-                ],
-            }),
-            MenuItem::action(TOGGLE_PANE_ZOOM_TITLE, TogglePaneZoom),
-        ],
-    }
-}
-
-fn window_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "Window".into(),
-        items: vec![
-            MenuItem::action("Minimize", MinimizeWindow),
-            MenuItem::action("Zoom", ZoomActiveWindow),
-            MenuItem::separator(),
-            MenuItem::action("Bring All to Front", BringAllWindowsToFront),
-        ],
-    }
-}
-
-fn help_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "Help".into(),
-        items: vec![
-            MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
-            MenuItem::separator(),
-            MenuItem::action(RELEASE_NOTES_TITLE, OpenReleaseNotes),
-            MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-        ],
     }
 }
 
@@ -512,8 +374,7 @@ mod native {
         NativeKeyEquivalent,
     };
 
-    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
-    const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
+    use crate::platform::application_menu_model::{ABOUT_DESCRIPTION, HELP_URL};
 
     pub(super) fn decorate(
         application_name: &str,

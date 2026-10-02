@@ -240,6 +240,7 @@ fn fixed_bindings(layout: &KeyboardLayout) -> Vec<KeyBinding> {
             layout,
         ),
         dispatched("ctrl-shift-q", QuitApplication, None, layout),
+        KeyBinding::new("ctrl-shift-p", crate::ui::application_commands::OpenApplicationCommands, None),
         dispatched("f11", ToggleFullScreen, None, layout),
     ];
     #[cfg(feature = "appearance-exerciser")]

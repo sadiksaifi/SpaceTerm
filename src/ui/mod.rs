@@ -1,4 +1,6 @@
 pub(crate) mod appearance;
+pub(crate) mod application_commands;
+pub(crate) mod application_prompt;
 #[cfg(feature = "appearance-exerciser")]
 pub(crate) mod appearance_exerciser;
 pub(crate) mod appearance_runtime;
