@@ -4,6 +4,7 @@ mod application_identity;
 mod bundled_font;
 mod close_confirmation;
 mod domain;
+mod host_fonts;
 mod keybindings;
 mod platform;
 mod settings;

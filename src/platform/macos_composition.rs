@@ -85,7 +85,19 @@ fn desktop_profile(
             crate::desktop_profile::ShortcutSelection::NativeMenu,
         ),
         locale,
-    ))
+    )
+    .with_fonts(crate::host_fonts::HostFonts {
+        ui_family: ".SystemUIFont".into(),
+        system_monospace_family: "Menlo".into(),
+        terminal_families: &[
+            crate::bundled_font::FAMILY,
+            "JetBrainsMono Nerd Font",
+            "JetBrainsMono Nerd Font Mono",
+            "JetBrains Mono",
+        ],
+        emoji_family: "Apple Color Emoji".into(),
+        bundled_ui_faces: &[],
+    }))
 }
 
 fn compose(
@@ -351,6 +363,20 @@ mod tests {
             )))
             .unwrap()
             .install(cx);
+            let fonts = crate::host_fonts::HostFonts::get(cx);
+            assert_eq!(fonts.ui_family, ".SystemUIFont");
+            assert_eq!(fonts.system_monospace_family, "Menlo");
+            assert_eq!(
+                fonts.terminal_families,
+                [
+                    crate::bundled_font::FAMILY,
+                    "JetBrainsMono Nerd Font",
+                    "JetBrainsMono Nerd Font Mono",
+                    "JetBrains Mono",
+                ]
+            );
+            assert_eq!(fonts.emoji_family, "Apple Color Emoji");
+            assert!(fonts.bundled_ui_faces.is_empty());
             gpui::BorrowAppContext::update_global::<DesktopPresentation, _>(
                 cx,
                 |presentation, cx| presentation.refresh(cx),

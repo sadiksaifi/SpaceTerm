@@ -4327,23 +4327,6 @@ fn render_paste_confirmation(
     )
 }
 
-#[cfg(test)]
-fn select_terminal_font(font_names: &[String]) -> &'static str {
-    [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ]
-    .into_iter()
-    .find(|candidate| {
-        font_names
-            .iter()
-            .any(|available| available.eq_ignore_ascii_case(candidate))
-    })
-    .unwrap_or("Menlo")
-}
-
 fn measure_prepared_cell_width(
     window: &mut Window,
     prepared_font: &gpui::Font,
@@ -4395,7 +4378,6 @@ fn ime_candidate_bounds(
         size(cell_width, line_height),
     )
 }
-
 
 /// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
 /// how far along it reports being.

@@ -278,7 +278,8 @@ impl AppearanceExerciser {
             };
             candidate.preferences.terminal.typography.family = if alternate {
                 TerminalFontFamily::Named {
-                    family: String::from("Menlo"),
+                    family: super::appearance_runtime::available_fonts(cx).system_monospace
+                        .family,
                 }
             } else {
                 TerminalFontFamily::DefaultMonospace

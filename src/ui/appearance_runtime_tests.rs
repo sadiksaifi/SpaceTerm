@@ -54,6 +54,80 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
     (settings, platform)
 }
 
+#[gpui::test]
+fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(crate::host_fonts::HostFonts {
+            ui_family: "Chrome Test".into(),
+            system_monospace_family: "Terminal Test".into(),
+            terminal_families: &[crate::bundled_font::FAMILY],
+            emoji_family: "Emoji Test".into(),
+            bundled_ui_faces: &[],
+        });
+    });
+    start(cx);
+    cx.update(|cx| {
+        enum Snapshot {
+            Initial,
+            CompleteCatalog,
+            #[cfg(feature = "appearance-exerciser")]
+            Reload,
+        }
+        for snapshot in [
+            Snapshot::Initial,
+            Snapshot::CompleteCatalog,
+            #[cfg(feature = "appearance-exerciser")]
+            Snapshot::Reload,
+        ] {
+            match snapshot {
+                Snapshot::Initial => {}
+                Snapshot::CompleteCatalog => {
+                    complete_font_catalog(cx);
+                    refresh(cx).unwrap();
+                }
+                #[cfg(feature = "appearance-exerciser")]
+                Snapshot::Reload => reload_fonts(cx).unwrap(),
+            }
+            let resolved = current(cx);
+            assert_eq!(
+                resolved.chrome.typography.body.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.chrome.typography.heading.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.primary_family,
+                "Terminal Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.fallback_families,
+                ["Emoji Test", "SpaceTerm Default"]
+            );
+            assert_eq!(
+                crate::ui::appearance::chrome(cx)
+                    .typography
+                    .style(crate::ui::chrome_typography::TextRole::Body)
+                    .font
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+            assert_eq!(
+                cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                    .installed_typography()
+                    .regular()
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+        }
+    });
+}
+
 struct CatalogTextSystem {
     base: gpui::NoopTextSystem,
     terminal_fonts_registered: std::sync::atomic::AtomicBool,
@@ -741,7 +815,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
         cx.update(|cx| {
             cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
-                                        spacing_scale: 1.0,
+                    spacing_scale: 1.0,
                     ..crate::ui::appearance::ChromeAppearance::default()
                 },
             )));
@@ -761,7 +835,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
         cx.update(|cx| {
             cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
-                                        spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                    spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
                         crate::appearance::ChromeDensity::Comfortable,
                     ),
                     ..crate::ui::appearance::ChromeAppearance::default()
@@ -824,7 +898,7 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
         );
         cx.set_global(InstalledChrome::single(std::sync::Arc::new(
             crate::ui::appearance::ChromeAppearance {
-                                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
                     crate::appearance::ChromeDensity::Comfortable,
                 ),
                 ..crate::ui::appearance::ChromeAppearance::default()
@@ -855,3 +929,6 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
 mod macos_adapter_tests {
     include!("../platform/macos_adapter_tests/appearance_runtime.rs");
 }
+#[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+#[path = "../platform/linux_adapter_tests/fonts.rs"]
+mod linux_adapter_tests;

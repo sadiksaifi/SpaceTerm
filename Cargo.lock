@@ -5684,6 +5684,7 @@ dependencies = [
  "gpui",
  "gpui_macos",
  "gpui_platform",
+ "gpui_wgpu",
  "image",
  "jsonschema",
  "libc",
@@ -5712,6 +5713,7 @@ dependencies = [
  "unicode-bidi",
  "unicode-segmentation",
  "ureq",
+ "yeslogic-fontconfig-sys",
  "zeroize",
 ]
 

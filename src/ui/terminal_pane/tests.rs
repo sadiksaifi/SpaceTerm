@@ -21,6 +21,22 @@ use crate::terminal::{
     SessionFailure, TerminalLaunchPlan, TerminalSessionFactory,
 };
 
+pub(super) fn select_terminal_font(font_names: &[String]) -> &'static str {
+    [
+        "JetBrainsMono Nerd Font",
+        "JetBrainsMono Nerd Font Mono",
+        "JetBrains Mono",
+        "Menlo",
+    ]
+    .into_iter()
+    .find(|candidate| {
+        font_names
+            .iter()
+            .any(|available| available.eq_ignore_ascii_case(candidate))
+    })
+    .unwrap_or("Menlo")
+}
+
 #[gpui::test]
 fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
     cx.update(crate::ui::init)
@@ -2202,29 +2218,14 @@ fn publish_terminal_preferences(
     preferences: crate::appearance::AppearancePreferences,
     cx: &mut App,
 ) {
-    use crate::appearance::{
-        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, ThemeCatalog,
-        SystemAppearance,
-    };
+    use crate::appearance::{AppearanceGeneration, ThemeCatalog, SystemAppearance};
     let previous = super::super::appearance_runtime::current(cx);
     let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::new(previous.generation.get() + 1),
             &preferences,
             SystemAppearance::unavailable(),
-            &AvailableFonts {
-                system_ui: AvailableFont {
-                    family: ".SystemUIFont".into(),
-                    class: FontClass::Proportional,
-                    resolution_identity: "ui".into(),
-                },
-                system_monospace: AvailableFont {
-                    family: "Menlo".into(),
-                    class: FontClass::Monospace,
-                    resolution_identity: "system-monospace".into(),
-                },
-                installed: Vec::new(),
-            },
+            &super::super::appearance_runtime::available_fonts(cx),
         )
         .unwrap();
     cx.set_global(super::super::appearance_runtime::InstalledAppearance(

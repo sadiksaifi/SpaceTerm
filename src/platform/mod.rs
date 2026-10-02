@@ -142,6 +142,10 @@ pub(crate) mod window_movement;
 pub(crate) use macos_composition::main;
 #[cfg(target_os = "linux")]
 mod linux_composition;
+#[cfg(all(target_os = "linux", not(test)))]
+mod linux_fonts;
+#[cfg(all(target_os = "linux", test))]
+pub(crate) mod linux_fonts;
 #[cfg(target_os = "linux")]
 pub(crate) use linux_composition::main;
 

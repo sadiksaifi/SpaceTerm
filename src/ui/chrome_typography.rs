@@ -208,7 +208,7 @@ impl Default for ChromeTypography {
     fn default() -> Self {
         fn descriptor(size: f32, weight: u16) -> ResolvedFontDescriptor {
             ResolvedFontDescriptor {
-                primary_family: ".SystemUIFont".to_owned(),
+                primary_family: "system-ui".to_owned(),
                 fallback_families: Vec::new(),
                 size,
                 line_height: size,
