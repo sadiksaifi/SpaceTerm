@@ -1,5 +1,5 @@
-use crate::platform::macos_selected_file::MacosSelectedFileOpener;
 use crate::platform::selected_file::SelectedFileOpener;
+use crate::platform::unix_selected_file::UnixSelectedFileOpener;
 
 #[test]
 fn a_selected_fifo_opens_without_waiting_for_a_writer() {
@@ -10,7 +10,7 @@ fn a_selected_fifo_opens_without_waiting_for_a_writer() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let selected_path = path.clone();
     let worker = std::thread::spawn(move || {
-        let result = MacosSelectedFileOpener
+        let result = UnixSelectedFileOpener
             .open(&selected_path)
             .map(|file| file.metadata().expect("selected object metadata").is_file());
         let _ = sender.send(result);

@@ -285,7 +285,7 @@ fn present_result(state: UpdateState, cx: &mut App) {
 }
 
 /// Prompts belong to the Workspace window the user is looking at.
-fn front_workspace_window(cx: &App) -> Option<WindowHandle<WorkspaceManager>> {
+pub(crate) fn front_workspace_window(cx: &App) -> Option<WindowHandle<WorkspaceManager>> {
     cx.active_window()
         .and_then(|window| window.downcast::<WorkspaceManager>())
         .or_else(|| {

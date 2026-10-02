@@ -582,6 +582,7 @@ pub(crate) struct TerminalPane {
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
+    primary_selection: Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -609,6 +610,7 @@ pub(crate) struct TerminalPane {
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
     )>,
+    file_preview_available: bool,
     file_preview: FilePreviewPresenter<Box<dyn FilePreviewPanel>>,
     context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
@@ -874,6 +876,7 @@ impl TerminalPane {
             ),
             file_insertion: native_service_adapters.file_insertion,
             file_clipboard: native_service_adapters.file_clipboard,
+            primary_selection: native_service_adapters.primary_selection,
             key_input_adapter,
             ime: TerminalIme::default(),
             preedit_layout: None,
@@ -890,6 +893,7 @@ impl TerminalPane {
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
+            file_preview_available: native_service_adapters.file_preview.is_available(),
             file_preview: FilePreviewPresenter::new(native_service_adapters.file_preview.create()),
             context_menu: None,
             blink_phase_visible: true,
@@ -2592,6 +2596,14 @@ impl TerminalPane {
             return;
         };
 
+        if button == PointerButton::Middle && !self.screen.mouse_tracking && self.primary_selection.is_some() {
+            if let Some(text) = self.primary_selection.as_ref().and_then(|primary| primary.read(cx))
+                && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
+                && !payload.text().is_empty() { self.request_paste_text(payload, cx); }
+            cx.stop_propagation();
+            return;
+        }
+
         if button == PointerButton::Left
             && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
@@ -2751,6 +2763,8 @@ impl TerminalPane {
             }
         });
         if let Some(copy) = copy {
+            if let Some(primary) = &self.primary_selection
+                && let Ok(Some(copy)) = &copy { primary.publish(copy, cx); }
             self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
@@ -2927,7 +2941,7 @@ impl TerminalPane {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let Ok(Some(insertion)) = PastePayload::clipboard(
             self.file_insertion,
-            self.file_clipboard.as_ref(),
+            || self.file_clipboard.read_files(cx),
             || cx.read_from_clipboard().and_then(|item| item.text()),
             terminal_input_focused,
             self.terminal_session.local_file_capabilities,
@@ -3021,11 +3035,13 @@ impl TerminalPane {
     }
 
     fn native_context_actions(&self) -> NativeContextActions {
-        NativeContextActions::from_presence(
+        let mut actions = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
             self.screen.selection_present,
             self.current_hovered_link(),
-        )
+        );
+        actions.file_preview &= self.file_preview_available;
+        actions
     }
 
     fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
@@ -3070,7 +3086,7 @@ impl TerminalPane {
             false,
             link.as_ref(),
         )
-        .file_preview;
+        .file_preview && self.file_preview_available;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -3143,7 +3159,7 @@ impl TerminalPane {
             }
             TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
-                    self.preview_context_link(&link, cx);
+                    self.preview_context_link(&link, window, cx);
                 }
             }
             _ => {}
@@ -3154,6 +3170,7 @@ impl TerminalPane {
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(target) =
@@ -3162,7 +3179,7 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        if self.file_preview.preview(&target).is_err() {
+        if self.file_preview.preview_in_window(&target, window, cx).is_err() {
             self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
             cx.notify();
         }

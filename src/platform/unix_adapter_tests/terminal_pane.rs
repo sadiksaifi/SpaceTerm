@@ -34,19 +34,21 @@ fn unavailable_replacement_preview_dismisses_the_previous_presentation(cx: &mut 
     let previews = Rc::new(Cell::new(0));
     let dismissals = Rc::new(Cell::new(0));
     let (pane, cx, _) = connected_terminal_pane(cx);
-    pane.update(cx, |pane, cx| {
-        pane.file_preview = FilePreviewPresenter::new(Box::new(RecordingFilePreviewPanel {
-            previews: previews.clone(),
-            dismissals: dismissals.clone(),
-        }));
-        pane.preview_context_link(&first_link, cx);
-        assert_eq!(previews.get(), 1);
-        std::fs::remove_file(&second).unwrap();
-        pane.preview_context_link(&second_link, cx);
-        assert_eq!((previews.get(), dismissals.get()), (1, 1));
-        std::fs::rename(&replacement, &second).unwrap();
-        pane.preview_context_link(&second_link, cx);
-        assert_eq!((previews.get(), dismissals.get()), (1, 2));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.file_preview = FilePreviewPresenter::new(Box::new(RecordingFilePreviewPanel {
+                previews: previews.clone(),
+                dismissals: dismissals.clone(),
+            }));
+            pane.preview_context_link(&first_link, window, cx);
+            assert_eq!(previews.get(), 1);
+            std::fs::remove_file(&second).unwrap();
+            pane.preview_context_link(&second_link, window, cx);
+            assert_eq!((previews.get(), dismissals.get()), (1, 1));
+            std::fs::rename(&replacement, &second).unwrap();
+            pane.preview_context_link(&second_link, window, cx);
+            assert_eq!((previews.get(), dismissals.get()), (1, 2));
+        })
     });
     std::fs::remove_dir_all(directory).unwrap();
 }

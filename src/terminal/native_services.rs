@@ -18,6 +18,7 @@ pub(crate) mod testing;
 #[derive(Clone)]
 pub(crate) struct NativeServiceAdapters {
     pub(crate) text_clipboard: std::rc::Rc<dyn clipboard::TextClipboard>,
+    pub(crate) primary_selection: Option<std::rc::Rc<dyn clipboard::PrimarySelection>>,
     pub(crate) selection_clipboard: std::rc::Rc<dyn clipboard::SelectionClipboard>,
     pub(crate) file_insertion: file_insertion::FileInsertionPolicy,
     pub(crate) file_clipboard: std::rc::Rc<dyn clipboard::FileClipboard>,
@@ -75,7 +76,10 @@ impl TerminalContextMenuState {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeServiceCapabilities {
@@ -85,7 +89,10 @@ pub(crate) struct NativeServiceCapabilities {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 impl NativeServiceCapabilities {
     pub(crate) const fn new(send_text: bool, return_text: bool) -> Self {
@@ -98,7 +105,10 @@ impl NativeServiceCapabilities {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeServiceOrigin {
@@ -112,7 +122,10 @@ pub(crate) struct NativeServiceOrigin {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 impl NativeServiceOrigin {
     pub(crate) const fn new(
@@ -160,7 +173,10 @@ impl NativeServiceOrigin {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeServiceStatus {
@@ -170,7 +186,10 @@ pub(crate) struct NativeServiceStatus {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop Services Adapter reads Services state")
+    allow(
+        dead_code,
+        reason = "only a desktop Services Adapter reads Services state"
+    )
 )]
 impl NativeServiceStatus {
     pub(crate) const fn new(
@@ -438,7 +457,11 @@ mod tests {
         );
         fs::remove_dir_all(directory).unwrap();
     }
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux"),
+        feature = "native-tests"
+    ))]
     mod unix_adapter_tests {
         include!("../platform/unix_adapter_tests/native_services.rs");
     }

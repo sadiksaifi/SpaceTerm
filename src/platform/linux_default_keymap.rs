@@ -297,7 +297,24 @@ fn control_bindings() -> Vec<KeyBinding> {
             crate::ui::settings_window::ClearSettingsSearch,
             settings,
         ),
-    ]
+    ];
+    #[cfg(feature = "developer-tools")]
+    let bindings = bindings
+        .into_iter()
+        .chain([
+            KeyBinding::new(
+                "ctrl-shift-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-w",
+                crate::ui::developer_workbench::CloseDeveloperWorkbench,
+                Some(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT),
+            ),
+        ])
+        .collect();
+    bindings
 }
 
 #[cfg(test)]

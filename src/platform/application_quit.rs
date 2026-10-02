@@ -10,7 +10,10 @@ pub(crate) enum ApplicationQuitDecision {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "desktops without an application delegate report only installation failures")
+    allow(
+        dead_code,
+        reason = "desktops without an application delegate report only installation failures"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum ApplicationQuitError {
@@ -26,7 +29,10 @@ pub(crate) enum ApplicationQuitError {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only an application delegate re-enters the quit handler from native callbacks")
+    allow(
+        dead_code,
+        reason = "only an application delegate re-enters the quit handler from native callbacks"
+    )
 )]
 #[derive(Clone)]
 pub(crate) struct ApplicationQuitHandler {
@@ -48,15 +54,28 @@ impl ApplicationQuitHandler {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only an application delegate re-enters the quit handler from native callbacks")
+        allow(
+            dead_code,
+            reason = "only an application delegate re-enters the quit handler from native callbacks"
+        )
     )]
     pub(crate) fn handle_native(&self) -> ApplicationQuitDecision {
         self.app.update(|cx| self.handle(cx))
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LastWindowPolicy {
+    KeepRunning,
+    Quit,
+}
+
 /// Connects native application termination requests to portable quit policy.
 pub(crate) trait ApplicationQuitAdapter {
+    fn last_window_policy(&self) -> LastWindowPolicy {
+        LastWindowPolicy::KeepRunning
+    }
+
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
     fn request_quit(&self, cx: &mut App);
@@ -112,14 +131,11 @@ pub(crate) mod testing {
         }
 
         fn request_quit(&self, cx: &mut App) {
-            let requests = Rc::clone(&self.requests);
+            self.requests.set(self.requests.get() + 1);
             let handler = self.handler.borrow().clone();
-            cx.defer(move |cx| {
-                requests.set(requests.get() + 1);
-                if let Some(handler) = handler {
-                    handler.handle(cx);
-                }
-            });
+            if let Some(handler) = handler {
+                handler.handle(cx);
+            }
         }
 
         fn confirm_quit(&self, _: &mut App) {

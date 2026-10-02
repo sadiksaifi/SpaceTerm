@@ -4,9 +4,9 @@ use std::{fs::File, os::unix::fs::OpenOptionsExt, path::Path};
 
 use super::selected_file::{SelectedFileOpenError, SelectedFileOpener};
 
-pub(super) struct MacosSelectedFileOpener;
+pub(super) struct UnixSelectedFileOpener;
 
-impl SelectedFileOpener for MacosSelectedFileOpener {
+impl SelectedFileOpener for UnixSelectedFileOpener {
     fn open(&self, path: &Path) -> Result<File, SelectedFileOpenError> {
         // Rejecting special files requires a handle first. Opening must not wait for a FIFO
         // writer or acquire a controlling terminal. The explicitly selected symlink may be followed.

@@ -150,13 +150,40 @@ pub(crate) fn init(
     application_quit: Rc<dyn ApplicationQuitAdapter>,
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
+    if application_menu.uses_command_palette() {
+        crate::ui::application_commands::install(cx);
+    }
     install_application_quit(cx, Rc::clone(&application_quit))?;
+    if application_quit.last_window_policy()
+        == crate::platform::application_quit::LastWindowPolicy::Quit
+    {
+        let adapter = application_quit.clone();
+        let pending = Rc::new(std::cell::Cell::new(false));
+        cx.on_window_closed(move |cx, _| {
+            if cx.windows().is_empty() && !pending.replace(true) {
+                let adapter = adapter.clone();
+                let pending = pending.clone();
+                cx.defer(move |cx| {
+                    pending.set(false);
+                    if cx.windows().is_empty() {
+                        adapter.request_quit(cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
     crate::ui::settings_window::init(cx);
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::init(cx);
     crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
-    cx.on_action(move |_: &QuitApplication, cx| application_quit.request_quit(cx));
+    cx.on_action(move |_: &QuitApplication, cx| {
+        let application_quit = Rc::clone(&application_quit);
+        // Window action dispatch temporarily owns its Window. Read all Workspace
+        // close facts after that Window has returned to the application registry.
+        cx.defer(move |cx| application_quit.request_quit(cx));
+    });
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
@@ -191,21 +218,26 @@ fn install_application_menu_actions(
     application_menu: Rc<dyn ApplicationMenuAdapter>,
 ) {
     let about = Rc::clone(&application_menu);
-    cx.on_action(move |_: &ShowAboutApplication, _| {
-        perform_application_menu_command(about.as_ref(), ApplicationMenuCommand::ShowAbout);
+    cx.on_action(move |_: &ShowAboutApplication, cx| {
+        perform_application_menu_command(about.as_ref(), ApplicationMenuCommand::ShowAbout, cx);
     });
     let help = Rc::clone(&application_menu);
-    cx.on_action(move |_: &OpenApplicationHelp, _| {
-        perform_application_menu_command(help.as_ref(), ApplicationMenuCommand::OpenHelp);
+    cx.on_action(move |_: &OpenApplicationHelp, cx| {
+        perform_application_menu_command(help.as_ref(), ApplicationMenuCommand::OpenHelp, cx);
     });
     let zoom = Rc::clone(&application_menu);
-    cx.on_action(move |_: &ZoomActiveWindow, _| {
-        perform_application_menu_command(zoom.as_ref(), ApplicationMenuCommand::ZoomActiveWindow);
+    cx.on_action(move |_: &ZoomActiveWindow, cx| {
+        perform_application_menu_command(
+            zoom.as_ref(),
+            ApplicationMenuCommand::ZoomActiveWindow,
+            cx,
+        );
     });
-    cx.on_action(move |_: &BringAllWindowsToFront, _| {
+    cx.on_action(move |_: &BringAllWindowsToFront, cx| {
         perform_application_menu_command(
             application_menu.as_ref(),
             ApplicationMenuCommand::BringAllWindowsToFront,
+            cx,
         );
     });
 }
@@ -213,8 +245,9 @@ fn install_application_menu_actions(
 fn perform_application_menu_command(
     application_menu: &dyn ApplicationMenuAdapter,
     command: ApplicationMenuCommand,
+    cx: &mut App,
 ) {
-    if let Err(error) = application_menu.perform(command) {
+    if let Err(error) = application_menu.perform(command, cx) {
         eprintln!("failed to perform an application menu command: {error}");
     }
 }
@@ -533,14 +566,16 @@ pub(crate) fn open(
                 .update(cx, |manager, cx| manager.should_close_window(window, cx))
                 .unwrap_or(true)
         });
-        if let Err(error) = host.services.install(
-            window,
-            Rc::new(WorkspaceServicesEndpoint {
-                app: cx.to_async(),
-                window: window.window_handle(),
-                owner: workspace_manager.downgrade(),
-            }),
-        ) {
+        if let Some(services) = &host.services
+            && let Err(error) = services.install(
+                window,
+                Rc::new(WorkspaceServicesEndpoint {
+                    app: cx.to_async(),
+                    window: window.window_handle(),
+                    owner: workspace_manager.downgrade(),
+                }),
+            )
+        {
             eprintln!("failed to install the Services responder: {error}");
         }
         workspace_manager
@@ -605,7 +640,34 @@ fn restore_default_window(cx: &mut App, host: &HostComposition) {
     }
 }
 
+struct DefaultWorkspaceWindowHost(Rc<HostComposition>);
+impl gpui::Global for DefaultWorkspaceWindowHost {}
+
+/// Reopening belongs to application lifecycle, including when only Settings remains open.
+#[allow(
+    dead_code,
+    reason = "external activation sources are selected by host composition"
+)]
+pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
+    if let Some(host) = cx
+        .try_global::<DefaultWorkspaceWindowHost>()
+        .map(|host| host.0.clone())
+    {
+        restore_default_window(cx, &host);
+    }
+    if let Some(handle) = crate::ui::updates::front_workspace_window(cx) {
+        let _ = handle.update(cx, |_, window, _| {
+            if let Some(token) = token {
+                window.activate_window_with_token(token);
+            } else {
+                window.activate_window();
+            }
+        });
+    }
+}
+
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
+    cx.set_global(DefaultWorkspaceWindowHost(host.clone()));
     cx.on_action(move |_: &NewWorkspace, cx| {
         if !workspace_windows(cx).is_empty() {
             return;
@@ -635,6 +697,45 @@ mod tests {
         Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         )
+    }
+
+    #[gpui::test]
+    fn last_window_policy_waits_for_all_windows_and_requests_quit_once(cx: &mut TestAppContext) {
+        struct Quit(std::cell::Cell<usize>);
+        impl ApplicationQuitAdapter for Quit {
+            fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
+                crate::platform::application_quit::LastWindowPolicy::Quit
+            }
+            fn install(
+                &self,
+                _: ApplicationQuitHandler,
+            ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
+                Ok(())
+            }
+            fn request_quit(&self, _: &mut App) {
+                self.0.set(self.0.get() + 1);
+            }
+            fn confirm_quit(&self, _: &mut App) {}
+        }
+        let quit = Rc::new(Quit(std::cell::Cell::new(0)));
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        let first = cx.add_window(|_, _| gpui::EmptyView);
+        let second = cx.add_window(|_, _| gpui::EmptyView);
+        cx.update(|cx| {
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 0);
+        cx.update(|cx| {
+            second
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 1);
     }
 
     #[gpui::test]
@@ -861,17 +962,19 @@ pub(crate) struct HostCompositionParts {
     pub(crate) home_directory: PathBuf,
     pub(crate) session_factory: Rc<dyn TerminalSessionFactory>,
     pub(crate) adapters: ApplicationCapabilities,
-    pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
+    pub(crate) services:
+        Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
     pub(crate) window_chrome: crate::platform::window_chrome::WindowChrome,
 }
 pub(crate) struct HostComposition {
+    modal_prompts: bool,
     profile: crate::desktop_profile::DesktopProfile,
     home_directory: PathBuf,
     session_factory: Rc<dyn TerminalSessionFactory>,
     adapters: ApplicationCapabilities,
-    services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
+    services: Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     window_frame: crate::platform::window_frame::WindowFrameGeometry,
     window_chrome: crate::platform::window_chrome::WindowChrome,
@@ -885,6 +988,10 @@ pub(crate) struct HostComposition {
         std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
 }
 impl HostComposition {
+    pub(crate) fn with_modal_prompts(mut self, enabled: bool) -> Self {
+        self.modal_prompts = enabled;
+        self
+    }
     pub(crate) fn with_appearance(
         mut self,
         storage: Arc<dyn crate::settings::storage::SettingsStorage>,
@@ -911,6 +1018,7 @@ impl HostComposition {
             return Err(DesktopProfileError::InvalidCombination);
         }
         Ok(Self {
+            modal_prompts: false,
             profile: parts.profile,
             home_directory: parts.home_directory,
             session_factory: parts.session_factory,
@@ -996,6 +1104,9 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
 }
 
 fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+    if host.modal_prompts {
+        crate::ui::application_prompt::install(cx);
+    }
     cx.set_global(host.window_frame);
     cx.set_global(host.window_chrome.clone());
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
@@ -1011,7 +1122,9 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
             presentation.refresh(cx);
         },
     );
-    if let Err(error) = host.services.register() {
+    if let Some(services) = &host.services
+        && let Err(error) = services.register()
+    {
         eprintln!("failed to register Services: {error}");
     }
     #[cfg(feature = "developer-tools")]
@@ -1171,7 +1284,7 @@ mod runtime_tests {
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },
-            services,
+            services: Some(services),
             window_movement: movement,
             window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
             window_chrome: crate::platform::window_chrome::WindowChrome::native(None),
@@ -1619,7 +1732,11 @@ mod runtime_tests {
                 Ok(())
             }
 
-            fn perform(&self, _: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+            fn perform(
+                &self,
+                _: ApplicationMenuCommand,
+                _: &mut App,
+            ) -> Result<(), ApplicationMenuError> {
                 Err(ApplicationMenuError::Unavailable)
             }
         }
@@ -1883,6 +2000,36 @@ mod runtime_tests {
         cx.run_until_parked();
 
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+    }
+
+    #[gpui::test]
+    fn window_dispatched_quit_includes_the_dispatching_workspace(cx: &mut gpui::TestAppContext) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert!(cx.update(|cx| application_quit_snapshot(cx).facts.requires_confirmation()));
+
+        cx.update(|cx| {
+            workspace
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(QuitApplication), cx);
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.has_pending_prompt(),
+            "the dispatching Workspace must be included in quit policy"
+        );
+        assert_eq!(quit.confirmations(), 0);
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(cx.update(|cx| workspace.read(cx).is_ok()));
+        assert_eq!(quit.confirmations(), 0);
     }
 
     #[gpui::test]

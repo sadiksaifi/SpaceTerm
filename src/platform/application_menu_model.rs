@@ -84,60 +84,6 @@ fn palette_exclusion(action: &dyn Action) -> Option<&'static str> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_menu_item_is_reachable_or_has_a_justified_exclusion() {
-        fn verify(menu: Menu, commands: &[ApplicationCommand]) {
-            for item in menu.items {
-                match item {
-                    MenuItem::Submenu(menu) => verify(menu, commands),
-                    MenuItem::Action { action, .. } => {
-                        let reachable = commands
-                            .iter()
-                            .filter(|entry| entry.action.partial_eq(action.as_ref()))
-                            .count();
-                        assert_eq!(
-                            reachable,
-                            usize::from(palette_exclusion(action.as_ref()).is_none()),
-                            "{}",
-                            action.name()
-                        );
-                    }
-                    MenuItem::SystemMenu(menu) => {
-                        assert!(
-                            matches!(menu.menu_type, SystemMenuType::Services),
-                            "Only native Services have no equivalent on this desktop"
-                        );
-                    }
-                    MenuItem::Separator => {}
-                }
-            }
-        }
-        let commands = application_commands("SpaceTerm");
-        for menu in menus("SpaceTerm") {
-            verify(menu, &commands);
-        }
-        for action in [
-            Box::new(ShowAboutApplication) as Box<dyn Action>,
-            Box::new(OpenApplicationHelp),
-            Box::new(OpenReleaseNotes),
-            Box::new(ExportTerminalDiagnostics),
-            Box::new(ZoomActiveWindow),
-        ] {
-            assert!(
-                commands
-                    .iter()
-                    .any(|entry| entry.action.partial_eq(action.as_ref())),
-                "{}",
-                action.name()
-            );
-        }
-    }
-}
-
 pub(crate) fn menus(application_name: &str) -> Vec<Menu> {
     let mut menus = vec![
         application_menu(application_name),
@@ -308,5 +254,59 @@ fn develop_menu() -> Menu {
                 crate::ui::developer_workbench::ToggleAppearancePreview,
             ),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_menu_item_is_reachable_or_has_a_justified_exclusion() {
+        fn verify(menu: Menu, commands: &[ApplicationCommand]) {
+            for item in menu.items {
+                match item {
+                    MenuItem::Submenu(menu) => verify(menu, commands),
+                    MenuItem::Action { action, .. } => {
+                        let reachable = commands
+                            .iter()
+                            .filter(|entry| entry.action.partial_eq(action.as_ref()))
+                            .count();
+                        assert_eq!(
+                            reachable,
+                            usize::from(palette_exclusion(action.as_ref()).is_none()),
+                            "{}",
+                            action.name()
+                        );
+                    }
+                    MenuItem::SystemMenu(menu) => {
+                        assert!(
+                            matches!(menu.menu_type, SystemMenuType::Services),
+                            "Only native Services have no equivalent on this desktop"
+                        );
+                    }
+                    MenuItem::Separator => {}
+                }
+            }
+        }
+        let commands = application_commands("SpaceTerm");
+        for menu in menus("SpaceTerm") {
+            verify(menu, &commands);
+        }
+        for action in [
+            Box::new(ShowAboutApplication) as Box<dyn Action>,
+            Box::new(OpenApplicationHelp),
+            Box::new(OpenReleaseNotes),
+            Box::new(ExportTerminalDiagnostics),
+            Box::new(ZoomActiveWindow),
+        ] {
+            assert!(
+                commands
+                    .iter()
+                    .any(|entry| entry.action.partial_eq(action.as_ref())),
+                "{}",
+                action.name()
+            );
+        }
     }
 }

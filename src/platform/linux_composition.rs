@@ -12,12 +12,25 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
-    let code = match super::unix_askpass_transport::dispatch_helper_from_environment() {
-        Some(code) => code,
-        None => crate::app::launch(capture_startup_dependencies(identity), |startup| {
-            compose(startup, identity)
-        }),
-    };
+    let (events, desktop_events) = super::linux_desktop_events::LinuxDesktopEvents::new();
+    let bus = super::linux_session_bus::SessionBus::connect().ok();
+    let token = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("DESKTOP_STARTUP_ID").ok());
+    if let Some(bus) = &bus
+        && super::linux_application_instance::forward_if_secondary(
+            bus,
+            identity,
+            events.clone(),
+            token,
+        )
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let code = crate::app::launch(capture_startup_dependencies(identity), |startup| {
+        compose(startup, identity, bus, events, desktop_events)
+    });
     if code != 0 {
         std::process::exit(code);
     }
@@ -89,25 +102,33 @@ fn desktop_profile(
 fn compose(
     startup: StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     identity: ApplicationIdentity,
+    bus: Option<super::linux_session_bus::SessionBus>,
+    events: super::linux_desktop_events::DesktopEventSender,
+    desktop_events: super::linux_desktop_events::LinuxDesktopEvents,
 ) -> Result<HostComposition, DesktopProfileError> {
+    let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
+        bus.clone(),
+    ));
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(super::linux_application::LinuxApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
         attention: crate::terminal::attention_runtime::AttentionRuntime::new(
-            Box::new(super::linux_attention::LinuxAudioBell),
-            Box::new(super::linux_attention::LinuxWindowAttention),
+            Box::new(super::linux_attention::LinuxAudioBell(events.clone())),
+            Box::new(super::linux_attention::LinuxWindowAttention(events.clone())),
             Box::new(
                 crate::terminal::attention_notification::AttentionNotifications::new(Arc::new(
-                    super::linux_notification::LinuxNotificationAdapter,
+                    super::linux_notification::LinuxNotificationAdapter::new(
+                        bus.clone(),
+                        identity,
+                        events,
+                    ),
                 )),
             ),
             Rc::clone(&activity),
         ),
-        secure_input: crate::terminal::secure_input::SecureInputHandle::new(Box::new(
-            super::linux_secure_input::LinuxSecureInputAdapter,
-        )),
+        secure_input: crate::terminal::secure_input::SecureInputHandle::unavailable(),
         activity,
         visibility: Rc::new(super::linux_window_visibility::LinuxWindowVisibilityFactory),
         wheel: Rc::new(super::linux_scroll::LinuxWheelPhaseEnrichment),
@@ -141,10 +162,10 @@ fn compose(
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
             updates: Rc::new(crate::updates::UnavailableUpdates),
-            selected_files: None,
+            selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
-                super::linux_application_menu::LinuxApplicationMenuAdapter::new(identity),
+                super::linux_application_menu::LinuxApplicationMenuAdapter::new(identity, desktop_events),
             ),
             application_quit: Rc::new(
                 super::linux_application_quit::LinuxApplicationQuitAdapter::default(),
@@ -156,28 +177,29 @@ fn compose(
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 text_clipboard: Rc::new(super::linux_clipboard::LinuxTextClipboard),
+                primary_selection: Some(Rc::new(super::linux_clipboard::LinuxPrimarySelection(appearance.clone()))),
                 selection_clipboard: Rc::new(super::linux_clipboard::LinuxSelectionClipboard),
                 file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
                     paths,
                     shell: crate::terminal::native_services::file_insertion::ShellInsertionDialect::Posix,
                 },
                 file_clipboard: Rc::new(super::linux_clipboard::LinuxFileClipboard),
-                file_preview: Rc::new(super::linux_file_preview::LinuxFilePreviewFactory),
+                file_preview: Rc::new(super::linux_file_preview::LinuxFilePreviewFactory::new(bus.clone())),
             },
             lifecycle,
             microphone_access: None,
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },
-        services: Rc::new(super::linux_services::LinuxServicesRegistration),
+        services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
         window_frame: super::window_frame::WindowFrameGeometry::new(Some(16.0)).with_outer_edge_width(1.0),
         window_chrome: super::window_chrome::WindowChrome::client(),
     })
     .map(|host| {
-        host.with_appearance(
+        host.with_modal_prompts(true).with_appearance(
             settings_storage,
-            Rc::new(super::linux_appearance::LinuxAppearancePlatform),
+            appearance,
         )
     })
 }
@@ -282,11 +304,19 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        #[cfg(feature = "appearance-exerciser")]
+        #[cfg(feature = "developer-tools")]
         let expected = {
             let mut expected = expected;
+            let fixed_bindings = expected
+                .iter()
+                .position(|binding| binding == "ctrl-shift-c\tSome(Identifier(\"TerminalPane\"))\tspaceterm_text_input::Copy")
+                .unwrap();
+            expected.splice(fixed_bindings..fixed_bindings, [
+                "ctrl-shift-w\tSome(Identifier(\"DeveloperWorkbench\"))\tspaceterm::CloseDeveloperWorkbench".to_owned(),
+                "ctrl-w\tSome(Identifier(\"DeveloperWorkbench\"))\tspaceterm::CloseDeveloperWorkbench".to_owned(),
+            ]);
             expected.extend([
-                "ctrl-alt-shift-a\tNone\tspaceterm::ShowAppearanceExerciser".to_owned(),
+                "ctrl-alt-shift-a\tNone\tspaceterm::OpenDeveloperWorkbench".to_owned(),
                 "ctrl-alt-shift-c\tNone\tspaceterm::ToggleAppearancePreview".to_owned(),
             ]);
             expected
