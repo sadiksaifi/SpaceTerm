@@ -457,6 +457,21 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
     assert!(!access.observing.get());
 }
 
+/// A system permission prompt is an ordinary window of another application. Settings stays at the
+/// normal window level, so the prompt a request raises appears above Settings instead of behind it.
+#[gpui::test]
+fn settings_opens_at_the_normal_window_level_so_permission_prompts_stay_visible(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let (_window, cx) = open_settings(Some(access), cx);
+
+    let options = cx.update(|_, cx| {
+        crate::ui::sidebar_window::window_options("Settings", gpui::size(gpui::px(1.), gpui::px(1.)), cx)
+    });
+    assert!(options.kind == gpui::WindowKind::Normal);
+}
+
 /// An apparently allowed grant can still fail, so Troubleshoot reaches System Settings from it.
 #[gpui::test]
 fn troubleshooting_an_allowed_grant_opens_system_settings(cx: &mut TestAppContext) {
