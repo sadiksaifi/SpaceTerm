@@ -1551,14 +1551,24 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
     worker.finish();
 }
 
-#[test]
-fn a_permission_request_is_reported_and_kept_off_the_screen() {
-    let (_command_tx, commands) = mpsc::channel();
-    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+/// A worker that reads scripted output, with the receiving end of its events. The channel ends it
+/// does not read stay alive with the worker.
+struct PermissionRequestWorker {
+    worker: TerminalWorker,
+    events: async_channel::Receiver<SessionEvent>,
+    records: ScriptedPtyRecords,
+    _commands: mpsc::Sender<Command>,
+    _reader: mpsc::SyncSender<NativePtyOutput>,
+    _accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+}
+
+fn permission_request_worker() -> PermissionRequestWorker {
+    let (command_tx, commands) = mpsc::channel();
+    let (reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
-    let mut worker = TerminalWorker {
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let worker = TerminalWorker {
         metadata_state: SessionMetadataState::default(),
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
@@ -1576,6 +1586,24 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
     };
+    PermissionRequestWorker {
+        worker,
+        events: receiver,
+        records,
+        _commands: command_tx,
+        _reader: reader_tx,
+        _accessibility: accessibility_receiver,
+    }
+}
+
+#[test]
+fn a_permission_request_is_reported_and_kept_off_the_screen() {
+    let PermissionRequestWorker {
+        mut worker,
+        events: receiver,
+        records,
+        ..
+    } = permission_request_worker();
 
     assert!(worker.feed_test_output(vec![
         b"before\x1b]7701;permissions=screen-".to_vec(),
@@ -1596,6 +1624,34 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
     assert!(text.contains("beforeafter"));
     assert!(!text.contains("7701"));
     assert!(records.snapshot().written.is_empty());
+    worker.finish();
+}
+
+/// A flood of requests in one read takes one slot in the bounded event queue, so it cannot push
+/// other events out.
+#[test]
+fn the_permission_requests_in_one_read_become_one_event() {
+    use crate::platform::computer_use_access::ComputerUsePermission::{
+        Accessibility, ScreenRecording,
+    };
+    let PermissionRequestWorker {
+        mut worker,
+        events: receiver,
+        ..
+    } = permission_request_worker();
+    let mut flood = b"\x1b]7701;permissions=screen-recording\x07".repeat(90);
+    flood.extend_from_slice(b"\x1b]7701;permissions=accessibility\x07");
+
+    assert!(worker.feed_test_output(vec![flood]));
+
+    let Ok(SessionEvent::PermissionRequested(request)) = receiver.try_recv() else {
+        panic!("the requests must reach the Pane");
+    };
+    assert_eq!(request.permissions(), [ScreenRecording, Accessibility]);
+    assert!(
+        !std::iter::from_fn(|| receiver.try_recv().ok())
+            .any(|event| matches!(event, SessionEvent::PermissionRequested(_)))
+    );
     worker.finish();
 }
 

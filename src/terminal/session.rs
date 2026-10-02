@@ -1758,13 +1758,16 @@ impl TerminalWorker {
                 .enqueue(self.osc52_filter.feed_with_context(&bytes, epoch));
         }
         let mut focus_reports = Vec::new();
+        // Every Permission Request in these chunks becomes one event, so a program that floods
+        // requests cannot crowd other events out of the bounded queue.
+        let mut requested: Option<PermissionRequest> = None;
         while !self.clipboard.pending() {
             let Some((effect, epoch)) = self.clipboard.effects.pop_front() else {
                 break;
             };
             let continued = match effect {
                 Osc52Effect::Terminal(bytes) => {
-                    self.feed_terminal_output(&bytes, &mut focus_reports)
+                    self.feed_terminal_output(&bytes, &mut requested, &mut focus_reports)
                 }
                 Osc52Effect::Operation(operation) => {
                     if !self.flush_ordered_terminal_replies(&mut focus_reports) {
@@ -1779,6 +1782,11 @@ impl TerminalWorker {
             if !continued {
                 return false;
             }
+        }
+        if let Some(request) = requested
+            && !self.send_terminal_event(SessionEvent::PermissionRequested(request))
+        {
+            return false;
         }
 
         if received_output {
@@ -1830,16 +1838,22 @@ impl TerminalWorker {
         true
     }
 
-    fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
-        let mut requests = Vec::new();
+    /// Feeds output to the emulator and adds the Permission Requests it carries to `requested`.
+    fn feed_terminal_output(
+        &mut self,
+        bytes: &[u8],
+        requested: &mut Option<PermissionRequest>,
+        focus_reports: &mut Vec<u8>,
+    ) -> bool {
         let emulator = &mut self.emulator;
-        self.permission_requests
-            .feed(bytes, |bytes| emulator.feed(bytes), |request| requests.push(request));
-        for request in requests {
-            if !self.send_terminal_event(SessionEvent::PermissionRequested(request)) {
-                return false;
-            }
-        }
+        self.permission_requests.feed(
+            bytes,
+            |bytes| emulator.feed(bytes),
+            |request| match requested {
+                Some(requested) => requested.merge(request),
+                None => *requested = Some(request),
+            },
+        );
         if let Some(error) = self.emulator.graphics_failure() {
             self.send_runtime_failure(format!(
                 "failed to update terminal graphics storage: {error}"
