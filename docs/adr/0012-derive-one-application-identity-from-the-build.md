@@ -17,3 +17,5 @@ SpaceTerm Development is the default because a mistaken build must never write i
 The `packaging/` directory owns everything that builds, identifies, signs, verifies, or publishes an application bundle. Each identity keeps its bundle template and icon together in `packaging/macos/<identity>/`, so adding or changing an identity touches one directory.
 
 SpaceTerm Development has no microphone access because every build re-signs it ad hoc, and macOS would not keep the privacy grant across builds.
+
+Every identity offers Screen Recording and Device Control setup and recovery for computer-use tools. macOS keys those grants to the bundle identifier and code signature, so each identity holds its own grants. SpaceTerm Development loses them on each build, which makes it the identity where stale-grant recovery is exercised. A permission reset names only the bundle identifier of the running identity, and only when the running bundle matches it.

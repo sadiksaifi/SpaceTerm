@@ -81,7 +81,7 @@ fn open_settings_with_capabilities(
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
-        SettingsWindow::new_with_capabilities(window_drag, None, registry, window, cx)
+        SettingsWindow::new_with_capabilities(window_drag, Default::default(), registry, window, cx)
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();

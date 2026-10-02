@@ -28,7 +28,7 @@ fn open_updates(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, &mut Visual
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            None,
+            Default::default(),
             None,
             window,
             cx,

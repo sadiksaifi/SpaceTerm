@@ -4,6 +4,7 @@ pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 pub(crate) mod application_quit;
+pub(crate) mod computer_use_access;
 pub(crate) mod control_socket;
 pub(crate) mod https_transport;
 pub(crate) mod keyboard_layout;
@@ -54,6 +55,11 @@ pub(crate) mod macos_application_menu;
 mod macos_application_quit;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application_quit;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_computer_use_access;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_computer_use_access;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_control_socket;

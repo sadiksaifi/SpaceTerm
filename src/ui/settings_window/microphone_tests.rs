@@ -93,7 +93,10 @@ fn open_settings(
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            access,
+            super::PermissionCapabilities {
+                microphone: access,
+                computer_use: None,
+            },
             None,
             window,
             cx,
@@ -503,12 +506,14 @@ fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
 
 /// Wrapped guidance beside the badge and action once stretched the row, and its card, hundreds of
 /// pixels below the content. Every state keeps the row at its natural height: equal padding above
-/// the label and below the guidance, with the control centered on the same row.
+/// the label and below the guidance, with the control centered on the same row, and the card ends
+/// with the group's last row.
 #[gpui::test]
 fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut TestAppContext) {
     const GROUP_SELECTOR: &str = "settings-section-privacy-group-permissions-card";
     const LABEL_SELECTOR: &str = "settings-row-microphone-access-label";
     const DESCRIPTION_SELECTOR: &str = "settings-row-microphone-access-description";
+    const LAST_ROW_SELECTOR: &str = "settings-row-device-control-access";
 
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
@@ -550,11 +555,12 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
                 (control.center().y - row.center().y).abs() <= gpui::px(1.0),
                 "{context}: the control should be centered on the row"
             );
+            let last_row = bounds(LAST_ROW_SELECTOR);
             let card_inset_above = row.top() - card.top();
-            let card_inset_below = card.bottom() - row.bottom();
+            let card_inset_below = card.bottom() - last_row.bottom();
             assert!(
                 (card_inset_above - card_inset_below).abs() <= gpui::px(1.0),
-                "{context}: the card should end with its only row"
+                "{context}: the card should end with its last row"
             );
         }
     }

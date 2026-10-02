@@ -809,6 +809,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
     pub(crate) microphone_access:
         Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
+    /// Reads and recovers the grants computer-use tools in a Terminal Session inherit.
+    pub(crate) computer_use_access:
+        Option<Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
     pub(crate) remote_workspace:
@@ -974,7 +977,10 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
-        host.adapters.microphone_access.clone(),
+        crate::ui::settings_window::PermissionCapabilities {
+            microphone: host.adapters.microphone_access.clone(),
+            computer_use: host.adapters.computer_use_access.clone(),
+        },
         host.adapters
             .theme_registry
             .clone()
@@ -1109,6 +1115,7 @@ mod runtime_tests {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 microphone_access: None,
+                computer_use_access: None,
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },

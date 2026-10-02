@@ -108,6 +108,12 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
+    /// The system's Screen Recording authorization, which computer-use tools in a Terminal Session
+    /// inherit to take screenshots.
+    ScreenRecordingAccess,
+    /// The system's Accessibility authorization, which the system presents as Device Control and Data
+    /// Access and computer-use tools in a Terminal Session inherit to click and type.
+    DeviceControlAccess,
     ClipboardWrites,
     ClipboardReads,
     /// The installed version, the latest check, and the next step the update service offers.
@@ -157,6 +163,8 @@ impl SettingsRowId {
             // through their own field instead of an appearance reset target.
             Self::InstalledThemes
             | Self::MicrophoneAccess
+            | Self::ScreenRecordingAccess
+            | Self::DeviceControlAccess
             | Self::ClipboardWrites
             | Self::ClipboardReads
             | Self::UpdateStatus
@@ -413,6 +421,53 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-microphone-access",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ScreenRecordingAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Screen recording access",
+        keywords: &[
+            "computer use",
+            "screenshot",
+            "screen capture",
+            "capture",
+            "agent",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+            "troubleshoot",
+            "reset",
+        ],
+        selector: "settings-row-screen-recording-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::DeviceControlAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Device control access",
+        keywords: &[
+            "accessibility",
+            "computer use",
+            "data access",
+            "click",
+            "type",
+            "input",
+            "automation",
+            "agent",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+            "troubleshoot",
+            "reset",
+        ],
+        selector: "settings-row-device-control-access",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ClipboardWrites,
         section: SettingsSectionId::Privacy,
         group: "Clipboard",
@@ -639,7 +694,7 @@ mod tests {
     use super::*;
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 24] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 26] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -654,6 +709,8 @@ mod tests {
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
         SettingsRowId::MicrophoneAccess,
+        SettingsRowId::ScreenRecordingAccess,
+        SettingsRowId::DeviceControlAccess,
         SettingsRowId::ClipboardWrites,
         SettingsRowId::ClipboardReads,
         SettingsRowId::UpdateStatus,
@@ -848,6 +905,32 @@ mod tests {
         }
     }
 
+    /// A person whose computer-use tool cannot see or control the screen searches for what the
+    /// tool does or for the permission's name in System Settings.
+    #[test]
+    fn a_computer_use_query_reaches_its_permission() {
+        for (query, row) in [
+            ("screen recording", SettingsRowId::ScreenRecordingAccess),
+            ("screenshot", SettingsRowId::ScreenRecordingAccess),
+            ("accessibility", SettingsRowId::DeviceControlAccess),
+            ("device control", SettingsRowId::DeviceControlAccess),
+            ("click", SettingsRowId::DeviceControlAccess),
+        ] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&row),
+                "{query:?} should rank {row:?} first"
+            );
+        }
+        let computer_use = matching_rows("computer use");
+        for row in [
+            SettingsRowId::ScreenRecordingAccess,
+            SettingsRowId::DeviceControlAccess,
+        ] {
+            assert!(computer_use.contains(&row), "computer use should reach {row:?}");
+        }
+    }
+
     #[test]
     fn a_command_query_reaches_its_shortcut_row() {
         assert_eq!(
@@ -917,6 +1000,8 @@ mod tests {
                 row.id,
                 SettingsRowId::InstalledThemes
                     | SettingsRowId::MicrophoneAccess
+                    | SettingsRowId::ScreenRecordingAccess
+                    | SettingsRowId::DeviceControlAccess
                     | SettingsRowId::ClipboardWrites
                     | SettingsRowId::ClipboardReads
                     | SettingsRowId::UpdateStatus
