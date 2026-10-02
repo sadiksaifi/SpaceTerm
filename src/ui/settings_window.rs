@@ -39,8 +39,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels,
-    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, actions, div, px, size,
+    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
+    actions, div, px, size,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ComboBox, ComboBoxItem, Icon, IconName, ModalAction, ModalActionEmphasis,
@@ -53,15 +53,16 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
+    ThemeId,
 };
 use crate::platform::microphone_access::MicrophoneAccess;
-use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
 };
+use crate::theme_registry::ZedThemeRegistry;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
@@ -220,28 +221,29 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         .and_then(|geometry| geometry.settings_traffic_light_position(titlebar_height));
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
-        WindowOptions {
-            app_id: crate::app::window_application_id(),
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Settings".into()),
-                // Retain the native title for the Window menu and accessibility while drawing the
-                // visible section title in the client surface.
-                appears_transparent: true,
-                traffic_light_position,
-            }),
-            // A floating window stays ordinary and modeless: the normal window level and the
-            // ordinary window class, with only tabbing, resizing, and minimizing withheld. It is
-            // deliberately not a popup and never orders itself above other applications.
-            kind: WindowKind::Floating,
-            is_movable: true,
-            is_resizable: false,
-            is_minimizable: false,
-            tabbing_identifier: None,
-            ..WindowOptions::default()
-        },
+        cx.global::<crate::platform::window_chrome::WindowChrome>()
+            .options(
+                crate::platform::window_chrome::WindowRole::Settings,
+                WindowOptions {
+                    app_id: crate::app::window_application_id(),
+                    window_background: crate::ui::appearance_runtime::window_background(cx),
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Settings".into()),
+                        // Retain the native title for the Window menu and accessibility while drawing the
+                        // visible section title in the client surface.
+                        appears_transparent: true,
+                        traffic_light_position,
+                    }),
+                    is_movable: true,
+                    is_resizable: false,
+                    is_minimizable: false,
+                    tabbing_identifier: None,
+                    ..WindowOptions::default()
+                },
+                cx,
+            ),
         |window, cx| {
             let settings = cx.new(|cx| {
                 SettingsWindow::new_with_capabilities(
@@ -754,10 +756,11 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
         let scope = spaceterm_ui::ControlThemeScope::Settings;
-        activity.mount(
+        let content = activity.mount(
             activity
                 .with_scope(|| scope.mount(scope.with_scope(|| self.render_chrome(window, cx)))),
-        )
+        );
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -860,6 +863,11 @@ impl SettingsWindow {
                     }
                 }
             }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
+            }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
@@ -916,7 +924,10 @@ impl SettingsWindow {
             "settings-sidebar-drag-region",
             div().size_full(),
             Edges {
-                left: px(super::workspace_chrome::TRAFFIC_LIGHT_CLEARANCE),
+                left: cx
+                    .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
+                    .and_then(|geometry| geometry.settings_titlebar_clearance())
+                    .unwrap_or(px(0.0)),
                 ..Edges::default()
             },
             cx,
@@ -942,6 +953,13 @@ impl SettingsWindow {
     ) -> AnyElement {
         let appearance = &settings.chrome;
         let section = self.active_section;
+        let close_owner = cx.weak_entity();
+        let close = spaceterm_ui::ClientWindowControls::new(Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        }));
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         let heading = div()
             .size_full()
@@ -962,6 +980,16 @@ impl SettingsWindow {
             .flex_none()
             .w_full()
             .child(region)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right(appearance.spacing(CONTENT_GUTTER))
+                    .h(appearance.top_height())
+                    .flex()
+                    .items_center()
+                    .child(close),
+            )
             .when(scrolled, |heading| {
                 heading.child(
                     div()
@@ -2350,10 +2378,8 @@ impl SettingsWindow {
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable = !zero_transparency
-                    && composition.effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque
-                    && !composition.floating_materials.is_opaque();
+                let native_unavailable =
+                    !zero_transparency && !composition.capabilities.native_window_transparency;
                 Some(match row {
                     SettingsRowId::Transparency if zero_transparency => {
                         "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
@@ -2364,6 +2390,12 @@ impl SettingsWindow {
                     SettingsRowId::Transparency if native_unavailable => {
                         "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
+                    SettingsRowId::Transparency
+                        if !composition.capabilities.native_window_blur
+                            && self.editor.document().preferences.window.blur =>
+                    {
+                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+                    }
                     SettingsRowId::Transparency => {
                         "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
@@ -2373,7 +2405,7 @@ impl SettingsWindow {
                     _ if accessibility_forced_opaque => {
                         "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
                     }
-                    _ if native_unavailable => {
+                    _ if native_unavailable || !composition.capabilities.native_window_blur => {
                         "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
                     }
                     _ => {
@@ -2391,9 +2423,9 @@ impl SettingsWindow {
             SettingsRowId::ExportSettings => {
                 Some("Save every setting, keyboard shortcut, and installed theme to a file.")
             }
-            SettingsRowId::ImportSettings => {
-                Some("Replace every setting, keyboard shortcut, and installed theme with an exported file.")
-            }
+            SettingsRowId::ImportSettings => Some(
+                "Replace every setting, keyboard shortcut, and installed theme with an exported file.",
+            ),
             SettingsRowId::ResetAllSettings => Some(
                 "Return every setting and keyboard shortcut to its default and remove installed themes.",
             ),

@@ -21,6 +21,7 @@ pub(crate) enum OperatingSystemWindowDragError {
 pub(crate) trait OperatingSystemWindowDragPlatform {
     fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError>;
     fn start_window_move(&self, window: &Window) -> Result<(), OperatingSystemWindowDragError>;
+    fn show_window_menu(&self, _: &Window, _: gpui::Point<gpui::Pixels>) {}
     fn interaction_finished(&self);
 }
 

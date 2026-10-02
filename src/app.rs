@@ -514,52 +514,59 @@ pub(crate) fn open(
         .window_frame
         .workspace_traffic_light_position(workspace_titlebar_height);
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    let result = cx.open_window(
-        WindowOptions {
-            app_id: crate::app::window_application_id(),
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(480.0), px(260.0))),
-            titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
-                title: titlebar.title.clone(),
-                appears_transparent: titlebar.appears_transparent,
-                traffic_light_position: workspace_traffic_light_position
-                    .or(titlebar.traffic_light_position),
-            }),
-            ..WindowOptions::default()
-        },
-        |window, cx| {
-            let workspace_manager = cx.new(|cx| {
-                WorkspaceManager::new_with_adapters(
-                    session_factory,
-                    home_directory,
-                    adapters,
+    let result =
+        cx.open_window(
+            host.window_chrome.options(
+                crate::platform::window_chrome::WindowRole::Workspace,
+                WindowOptions {
+                    app_id: crate::app::window_application_id(),
+                    window_background: crate::ui::appearance_runtime::window_background(cx),
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(480.0), px(260.0))),
+                    titlebar: host.window_chrome.titlebar.as_ref().map(|titlebar| {
+                        TitlebarOptions {
+                            title: titlebar.title.clone(),
+                            appears_transparent: titlebar.appears_transparent,
+                            traffic_light_position: workspace_traffic_light_position
+                                .or(titlebar.traffic_light_position),
+                        }
+                    }),
+                    ..WindowOptions::default()
+                },
+                cx,
+            ),
+            |window, cx| {
+                let workspace_manager = cx.new(|cx| {
+                    WorkspaceManager::new_with_adapters(
+                        session_factory,
+                        home_directory,
+                        adapters,
+                        window,
+                        cx,
+                    )
+                });
+                workspace_manager.update(cx, |workspace_manager, cx| {
+                    workspace_manager.focus(window, cx);
+                });
+                let close_manager = workspace_manager.downgrade();
+                window.on_window_should_close(cx, move |window, cx| {
+                    close_manager
+                        .update(cx, |manager, cx| manager.should_close_window(window, cx))
+                        .unwrap_or(true)
+                });
+                if let Err(error) = host.services.install(
                     window,
-                    cx,
-                )
-            });
-            workspace_manager.update(cx, |workspace_manager, cx| {
-                workspace_manager.focus(window, cx);
-            });
-            let close_manager = workspace_manager.downgrade();
-            window.on_window_should_close(cx, move |window, cx| {
-                close_manager
-                    .update(cx, |manager, cx| manager.should_close_window(window, cx))
-                    .unwrap_or(true)
-            });
-            if let Err(error) = host.services.install(
-                window,
-                Rc::new(WorkspaceServicesEndpoint {
-                    app: cx.to_async(),
-                    window: window.window_handle(),
-                    owner: workspace_manager.downgrade(),
-                }),
-            ) {
-                eprintln!("failed to install the Services responder: {error}");
-            }
-            workspace_manager
-        },
-    );
+                    Rc::new(WorkspaceServicesEndpoint {
+                        app: cx.to_async(),
+                        window: window.window_handle(),
+                        owner: workspace_manager.downgrade(),
+                    }),
+                ) {
+                    eprintln!("failed to install the Services responder: {error}");
+                }
+                workspace_manager
+            },
+        );
 
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
@@ -837,7 +844,7 @@ pub(crate) struct HostCompositionParts {
     pub(crate) services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     pub(crate) window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    pub(crate) titlebar: Option<TitlebarOptions>,
+    pub(crate) window_chrome: crate::platform::window_chrome::WindowChrome,
 }
 pub(crate) struct HostComposition {
     profile: crate::desktop_profile::DesktopProfile,
@@ -847,7 +854,7 @@ pub(crate) struct HostComposition {
     services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     window_frame: crate::platform::window_frame::WindowFrameGeometry,
-    titlebar: Option<TitlebarOptions>,
+    window_chrome: crate::platform::window_chrome::WindowChrome,
     appearance: Option<(
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
@@ -869,9 +876,14 @@ impl HostComposition {
         if !parts.home_directory.is_absolute() {
             return Err(DesktopProfileError::InvalidCombination);
         }
-        if parts.titlebar.as_ref().is_some_and(|titlebar| {
-            titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
-        }) {
+        if parts
+            .window_chrome
+            .titlebar
+            .as_ref()
+            .is_some_and(|titlebar| {
+                titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
+            })
+        {
             return Err(DesktopProfileError::InvalidCombination);
         }
         Ok(Self {
@@ -882,7 +894,7 @@ impl HostComposition {
             services: parts.services,
             window_movement: parts.window_movement,
             window_frame: parts.window_frame,
-            titlebar: parts.titlebar,
+            window_chrome: parts.window_chrome,
             appearance: None,
         })
     }
@@ -960,6 +972,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
 
 fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
     cx.set_global(host.window_frame);
+    cx.set_global(host.window_chrome.clone());
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));
@@ -1120,7 +1133,7 @@ mod runtime_tests {
             services,
             window_movement: movement,
             window_frame: crate::platform::window_frame::WindowFrameGeometry::default(),
-            titlebar: None,
+            window_chrome: crate::platform::window_chrome::WindowChrome::native(None),
         }
     }
     #[test]

@@ -41,6 +41,14 @@ fn register_font_with(
 /// A bundled vector icon outside the Lucide family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CustomIconName {
+    /// Close an Operating-System Window.
+    WindowClose,
+    /// Minimize an Operating-System Window.
+    WindowMinimize,
+    /// Maximize an Operating-System Window.
+    WindowMaximize,
+    /// Restore a maximized Operating-System Window.
+    WindowRestore,
     /// A panel with a left sidebar, rendered with the bundled chrome vectors.
     PanelLeft,
     /// A panel with a right sidebar, rendered with the bundled chrome vectors.
@@ -64,6 +72,10 @@ pub enum CustomIconName {
 impl CustomIconName {
     fn path(self) -> &'static str {
         match self {
+            Self::WindowClose => "spaceterm-ui/icons/window-close.svg",
+            Self::WindowMinimize => "spaceterm-ui/icons/window-minimize.svg",
+            Self::WindowMaximize => "spaceterm-ui/icons/window-maximize.svg",
+            Self::WindowRestore => "spaceterm-ui/icons/window-restore.svg",
             Self::PanelLeft => "spaceterm-ui/icons/panel-left.svg",
             Self::PanelRight => "spaceterm-ui/icons/panel-right.svg",
             Self::Plus => "spaceterm-ui/icons/plus.svg",
@@ -78,6 +90,22 @@ impl CustomIconName {
 }
 
 const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
+    (
+        "spaceterm-ui/icons/window-close.svg",
+        include_bytes!("../assets/icons/window-close.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/window-minimize.svg",
+        include_bytes!("../assets/icons/window-minimize.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/window-maximize.svg",
+        include_bytes!("../assets/icons/window-maximize.svg"),
+    ),
+    (
+        "spaceterm-ui/icons/window-restore.svg",
+        include_bytes!("../assets/icons/window-restore.svg"),
+    ),
     (
         "spaceterm-ui/icons/panel-left.svg",
         include_bytes!("../assets/icons/panel-left.svg"),
@@ -894,6 +922,10 @@ mod tests {
                 .list("spaceterm-ui/icons")
                 .expect("owned directory"),
             vec![
+                CustomIconName::WindowClose.path().into(),
+                CustomIconName::WindowMinimize.path().into(),
+                CustomIconName::WindowMaximize.path().into(),
+                CustomIconName::WindowRestore.path().into(),
                 CustomIconName::PanelLeft.path().into(),
                 CustomIconName::PanelRight.path().into(),
                 CustomIconName::Plus.path().into(),

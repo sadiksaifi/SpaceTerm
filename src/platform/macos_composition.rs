@@ -183,11 +183,11 @@ fn compose(
         services: Rc::new(super::macos_services::NativeServicesRegistration),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
         window_frame: super::macos_window_frame::window_frame_geometry(),
-        titlebar: Some(TitlebarOptions {
+        window_chrome: super::window_chrome::WindowChrome::native(Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
             traffic_light_position: None,
-        }),
+        })),
     })
     .map(|host| {
         host.with_appearance(

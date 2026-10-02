@@ -4416,7 +4416,9 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-o");
     cx.run_until_parked();
-    let flow = manager.read_with(cx, |manager, _| manager.remote_workspace_flow.clone().unwrap());
+    let flow = manager.read_with(cx, |manager, _| {
+        manager.remote_workspace_flow.clone().unwrap()
+    });
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
             flow.select_destination_for_test(
@@ -5292,6 +5294,29 @@ fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mu
     assert!(!cx.simulate_close());
     click("modal-action-close-confirmation-confirm", cx);
 
+    assert!(cx.windows().is_empty());
+}
+
+#[gpui::test]
+fn client_window_close_preserves_running_work_until_confirmation(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    redraw(cx);
+    click("window-close", cx);
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Window)
+    );
+    click("modal-action-close-confirmation-cancel", cx);
+    assert_eq!(cx.windows().len(), 1);
+    assert!(records.dropped_session_ids().is_empty());
+    click("window-close", cx);
+    click("modal-action-close-confirmation-confirm", cx);
     assert!(cx.windows().is_empty());
 }
 
@@ -6369,7 +6394,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         .expect("sidebar toggle");
     assert_eq!(chooser.size, toggle.size);
     let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
-    assert_eq!(toggle.left(), chrome.left() + px(78.0));
+    assert_eq!(toggle.left(), chrome.left() + frame_space(cx));
     assert!(toggle.right() < chooser.left());
     let tabs = cx.debug_bounds("tab-bar").unwrap();
     assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
@@ -6900,7 +6925,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     assert!(cx.debug_bounds("workspace-chip-icon").is_none());
     let label = cx.debug_bounds("workspace-chip-label").unwrap();
     let tabs = cx.debug_bounds("tab-bar").unwrap();
-    assert_eq!(expanded_toggle.left(), px(78.0));
+    assert_eq!(expanded_toggle.left(), frame_space(cx));
     assert_eq!(expanded_toggle.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(chooser.left(), expanded_toggle.right() + frame_space(cx));
     // Ten pixels of content padding inside the one-pixel trigger border.

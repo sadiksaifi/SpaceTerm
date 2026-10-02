@@ -16,7 +16,7 @@ use crate::platform::window_frame::WindowFrameGeometry;
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
     AvailableFonts, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES, FontClass,
-    ResolvedAppearance, ThemeCatalog, SystemAppearance, TerminalFontFamily,
+    ResolvedAppearance, SystemAppearance, TerminalFontFamily, ThemeCatalog,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};
@@ -163,8 +163,10 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         })
         .ok_or(SettingsError::RevisionExhausted)?;
     let accessibility = platform.accessibility_display_options();
+    let native_composition = platform.native_window_composition(cx);
     let capabilities = CompositionCapabilities {
-        native_window_transparency: platform.supports_native_window_transparency(),
+        native_window_transparency: native_composition.transparency,
+        native_window_blur: native_composition.blur,
         reduce_transparency: accessibility.reduce_transparency,
         increase_contrast: accessibility.increase_contrast,
         show_borders: accessibility.show_borders,
