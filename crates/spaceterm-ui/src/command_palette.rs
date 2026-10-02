@@ -3270,7 +3270,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         let panel_height = chrome_height + list_height;
 
         let panel_bounds = gpui::Bounds::new(
-            gpui::point(left, top),
+            gpui::point(left, top) + content_viewport.origin,
             gpui::size(panel_width, panel_height),
         );
         let outside = self.render_outside_tracker(panel_bounds, cx);
@@ -3306,8 +3306,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .child(
                 div()
                     .absolute()
-                    .left(left + content_viewport.origin.x)
-                    .top(top + content_viewport.origin.y)
+                    .left(panel_bounds.origin.x)
+                    .top(panel_bounds.origin.y)
                     // A hidden panel keeps its focus and key handling, so typing is not lost.
                     .when(!panel_visible, |panel| panel.opacity(0.0))
                     .child(panel),
