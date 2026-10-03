@@ -13,7 +13,8 @@ use objc2_foundation::{
 use super::computer_use_access::{
     AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
     ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
-    ComputerUseResetCompletion, ComputerUseSetupCompletion, ComputerUseSetupReadiness,
+    ComputerUseResetCompletion, ComputerUseSetupCancellation, ComputerUseSetupCompletion,
+    ComputerUseSetupPreparation, ComputerUseSetupReadiness,
 };
 use super::macos_computer_use_probe::{ProbeReport, run_probe};
 use super::permission_recovery::{
@@ -149,22 +150,25 @@ impl ComputerUseAccess for MacosComputerUseAccess {
         &self,
         permission: ComputerUsePermission,
         completion: ComputerUseSetupCompletion,
-    ) -> Result<(), ComputerUseAccessError> {
+    ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError> {
         let reset_bundle_identifier = self.reset_bundle_identifier;
         let verification = Arc::clone(&self.verification);
+        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
         std::thread::Builder::new()
             .name("spaceterm-permission-setup".to_owned())
             .spawn(move || {
-                let readiness = prepare(
+                if let Some(readiness) = prepare_exclusively(
+                    &verification,
                     permission,
                     reset_bundle_identifier,
+                    &cancellation,
                     run_probe,
                     run_reset,
-                    |report| verification.record(report),
-                );
-                completion(Ok(readiness));
+                ) {
+                    completion(Ok(readiness));
+                }
             })
-            .map(drop)
+            .map(|_| preparation)
             .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
     }
 
@@ -212,11 +216,38 @@ impl ComputerUseAccess for MacosComputerUseAccess {
     }
 }
 
+/// Prepares once no probe or earlier preparation runs, so a setup cancelled and started again
+/// never probes or resets beside its predecessor. Returns `None` when the setup was cancelled
+/// while it waited.
+fn prepare_exclusively(
+    verification: &Verification,
+    permission: ComputerUsePermission,
+    reset_bundle_identifier: Option<&'static str>,
+    cancellation: &ComputerUseSetupCancellation,
+    probe: impl FnOnce() -> Result<ProbeReport, ComputerUseAccessError>,
+    reset: impl FnOnce(ComputerUsePermission, &'static str) -> Result<(), ComputerUseAccessError>,
+) -> Option<ComputerUseSetupReadiness> {
+    let _probing = verification.probing();
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    Some(prepare(
+        permission,
+        reset_bundle_identifier,
+        cancellation,
+        probe,
+        reset,
+        |report| verification.record(report),
+    ))
+}
+
 /// Reads `permission` from a fresh process and clears its entry only on a verified NotGranted, so
-/// a grant made since the last read is never reset and a failed read resets nothing.
+/// a grant made since the last read is never reset and a failed read resets nothing. A setup
+/// cancelled before the reset begins resets nothing either.
 fn prepare(
     permission: ComputerUsePermission,
     reset_bundle_identifier: Option<&'static str>,
+    cancellation: &ComputerUseSetupCancellation,
     probe: impl FnOnce() -> Result<ProbeReport, ComputerUseAccessError>,
     reset: impl FnOnce(ComputerUsePermission, &'static str) -> Result<(), ComputerUseAccessError>,
     record: impl FnOnce(ProbeReport),
@@ -230,6 +261,7 @@ fn prepare(
     }
     // A failed reset leaves an entry the person turns on instead.
     let cleared = reset_bundle_identifier
+        .filter(|_| !cancellation.is_cancelled())
         .is_some_and(|bundle_identifier| reset(permission, bundle_identifier).is_ok());
     ComputerUseSetupReadiness::Ready { cleared }
 }
@@ -249,11 +281,13 @@ fn run_reset(
 
 /// The latest probe report and the probe that refreshes it.
 ///
-/// At most one probe runs at a time. A request made while one runs starts one more afterward, so
-/// the last report always follows the last request.
+/// At most one probe runs at a time, counting the probe a setup preparation makes. A request made
+/// while one runs starts one more afterward, so the last report always follows the last request.
 #[derive(Default)]
 struct Verification {
     state: Mutex<VerificationState>,
+    /// Held for each probe and each whole setup preparation.
+    probing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -271,6 +305,11 @@ impl Verification {
 
     fn latest(&self) -> Option<ProbeReport> {
         self.lock().latest
+    }
+
+    /// Waits until no probe or setup preparation runs, and keeps others waiting while held.
+    fn probing(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.probing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn subscribe(&self, sender: async_channel::Sender<()>) {
@@ -309,7 +348,11 @@ impl Verification {
             .spawn(move || {
                 loop {
                     // A failed probe keeps the last report rather than inventing one.
-                    if let Ok(report) = run_probe() {
+                    let probed = {
+                        let _probing = verification.probing();
+                        run_probe()
+                    };
+                    if let Ok(report) = probed {
                         verification.record(report);
                     }
                     let mut state = verification.lock();
@@ -482,9 +525,11 @@ mod tests {
         Vec<(ComputerUsePermission, &'static str)>,
     ) {
         let mut resets = Vec::new();
+        let (_preparation, cancellation) = ComputerUseSetupPreparation::new();
         let readiness = prepare(
             ComputerUsePermission::ScreenRecording,
             reset_bundle_identifier,
+            &cancellation,
             || probe,
             |permission, bundle| {
                 resets.push((permission, bundle));
@@ -514,9 +559,11 @@ mod tests {
 
     #[test]
     fn a_failed_reset_clears_nothing() {
+        let (_preparation, cancellation) = ComputerUseSetupPreparation::new();
         let readiness = prepare(
             ComputerUsePermission::ScreenRecording,
             Some(BUNDLE),
+            &cancellation,
             || Ok(report(false)),
             |_, _| Err(ComputerUseAccessError::PlatformRejected),
             |_| {},
@@ -525,6 +572,72 @@ mod tests {
         assert_eq!(
             readiness,
             ComputerUseSetupReadiness::Ready { cleared: false }
+        );
+    }
+
+    #[test]
+    fn a_setup_cancelled_during_its_probe_resets_nothing() {
+        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let mut preparation = Some(preparation);
+        let mut resets = Vec::new();
+        let readiness = prepare(
+            ComputerUsePermission::ScreenRecording,
+            Some(BUNDLE),
+            &cancellation,
+            || {
+                preparation.take();
+                Ok(report(false))
+            },
+            |permission, bundle| {
+                resets.push((permission, bundle));
+                Ok(())
+            },
+            |_| {},
+        );
+
+        assert_eq!(
+            readiness,
+            ComputerUseSetupReadiness::Ready { cleared: false }
+        );
+        assert!(resets.is_empty());
+    }
+
+    #[test]
+    fn a_preparation_waits_for_a_running_probe() {
+        let verification = Arc::new(Verification::default());
+        let probing = verification.probing();
+        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (sender, probed) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn({
+            let verification = Arc::clone(&verification);
+            move || {
+                prepare_exclusively(
+                    &verification,
+                    ComputerUsePermission::ScreenRecording,
+                    Some(BUNDLE),
+                    &cancellation,
+                    || {
+                        let _ = sender.send(());
+                        Ok(report(false))
+                    },
+                    |_, _| Ok(()),
+                )
+            }
+        });
+
+        assert!(
+            probed
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a preparation does not probe beside a running probe"
+        );
+        drop(preparation);
+        drop(probing);
+
+        assert_eq!(waiting.join().expect("the preparation"), None);
+        assert!(
+            probed.try_recv().is_err(),
+            "a preparation cancelled while it waits neither probes nor resets"
         );
     }
 

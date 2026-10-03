@@ -425,6 +425,28 @@ fn closing_the_guide_cancels_and_leaves_system_settings_alone(cx: &mut TestAppCo
     assert_eq!(fixture.access.opened.borrow().len(), 1);
 }
 
+/// Cancel Setup stops a reset the preparation has not begun, so a person who changes their mind
+/// while SpaceTerm reads the authorization leaves the entry as it was.
+#[gpui::test]
+fn cancelling_a_setup_cancels_its_preparation(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    let cancelled = |fixture: &Fixture| {
+        fixture
+            .access
+            .preparations
+            .borrow()
+            .iter()
+            .map(|preparation| preparation.is_cancelled())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cancelled(&fixture), [false]);
+
+    fixture.setup.update(cx, |setup, cx| setup.cancel(cx));
+
+    assert_eq!(cancelled(&fixture), [true]);
+}
+
 /// Dragging the application out of the guide hands its bundle to the system, which is what a
 /// System Settings list accepts, drawn as a copy of the row held where the pointer took it.
 #[gpui::test]

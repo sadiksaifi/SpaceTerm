@@ -22,7 +22,8 @@ use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Tas
 
 use crate::platform::computer_use_access::{
     AccessibilityNaming, ComputerUseAccess, ComputerUseAccessSubscription,
-    ComputerUseAuthorization, ComputerUsePermission, ComputerUseSetupReadiness,
+    ComputerUseAuthorization, ComputerUsePermission, ComputerUseSetupPreparation,
+    ComputerUseSetupReadiness,
 };
 use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost, SystemSettingsWindow};
 
@@ -152,6 +153,9 @@ struct SetupRun {
     intervals: u32,
     /// When System Settings was last asked for a list.
     opened_at: Instant,
+    /// The current permission's preparation. Ending the setup drops it, which cancels a reset it
+    /// has not begun.
+    _preparation: Option<ComputerUseSetupPreparation>,
     /// Waits for the current step: the preparation's result or the opening timeout.
     _step: Option<Task<()>>,
     _tracking: Task<()>,
@@ -326,6 +330,7 @@ impl PermissionSetup {
             guide: None,
             intervals: 0,
             opened_at: cx.background_executor().now(),
+            _preparation: None,
             _step: None,
             _tracking: tracking,
             _changes: changes,
@@ -368,12 +373,15 @@ impl PermissionSetup {
         run.cleared = false;
         let permission = run.permission;
         let (sender, receiver) = async_channel::bounded(1);
-        let started = self.access.prepare_setup(
-            permission,
-            Box::new(move |readiness| {
-                let _ = sender.try_send(readiness);
-            }),
-        );
+        let started = self
+            .access
+            .prepare_setup(
+                permission,
+                Box::new(move |readiness| {
+                    let _ = sender.try_send(readiness);
+                }),
+            )
+            .map(|preparation| run._preparation = Some(preparation));
         run._step = Some(cx.spawn(async move |setup, cx| {
             let readiness = match started {
                 Ok(()) => receiver.recv().await.ok().and_then(Result::ok),

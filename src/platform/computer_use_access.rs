@@ -3,6 +3,9 @@
 //! A computer-use tool running in a Terminal Session takes screenshots and sends input through
 //! SpaceTerm's grants, so SpaceTerm reads, sets up, and recovers them for the tool.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// One system permission that computer-use tools in a Terminal Session inherit from SpaceTerm.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ComputerUsePermission {
@@ -63,6 +66,43 @@ pub(crate) enum ComputerUseSetupReadiness {
 pub(crate) type ComputerUseSetupCompletion =
     Box<dyn FnOnce(Result<ComputerUseSetupReadiness, ComputerUseAccessError>) + Send>;
 
+/// A preparation [`ComputerUseAccess::prepare_setup`] started. Dropping it cancels the
+/// preparation: an entry it has not begun removing stays, and its completion may never run.
+pub(crate) struct ComputerUseSetupPreparation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ComputerUseSetupPreparation {
+    /// A preparation and the signal its native work reads to learn of the cancellation.
+    pub(crate) fn new() -> (Self, ComputerUseSetupCancellation) {
+        let cancelled = Arc::default();
+        (
+            Self {
+                cancelled: Arc::clone(&cancelled),
+            },
+            ComputerUseSetupCancellation { cancelled },
+        )
+    }
+}
+
+impl Drop for ComputerUseSetupPreparation {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+/// Whether the owner of a [`ComputerUseSetupPreparation`] cancelled it.
+#[derive(Clone)]
+pub(crate) struct ComputerUseSetupCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ComputerUseSetupCancellation {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
 /// Keeps a native authorization-change observation alive until its owner drops it.
 pub(crate) trait ComputerUseAccessSubscription {}
 
@@ -102,12 +142,13 @@ pub(crate) trait ComputerUseAccess {
     /// without changing anything when tools already receive the permission. Otherwise it removes
     /// any entry for the running application when it can, because System Settings ignores an
     /// application dropped onto a list that already holds it, and an entry from an earlier build
-    /// grants nothing. The completion may run on any thread.
+    /// grants nothing. The completion may run on any thread. The caller keeps the returned
+    /// preparation for as long as it wants the result.
     fn prepare_setup(
         &self,
         permission: ComputerUsePermission,
         completion: ComputerUseSetupCompletion,
-    ) -> Result<(), ComputerUseAccessError>;
+    ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError>;
 
     fn open_settings(
         &self,
@@ -150,6 +191,8 @@ pub(crate) mod testing {
         pub(crate) resettable: Cell<bool>,
         pub(crate) reset_failure: Cell<Option<ComputerUseAccessError>>,
         pub(crate) prepared: RefCell<Vec<ComputerUsePermission>>,
+        /// One signal for each preparation, in order, which tells whether its owner cancelled it.
+        pub(crate) preparations: RefCell<Vec<ComputerUseSetupCancellation>>,
         pub(crate) opened: RefCell<Vec<ComputerUsePermission>>,
         pub(crate) resets: RefCell<Vec<ComputerUsePermission>>,
         pending_resets: RefCell<Vec<ComputerUseResetCompletion>>,
@@ -184,6 +227,7 @@ pub(crate) mod testing {
                 resettable: Cell::new(true),
                 reset_failure: Cell::new(None),
                 prepared: RefCell::default(),
+                preparations: RefCell::default(),
                 opened: RefCell::default(),
                 resets: RefCell::default(),
                 pending_resets: RefCell::default(),
@@ -254,11 +298,13 @@ pub(crate) mod testing {
             &self,
             permission: ComputerUsePermission,
             completion: ComputerUseSetupCompletion,
-        ) -> Result<(), ComputerUseAccessError> {
+        ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError> {
             self.prepared.borrow_mut().push(permission);
             if let Some(error) = self.setup_failure.get() {
                 return Err(error);
             }
+            let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+            self.preparations.borrow_mut().push(cancellation);
             completion(
                 self.authorization(permission)
                     .map(|authorization| match authorization {
@@ -270,7 +316,7 @@ pub(crate) mod testing {
                         },
                     }),
             );
-            Ok(())
+            Ok(preparation)
         }
 
         fn open_settings(
