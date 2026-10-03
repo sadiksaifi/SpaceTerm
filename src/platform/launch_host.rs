@@ -121,6 +121,38 @@ pub(crate) fn local_hostname() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// macOS removes only the shared foreign terminal variables.
+#[cfg(target_os = "macos")]
+const HOST_RUNTIME_ENVIRONMENT: &[&str] = &[];
+
+/// Desktop launch tokens and the markers of terminals that commonly start SpaceTerm on Linux.
+#[cfg(target_os = "linux")]
+const HOST_RUNTIME_ENVIRONMENT: &[&str] = &[
+    "ALACRITTY_LOG",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "DESKTOP_STARTUP_ID",
+    "GIO_LAUNCHED_DESKTOP_FILE",
+    "GIO_LAUNCHED_DESKTOP_FILE_PID",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "KITTY_INSTALLATION_DIR",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "KONSOLE_VERSION",
+    "TERMINATOR_DBUS_NAME",
+    "TERMINATOR_DBUS_PATH",
+    "TERMINATOR_UUID",
+    "TILIX_ID",
+    "VTE_VERSION",
+    "WINDOWID",
+    "XDG_ACTIVATION_TOKEN",
+    "XTERM_LOCALE",
+    "XTERM_SHELL",
+    "XTERM_VERSION",
+];
+
 /// Capture every shell planning fact once at composition.
 pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner {
     shell_launch_planner_with(user_shell(), resource_root(), |key| std::env::var_os(key))
@@ -147,6 +179,7 @@ pub(super) fn shell_launch_planner_with(
             env: read("ENV"),
         },
         policy,
+        HOST_RUNTIME_ENVIRONMENT,
     )
 }
 
@@ -163,6 +196,36 @@ mod tests {
         );
         assert!(shell_integration_supported(Path::new("/bin/bash")));
         assert!(fallback_shell().is_absolute());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_desktop_launch_variables_are_host_policy_not_shared_removals() {
+        let directory = std::env::temp_dir();
+        let removals = |planner: super::super::shell_launch::ShellLaunchPlanner| {
+            planner
+                .local(&directory)
+                .unwrap()
+                .environment_removals()
+                .to_vec()
+        };
+        let host = removals(shell_launch_planner_with(
+            "/fixture/zsh".into(),
+            "/fixture/resources".into(),
+            |_| None,
+        ));
+        let shared = removals(super::super::shell_launch::ShellLaunchPlanner::for_test(
+            "/fixture/zsh".into(),
+            "/fixture/resources".into(),
+        ));
+        for name in HOST_RUNTIME_ENVIRONMENT {
+            assert!(
+                host.contains(&(*name).into()),
+                "{name} reaches Linux shells"
+            );
+            assert!(!shared.contains(&(*name).into()), "{name} is shared policy");
+        }
+        assert!(shared.iter().all(|name| host.contains(name)));
     }
 
     #[cfg(target_os = "macos")]
