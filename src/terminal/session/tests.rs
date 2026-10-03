@@ -4362,7 +4362,7 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
 }
 
 #[test]
-fn copy_or_forward_preserves_linux_chord_and_completes_one_gesture() {
+fn copy_or_forward_preserves_a_control_shift_chord_and_completes_one_gesture() {
     let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events;
@@ -4392,7 +4392,7 @@ fn copy_or_forward_preserves_linux_chord_and_completes_one_gesture() {
 }
 
 #[test]
-fn linux_unshifted_xterm_control_forms_write_exact_pty_bytes() {
+fn unshifted_xterm_control_forms_write_exact_pty_bytes() {
     let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events;
