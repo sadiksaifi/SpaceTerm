@@ -2849,7 +2849,10 @@ impl TerminalPane {
         if self.synchronize_terminal_input_focus(window, cx)
             && let Some(session) = self.terminal_session.session.as_ref()
         {
-            let result = session.copy_or_forward();
+            let modifiers = crate::keybindings::runtime::KeymapRuntime::profile(cx)
+                .terminal_conventions()
+                .shortcut_modifiers();
+            let result = session.copy_or_forward(input_modifiers(modifiers));
             self.publish_selection_copy(result, None, cx);
         }
     }

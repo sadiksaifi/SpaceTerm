@@ -51,9 +51,25 @@ impl KeyboardProtocolEncoder {
             .set_composing(false)
             .set_utf8(input.text.clone())
             .set_unshifted_codepoint(input.unshifted_codepoint.unwrap_or('\0'));
+        let start = bytes.len();
         self.encoder
             .encode_to_vec(&self.event, bytes)
-            .map_err(|error| format!("failed to encode terminal key input: {error}"))
+            .map_err(|error| format!("failed to encode terminal key input: {error}"))?;
+        // Native Ctrl+[ may carry no text after its control character is filtered. Ghostty's
+        // fixterms path needs text for this ambiguous chord, so retain its xterm ESC form when
+        // it otherwise encodes nothing. Negotiated keyboard reports remain authoritative.
+        if bytes.len() == start
+            && input.action != KeyAction::Release
+            && input.text.is_none()
+            && input.logical_key == "["
+            && input.modifiers.control
+            && !input.modifiers.shift
+            && !input.modifiers.alt
+            && !input.modifiers.platform
+        {
+            bytes.push(0x1b);
+        }
+        Ok(())
     }
 }
 
