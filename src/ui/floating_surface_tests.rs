@@ -1,9 +1,9 @@
-use crate::ui::appearance::gpui_color;
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, ThemeCatalog,
-    SystemAppearance, WindowBackgroundAppearance,
+    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SystemAppearance,
+    ThemeCatalog, WindowBackgroundAppearance,
 };
+use crate::ui::appearance::gpui_color;
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
 use spaceterm_ui::{FloatingRole, FloatingShell};
 
@@ -2549,8 +2549,8 @@ fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback
     let hover = paint.ghost_element_hover;
     let pressed = paint.ghost_element_active;
     let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    let endpoints = [Color::BLACK, Color::WHITE]
-        .map(|underlay| shell_endpoint_background(shell, underlay));
+    let endpoints =
+        [Color::BLACK, Color::WHITE].map(|underlay| shell_endpoint_background(shell, underlay));
     assert!(
         !prepared
             .floating_fallbacks
@@ -3174,10 +3174,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
     cx.update(|cx| {
         spaceterm_ui::init(
             cx,
-            super::control_theme_catalog::catalog(
-                &prepared,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
+            super::control_theme_catalog::catalog(&prepared, spaceterm_ui::ControlMotion::Standard),
         )
         .expect("floating catalog should install");
         assert_eq!(

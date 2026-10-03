@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::appearance::{ChromeDensity, ResetTarget, SettingsDocument};
 use crate::settings::storage::StorageError;
-use crate::settings::{PreviewPhase, ThemeImport, SettingsError, UserSettings};
+use crate::settings::{PreviewPhase, SettingsError, ThemeImport, UserSettings};
 use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
@@ -189,11 +189,7 @@ fn unchanged_or_rejected_edits_preserve_a_save_failure_until_retry_finishes() {
     assert_eq!(draft.status(), failed);
 
     assert!(!draft.edit(|_| {}));
-    assert!(
-        draft
-            .import(ThemeImport::ZedFamily(b"invalid"))
-            .is_err()
-    );
+    assert!(draft.import(ThemeImport::ZedFamily(b"invalid")).is_err());
     assert_eq!(draft.status(), failed);
     assert!(draft.has_unwritten_changes());
 
@@ -345,14 +341,11 @@ fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
 
     for operation in 0..3 {
         let result = match operation {
-            0 => draft
-                .import(ThemeImport::ZedFamily(b"invalid"))
-                .map(|_| ()),
+            0 => draft.import(ThemeImport::ZedFamily(b"invalid")).map(|_| ()),
             1 => draft
                 .import(ThemeImport::ZedFamily(br#"{"themes":[]}"#))
                 .map(|_| ()),
-            _ => draft
-                .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()]),
+            _ => draft.remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()]),
         };
         assert!(result.is_err());
         assert_eq!(draft.status(), SaveStatus::Saved);
@@ -371,11 +364,7 @@ fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
     draft.edit(|document| document.preferences.window.density = ChromeDensity::Comfortable);
     let expected = draft.document().clone();
 
-    assert!(
-        draft
-            .import(ThemeImport::ZedFamily(b"invalid"))
-            .is_err()
-    );
+    assert!(draft.import(ThemeImport::ZedFamily(b"invalid")).is_err());
     assert!(
         draft
             .remove_themes(&[crate::appearance::ThemeId::new("custom.absent").unwrap()])

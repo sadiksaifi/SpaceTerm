@@ -101,9 +101,7 @@ impl ChipPaint {
         };
         Self {
             fill: material(self.fill),
-            hover_fill: if appearance.appearance == Appearance::Light
-                && appearance.active
-            {
+            hover_fill: if appearance.appearance == Appearance::Light && appearance.active {
                 self.hover_fill
                     .map(|fill| appearance.hover_surface(semantic_host, fill))
             } else {
@@ -188,10 +186,17 @@ impl SelectionChip {
 /// A paint `hover` of the way from its resting to its hovered color.
 ///
 /// A paint that appears only on hover fades in from transparent, keeping its own color.
-pub(crate) fn hovered_paint(rest: Option<Color>, hovered: Option<Color>, hover: f32) -> Option<Color> {
+pub(crate) fn hovered_paint(
+    rest: Option<Color>,
+    hovered: Option<Color>,
+    hover: f32,
+) -> Option<Color> {
     match hovered {
         None => rest,
-        Some(hovered) => Some(rest.unwrap_or(Color::rgba(0)).fade(hovered, f64::from(hover))),
+        Some(hovered) => Some(
+            rest.unwrap_or(Color::rgba(0))
+                .fade(hovered, f64::from(hover)),
+        ),
     }
 }
 
@@ -200,7 +205,7 @@ mod tests {
     use super::*;
     use crate::appearance::{
         AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-        ThemeCatalog, SystemAppearance,
+        SystemAppearance, ThemeCatalog,
     };
 
     fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {

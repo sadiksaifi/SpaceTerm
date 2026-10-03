@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, ThemeCatalog, SystemAppearance,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog,
     };
     use crate::ui::appearance::ChromeAppearance;
 

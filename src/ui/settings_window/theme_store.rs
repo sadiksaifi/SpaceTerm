@@ -13,9 +13,8 @@ use gpui::{AnyElement, App, Entity, FocusHandle, SharedString, WeakEntity, Windo
 use spaceterm_ui::{
     Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FuzzyTarget, Icon, IconName,
     ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressBar, ProgressRing,
-    ProgressSize, ProgressState,
-    SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
-    TextInputVariant, fuzzy_filter,
+    ProgressSize, ProgressState, SearchField, TextInput, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant, fuzzy_filter,
 };
 
 use crate::appearance::{CatalogError, ImportError, ThemePackage, ZedExtension};
@@ -27,8 +26,8 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 use super::SettingsWindow;
-use crate::ui::sidebar_window::form::action_button;
 use super::import::{ImportError as ThemeReadError, read_selected_document};
+use crate::ui::sidebar_window::form::action_button;
 
 /// Results beyond this many ask for a narrower search instead of growing the list.
 const MAX_RESULTS: usize = 40;
@@ -82,14 +81,20 @@ impl ThemeStore {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| {
-            TextInput::new(SEARCH_SELECTOR, "Search Zed themes", String::new(), window, cx)
-                .placeholder("Search Zed themes")
-                .variant(TextInputVariant::Bare)
-                .return_behavior(TextInputReturnBehavior::Propagate)
-                .escape_behavior(TextInputEscapeBehavior::Propagate)
-                .input_length_limit(Some(128))
-                .emit_programmatic_changes(true)
-                .debug_selector(SEARCH_SELECTOR)
+            TextInput::new(
+                SEARCH_SELECTOR,
+                "Search Zed themes",
+                String::new(),
+                window,
+                cx,
+            )
+            .placeholder("Search Zed themes")
+            .variant(TextInputVariant::Bare)
+            .return_behavior(TextInputReturnBehavior::Propagate)
+            .escape_behavior(TextInputEscapeBehavior::Propagate)
+            .input_length_limit(Some(128))
+            .emit_programmatic_changes(true)
+            .debug_selector(SEARCH_SELECTOR)
         });
         cx.subscribe(&search, |store, search, event: &TextInputEvent, cx| {
             if matches!(event, TextInputEvent::ValueChanged(_)) {
@@ -411,12 +416,14 @@ impl ThemeStore {
                     .w_full()
                     .children(rows)
                     .when(total > count, |list| {
-                        list.child(div().pt(appearance.spacing(10.0)).child(secondary(
-                            format!(
-                                "Showing {count} of {total} extensions. Search to find others."
-                            )
-                            .into(),
-                        )))
+                        list.child(
+                            div().pt(appearance.spacing(10.0)).child(secondary(
+                                format!(
+                                    "Showing {count} of {total} extensions. Search to find others."
+                                )
+                                .into(),
+                            )),
+                        )
                     })
                     .into_any_element()
             }
@@ -500,12 +507,7 @@ impl SettingsWindow {
         )
         .size(DialogSize::Wide)
         .body(store);
-        let presented = dialog.present(
-            window,
-            cx,
-            |_, _, _| DialogCloseDecision::Allow,
-            |_, _| {},
-        );
+        let presented = dialog.present(window, cx, |_, _, _| DialogCloseDecision::Allow, |_, _| {});
         if presented.is_err() {
             eprintln!("failed to present the SpaceTerm Get More Themes sheet");
         }

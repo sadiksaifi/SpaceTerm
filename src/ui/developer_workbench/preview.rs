@@ -289,7 +289,9 @@ mod tests {
         assert!(preview.alternate_typography(&preview.document()));
         assert_eq!(
             preview.document().preferences.terminal.typography.family,
-            TerminalFontFamily::Named { family: "Fixture Mono".into() },
+            TerminalFontFamily::Named {
+                family: "Fixture Mono".into()
+            },
         );
         preview.set_alternate_typography(false).unwrap();
 
@@ -312,7 +314,8 @@ mod tests {
     #[test]
     fn commit_saves_the_preview_and_closes_it() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
 
         assert!(preview.commit().is_ok());
@@ -328,7 +331,8 @@ mod tests {
     #[test]
     fn a_failed_commit_keeps_the_preview_open() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
         storage.fail_writes(Some(StorageError::Unavailable));
 
@@ -344,7 +348,8 @@ mod tests {
     #[test]
     fn a_theme_family_installs_without_an_open_preview() {
         let mut preview = preview();
-        let family = r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;
+        let family =
+            r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;
 
         assert_eq!(preview.install_theme_family(family), Ok(1));
 

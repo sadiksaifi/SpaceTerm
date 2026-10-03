@@ -809,7 +809,11 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
 
     for (role, owner, compact_height) in [
         ("workspace", WindowTrafficLightOwner::workspace(), px(41.0)),
-        ("settings", WindowTrafficLightOwner::sidebar_window(), px(36.0)),
+        (
+            "settings",
+            WindowTrafficLightOwner::sidebar_window(),
+            px(36.0),
+        ),
     ] {
         // Compact density rests exactly on the host anchor.
         cx.update(|cx| {

@@ -166,6 +166,7 @@ macro_rules! lucide_sources {
 
 lucide_sources! {
     AppWindow => "app-window",
+    ArrowUp => "arrow-up",
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronRight => "chevron-right",

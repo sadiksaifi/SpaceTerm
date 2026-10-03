@@ -17,8 +17,8 @@ pub use preferences::KeybindingPreferences;
 )]
 pub use preferences::KeybindingPreferencesError;
 pub use shortcut::{Shortcut, ShortcutRejection};
-pub use terminal_conventions::{TerminalConvention, TerminalConventions};
 pub(crate) use terminal_conventions::is_presentable;
+pub use terminal_conventions::{TerminalConvention, TerminalConventions};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

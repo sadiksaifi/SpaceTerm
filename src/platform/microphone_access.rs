@@ -3,7 +3,10 @@
 /// The application's current Operating-System microphone authorization.
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "desktops without microphone authorization construct only the denied states")
+    allow(
+        dead_code,
+        reason = "desktops without microphone authorization construct only the denied states"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MicrophoneAuthorization {
@@ -16,7 +19,10 @@ pub(crate) enum MicrophoneAuthorization {
 /// Content-free failures from native microphone authorization and recovery operations.
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "desktops without microphone authorization construct only the denied states")
+    allow(
+        dead_code,
+        reason = "desktops without microphone authorization construct only the denied states"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum MicrophoneAccessError {

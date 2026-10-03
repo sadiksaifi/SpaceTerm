@@ -232,7 +232,10 @@ fn theme_families(archive: &[u8]) -> Result<Vec<Vec<u8>>, RegistryError> {
         if families.len() >= MAX_EXTENSION_FAMILIES {
             return Err(RegistryError::InvalidArchive);
         }
-        let size = entry.header().size().map_err(|_| RegistryError::InvalidArchive)?;
+        let size = entry
+            .header()
+            .size()
+            .map_err(|_| RegistryError::InvalidArchive)?;
         if size > MAX_FAMILY_BYTES as u64 {
             return Err(RegistryError::TooLarge);
         }

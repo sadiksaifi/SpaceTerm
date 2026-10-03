@@ -23,18 +23,22 @@ impl SettingsWindow {
             "settings-clipboard-writes"
         };
         let owner = cx.weak_entity();
-        Switch::new(selector, row.descriptor().label, value)
-            .size(ToggleSize::Regular)
-            .label_hidden(true)
-            .disabled(!self.editor.editable())
-            .debug_selector(selector)
-            .on_change(move |change, _, cx| {
-                let value = change.requested();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.edit(move |draft| set(row, &mut draft.clipboard, value), cx);
-                });
-            })
-            .into_any_element()
+        Switch::new(
+            selector,
+            row.descriptor().label(self.permission_access.naming()),
+            value,
+        )
+        .size(ToggleSize::Regular)
+        .label_hidden(true)
+        .disabled(!self.editor.editable())
+        .debug_selector(selector)
+        .on_change(move |change, _, cx| {
+            let value = change.requested();
+            let _ = owner.update(cx, |settings, cx| {
+                settings.edit(move |draft| set(row, &mut draft.clipboard, value), cx);
+            });
+        })
+        .into_any_element()
     }
 
     pub(super) fn clipboard_preference_differs(&self, row: SettingsRowId) -> Option<bool> {

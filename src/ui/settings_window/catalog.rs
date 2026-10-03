@@ -8,6 +8,7 @@ use spaceterm_ui::{FuzzyTarget, fuzzy_filter};
 
 use crate::appearance::{Appearance, ResetTarget};
 use crate::keybindings::{Command, CommandGroup};
+use crate::platform::permission_access::AccessibilityNaming;
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -108,6 +109,12 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
+    /// The system's Screen Recording authorization, which programs in a Terminal Session inherit
+    /// to take screenshots.
+    ScreenRecordingAccess,
+    /// The system's Accessibility authorization, which programs in a Terminal Session inherit to
+    /// click and type. Its label follows the name System Settings gives it.
+    AccessibilityAccess,
     ClipboardWrites,
     ClipboardReads,
     /// The installed version, the latest check, and the next step the update service offers.
@@ -157,6 +164,8 @@ impl SettingsRowId {
             // through their own field instead of an appearance reset target.
             Self::InstalledThemes
             | Self::MicrophoneAccess
+            | Self::ScreenRecordingAccess
+            | Self::AccessibilityAccess
             | Self::ClipboardWrites
             | Self::ClipboardReads
             | Self::UpdateStatus
@@ -186,10 +195,23 @@ pub(super) struct SettingsRowDescriptor {
     /// Rows carrying the same group title in one section render as one box, so the order here is
     /// also the grouping: a row that leaves its neighbours starts a new box.
     pub(super) group: &'static str,
-    pub(super) label: &'static str,
+    /// The row's name. [`Self::label`] presents it, naming a permission as the running system does.
+    label: &'static str,
     /// Words a person might search for that do not appear in the label.
     pub(super) keywords: &'static [&'static str],
     pub(super) selector: &'static str,
+}
+
+impl SettingsRowDescriptor {
+    /// The row's name, with its permission named as System Settings does under `naming`.
+    pub(super) fn label(&self, naming: AccessibilityNaming) -> &'static str {
+        match (self.id, naming) {
+            (SettingsRowId::AccessibilityAccess, AccessibilityNaming::Accessibility) => {
+                "Accessibility access"
+            }
+            _ => self.label,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,13 +221,17 @@ pub(super) struct SettingsRowMatch {
     pub(super) matched_indices: Vec<usize>,
 }
 
-pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
+/// Matches `query` against each row's label as presented under `naming` and its keywords.
+pub(super) fn matching_row_matches(
+    query: &str,
+    naming: AccessibilityNaming,
+) -> Vec<SettingsRowMatch> {
     let rows = rows().collect::<Vec<_>>();
     let fields = rows
         .iter()
         .enumerate()
         .flat_map(|(row_index, descriptor)| {
-            std::iter::once((row_index, true, descriptor.label)).chain(
+            std::iter::once((row_index, true, descriptor.label(naming))).chain(
                 descriptor
                     .keywords
                     .iter()
@@ -236,8 +262,8 @@ pub(super) fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
 }
 
 /// Returns the rows answering `query`, or every row when the query is empty.
-pub(super) fn matching_rows(query: &str) -> Vec<SettingsRowId> {
-    matching_row_matches(query)
+pub(super) fn matching_rows(query: &str, naming: AccessibilityNaming) -> Vec<SettingsRowId> {
+    matching_row_matches(query, naming)
         .into_iter()
         .map(|matched| matched.id)
         .collect()
@@ -411,6 +437,53 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "denied",
         ],
         selector: "settings-row-microphone-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ScreenRecordingAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Screen recording access",
+        keywords: &[
+            "computer use",
+            "screenshot",
+            "screen capture",
+            "capture",
+            "agent",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+            "troubleshoot",
+            "reset",
+        ],
+        selector: "settings-row-screen-recording-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::AccessibilityAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Device control access",
+        keywords: &[
+            "accessibility",
+            "computer use",
+            "data access",
+            "click",
+            "type",
+            "input",
+            "automation",
+            "agent",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+            "troubleshoot",
+            "reset",
+        ],
+        selector: "settings-row-accessibility-access",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ClipboardWrites,
@@ -638,8 +711,39 @@ mod tests {
 
     use super::*;
 
+    /// Searches as on macOS 27 and later; the naming tests below cover earlier systems.
+    fn matching_rows(query: &str) -> Vec<SettingsRowId> {
+        super::matching_rows(query, AccessibilityNaming::DeviceControl)
+    }
+
+    fn matching_row_matches(query: &str) -> Vec<SettingsRowMatch> {
+        super::matching_row_matches(query, AccessibilityNaming::DeviceControl)
+    }
+
+    /// The Accessibility row carries the name System Settings shows on the running system.
+    #[test]
+    fn the_accessibility_row_follows_the_system_name() {
+        let row = SettingsRowId::AccessibilityAccess.descriptor();
+        assert_eq!(
+            row.label(AccessibilityNaming::Accessibility),
+            "Accessibility access"
+        );
+        assert_eq!(
+            row.label(AccessibilityNaming::DeviceControl),
+            "Device control access"
+        );
+
+        let matched =
+            super::matching_row_matches("accessibility", AccessibilityNaming::Accessibility);
+        assert_eq!(matched[0].id, SettingsRowId::AccessibilityAccess);
+        assert!(
+            !matched[0].matched_indices.is_empty(),
+            "the presented label carries the match"
+        );
+    }
+
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 24] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 26] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Transparency,
         SettingsRowId::Blur,
@@ -654,6 +758,8 @@ mod tests {
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
         SettingsRowId::MicrophoneAccess,
+        SettingsRowId::ScreenRecordingAccess,
+        SettingsRowId::AccessibilityAccess,
         SettingsRowId::ClipboardWrites,
         SettingsRowId::ClipboardReads,
         SettingsRowId::UpdateStatus,
@@ -848,6 +954,35 @@ mod tests {
         }
     }
 
+    /// A person whose program cannot see or control the screen searches for what the program
+    /// does, for the permission's name in System Settings, or for a common use of both.
+    #[test]
+    fn a_permission_query_reaches_its_row() {
+        for (query, row) in [
+            ("screen recording", SettingsRowId::ScreenRecordingAccess),
+            ("screenshot", SettingsRowId::ScreenRecordingAccess),
+            ("accessibility", SettingsRowId::AccessibilityAccess),
+            ("device control", SettingsRowId::AccessibilityAccess),
+            ("click", SettingsRowId::AccessibilityAccess),
+        ] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&row),
+                "{query:?} should rank {row:?} first"
+            );
+        }
+        let common_use = matching_rows("computer use");
+        for row in [
+            SettingsRowId::ScreenRecordingAccess,
+            SettingsRowId::AccessibilityAccess,
+        ] {
+            assert!(
+                common_use.contains(&row),
+                "computer use should reach {row:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_command_query_reaches_its_shortcut_row() {
         assert_eq!(
@@ -917,6 +1052,8 @@ mod tests {
                 row.id,
                 SettingsRowId::InstalledThemes
                     | SettingsRowId::MicrophoneAccess
+                    | SettingsRowId::ScreenRecordingAccess
+                    | SettingsRowId::AccessibilityAccess
                     | SettingsRowId::ClipboardWrites
                     | SettingsRowId::ClipboardReads
                     | SettingsRowId::UpdateStatus

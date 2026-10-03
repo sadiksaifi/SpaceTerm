@@ -1,7 +1,10 @@
 //! Explicit application shortcut policy shared by host composition and test fixtures.
 #![cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "the Command-key desktop composes this table; other desktops use it only as a test fixture")
+    allow(
+        dead_code,
+        reason = "the Command-key desktop composes this table; other desktops use it only as a test fixture"
+    )
 )]
 use crate::app::*;
 use crate::keybindings::{
@@ -245,8 +248,14 @@ fn developer_reservations() -> [SystemReserved; 2] {
     use crate::keybindings::{Shortcut, SystemReservation};
 
     [
-        (OPEN_DEVELOPER_WORKBENCH, SystemReservation::DeveloperWorkbench),
-        (TOGGLE_APPEARANCE_PREVIEW, SystemReservation::AppearancePreview),
+        (
+            OPEN_DEVELOPER_WORKBENCH,
+            SystemReservation::DeveloperWorkbench,
+        ),
+        (
+            TOGGLE_APPEARANCE_PREVIEW,
+            SystemReservation::AppearancePreview,
+        ),
     ]
     .map(|(source, reason)| SystemReserved {
         shortcut: Shortcut::parse(source).expect("static developer shortcut"),
@@ -277,6 +286,19 @@ fn control_bindings() -> Vec<KeyBinding> {
             "escape",
             CancelUnsafePaste,
             Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
+        ),
+        // A program can raise a Permission Request at any moment, so its answers avoid Return and
+        // Escape, which every program reads. A Pane also ignores them until the notice has shown
+        // briefly, because an enhanced keyboard mode can send these keys to a program too.
+        KeyBinding::new(
+            "cmd-enter",
+            SetUpPermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-.",
+            DeclinePermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
         ),
         KeyBinding::new(
             "cmd-w",

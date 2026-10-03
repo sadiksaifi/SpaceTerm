@@ -4,7 +4,10 @@ use std::cell::Cell;
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "desktops whose toolkit owns window moves report no native failures")
+    allow(
+        dead_code,
+        reason = "desktops whose toolkit owns window moves report no native failures"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum OperatingSystemWindowDragError {

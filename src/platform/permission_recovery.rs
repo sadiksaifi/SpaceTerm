@@ -1,6 +1,9 @@
 #![cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only desktops with a permission recovery route compose this policy")
+    allow(
+        dead_code,
+        reason = "only desktops with a permission recovery route compose this policy"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionRecoveryError {
@@ -112,11 +115,7 @@ mod tests {
     fn preferred_success_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Ok(())]);
 
-        let result = open_settings_url(
-            &launcher,
-            PREFERRED_SETTINGS_URI,
-            FALLBACK_SETTINGS_URI,
-        );
+        let result = open_settings_url(&launcher, PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI);
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
@@ -128,21 +127,11 @@ mod tests {
     fn preferred_rejection_launches_successful_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::Rejected), Ok(())]);
 
-        let result = open_settings_url(
-            &launcher,
-            PREFERRED_SETTINGS_URI,
-            FALLBACK_SETTINGS_URI,
-        );
+        let result = open_settings_url(&launcher, PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI);
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
-            (
-                Ok(()),
-                vec![
-                    PREFERRED_SETTINGS_URI,
-                    FALLBACK_SETTINGS_URI,
-                ]
-            )
+            (Ok(()), vec![PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI,])
         );
     }
 
@@ -153,20 +142,13 @@ mod tests {
             Err(UrlLaunchError::Rejected),
         ]);
 
-        let result = open_settings_url(
-            &launcher,
-            PREFERRED_SETTINGS_URI,
-            FALLBACK_SETTINGS_URI,
-        );
+        let result = open_settings_url(&launcher, PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI);
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
             (
                 Err(PermissionRecoveryError::PlatformRejected),
-                vec![
-                    PREFERRED_SETTINGS_URI,
-                    FALLBACK_SETTINGS_URI,
-                ]
+                vec![PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI,]
             )
         );
     }
@@ -175,11 +157,7 @@ mod tests {
     fn non_appkit_failure_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::OffMainThread)]);
 
-        let result = open_settings_url(
-            &launcher,
-            PREFERRED_SETTINGS_URI,
-            FALLBACK_SETTINGS_URI,
-        );
+        let result = open_settings_url(&launcher, PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI);
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),
@@ -194,11 +172,7 @@ mod tests {
     fn platform_unavailability_does_not_launch_fallback() {
         let launcher = RecordingUrlLauncher::new([Err(UrlLaunchError::Unavailable)]);
 
-        let result = open_settings_url(
-            &launcher,
-            PREFERRED_SETTINGS_URI,
-            FALLBACK_SETTINGS_URI,
-        );
+        let result = open_settings_url(&launcher, PREFERRED_SETTINGS_URI, FALLBACK_SETTINGS_URI);
 
         assert_eq!(
             (result, launcher.opened_uris.into_inner()),

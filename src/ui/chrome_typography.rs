@@ -323,11 +323,9 @@ mod tests {
         }
     }
 
-
     #[test]
     fn roles_retain_descriptor_identity_and_features_with_mapped_weight() {
-        let typography =
-            ChromeTypography::prepare(&resolved(), ChromeDensity::Compact);
+        let typography = ChromeTypography::prepare(&resolved(), ChromeDensity::Compact);
         let shortcut = typography.style(TextRole::Shortcut);
         assert_eq!(shortcut.font.family.as_ref(), "Body Family");
         assert_eq!(
@@ -361,9 +359,6 @@ mod tests {
         assert_eq!(title.font.family.as_ref(), "Heading Family");
         assert_eq!(title.font.weight, FontWeight(300.0));
     }
-
-
-
 
     #[test]
     fn default_catalog_keeps_the_shipped_regular_emphasis_and_heading_weights() {

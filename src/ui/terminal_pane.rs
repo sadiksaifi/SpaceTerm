@@ -33,22 +33,25 @@ use super::{
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
     OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
     TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
+    TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
+use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
+use crate::platform::permission_access::SystemPermission;
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
-#[cfg(test)]
-use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
 };
+#[cfg(test)]
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
 use crate::terminal::native_services::file_preview::{FilePreviewPanel, FilePreviewPresenter};
 use crate::terminal::native_services::{
@@ -101,6 +104,10 @@ const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
 /// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
 /// because the caller filters those out before recording.
 const DOUBLE_ESCAPE_FULLSCREEN_WINDOW: Duration = Duration::from_millis(500);
+/// How long a Permission Request notice shows an offer before it accepts an answer. Any key can
+/// reach a program in an enhanced keyboard mode, so without the delay a program could raise a
+/// request just before a click or keystroke meant for itself and redirect it to the notice.
+pub(crate) const PERMISSION_REQUEST_ARMING_DELAY: Duration = Duration::from_millis(500);
 
 /// Pending first half of a double-Escape fullscreen exit.
 #[derive(Default)]
@@ -426,6 +433,7 @@ impl PaneSessionLifecycle {
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
+                        changed |= this.sync_permission_request(session_epoch, cx);
                         presentation_changed |= this.sync_metadata(session_epoch);
                         if presentation_changed {
                             cx.emit(TerminalPaneEvent::CaptionChanged);
@@ -571,7 +579,8 @@ pub(crate) struct TerminalPane {
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
-    primary_selection: Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
+    primary_selection:
+        Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -580,6 +589,19 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
+    /// Permissions a Permission Request asked for that the person has not answered. The Pane
+    /// keeps them while granted, so it offers a setup again if a grant is later withdrawn.
+    requested_permissions: Vec<SystemPermission>,
+    /// The requested permissions the notice offers now: those a tool started now would not receive
+    /// and no running Permission Setup holds.
+    permission_request: Vec<SystemPermission>,
+    /// Permissions the person chose Not Now for; later requests for them stay silent.
+    declined_permissions: Vec<SystemPermission>,
+    /// The offer the notice shows now and when it began, while the notice shows.
+    permission_request_showing: Option<PermissionRequestShowing>,
+    /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
+    /// first request on.
+    _permission_setup: Option<gpui::Subscription>,
     fullscreen_escape: FullscreenEscapeSequence,
     hovered_link: Option<HoveredTerminalLink>,
     pressed_link: Option<(
@@ -743,6 +765,11 @@ impl TerminalPane {
         .detach();
         cx.observe_window_activation(window, |pane, window, cx| {
             pane.refresh_surface(window, cx);
+            // The system reports no Screen Recording change, so a waiting Permission Request reads
+            // again when the person returns, for example from granting it in System Settings.
+            if window.is_window_active() {
+                pane.refresh_permission_offer(cx);
+            }
             cx.notify();
         })
         .detach();
@@ -856,6 +883,11 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
+            requested_permissions: Vec::new(),
+            permission_request: Vec::new(),
+            declined_permissions: Vec::new(),
+            permission_request_showing: None,
+            _permission_setup: None,
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
@@ -2048,6 +2080,21 @@ impl TerminalPane {
         self.accept_metadata(snapshot)
     }
 
+    /// Screen and lifecycle events can replace the request's wakeup before the Pane reads it.
+    fn sync_permission_request(&mut self, session_epoch: u64, cx: &mut Context<Self>) -> bool {
+        if self.terminal_session.session_epoch != session_epoch
+            || !self.terminal_session_available()
+        {
+            return false;
+        }
+        let request = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.permission_request());
+        request.is_some_and(|request| self.offer_permission_setup(request.permissions(), cx))
+    }
+
     /// Accepts metadata no older than what this Pane already presents.
     ///
     /// Returns whether any presented fact changed.
@@ -2119,12 +2166,17 @@ impl TerminalPane {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
             }
+            SessionEvent::PermissionRequested(request) => {
+                return self.offer_permission_setup(request.permissions(), cx);
+            }
             SessionEvent::Exited(status) => {
                 if self.suspend_if_remote_channel_unavailable(cx) {
                     return false;
                 }
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.requested_permissions.clear();
+                self.permission_request.clear();
                 if matches!(self.pane_state, PaneTerminalState::Exited(_))
                     || self
                         .pane_state
@@ -2149,6 +2201,8 @@ impl TerminalPane {
                 let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
+                self.requested_permissions.clear();
+                self.permission_request.clear();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
@@ -2540,10 +2594,19 @@ impl TerminalPane {
             return;
         };
 
-        if button == PointerButton::Middle && !self.screen.mouse_tracking && self.primary_selection.is_some() {
-            if let Some(text) = self.primary_selection.as_ref().and_then(|primary| primary.read(cx))
+        if button == PointerButton::Middle
+            && !self.screen.mouse_tracking
+            && self.primary_selection.is_some()
+        {
+            if let Some(text) = self
+                .primary_selection
+                .as_ref()
+                .and_then(|primary| primary.read(cx))
                 && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
-                && !payload.text().is_empty() { self.request_paste_text(payload, cx); }
+                && !payload.text().is_empty()
+            {
+                self.request_paste_text(payload, cx);
+            }
             cx.stop_propagation();
             return;
         }
@@ -2708,7 +2771,10 @@ impl TerminalPane {
         });
         if let Some(copy) = copy {
             if let Some(primary) = &self.primary_selection
-                && let Ok(Some(copy)) = &copy { primary.publish(copy, cx); }
+                && let Ok(Some(copy)) = &copy
+            {
+                primary.publish(copy, cx);
+            }
             self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
@@ -2823,7 +2889,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.terminal_session.session.as_ref()?;
@@ -2861,7 +2930,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_selection(
         &mut self,
@@ -2899,7 +2971,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn insert_native_service_text(
         &mut self,
@@ -3030,7 +3105,8 @@ impl TerminalPane {
             false,
             link.as_ref(),
         )
-        .file_preview && self.file_preview_available;
+        .file_preview
+            && self.file_preview_available;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -3123,7 +3199,11 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        if self.file_preview.preview_in_window(&target, window, cx).is_err() {
+        if self
+            .file_preview
+            .preview_in_window(&target, window, cx)
+            .is_err()
+        {
             self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
             cx.notify();
         }
@@ -3136,7 +3216,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_status(
         &mut self,
@@ -3227,7 +3310,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
         self.terminal_session.session.is_some()
@@ -3306,6 +3392,184 @@ impl TerminalPane {
                 operation.generation,
             );
         }
+        cx.notify();
+    }
+
+    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for.
+    ///
+    /// Only a Local Pane offers one, because a Remote Pane's programs run on another computer.
+    /// Any output a Local Pane shows can carry a request, including output a remote shell or a
+    /// file relays, so the offer names no program and starts nothing until the person chooses Set
+    /// Up. A permission already requested or declined adds nothing, so repeated requests read no
+    /// authorization.
+    fn offer_permission_setup(
+        &mut self,
+        permissions: &[SystemPermission],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.terminal_session.session_factory.is_remote() {
+            return false;
+        }
+        let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() else {
+            return false;
+        };
+        let mut added = false;
+        for permission in permissions {
+            if !self.declined_permissions.contains(permission)
+                && !self.requested_permissions.contains(permission)
+            {
+                self.requested_permissions.push(*permission);
+                added = true;
+            }
+        }
+        if !added {
+            return false;
+        }
+        if self._permission_setup.is_none() {
+            setup.update(cx, |setup, cx| setup.watch_authorization(cx));
+            self._permission_setup = Some(cx.observe(&setup, |pane, _, cx| {
+                if pane.refresh_permission_offer(cx) {
+                    cx.notify();
+                }
+            }));
+        }
+        self.refresh_permission_offer(cx)
+    }
+
+    /// Reads which requested permissions the notice offers, and reports whether that changed.
+    fn refresh_permission_offer(&mut self, cx: &App) -> bool {
+        let offered = match &self.lifecycle_dependencies.permission_setup {
+            Some(setup) if !self.requested_permissions.is_empty() => {
+                let setup = setup.read(cx);
+                setup
+                    .ungranted(&self.requested_permissions)
+                    .into_iter()
+                    .filter(|permission| {
+                        setup.status(*permission)
+                            != super::permission_setup::PermissionSetupStatus::Running
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if offered == self.permission_request {
+            return false;
+        }
+        self.permission_request = offered;
+        true
+    }
+
+    /// Records when the notice began showing its offer at `edge`, and reports whether it accepts
+    /// answers. An offer that gains a permission starts the delay again; one that loses a
+    /// permission keeps it. Moving to the other edge also starts it again, because the program
+    /// moves the cursor that picks the edge and could otherwise slide an answering button under
+    /// the pointer.
+    fn show_permission_request(
+        &mut self,
+        edge: Option<NoticeEdge>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(edge) = edge else {
+            self.permission_request_showing = None;
+            return false;
+        };
+        match &mut self.permission_request_showing {
+            Some(showing)
+                if showing.edge == edge
+                    && self
+                        .permission_request
+                        .iter()
+                        .all(|permission| showing.offer.contains(permission)) =>
+            {
+                showing.offer.clone_from(&self.permission_request);
+            }
+            _ => {
+                let arming = cx.spawn(async move |pane, cx| {
+                    cx.background_executor()
+                        .timer(PERMISSION_REQUEST_ARMING_DELAY)
+                        .await;
+                    let _ = pane.update(cx, |_, cx| cx.notify());
+                });
+                self.permission_request_showing = Some(PermissionRequestShowing {
+                    offer: self.permission_request.clone(),
+                    edge,
+                    since: cx.background_executor().now(),
+                    _arming: arming,
+                });
+            }
+        }
+        self.permission_request_armed(cx)
+    }
+
+    /// Whether the notice has shown its offer long enough to accept an answer.
+    fn permission_request_armed(&self, cx: &App) -> bool {
+        self.permission_request_showing
+            .as_ref()
+            .is_some_and(|showing| {
+                showing.offer == self.permission_request
+                    && cx.background_executor().now().duration_since(showing.since)
+                        >= PERMISSION_REQUEST_ARMING_DELAY
+            })
+    }
+
+    fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
+        if !self.permission_request_armed(cx) {
+            return;
+        }
+        let permissions = std::mem::take(&mut self.permission_request);
+        self.requested_permissions
+            .retain(|permission| !permissions.contains(permission));
+        if let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() {
+            setup.update(cx, |setup, cx| setup.start(&permissions, cx));
+        }
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_permission_setup(
+        &mut self,
+        setup: Entity<super::permission_setup::PermissionSetup>,
+    ) {
+        self.lifecycle_dependencies.permission_setup = Some(setup);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_setup(
+        &self,
+    ) -> Option<Entity<super::permission_setup::PermissionSetup>> {
+        self.lifecycle_dependencies.permission_setup.clone()
+    }
+
+    fn set_up_permission_request(
+        &mut self,
+        _: &SetUpPermissionRequest,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.permission_request.is_empty() {
+            self.set_up_requested_permissions(cx);
+        }
+    }
+
+    fn decline_permission_request_action(
+        &mut self,
+        _: &DeclinePermissionRequest,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.permission_request.is_empty() {
+            self.decline_permission_request(cx);
+        }
+    }
+
+    fn decline_permission_request(&mut self, cx: &mut Context<Self>) {
+        if !self.permission_request_armed(cx) {
+            return;
+        }
+        let declined = std::mem::take(&mut self.permission_request);
+        self.requested_permissions
+            .retain(|permission| !declined.contains(permission));
+        self.declined_permissions.extend(declined);
         cx.notify();
     }
 
@@ -3946,11 +4210,6 @@ impl Render for TerminalPane {
         });
         let native_context_actions = self.native_context_actions();
         let paste_confirmation = self.pending_paste;
-        let key_context = if paste_confirmation.is_some() {
-            TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT
-        } else {
-            TERMINAL_KEY_CONTEXT
-        };
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
@@ -3974,6 +4233,48 @@ impl Render for TerminalPane {
         let floating_colors = &appearance.floating_colors;
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
+        // A Permission Request waits behind a paste confirmation and any Terminal Failure.
+        let permission_request = self
+            .lifecycle_dependencies
+            .permission_setup
+            .as_ref()
+            .filter(|_| {
+                !self.permission_request.is_empty()
+                    && paste_confirmation.is_none()
+                    && status.is_none()
+            })
+            .map(|setup| {
+                let setup = setup.read(cx);
+                self.permission_request
+                    .iter()
+                    .map(|permission| setup.copy(*permission))
+                    .collect::<Vec<_>>()
+            });
+        // The notice docks on the half of the Pane away from the cursor, so it never hides the
+        // line a person types on.
+        let permission_request_edge = match self.screen.cursor.position {
+            Some(cursor) if usize::from(cursor.row) * 2 >= self.screen.rows.len() => {
+                NoticeEdge::Top
+            }
+            _ => NoticeEdge::Bottom,
+        };
+        let permission_request_armed = self.show_permission_request(
+            permission_request
+                .is_some()
+                .then_some(permission_request_edge),
+            cx,
+        );
+        // The notice's shortcuts apply only once it accepts answers. Until then the keys reach the
+        // program, which is what the person meant them for.
+        let mut key_context = gpui::KeyContext::default();
+        if paste_confirmation.is_some() {
+            key_context.add(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT);
+        } else {
+            key_context.add(TERMINAL_KEY_CONTEXT);
+            if permission_request_armed {
+                key_context.add(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT);
+            }
+        }
         // A failed Terminal Session reads as an error notice.
         let status_intent = match self.pane_state {
             PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
@@ -4149,6 +4450,8 @@ impl Render for TerminalPane {
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
+            .on_action(cx.listener(Self::set_up_permission_request))
+            .on_action(cx.listener(Self::decline_permission_request_action))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -4185,7 +4488,9 @@ impl Render for TerminalPane {
                 )
             })
             .when_some(
-                link_preview_text.filter(|_| paste_confirmation.is_none() && status.is_none()),
+                link_preview_text.filter(|_| {
+                    paste_confirmation.is_none() && status.is_none() && permission_request.is_none()
+                }),
                 |root, text| {
                     root.child(
                         readout_shell.mount(
@@ -4207,6 +4512,16 @@ impl Render for TerminalPane {
             .when_some(paste_confirmation, |root, confirmation| {
                 root.child(render_paste_confirmation(
                     confirmation,
+                    cx.entity().downgrade(),
+                    appearance.clone(),
+                    notice_shell,
+                ))
+            })
+            .when_some(permission_request, |root, copies| {
+                root.child(render_permission_request(
+                    copies,
+                    permission_request_edge,
+                    permission_request_armed,
                     cx.entity().downgrade(),
                     appearance.clone(),
                     notice_shell,
@@ -4445,6 +4760,112 @@ fn render_paste_confirmation(
                                         });
                                     }),
                             ),
+                    ),
+            ),
+    )
+}
+
+/// The offer a Permission Request notice shows, where, and since when.
+struct PermissionRequestShowing {
+    offer: Vec<SystemPermission>,
+    edge: NoticeEdge,
+    since: Instant,
+    /// Renders the notice again once it accepts answers.
+    _arming: Task<()>,
+}
+
+/// The Pane edge a notice docks on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoticeEdge {
+    Top,
+    Bottom,
+}
+
+/// Presents a Permission Request on the shared Notice surface.
+///
+/// The notice never takes keyboard focus, so terminal input still reaches the program. Its answers
+/// are clicks and shortcuts, which a program cannot produce by writing to the terminal. They stay
+/// off until the notice is `armed`, so a program cannot redirect a click or keystroke by timing a
+/// request just before it.
+fn render_permission_request(
+    copies: Vec<&'static super::permission_setup::PermissionCopy>,
+    edge: NoticeEdge,
+    armed: bool,
+    pane: gpui::WeakEntity<TerminalPane>,
+    appearance: Arc<super::appearance::ChromeAppearance>,
+    shell: FloatingShell,
+) -> impl IntoElement {
+    let floating_colors = &appearance.floating_colors;
+    let decline_pane = pane.clone();
+    let names = copies
+        .iter()
+        .map(|copy| copy.name)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let purposes = copies
+        .iter()
+        .map(|copy| copy.purpose)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let application = crate::application_identity::ApplicationIdentity::current().display_name();
+
+    shell.mount(
+        div()
+            .debug_selector(|| "permission-request".to_owned())
+            .chrome_text(appearance.typography.style(TextRole::Body))
+            .absolute()
+            .left(appearance.spacing(16.0))
+            .right(appearance.spacing(16.0))
+            .map(|notice| match edge {
+                NoticeEdge::Top => notice.top(appearance.spacing(16.0)),
+                NoticeEdge::Bottom => notice.bottom(appearance.spacing(16.0)),
+            })
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(appearance.spacing(10.0))
+            .px(appearance.spacing(12.0))
+            .py(appearance.spacing(10.0))
+            .text_color(gpui_color(floating_colors.text))
+            .occlude()
+            .child(
+                div()
+                    .debug_selector(|| "permission-request-message".to_owned())
+                    .w_full()
+                    .whitespace_normal()
+                    .child(format!(
+                        "A program asked for {names} access, which lets programs you run in \
+                         {application} {purposes}."
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .gap(appearance.spacing(8.0))
+                    .child(
+                        Button::new("permission-request-not-now", "Not Now")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ButtonSize::Small)
+                            .role(ButtonRole::Cancel)
+                            .disabled(!armed)
+                            .debug_selector("permission-request-not-now")
+                            .on_activate(move |_, _, cx| {
+                                let _ = decline_pane
+                                    .update(cx, |pane, cx| pane.decline_permission_request(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("permission-request-set-up", "Set Up…")
+                            .variant(ButtonVariant::Primary)
+                            .size(ButtonSize::Small)
+                            .disabled(!armed)
+                            .debug_selector("permission-request-set-up")
+                            .on_activate(move |_, _, cx| {
+                                let _ = pane
+                                    .update(cx, |pane, cx| pane.set_up_requested_permissions(cx));
+                            }),
                     ),
             ),
     )

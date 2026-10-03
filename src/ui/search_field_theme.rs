@@ -89,8 +89,14 @@ fn toggle_off(colors: &ChromeColors) -> ButtonVariantStyle {
     };
     ButtonVariantStyle::new(
         ButtonPaint::new(rgba(0), gpui_color(colors.input_placeholder), rgba(0)),
-        paint(colors.ghost_element_hover, colors.ghost_element_hover_foreground),
-        paint(colors.ghost_element_active, colors.ghost_element_active_foreground),
+        paint(
+            colors.ghost_element_hover,
+            colors.ghost_element_hover_foreground,
+        ),
+        paint(
+            colors.ghost_element_active,
+            colors.ghost_element_active_foreground,
+        ),
         ButtonPaint::new(rgba(0), gpui_color(colors.input_disabled_text), rgba(0)),
     )
 }
@@ -99,7 +105,11 @@ fn toggle_off(colors: &ChromeColors) -> ButtonVariantStyle {
 /// search mode reads from the field without looking at the placeholder.
 fn toggle_on(colors: &ChromeColors) -> ButtonVariantStyle {
     let paint = |background: Color| {
-        ButtonPaint::new(gpui_color(background), gpui_color(colors.text_accent), rgba(0))
+        ButtonPaint::new(
+            gpui_color(background),
+            gpui_color(colors.text_accent),
+            rgba(0),
+        )
     };
     ButtonVariantStyle::new(
         paint(colors.ghost_element_selected),
@@ -124,7 +134,6 @@ fn clear_glyph(reference: &ChromeColors) -> Color {
     );
     super::control_theme_catalog::readable_on(reference.input_background, disc, 4.5)
 }
-
 
 #[cfg(test)]
 mod tests {

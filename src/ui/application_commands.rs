@@ -379,7 +379,7 @@ mod tests {
             install_application_actions(cx);
             crate::ui::settings_window::configure_window_chrome(
                 std::rc::Rc::new(Movement),
-                None,
+                Default::default(),
                 None,
                 cx,
             );
@@ -433,11 +433,13 @@ mod tests {
             cx.run_until_parked();
             cx.simulate_input(label);
             cx.run_until_parked();
-            assert!(cx.update(|window, cx| layer(window, cx)
-                .unwrap()
-                .read(cx)
-                .selected_item_id()
-                .is_some()));
+            assert!(cx.update(|window, cx| {
+                layer(window, cx)
+                    .unwrap()
+                    .read(cx)
+                    .selected_item_id()
+                    .is_some()
+            }));
             // The compositor can withdraw support after the command was listed.
             cx.simulate_window_controls(gpui::WindowControls {
                 minimize: false,

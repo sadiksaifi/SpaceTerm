@@ -69,8 +69,8 @@ sha2 = "0.10"
 anyhow = "1.0.100"
 async-channel = "2.5.0"
 getrandom = "=0.4.3"
-gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02" }
-gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02", features = ["font-kit"] }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2" }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2", features = ["font-kit"] }
 image = { version = "=0.25.10", default-features = false }
 libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
@@ -94,28 +94,28 @@ serde_json_lenient = "=0.2.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1" }
 zbus = { version = "=5.19.0", features = ["blocking-api"] }
-gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02", features = ["wayland", "x11"] }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2", features = ["wayland", "x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
 objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols", "NSAppearance", "NSApplication", "NSAttributedString", "NSColor", "NSEvent", "NSFont", "NSFontDescriptor", "NSFontManager", "NSGraphics", "NSHelpManager", "NSImage", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSText", "NSUserInterfaceLayout", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "objc2-core-foundation"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSNotification", "NSObject", "NSOperation", "NSRange", "NSString", "NSThread", "NSURL", "NSUserDefaults", "NSValue", "block2", "std"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSColor", "NSEvent", "NSFont", "NSFontDescriptor", "NSFontManager", "NSGlassEffectView", "NSGraphics", "NSGraphicsContext", "NSHelpManager", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSParagraphStyle", "NSResponder", "NSRunningApplication", "NSStringDrawing", "NSText", "NSUserInterfaceLayout", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "libc", "objc2-core-foundation"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSNotification", "NSObject", "NSOperation", "NSProcessInfo", "NSRange", "NSString", "NSThread", "NSURL", "NSUserDefaults", "NSValue", "block2", "std"] }
 objc2-quick-look-ui = { version = "=0.3.2", default-features = false, features = ["QLPreviewItem", "QLPreviewView", "objc2-app-kit"] }
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNUserNotificationCenter", "block2"] }
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 accesskit_consumer = "=0.38.0"
-gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02", features = ["test-support"] }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2", features = ["test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02", features = ["font-kit", "test-support"] }
+gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2", features = ["font-kit", "test-support"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-gpui_wgpu = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-02" }
+gpui_wgpu = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.2" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

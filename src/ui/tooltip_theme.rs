@@ -30,7 +30,6 @@ fn metrics(typography: &ChromeTypography) -> TooltipMetrics {
         )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

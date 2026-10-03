@@ -20,8 +20,8 @@ use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::settings_file::SettingsFile;
 
 use super::SettingsWindow;
-use crate::ui::sidebar_window::form::action_button;
 use super::import::{ImportError, read_selected_document};
+use crate::ui::sidebar_window::form::action_button;
 
 /// How many lines of the settings file show before the view scrolls.
 const SETTINGS_FILE_ROWS: usize = 16;
@@ -287,7 +287,11 @@ impl SettingsWindow {
     }
 }
 
-fn present_import_failure(detail: &'static str, window: &mut Window, cx: &mut Context<SettingsWindow>) {
+fn present_import_failure(
+    detail: &'static str,
+    window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) {
     let _ = Alert::new(
         ModalId::new("settings-import-failed"),
         "Import failed",

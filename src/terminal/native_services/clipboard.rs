@@ -31,13 +31,19 @@ pub(crate) trait TextClipboard {
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native pasteboard Adapter publishes typed representations")
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
 )]
 pub(crate) const HTML_MIME: &str = "text/html;charset=utf-8";
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native pasteboard Adapter publishes typed representations")
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
 )]
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct PasteboardRepresentation<'a> {
@@ -55,7 +61,10 @@ impl std::fmt::Debug for PasteboardRepresentation<'_> {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native pasteboard Adapter publishes typed representations")
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
 )]
 pub(crate) fn selection_representations<'a>(
     plain_text: &'a str,
@@ -76,7 +85,10 @@ pub(crate) fn selection_representations<'a>(
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native pasteboard Adapter reports clipboard failures")
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter reports clipboard failures"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClipboardError {

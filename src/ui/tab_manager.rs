@@ -13,8 +13,8 @@ use thiserror::Error;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
-    DragPreview, DragSession, MarkerSide, ReorderableStrip, drag_release_observer, insertion_marker,
-    painted_item_size,
+    DragPreview, DragSession, MarkerSide, ReorderableStrip, drag_release_observer,
+    insertion_marker, painted_item_size,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
@@ -585,7 +585,10 @@ impl TabManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_status(
         &self,
@@ -605,7 +608,10 @@ impl TabManager {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_target(
         &self,
@@ -1098,9 +1104,9 @@ impl TabManager {
             return;
         };
         self.drag_tab_to(tab_id, pointer, cx);
-        let landing = self.tab_position(tab_id).and_then(|current| {
-            self.tab_reorder.finish(current, self.tabs.len(), cx)
-        });
+        let landing = self
+            .tab_position(tab_id)
+            .and_then(|current| self.tab_reorder.finish(current, self.tabs.len(), cx));
         self.tab_reorder.cancel();
         if let Some((tab_id, position)) = landing {
             self.move_tab(tab_id, position, cx);
@@ -1723,7 +1729,9 @@ impl TabManager {
         let insertion = self.tab_reorder.insertion(self.tabs.len());
         let marker_inset = tab_chip_shape(appearance, cx).inset_y;
         let mut previous_inactive_tab = None;
-        for (index, ((tab_id, pane_host), (fade, hover))) in self.tabs.iter().zip(hovers).enumerate() {
+        for (index, ((tab_id, pane_host), (fade, hover))) in
+            self.tabs.iter().zip(hovers).enumerate()
+        {
             let active = tab_id == active_tab_id;
             // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
             // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
@@ -1876,7 +1884,10 @@ impl TabManager {
                                 appearance, cx,
                             )
                             .space())
-                            .child(spaceterm_ui::ControlHost::TitleBar.mount(spaceterm_ui::ClientWindowControls::new(close))),
+                            .child(
+                                spaceterm_ui::ControlHost::TitleBar
+                                    .mount(spaceterm_ui::ClientWindowControls::new(close)),
+                            ),
                     )
                 },
             );
@@ -4891,7 +4902,8 @@ mod tests {
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
-        let release = cx.debug_bounds("tab-item-3-active").unwrap().center() + point(px(4.0), px(0.0));
+        let release =
+            cx.debug_bounds("tab-item-3-active").unwrap().center() + point(px(4.0), px(0.0));
 
         drag_tab(first.center(), &[release], cx);
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
@@ -4910,7 +4922,11 @@ mod tests {
         // Level with the Tabs, but past the strip's leading end.
         let beside = point(strip.left() - px(12.0), last.center().y);
 
-        drag_tab(last.center(), &[last.center() - point(px(8.0), px(0.0)), beside], cx);
+        drag_tab(
+            last.center(),
+            &[last.center() - point(px(8.0), px(0.0)), beside],
+            cx,
+        );
         let marked = [
             "tab-insertion-marker-0",
             "tab-insertion-marker-1",
@@ -5016,7 +5032,12 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            (before_second, before_first, over_itself, tab_order(&manager, cx)),
+            (
+                before_second,
+                before_first,
+                over_itself,
+                tab_order(&manager, cx)
+            ),
             (vec![1], vec![0], vec![], vec![1, 2, 3])
         );
         // The marker stands on the edge the first and second Tabs share.

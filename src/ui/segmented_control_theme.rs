@@ -116,7 +116,6 @@ fn paint(background: Color, label: Color, border: Color) -> SegmentedPaint {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

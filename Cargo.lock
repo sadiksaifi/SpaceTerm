@@ -955,7 +955,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1340,7 +1340,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1376,7 +1376,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1581,7 +1581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2157,7 +2157,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2228,7 +2228,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2251,7 +2251,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2299,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2345,7 +2345,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2356,7 +2356,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2370,7 +2370,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "schemars",
  "serde",
@@ -2380,7 +2380,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "log",
@@ -2390,7 +2390,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2418,7 +2418,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2444,7 +2444,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -2621,7 +2621,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3639,7 +3639,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3836,6 +3836,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -4285,7 +4286,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "collections",
  "serde",
@@ -4961,7 +4962,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "derive_refineable",
 ]
@@ -5093,7 +5094,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5150,7 +5151,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5233,7 +5234,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "async-task",
  "backtrace",
@@ -5814,7 +5815,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "heapless",
  "log",
@@ -6040,7 +6041,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6373,7 +6374,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6549,7 +6550,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "perf",
  "quote",
@@ -7123,7 +7124,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8063,7 +8064,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8080,7 +8081,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -8091,7 +8092,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-02#179a877e62a28697b03e0d0ea4febb03e43db6a7"
+source = "git+https://github.com/sadiksaifi/zed?tag=spaceterm-2026-10-03.2#c0a8bca20de7238b05c75ca3e243b36419b9cbc2"
 
 [[package]]
 name = "zune-core"

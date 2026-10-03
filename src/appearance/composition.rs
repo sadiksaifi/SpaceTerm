@@ -1047,11 +1047,7 @@ mod tests {
         let exact = u16::from(bright.alpha(SurfaceRole::Surface));
         let painted = u16::from(
             bright
-                .paint(
-                    SurfaceRole::Surface,
-                    Color::rgb(0xdcdee3),
-                    Color::WHITE,
-                )
+                .paint(SurfaceRole::Surface, Color::rgb(0xdcdee3), Color::WHITE)
                 .a,
         );
         assert!(painted * 2 < exact, "{painted} of {exact}");
@@ -1070,9 +1066,7 @@ mod tests {
                 let material = SurfaceMaterials::derive(f32::from(glass) / 255.0, tone);
                 let sheet = material.alpha(SurfaceRole::Sheet);
                 let floating = material.alpha(SurfaceRole::Floating);
-                let raised = material
-                    .paint(SurfaceRole::Surface, base, Color::WHITE)
-                    .a;
+                let raised = material.paint(SurfaceRole::Surface, base, Color::WHITE).a;
                 let current = (sheet, floating, raised);
                 assert!(
                     current.0 <= previous.0 && current.1 <= previous.1 && current.2 <= previous.2,
@@ -1184,9 +1178,7 @@ mod tests {
                 "a transparent sentinel stays transparent"
             );
             let opaque = material.paint(role, base, Color::WHITE).a;
-            let authored = material
-                .paint(role, base, Color::WHITE.with_alpha(128))
-                .a;
+            let authored = material.paint(role, base, Color::WHITE.with_alpha(128)).a;
             assert!(
                 authored < opaque && u16::from(authored) * 2 <= u16::from(opaque) + 2,
                 "authored translucency must survive the material: {authored} of {opaque}"

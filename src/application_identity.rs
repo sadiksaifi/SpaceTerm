@@ -62,6 +62,18 @@ impl ApplicationIdentity {
         self.application_id
     }
 
+    /// The bundle identifier the Operating System keys this identity's privacy grants to.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the native permission host consumes this identity policy"
+        )
+    )]
+    pub(crate) const fn bundle_identifier(self) -> &'static str {
+        self.application_id()
+    }
+
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -259,6 +271,7 @@ mod tests {
             }
             assert_eq!(plist_string(plist, "CFBundleIdentifier"), bundle_identifier);
             assert_eq!(identity.application_id(), bundle_identifier);
+            assert_eq!(identity.bundle_identifier(), bundle_identifier);
         }
     }
 

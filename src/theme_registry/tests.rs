@@ -229,7 +229,10 @@ fn a_malformed_archive_is_invalid() {
     );
     let mut truncated = archive(&[Entry::File("./themes/a.json", &[b' '; 4096])]);
     truncated.truncate(truncated.len() / 2);
-    assert_eq!(theme_families(&truncated), Err(RegistryError::InvalidArchive));
+    assert_eq!(
+        theme_families(&truncated),
+        Err(RegistryError::InvalidArchive)
+    );
 }
 
 #[test]

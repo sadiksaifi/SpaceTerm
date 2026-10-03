@@ -6,7 +6,10 @@ use super::attention_runtime::{AttentionFailure, NotificationDelivery, Notificat
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "desktops without notification authorization report only denial")
+    allow(
+        dead_code,
+        reason = "desktops without notification authorization report only denial"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NotificationAuthorization {
@@ -57,7 +60,10 @@ fn authorization_decision(settings: NotificationSettings) -> AuthorizationDecisi
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop notification Adapter composes a notification body")
+    allow(
+        dead_code,
+        reason = "only a desktop notification Adapter composes a notification body"
+    )
 )]
 pub(crate) fn notification_body(aggregate_count: u32) -> String {
     format!("Terminal requested attention ({})", aggregate_count.max(1))

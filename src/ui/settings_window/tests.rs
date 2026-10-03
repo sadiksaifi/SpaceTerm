@@ -106,7 +106,7 @@ fn open_settings_with_capabilities(
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
-        SettingsWindow::new_with_capabilities(window_drag, None, registry, window, cx)
+        SettingsWindow::new_with_capabilities(window_drag, Default::default(), registry, window, cx)
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -3677,12 +3677,72 @@ fn absent_host_capabilities_hide_their_rows_but_keep_clipboard_privacy(cx: &mut 
     );
     select_section(SettingsSectionId::Privacy, cx);
     assert!(cx.debug_bounds("settings-row-microphone-access").is_none());
+    assert!(
+        cx.debug_bounds("settings-row-screen-recording-access")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("settings-row-accessibility-access")
+            .is_none()
+    );
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
-    for query in ["microphone", "updates"] {
+    for query in [
+        "microphone",
+        "updates",
+        "screen recording",
+        "device control",
+        "accessibility",
+    ] {
         set_query(&window, query, cx);
         window.read_with(cx, |settings, _| {
-            assert!(settings.matching_rows().is_empty())
+            assert!(settings.matching_rows().is_empty());
+            assert!(settings.navigable_sections().is_empty());
+            assert_eq!(settings.revealed, None);
         });
     }
+}
+
+struct RecordingMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
+    fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+    }
+}
+
+#[gpui::test]
+fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext) {
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        &SettingsDocument::default(),
+    ));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::open_or_activate(cx);
+    });
+    cx.run_until_parked();
+    let settings_windows = |cx: &mut TestAppContext| {
+        cx.windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<SettingsWindow>())
+            .collect::<Vec<_>>()
+    };
+    let [opened] = settings_windows(cx)[..] else {
+        panic!("Settings should open one window");
+    };
+
+    // The Settings shortcut dispatches inside Settings once Settings is the main window.
+    opened
+        .update(cx, |_, _, cx| super::open_or_activate(cx))
+        .expect("Settings should stay open");
+    cx.run_until_parked();
+
+    assert_eq!(settings_windows(cx).len(), 1);
 }

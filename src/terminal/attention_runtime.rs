@@ -44,7 +44,10 @@ pub(crate) trait AudioBell {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a desktop notification Adapter reports delivery failures")
+    allow(
+        dead_code,
+        reason = "only a desktop notification Adapter reports delivery failures"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AttentionFailure {

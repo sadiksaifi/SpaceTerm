@@ -209,14 +209,13 @@ pub(crate) use document::{
     SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 pub(crate) use preferences::{
-    AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, ThemeSlots,
-    TerminalFontFamily,
+    AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, TerminalFontFamily,
+    ThemeSlots,
 };
 pub(crate) use resolution::{
-    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
-    FontClass, FontStyle, ResolvedAppearance, ResolvedChromeAppearance,
-    ResolvedChromeTypography, ResolvedFontDescriptor, ResolvedTerminalAppearance,
-    ResolvedTerminalTypography, SystemAppearance,
+    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
+    ResolvedAppearance, ResolvedChromeAppearance, ResolvedChromeTypography, ResolvedFontDescriptor,
+    ResolvedTerminalAppearance, ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use terminal_theme::{
     Appearance, CatalogError, ChromeColors, TerminalColors, TerminalTheme, ThemeCatalog, ThemeId,
@@ -227,16 +226,16 @@ pub(crate) use zed::{
     translate_zed_family,
 };
 
+pub(crate) use builtin::LIGHT_BOUNDARY_INK;
 /// The built-in chrome palettes, so a control theme can be asserted against what ships.
 #[cfg(test)]
 pub(crate) use builtin::chrome_base as builtin_chrome_base;
 #[cfg(test)]
 pub(crate) use builtin::fallback_id as builtin_fallback_theme;
 pub(crate) use builtin::terminal_base as builtin_terminal_base;
-pub(crate) use builtin::LIGHT_BOUNDARY_INK;
 pub(crate) use resolution::AppearanceDiagnostic;
 
 #[cfg(test)]
 pub(crate) use resolution::ResolutionError;
 #[cfg(test)]
-pub(crate) use terminal_theme::{OptionalColorOverride, ThemeMetadata, TerminalColorOverrides};
+pub(crate) use terminal_theme::{OptionalColorOverride, TerminalColorOverrides, ThemeMetadata};

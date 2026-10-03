@@ -537,7 +537,10 @@ pub(crate) fn open(
         key_input: Rc::clone(&host.adapters.key_input),
         accessibility: Rc::clone(&host.adapters.accessibility),
         native_services: host.adapters.native_services.clone(),
-        lifecycle: host.adapters.lifecycle.clone(),
+        lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+            permission_setup: host.permission_setup.get().cloned(),
+            ..host.adapters.lifecycle.clone()
+        },
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
@@ -934,6 +937,11 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
     pub(crate) microphone_access:
         Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
+    /// Reads and recovers the System Permissions programs in a Terminal Session inherit.
+    pub(crate) permission_access:
+        Option<Rc<dyn crate::platform::permission_access::PermissionAccess>>,
+    /// Docks the Setup Guide on System Settings' window during a Permission Setup.
+    pub(crate) setup_guide: Option<Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
     pub(crate) remote_workspace:
@@ -973,6 +981,10 @@ pub(crate) struct HostComposition {
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
     )>,
+    /// The application's one Permission Setup, created once the application runs when the host
+    /// composes permission access and a Setup Guide.
+    permission_setup:
+        std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
 }
 impl HostComposition {
     pub(crate) fn with_modal_prompts(mut self, enabled: bool) -> Self {
@@ -1015,6 +1027,7 @@ impl HostComposition {
             window_frame: parts.window_frame,
             window_chrome: parts.window_chrome,
             appearance: None,
+            permission_setup: std::cell::OnceCell::new(),
         })
     }
 }
@@ -1115,9 +1128,23 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     }
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    if let (Some(access), Some(guide)) =
+        (&host.adapters.permission_access, &host.adapters.setup_guide)
+    {
+        let setup = crate::ui::permission_setup::PermissionSetup::create(
+            Rc::clone(access),
+            Arc::clone(guide),
+            cx,
+        );
+        let _ = host.permission_setup.set(setup);
+    }
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
-        host.adapters.microphone_access.clone(),
+        crate::ui::settings_window::PermissionCapabilities {
+            microphone: host.adapters.microphone_access.clone(),
+            system_permissions: host.adapters.permission_access.clone(),
+            permission_setup: host.permission_setup.get().cloned(),
+        },
         host.adapters
             .theme_registry
             .clone()
@@ -1251,6 +1278,8 @@ mod runtime_tests {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 microphone_access: None,
+                permission_access: None,
+                setup_guide: None,
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
             },

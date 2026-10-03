@@ -24,7 +24,7 @@ use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
 
 /// A capability whose authorization, failures, and pending decisions the test controls.
-struct ScriptedMicrophoneAccess {
+pub(super) struct ScriptedMicrophoneAccess {
     authorization: Cell<Result<MicrophoneAuthorization, MicrophoneAccessError>>,
     request_failure: Cell<Option<MicrophoneAccessError>>,
     open_failure: Cell<Option<MicrophoneAccessError>>,
@@ -34,7 +34,9 @@ struct ScriptedMicrophoneAccess {
 }
 
 impl ScriptedMicrophoneAccess {
-    fn new(authorization: Result<MicrophoneAuthorization, MicrophoneAccessError>) -> Rc<Self> {
+    pub(super) fn new(
+        authorization: Result<MicrophoneAuthorization, MicrophoneAccessError>,
+    ) -> Rc<Self> {
         Rc::new(Self {
             authorization: Cell::new(authorization),
             request_failure: Cell::new(None),
@@ -80,6 +82,19 @@ fn open_settings(
     access: Option<Rc<dyn MicrophoneAccess>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
+    open_settings_with_capabilities(
+        super::PermissionCapabilities {
+            microphone: access,
+            ..super::PermissionCapabilities::default()
+        },
+        cx,
+    )
+}
+
+fn open_settings_with_capabilities(
+    capabilities: super::PermissionCapabilities,
+    cx: &mut TestAppContext,
+) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
         &SettingsDocument::default(),
     ));
@@ -93,7 +108,7 @@ fn open_settings(
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            access,
+            capabilities,
             None,
             window,
             cx,
@@ -505,15 +520,30 @@ fn a_host_without_the_capability_offers_no_microphone_controls(cx: &mut TestAppC
 
 /// Wrapped guidance beside the badge and action once stretched the row, and its card, hundreds of
 /// pixels below the content. Every state keeps the row at its natural height: equal padding above
-/// the label and below the guidance, with the control centered on the same row.
+/// the label and below the guidance, with the control centered on the same row, and the card ends
+/// with the group's last row.
 #[gpui::test]
 fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut TestAppContext) {
     const GROUP_SELECTOR: &str = "settings-section-privacy-group-permissions-card";
     const LABEL_SELECTOR: &str = "settings-row-microphone-access-label";
     const DESCRIPTION_SELECTOR: &str = "settings-row-microphone-access-description";
+    const LAST_ROW_SELECTOR: &str = "settings-row-accessibility-access";
 
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
-    let (window, cx) = open_privacy(&access, cx);
+    let (window, cx) = open_settings_with_capabilities(
+        super::PermissionCapabilities {
+            microphone: Some(access.clone()),
+            system_permissions: Some(
+                crate::platform::permission_access::testing::ScriptedPermissionAccess::new(
+                    Ok(crate::platform::permission_access::PermissionAuthorization::Granted),
+                    Ok(crate::platform::permission_access::PermissionAuthorization::Granted),
+                ),
+            ),
+            ..super::PermissionCapabilities::default()
+        },
+        cx,
+    );
+    click("settings-navigation-settings-section-privacy", cx);
     let states = [
         Ok(MicrophoneAuthorization::NotDetermined),
         Ok(MicrophoneAuthorization::Denied),
@@ -552,11 +582,12 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
                 (control.center().y - row.center().y).abs() <= gpui::px(1.0),
                 "{context}: the control should be centered on the row"
             );
+            let last_row = bounds(LAST_ROW_SELECTOR);
             let card_inset_above = row.top() - card.top();
-            let card_inset_below = card.bottom() - row.bottom();
+            let card_inset_below = card.bottom() - last_row.bottom();
             assert!(
                 (card_inset_above - card_inset_below).abs() <= gpui::px(1.0),
-                "{context}: the card should end with its only row"
+                "{context}: the card should end with its last row"
             );
         }
     }

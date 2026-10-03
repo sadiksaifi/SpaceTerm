@@ -6,7 +6,10 @@ use super::WheelPhase;
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only native wheel enrichment reports momentum and cancellation")
+    allow(
+        dead_code,
+        reason = "only native wheel enrichment reports momentum and cancellation"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WheelPhaseDetail {

@@ -4,7 +4,7 @@ use crate::terminal::{
     PreparedWorkspaceTerminalLaunch, TerminalKeyInputAdapterFactory,
     WorkspaceTerminalSessionFactory,
 };
-use gpui::{Context, Window};
+use gpui::{Context, Entity, Window};
 use std::rc::Rc;
 
 use crate::platform::application_activity::ApplicationActivity;
@@ -12,6 +12,7 @@ use crate::platform::window_visibility::WindowVisibilityFactory;
 use crate::terminal::attention_runtime::AttentionRuntime;
 use crate::terminal::secure_input::SecureInputHandle;
 use crate::terminal::wheel_phase::WheelPhaseEnrichment;
+use crate::ui::permission_setup::PermissionSetup;
 
 /// Constructor wiring for independent capabilities and application-owned coordinators.
 /// This value defines no platform operations or surface policy.
@@ -22,6 +23,9 @@ pub(crate) struct PaneLifecycleDependencies {
     pub(crate) wheel: Rc<dyn WheelPhaseEnrichment>,
     pub(crate) attention: AttentionRuntime,
     pub(crate) secure_input: SecureInputHandle,
+    /// The application's Permission Setup, which a Pane offers for a Permission Request. The
+    /// application creates it once it runs, so a composition made before then holds none.
+    pub(crate) permission_setup: Option<Entity<PermissionSetup>>,
 }
 
 #[cfg(test)]
@@ -37,6 +41,7 @@ impl PaneLifecycleDependencies {
                 crate::platform::window_visibility::RecordingWindowVisibilityFactory::default(),
             ),
             wheel: Rc::new(crate::terminal::wheel_phase::NoWheelPhaseEnrichment),
+            permission_setup: None,
         }
     }
 }

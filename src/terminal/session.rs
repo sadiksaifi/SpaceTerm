@@ -58,6 +58,7 @@ use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
     PreparedPaste,
 };
+use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration};
 
@@ -87,6 +88,8 @@ pub(crate) enum SessionEvent {
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
+    /// A program asked for a Permission Setup.
+    PermissionRequested(PermissionRequest),
     Exited(SessionExit),
     Failed(SessionFailure),
 }
@@ -274,7 +277,10 @@ pub(crate) enum SelectionCopyError {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 #[derive(Clone, Debug)]
 pub(crate) struct AccessibilitySelectionSender {
@@ -283,7 +289,10 @@ pub(crate) struct AccessibilitySelectionSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 impl AccessibilitySelectionSender {
     #[cfg(test)]
@@ -310,7 +319,10 @@ impl AccessibilitySelectionSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 #[derive(Clone)]
 pub(crate) struct AccessibilityDemandSender {
@@ -326,7 +338,10 @@ impl fmt::Debug for AccessibilityDemandSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 impl AccessibilityDemandSender {
     pub(crate) fn request(&self) {
@@ -380,9 +395,35 @@ impl SessionMetadataState {
     }
 }
 
+/// Requests are a bounded set of supported permissions, retained independently of UI wakeups.
+#[derive(Clone, Default)]
+struct SessionPermissionRequestState(Arc<Mutex<Option<PermissionRequest>>>);
+
+impl SessionPermissionRequestState {
+    fn snapshot(&self) -> Option<PermissionRequest> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn publish(&self, request: &PermissionRequest) {
+        let mut retained = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        match retained.as_mut() {
+            Some(retained) => retained.merge(request.clone()),
+            None => *retained = Some(request.clone()),
+        }
+    }
+}
+
 pub(crate) trait TerminalSessionHandle {
     /// The newest Terminal Metadata the Session has retained, whether or not it is presentable.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+        None
+    }
+
+    /// The permissions requested by this Terminal Session, retained across event replacement.
+    fn permission_request(&self) -> Option<PermissionRequest> {
         None
     }
 
@@ -447,6 +488,7 @@ pub(crate) trait TerminalSessionFactory {
 
 pub(crate) struct TerminalSession {
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -524,6 +566,10 @@ impl TerminalSession {
 impl TerminalSessionHandle for TerminalSession {
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.metadata_state.snapshot()
+    }
+
+    fn permission_request(&self) -> Option<PermissionRequest> {
+        self.permission_request_state.snapshot()
     }
 
     fn key(&self, input: KeyInput) {
@@ -810,12 +856,18 @@ enum Command {
     ),
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
     )]
     AccessibilitySelection(AccessibilitySelectionRequest),
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
     )]
     AccessibilityDemand,
     AccessibilityContinue,
@@ -898,6 +950,7 @@ impl fmt::Debug for Command {
 
 struct TerminalWorker {
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
@@ -911,6 +964,7 @@ struct TerminalWorker {
     held_keys: HeldKeys,
     schedules: WorkerSchedules,
     osc52_filter: Osc52Filter<Option<u64>>,
+    permission_requests: PermissionRequestFilter,
     clipboard: WorkerClipboard,
 }
 
@@ -926,6 +980,7 @@ struct TerminalWorkerContext {
 struct TerminalWorkerPublishers {
     clipboard: WorkerClipboard,
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -1066,6 +1121,7 @@ impl TerminalWorker {
         let TerminalWorkerPublishers {
             clipboard,
             metadata_state,
+            permission_request_state,
             events,
             accessibility,
         } = publishers;
@@ -1099,6 +1155,7 @@ impl TerminalWorker {
 
         let mut worker = Self {
             metadata_state,
+            permission_request_state,
             native_pty,
             input: PtyInput::default(),
             emulator,
@@ -1112,6 +1169,7 @@ impl TerminalWorker {
             held_keys: HeldKeys::default(),
             schedules: WorkerSchedules::new(Instant::now(), schedule_input),
             osc52_filter: Osc52Filter::default(),
+            permission_requests: PermissionRequestFilter::default(),
             clipboard,
         };
 
@@ -1777,13 +1835,16 @@ impl TerminalWorker {
                 .enqueue(self.osc52_filter.feed_with_context(&bytes, epoch));
         }
         let mut focus_reports = Vec::new();
+        // Every Permission Request in these chunks becomes one event, so a program that floods
+        // requests cannot crowd other events out of the bounded queue.
+        let mut requested: Option<PermissionRequest> = None;
         while !self.clipboard.pending() {
             let Some((effect, epoch)) = self.clipboard.effects.pop_front() else {
                 break;
             };
             let continued = match effect {
                 Osc52Effect::Terminal(bytes) => {
-                    self.feed_terminal_output(&bytes, &mut focus_reports)
+                    self.feed_terminal_output(&bytes, &mut requested, &mut focus_reports)
                 }
                 Osc52Effect::Operation(operation) => {
                     if !self.flush_ordered_terminal_replies(&mut focus_reports) {
@@ -1796,6 +1857,12 @@ impl TerminalWorker {
                 Osc52Effect::Rejected(_) => true,
             };
             if !continued {
+                return false;
+            }
+        }
+        if let Some(request) = requested {
+            self.permission_request_state.publish(&request);
+            if !self.send_terminal_event(SessionEvent::PermissionRequested(request)) {
                 return false;
             }
         }
@@ -1849,8 +1916,22 @@ impl TerminalWorker {
         true
     }
 
-    fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
-        self.emulator.feed(bytes);
+    /// Feeds output to the emulator and adds the Permission Requests it carries to `requested`.
+    fn feed_terminal_output(
+        &mut self,
+        bytes: &[u8],
+        requested: &mut Option<PermissionRequest>,
+        focus_reports: &mut Vec<u8>,
+    ) -> bool {
+        let emulator = &mut self.emulator;
+        self.permission_requests.feed(
+            bytes,
+            |bytes| emulator.feed(bytes),
+            |request| match requested {
+                Some(requested) => requested.merge(request),
+                None => *requested = Some(request),
+            },
+        );
         if let Some(error) = self.emulator.graphics_failure() {
             self.send_runtime_failure(format!(
                 "failed to update terminal graphics storage: {error}"
@@ -2249,6 +2330,10 @@ fn join_worker(worker: JoinHandle<()>) {
 #[path = "session/tests.rs"]
 mod tests;
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
 #[path = "../platform/unix_adapter_tests/session.rs"]
 mod unix_adapter_tests;

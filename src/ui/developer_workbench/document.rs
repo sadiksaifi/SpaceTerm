@@ -77,14 +77,15 @@ impl DocumentEditor {
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .font_family(crate::bundled_font::FAMILY)
         .child(self.area.clone());
-        let button = |selector: &'static str,
-                      label: &'static str,
-                      operation: fn(&mut DeveloperWorkbench, &mut Context<DeveloperWorkbench>)| {
-            let owner = cx.weak_entity();
-            action_button(selector, label, true, move |_, cx| {
-                let _ = owner.update(cx, operation);
-            })
-        };
+        let button =
+            |selector: &'static str,
+             label: &'static str,
+             operation: fn(&mut DeveloperWorkbench, &mut Context<DeveloperWorkbench>)| {
+                let owner = cx.weak_entity();
+                action_button(selector, label, true, move |_, cx| {
+                    let _ = owner.update(cx, operation);
+                })
+            };
         let actions = div()
             .flex()
             .flex_row()

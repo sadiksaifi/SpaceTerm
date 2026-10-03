@@ -13,8 +13,8 @@ use crate::ui::appearance_runtime;
 
 use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
-use crate::ui::sidebar_window::form::CaptionTone;
 use super::ShortcutDescription;
+use crate::ui::sidebar_window::form::CaptionTone;
 
 fn open_keybindings(
     document: SettingsDocument,
@@ -38,7 +38,7 @@ fn open_keybindings_with(
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            None,
+            Default::default(),
             None,
             window,
             cx,
@@ -102,12 +102,7 @@ fn retained(
     cx: &mut VisualTestContext,
 ) -> Option<Option<Shortcut>> {
     window.read_with(cx, |settings, _| {
-        settings
-            .editor
-            .document()
-            .keybindings
-            .get(command)
-            .cloned()
+        settings.editor.document().keybindings.get(command).cloned()
     })
 }
 
@@ -116,7 +111,9 @@ fn description(
     command: Command,
     cx: &mut VisualTestContext,
 ) -> Option<ShortcutDescription> {
-    window.read_with(cx, |settings, cx| settings.shortcut_description(command, cx))
+    window.read_with(cx, |settings, cx| {
+        settings.shortcut_description(command, cx)
+    })
 }
 
 /// The Commands whose rows the Keybindings search keeps, in row order.
@@ -135,22 +132,33 @@ fn found(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Vec<Com
 
 fn search_value(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
     window.read_with(cx, |settings, cx| {
-        settings.shortcuts.search_input().read(cx).value().to_owned()
+        settings
+            .shortcuts
+            .search_input()
+            .read(cx)
+            .value()
+            .to_owned()
     })
 }
 
 /// The explanation a search that found nothing shows.
 fn no_results(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
-    window.read_with(cx, |settings, cx| settings.no_shortcuts_found(cx).map(String::from))
+    window.read_with(cx, |settings, cx| {
+        settings.no_shortcuts_found(cx).map(String::from)
+    })
 }
 
 fn is_searching_by_shortcut(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
-    window.read_with(cx, |settings, _| settings.shortcuts.is_searching_by_shortcut())
+    window.read_with(cx, |settings, _| {
+        settings.shortcuts.is_searching_by_shortcut()
+    })
 }
 
 fn type_search(window: &Entity<SettingsWindow>, text: &str, cx: &mut VisualTestContext) {
     let input = window.read_with(cx, |settings, _| settings.shortcuts.search_input().clone());
-    input.update_in(cx, |input, window, cx| input.focus_handle().focus(window, cx));
+    input.update_in(cx, |input, window, cx| {
+        input.focus_handle().focus(window, cx)
+    });
     cx.simulate_input(text);
     cx.run_until_parked();
 }
@@ -313,9 +321,7 @@ fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestA
 }
 
 #[gpui::test]
-fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(
-    cx: &mut TestAppContext,
-) {
+fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     record(&window, Command::NewWorkspace, "cmd-w", cx);
 
@@ -331,9 +337,9 @@ fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(
 fn escape_while_recording_keeps_the_settings_search(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     window.update_in(cx, |settings, _, cx| {
-        settings
-            .search
-            .update(cx, |search, cx| search.set_value("workspace".to_owned(), cx));
+        settings.search.update(cx, |search, cx| {
+            search.set_value("workspace".to_owned(), cx)
+        });
     });
     cx.run_until_parked();
     record(&window, Command::NewWorkspace, "escape", cx);
@@ -403,7 +409,10 @@ fn reset_all_restores_every_keybinding(cx: &mut TestAppContext) {
 #[gpui::test]
 fn searching_by_text_keeps_the_commands_it_names(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    assert!(cx.debug_bounds("settings-keybindings-search-frame").is_some());
+    assert!(
+        cx.debug_bounds("settings-keybindings-search-frame")
+            .is_some()
+    );
     assert_eq!(found(&window, cx).len(), Command::ALL.len());
 
     type_search(&window, "split", cx);
@@ -419,7 +428,10 @@ fn searching_by_text_keeps_the_commands_it_names(cx: &mut TestAppContext) {
     assert!(found(&window, cx).is_empty());
     assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
     // The search stays in place so the query can be corrected.
-    assert!(cx.debug_bounds("settings-keybindings-search-frame").is_some());
+    assert!(
+        cx.debug_bounds("settings-keybindings-search-frame")
+            .is_some()
+    );
 }
 
 #[gpui::test]
@@ -509,9 +521,7 @@ fn searching_by_a_system_reserved_shortcut_names_its_owner(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn the_search_by_shortcut_toggle_is_the_tab_stop_after_the_search_field(
-    cx: &mut TestAppContext,
-) {
+fn the_search_by_shortcut_toggle_is_the_tab_stop_after_the_search_field(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     type_search(&window, "", cx);
 
@@ -585,8 +595,12 @@ fn recorder_bounds(command: Command, cx: &mut VisualTestContext) -> Bounds<Pixel
 }
 
 fn focus_recorder(window: &Entity<SettingsWindow>, command: Command, cx: &mut VisualTestContext) {
-    let recorder = window.read_with(cx, |settings, _| settings.shortcuts.recorder(command).clone());
-    recorder.update_in(cx, |recorder, window, cx| recorder.focus_handle().focus(window, cx));
+    let recorder = window.read_with(cx, |settings, _| {
+        settings.shortcuts.recorder(command).clone()
+    });
+    recorder.update_in(cx, |recorder, window, cx| {
+        recorder.focus_handle().focus(window, cx)
+    });
     cx.run_until_parked();
     // The frame that reports the focus scrolls, and the next one draws the scrolled rows.
     cx.update(|window, _| window.refresh());

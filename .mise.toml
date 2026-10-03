@@ -254,7 +254,11 @@ export SPACETERM_SPARKLE_DIR="$(python3 packaging/macos/prepare-sparkle.py)"
 
 [tasks.fmt]
 description = "Format shared Rust sources"
-run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui"
+# rustfmt does not follow main.rs's include!, so visit the application module root explicitly.
+run = [
+  "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui",
+  "rustfmt --edition 2024 src/application_modules.rs",
+]
 
 [tasks."fmt:files"]
 description = "Format selected Rust files during focused changes"
@@ -265,7 +269,10 @@ run = '''python3 -c 'import os, shlex, subprocess; subprocess.run(["rustfmt", "-
 
 [tasks."fmt:check"]
 description = "Check shared Rust formatting"
-run = "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check"
+run = [
+  "cargo fmt --package spaceterm --package spaceterm-directories --package spaceterm-ui -- --check",
+  "rustfmt --edition 2024 --check src/application_modules.rs",
+]
 
 [tasks."fmt:macos"]
 description = "Format isolated macOS and shared Unix Adapter sources"

@@ -561,9 +561,13 @@ impl WorkspaceSidebar {
             sidebar
                 .upgrade()
                 .map(|owner| {
-                    owner
-                        .read(cx)
-                        .render_lifted_row(workspace_id, size, sidebar.clone(), window, cx)
+                    owner.read(cx).render_lifted_row(
+                        workspace_id,
+                        size,
+                        sidebar.clone(),
+                        window,
+                        cx,
+                    )
                 })
                 .unwrap_or_else(|| div().into_any_element())
         })

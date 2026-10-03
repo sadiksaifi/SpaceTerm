@@ -321,6 +321,8 @@ impl TerminalSession {
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = SessionMetadataState::default();
         let worker_metadata_state = metadata_state.clone();
+        let permission_request_state = SessionPermissionRequestState::default();
+        let worker_permission_request_state = permission_request_state.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let native_pty_close = NativePtyCloseHandle::default();
@@ -371,6 +373,7 @@ impl TerminalSession {
                     TerminalWorkerPublishers {
                         clipboard,
                         metadata_state: worker_metadata_state,
+                        permission_request_state: worker_permission_request_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
@@ -382,6 +385,7 @@ impl TerminalSession {
         Ok((
             Self {
                 metadata_state,
+                permission_request_state,
                 commands: Some(command_tx),
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
@@ -432,6 +436,8 @@ impl TerminalSession {
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = SessionMetadataState::default();
         let worker_metadata_state = metadata_state.clone();
+        let permission_request_state = SessionPermissionRequestState::default();
+        let worker_permission_request_state = permission_request_state.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -452,6 +458,7 @@ impl TerminalSession {
                     TerminalWorkerPublishers {
                         clipboard,
                         metadata_state: worker_metadata_state,
+                        permission_request_state: worker_permission_request_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
@@ -464,6 +471,7 @@ impl TerminalSession {
             Ok(Ok(())) => Ok((
                 Self {
                     metadata_state,
+                    permission_request_state,
                     commands: Some(command_tx),
                     worker: Some(worker),
                     native_pty_close: Some(native_pty_close),

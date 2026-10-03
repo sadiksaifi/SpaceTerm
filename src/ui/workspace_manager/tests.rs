@@ -7329,7 +7329,8 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
-    let release = cx.debug_bounds("workspace-row-3-active").unwrap().center() + point(px(0.0), px(4.0));
+    let release =
+        cx.debug_bounds("workspace-row-3-active").unwrap().center() + point(px(0.0), px(4.0));
 
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
@@ -7368,7 +7369,10 @@ fn a_workspace_row_released_below_the_list_should_stay_in_place(cx: &mut TestApp
     cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
-    assert_eq!((marked, workspace_order(&manager, cx)), (false, vec![1, 2, 3]));
+    assert_eq!(
+        (marked, workspace_order(&manager, cx)),
+        (false, vec![1, 2, 3])
+    );
 }
 
 #[gpui::test]
@@ -8522,7 +8526,11 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     });
     assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
 }
-#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
 mod unix_adapter_tests {
     include!("../../platform/unix_adapter_tests/workspace_manager.rs");
 }

@@ -204,6 +204,8 @@ tab	Some(Identifier("TerminalFind"))	terminal::FocusNextTerminalFindControl
 shift-tab	Some(Identifier("TerminalFind"))	terminal::FocusPreviousTerminalFindControl
 enter	Some(Identifier("TerminalPasteConfirmation"))	terminal::ConfirmUnsafePaste
 escape	Some(Identifier("TerminalPasteConfirmation"))	terminal::CancelUnsafePaste
+cmd-enter	Some(Identifier("TerminalPermissionRequest"))	terminal::SetUpPermissionRequest
+cmd-.	Some(Identifier("TerminalPermissionRequest"))	terminal::DeclinePermissionRequest
 cmd-w	Some(Identifier("Settings"))	spaceterm::CloseSettingsWindow
 cmd-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
 escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch

@@ -14,14 +14,16 @@ mod macos_appearance;
 mod macos_keyboard_layout;
 #[cfg(target_os = "macos")]
 mod macos_quick_look_window;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod unix_selected_file;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
+pub(crate) mod permission_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
+pub(crate) mod setup_guide_host;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix_selected_file;
 pub(crate) mod window_chrome;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
@@ -57,6 +59,15 @@ pub(crate) mod macos_application_menu;
 mod macos_application_quit;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application_quit;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_permission_access;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_permission_access;
+#[cfg(target_os = "macos")]
+mod macos_permission_probe;
+#[cfg(target_os = "macos")]
+mod macos_setup_guide_host;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_accessibility;
@@ -158,8 +169,14 @@ mod linux_fonts;
 pub(crate) mod linux_fonts;
 #[cfg(target_os = "linux")]
 pub(crate) use linux_composition::main;
+/// Runs a helper role this process was started for, returning its exit code.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(crate) use unix_askpass_transport::dispatch_helper_from_environment;
+pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
+    let result = unix_askpass_transport::dispatch_helper_from_environment();
+    #[cfg(target_os = "macos")]
+    let result = result.or_else(macos_permission_probe::dispatch_probe_from_environment);
+    result
+}
 
 pub(crate) mod locale;
 
@@ -288,8 +305,6 @@ mod linux_reserved_shortcuts;
 #[cfg(target_os = "linux")]
 mod linux_scroll;
 
-
-
 #[cfg(target_os = "linux")]
 mod linux_shortcut_text;
 
@@ -300,8 +315,8 @@ mod linux_window_drag;
 mod linux_window_visibility;
 
 #[cfg(target_os = "linux")]
-mod linux_session_bus;
+mod linux_application_instance;
 #[cfg(target_os = "linux")]
 mod linux_desktop_events;
 #[cfg(target_os = "linux")]
-mod linux_application_instance;
+mod linux_session_bus;
