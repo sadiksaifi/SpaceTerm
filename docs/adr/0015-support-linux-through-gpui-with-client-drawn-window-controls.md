@@ -9,7 +9,8 @@ Linux uses client-drawn Window Controls and a rounded window frame. Controls fol
 button layout and available window capabilities, but always occupy the top right. The sidebar
 toggle sits at the far left because Linux has no traffic lights. The Settings Window uses the normal
 window kind on Linux and remains non-resizable. Background transparency and blur follow host
-capabilities, with an opaque fallback when unavailable.
+capabilities. Without either, the window stays opaque and Settings shows both choices disabled at
+their defaults, which then also govern floating surfaces, while the stored choices are retained.
 
 The Linux Keymap assigns application Shortcuts to Ctrl+Shift, optionally with Alt, including digits
 for Tabs and minus for font size. Unshifted xterm Control forms remain available to the terminal;

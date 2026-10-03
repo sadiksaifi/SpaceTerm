@@ -27,29 +27,307 @@ struct Harness {
     platform: RecordingAppearancePlatform,
 }
 
-#[gpui::test]
-fn unsupported_blur_explains_how_to_use_available_desktop_transparency(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+/// Retained window effects that differ from the defaults in every respect a row can show.
+fn retained_window_effects() -> SettingsDocument {
+    let mut document = SettingsDocument::default();
+    document.preferences.window.transparency = 0.8;
+    document.preferences.window.blur = false;
+    document
+}
+
+/// Configures the desktop's window-effect capabilities and lets Settings observe them.
+fn set_window_effects(
+    harness: &Harness,
+    transparency: bool,
+    blur: bool,
+    cx: &mut VisualTestContext,
+) {
     harness
         .platform
-        .set_native_window_transparency_supported(true);
-    harness.platform.set_native_window_blur_supported(false);
+        .set_native_window_transparency_supported(transparency);
+    harness.platform.set_native_window_blur_supported(blur);
     cx.run_until_parked();
-    let guidance = window.read_with(cx, |settings, cx| {
-        settings.row_description(SettingsRowId::Transparency, cx)
-    });
+}
+
+fn window_background_rows(
+    window: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> crate::appearance::WindowBackgroundChoices {
+    window.read_with(cx, |settings, cx| settings.window_background(cx))
+}
+
+/// Whether the Blur switch presents itself as on, read from where its thumb rests.
+fn blur_switch_shows_on(cx: &mut VisualTestContext) -> bool {
+    let track = cx
+        .debug_bounds("settings-blur-indicator")
+        .expect("the Blur switch should render");
+    let thumb = cx
+        .debug_bounds("settings-blur-thumb")
+        .expect("the Blur switch thumb should render");
+    thumb.center().x > track.center().x
+}
+
+/// Whether the element at `selector` paints exactly this fill, and this border where one is
+/// given.
+fn paints_frame(
+    selector: &'static str,
+    (fill, border): (crate::appearance::Color, Option<crate::appearance::Color>),
+    cx: &mut VisualTestContext,
+) -> bool {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"));
+    cx.update(|window, _| {
+        let bounds = bounds.scale(window.scale_factor());
+        let fill = gpui::Background::from(crate::ui::appearance::gpui_color(fill));
+        let border =
+            border.map(|border| gpui::Hsla::from(crate::ui::appearance::gpui_color(border)));
+        // A frame paints its fill and its border as separate quads over the same bounds.
+        let quads = window.painted_quads();
+        let framed = quads.iter().filter(|quad| quad.bounds == bounds);
+        framed.clone().any(|quad| quad.background == fill)
+            && border.is_none_or(|border| framed.clone().any(|quad| quad.border_color == border))
+    })
+}
+
+/// The number of distinct keyboard stops Tab visits on the way once around the window.
+fn keyboard_stops(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| {
+        let mut visited: Vec<gpui::FocusHandle> = Vec::new();
+        for _ in 0..512 {
+            window.focus_next(cx);
+            let Some(focused) = window.focused(cx) else {
+                break;
+            };
+            if visited.contains(&focused) {
+                break;
+            }
+            visited.push(focused);
+        }
+        visited.len()
+    })
+}
+
+#[gpui::test]
+fn missing_desktop_transparency_shows_disabled_window_effect_defaults(cx: &mut TestAppContext) {
+    assert_unavailable_window_effects_show_disabled_defaults(
+        false,
+        crate::appearance::UnavailableWindowEffect::Transparency,
+        [
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency.",
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+        ],
+        cx,
+    );
+}
+
+#[gpui::test]
+fn missing_desktop_blur_shows_disabled_window_effect_defaults(cx: &mut TestAppContext) {
+    assert_unavailable_window_effects_show_disabled_defaults(
+        true,
+        crate::appearance::UnavailableWindowEffect::Blur,
+        [
+            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency.",
+            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+        ],
+        cx,
+    );
+}
+
+/// Where the desktop cannot present a window effect, the window stays opaque and neither
+/// Transparency nor Blur can change it. Both rows show their defaults, which are what render,
+/// in the disabled state, and the retained choices return once the desktop can present them.
+fn assert_unavailable_window_effects_show_disabled_defaults(
+    transparency: bool,
+    unavailable: crate::appearance::UnavailableWindowEffect,
+    guidance: [&'static str; 2],
+    cx: &mut TestAppContext,
+) {
+    use crate::appearance::{ChromeTone, ResolvedWindowComposition, WindowBackgroundAppearance};
+
+    let blur = false;
+    {
+        let retained = retained_window_effects();
+        let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&retained));
+        set_window_effects(&harness, transparency, blur, cx);
+        let case = format!("transparency={transparency} blur={blur}");
+
+        // The rows show the defaults, not the retained choices.
+        let defaults = crate::appearance::AppearancePreferences::default().window;
+        let rows = window_background_rows(&window, cx);
+        assert_eq!(rows.unavailable, Some(unavailable), "{case}");
+        assert_eq!(
+            (rows.transparency, rows.blur),
+            (defaults.transparency, defaults.blur),
+            "{case}"
+        );
+        assert!(blur_switch_shows_on(cx), "{case}: Blur shows its default");
+        let description = |row, cx: &mut VisualTestContext| {
+            window.read_with(cx, |settings, cx| settings.row_description(row, cx))
+        };
+        assert_eq!(
+            [
+                description(SettingsRowId::Transparency, cx),
+                description(SettingsRowId::Blur, cx),
+            ],
+            guidance.map(Some),
+            "{case}"
+        );
+
+        // What renders is the defaults, floating surfaces included.
+        let composition = cx.update(|_, cx| {
+            let chrome = &appearance_runtime::current(cx).chrome;
+            (
+                chrome.composition,
+                ResolvedWindowComposition::resolve(
+                    &defaults,
+                    chrome.composition.capabilities,
+                    ChromeTone::of(chrome.colors.background),
+                ),
+            )
+        });
+        assert_eq!(composition.0, composition.1, "{case}");
+        assert_eq!(composition.0.effective, WindowBackgroundAppearance::Opaque);
+        assert!(!composition.0.floating_materials.is_opaque(), "{case}");
+        assert!(composition.0.floating_blur, "{case}");
+
+        // Both controls paint the shared disabled state rather than the enabled one.
+        let card = cx.update(|_, cx| {
+            crate::ui::appearance::settings::shared(cx)
+                .chrome
+                .host_colors(spaceterm_ui::ControlHost::Card)
+                .clone()
+        });
+        // The switch track's border is a shared control-library treatment in every state, so
+        // only its fill tells the states apart.
+        for (selector, disabled, enabled) in [
+            (
+                "settings-blur-indicator",
+                (card.toggle_on_disabled_background, None),
+                (card.toggle_on_background, None),
+            ),
+            (
+                "settings-transparency-buttons",
+                (
+                    card.input_disabled_background,
+                    Some(card.input_disabled_border),
+                ),
+                (card.input_background, Some(card.input_border)),
+            ),
+        ] {
+            assert!(
+                paints_frame(selector, disabled, cx),
+                "{case}: {selector} paints the disabled state"
+            );
+            assert!(
+                !paints_frame(selector, enabled, cx),
+                "{case}: {selector} does not paint the enabled state"
+            );
+        }
+
+        // Neither pointer nor reset reaches the retained choices, and nothing is written.
+        assert!(
+            !window.read_with(cx, |settings, cx| {
+                settings.differs_from_default(SettingsRowId::Transparency, cx)
+                    || settings.differs_from_default(SettingsRowId::Blur, cx)
+            }),
+            "{case}: a row showing its default offers no reset"
+        );
+        click("settings-transparency-increase", cx);
+        click("settings-transparency-decrease", cx);
+        click("settings-blur", cx);
+        settle(cx);
+        assert_eq!(
+            document_of(&window, cx).preferences.window,
+            retained.preferences.window,
+            "{case}"
+        );
+        assert_eq!(harness.storage.writes(), 0, "{case}");
+        assert!(blur_switch_shows_on(cx), "{case}");
+
+        // The keyboard cannot reach the decrement, the increment, the switch, or a reset. Once
+        // the desktop presents both effects, all five become stops: the retained choices differ
+        // from the defaults, so each row offers its reset again.
+        let locked_stops = keyboard_stops(cx);
+        set_window_effects(&harness, true, true, cx);
+        assert_eq!(keyboard_stops(cx), locked_stops + 5, "{case}");
+        assert!(
+            window.read_with(cx, |settings, cx| {
+                settings.differs_from_default(SettingsRowId::Transparency, cx)
+                    && settings.differs_from_default(SettingsRowId::Blur, cx)
+            }),
+            "{case}"
+        );
+
+        // A desktop that presents both effects restores the retained choices, editable again.
+        let rows = window_background_rows(&window, cx);
+        assert_eq!(rows.unavailable, None, "{case}");
+        assert_eq!((rows.transparency, rows.blur), (0.8, false), "{case}");
+        assert!(!blur_switch_shows_on(cx), "{case}");
+        assert_eq!(
+            cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
+            WindowBackgroundAppearance::Transparent,
+            "{case}"
+        );
+        click("settings-blur", cx);
+        settle(cx);
+        assert!(harness.storage.document().unwrap().preferences.window.blur);
+        assert_eq!(
+            harness
+                .storage
+                .document()
+                .unwrap()
+                .preferences
+                .window
+                .transparency,
+            0.8
+        );
+    }
+}
+
+/// Reduce Transparency still explains floating surfaces while a missing window effect keeps the
+/// rows at their disabled defaults.
+#[gpui::test]
+fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) =
+        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
+    set_window_effects(&harness, true, false, cx);
+    harness.platform.set_reduce_transparency(true);
+    cx.run_until_parked();
+    let description = |row, cx: &mut VisualTestContext| {
+        window.read_with(cx, |settings, cx| settings.row_description(row, cx))
+    };
     assert_eq!(
-        guidance,
+        description(SettingsRowId::Transparency, cx),
         Some(
-            "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
         )
     );
-    click("settings-blur", cx);
+    assert_eq!(
+        description(SettingsRowId::Blur, cx),
+        Some(
+            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+        )
+    );
+    harness
+        .platform
+        .set_native_window_transparency_supported(false);
     cx.run_until_parked();
     assert_eq!(
-        cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
-        crate::appearance::WindowBackgroundAppearance::Transparent
+        description(SettingsRowId::Transparency, cx),
+        Some(
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+        )
     );
+    assert_eq!(
+        description(SettingsRowId::Blur, cx),
+        Some(
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+        )
+    );
+    assert!(!window_background_rows(&window, cx).adjustable());
 }
 
 fn open_settings(
@@ -1554,28 +1832,30 @@ fn settings_backdrop_tracks_blur_and_accessibility_live(cx: &mut TestAppContext)
 fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     cx: &mut TestAppContext,
 ) {
-    let (window, harness, cx) = open_settings(cx);
+    let (window, harness, cx) =
+        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
+    let retained = retained_window_effects().preferences.window;
     let guidance = |row, cx: &mut VisualTestContext| {
         window.read_with(cx, |settings, cx| settings.row_description(row, cx))
     };
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("Floating surfaces still use your transparency choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
     assert!(
         guidance(SettingsRowId::Blur, cx)
             .unwrap()
-            .contains("Floating surfaces still use your blur choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
 
-    // The fallback must not disable editing the choices that will apply when support returns.
+    // The fallback shows the defaults it renders and leaves the retained choices for a desktop
+    // that can present them.
     click("settings-transparency-increase", cx);
     click("settings-blur", cx);
     settle(cx);
-    let retained = harness.storage.document().unwrap().preferences.window;
-    assert_eq!(retained.transparency, 0.4);
-    assert!(!retained.blur);
+    assert_eq!(document_of(&window, cx).preferences.window, retained);
+    assert_eq!(harness.storage.writes(), 0);
 
     harness
         .platform
@@ -1603,7 +1883,7 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("Floating surfaces still use your transparency choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
     assert_eq!(document_of(&window, cx).preferences.window, retained);
     assert_eq!(
@@ -1684,10 +1964,16 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
                 settings.row_description(SettingsRowId::Blur, cx).unwrap(),
             )
         });
-        assert!(transparency.contains("opaque at 0"));
-        assert!(blur.contains("Increase Transparency above 0"));
-        assert!(!transparency.contains("accessibility"));
-        assert!(!blur.contains("accessibility"));
+        if supported {
+            assert!(transparency.contains("opaque at 0"));
+            assert!(blur.contains("Increase Transparency above 0"));
+        } else {
+            // Without desktop transparency the rows show the default rather than the retained 0.
+            assert!(transparency.starts_with("Desktop transparency is unavailable"));
+            assert!(blur.starts_with("Desktop transparency is unavailable"));
+        }
+        assert!(!transparency.contains("ccessibility"));
+        assert!(!blur.contains("ccessibility"));
         assert_eq!(
             document_of(&window, cx).preferences.window,
             document.preferences.window
@@ -1698,6 +1984,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
 #[gpui::test]
 fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
+    set_window_effects(&harness, true, true, cx);
     assert_eq!(
         document_of(&window, cx).preferences.window.transparency,
         0.35

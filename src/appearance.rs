@@ -203,7 +203,7 @@ pub(crate) use crate::theme::Color;
 pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
-    WindowBackgroundAppearance,
+    UnavailableWindowEffect, WindowBackgroundAppearance, WindowBackgroundChoices,
 };
 pub(crate) use document::{
     SettingsDocument, SettingsDocumentError, export_settings, parse_settings,

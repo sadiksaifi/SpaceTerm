@@ -415,7 +415,9 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     cx.update(|cx| {
         let current = current(cx);
         assert!(current.chrome.composition.materials.is_opaque());
-        assert_eq!(floating(&current), preview_floating);
+        // Without desktop transparency the retained choices cannot take effect, so floating
+        // surfaces follow the defaults the Settings rows then show.
+        assert_eq!(floating(&current), floating(&before));
         assert_eq!(
             window_background(cx),
             gpui::WindowBackgroundAppearance::Opaque
@@ -423,7 +425,10 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     });
     platform.set_native_window_transparency_supported(true);
     cx.run_until_parked();
-    cx.update(|cx| assert_eq!(shell(&current(cx)), preview_shell));
+    cx.update(|cx| {
+        assert_eq!(shell(&current(cx)), preview_shell);
+        assert_eq!(floating(&current(cx)), preview_floating);
+    });
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell(&current(cx)), shell(&before)));

@@ -56,7 +56,7 @@ use spaceterm_ui::{
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
     FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
-    ThemeId,
+    ThemeId, UnavailableWindowEffect, WindowBackgroundChoices,
 };
 use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
@@ -710,6 +710,12 @@ impl SettingsWindow {
         }
         if let Some(differs) = self.clipboard_preference_differs(row) {
             return differs.then_some(RowReset::Clipboard);
+        }
+        if matches!(row, SettingsRowId::Transparency | SettingsRowId::Blur)
+            && !self.window_background(cx).adjustable()
+        {
+            // The row already shows its default and cannot change, so there is nothing to offer.
+            return None;
         }
         let target = row.reset_target(self.fixed_appearance())?;
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
@@ -1376,12 +1382,25 @@ impl SettingsWindow {
         .into_any_element()
     }
 
+    /// Transparency and Blur as the window presents them on this desktop.
+    ///
+    /// Where a window effect is unavailable, both rows show the defaults that render and cannot
+    /// change, while the retained choices wait in the document for a desktop that presents them.
+    fn window_background(&self, cx: &App) -> WindowBackgroundChoices {
+        super::appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities
+            .window_background(&self.editor.document().preferences.window)
+    }
+
     fn render_transparency(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let value = self.editor.document().preferences.window.transparency;
+        let background = self.window_background(cx);
+        let value = background.transparency;
         let owner = cx.weak_entity();
         Stepper::new(
             "settings-transparency",
@@ -1389,7 +1408,7 @@ impl SettingsWindow {
             format!("{value:.2}"),
         )
         .bounds(value > 0.0, value < 1.0)
-        .enabled(self.editor.editable())
+        .enabled(self.editor.editable() && background.adjustable())
         .on_step(move |delta, _, cx| {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
@@ -1406,12 +1425,12 @@ impl SettingsWindow {
     }
 
     fn render_blur(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let value = self.editor.document().preferences.window.blur;
+        let background = self.window_background(cx);
         let owner = cx.weak_entity();
-        Switch::new("settings-blur", "Blur background", value)
+        Switch::new("settings-blur", "Blur background", background.blur)
             .size(ToggleSize::Regular)
             .label_hidden(true)
-            .disabled(!self.editor.editable())
+            .disabled(!self.editor.editable() || !background.adjustable())
             .debug_selector("settings-blur")
             .on_change(move |change, _, cx| {
                 let blur = change.requested();
@@ -1988,45 +2007,58 @@ impl SettingsWindow {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
             SettingsRowId::Transparency | SettingsRowId::Blur => {
-                let zero_transparency =
-                    self.editor.document().preferences.window.transparency == 0.0;
+                let background = self.window_background(cx);
+                let zero_transparency = background.transparency == 0.0;
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable =
-                    !zero_transparency && !composition.capabilities.native_window_transparency;
-                Some(match row {
-                    SettingsRowId::Transparency if zero_transparency => {
-                        "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
-                    }
-                    SettingsRowId::Transparency if accessibility_forced_opaque => {
-                        "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
-                    }
-                    SettingsRowId::Transparency if native_unavailable => {
-                        "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
-                    }
-                    SettingsRowId::Transparency
-                        if !composition.capabilities.native_window_blur
-                            && self.editor.document().preferences.window.blur =>
-                    {
-                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
-                    }
-                    SettingsRowId::Transparency => {
-                        "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
-                    }
-                    _ if zero_transparency => {
-                        "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
-                    }
-                    _ if accessibility_forced_opaque => {
-                        "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
-                    }
-                    _ if native_unavailable || !composition.capabilities.native_window_blur => {
-                        "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
-                    }
-                    _ => {
-                        "Soften the desktop behind the window and content behind floating surfaces."
-                    }
-                })
+                let transparency = row == SettingsRowId::Transparency;
+                Some(
+                    match (background.unavailable, accessibility_forced_opaque) {
+                        (Some(UnavailableWindowEffect::Transparency), false) if transparency => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), false) => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), true) if transparency => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), true) => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), false) if transparency => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), false) => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), true) if transparency => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), true) => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                        }
+                        (None, _) if transparency && zero_transparency => {
+                            "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
+                        }
+                        (None, true) if transparency => {
+                            "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
+                        }
+                        (None, _) if transparency => {
+                            "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
+                        }
+                        (None, _) if zero_transparency => {
+                            "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
+                        }
+                        (None, true) => {
+                            "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
+                        }
+                        (None, false) => {
+                            "Soften the desktop behind the window and content behind floating surfaces."
+                        }
+                    },
+                )
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::AutomaticUpdateDownloads
