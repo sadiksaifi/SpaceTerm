@@ -152,7 +152,9 @@ fn compose(
         ),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory,
+        super::unix_askpass_transport::AskPassWindowFactory::new(
+            super::launch_host::running_executable(),
+        ),
     ));
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(

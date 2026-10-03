@@ -19,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -165,7 +165,18 @@ fn validate_broker_process(
     }
 }
 
-pub(super) struct AskPassWindowFactory;
+/// Starts each window's AskPass broker with the helper executable composition resolved once at
+/// startup, so a later upgrade of the installed file cannot change what OpenSSH executes.
+pub(super) struct AskPassWindowFactory {
+    helper_path: Option<PathBuf>,
+}
+
+impl AskPassWindowFactory {
+    /// `None` makes every attempt report AskPass as unavailable.
+    pub(super) fn new(helper_path: Option<PathBuf>) -> Self {
+        Self { helper_path }
+    }
+}
 
 impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
     fn create(
@@ -177,7 +188,7 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
             window,
             cx,
             Arc::new(UnixAskPassLocalIpc),
-            std::env::current_exe().map_err(|_| AskPassUnavailable)?,
+            self.helper_path.clone().ok_or(AskPassUnavailable)?,
         )
         .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
     }
