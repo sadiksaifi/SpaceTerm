@@ -32,12 +32,17 @@ use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
-/// The guide's height: the instruction line above one row. Its width follows System Settings'
-/// content column.
-pub(super) const GUIDE_HEIGHT: Pixels = px(92.0);
+/// The guide's height while it guides: the instruction line, the application row, and one caption
+/// line. Its width follows System Settings' content column.
+pub(super) const GUIDING_HEIGHT: Pixels = px(114.0);
+/// The guide's height once the permission is granted: the result line above the advice row.
+pub(super) const GRANTED_HEIGHT: Pixels = px(92.0);
 
 const PADDING: f32 = 12.0;
 const LINE_HEIGHT: f32 = 20.0;
+const CAPTION_HEIGHT: f32 = 16.0;
+/// The space between the application row and the caption line below it.
+const CAPTION_GAP: f32 = 6.0;
 /// The application row's height, close to a row of the System Settings list.
 const ROW_HEIGHT: f32 = 40.0;
 const ROW_ICON_SIZE: f32 = 24.0;
@@ -50,6 +55,15 @@ const DRAG_ICON_SIZE: f32 = 32.0;
 const NUDGE_DURATION: Duration = Duration::from_millis(450);
 /// How far the arrow rises while it points.
 const NUDGE_DISTANCE: f32 = 4.0;
+
+/// The guide's height for what it shows.
+pub(super) fn height(presentation: GuidePresentation) -> Pixels {
+    if presentation.granted {
+        GRANTED_HEIGHT
+    } else {
+        GUIDING_HEIGHT
+    }
+}
 
 /// Opens the guide at `bounds` on `display` without activating SpaceTerm.
 pub(super) fn open(
@@ -329,17 +343,50 @@ impl SetupGuide {
                 .text_color(gpui_color(colors.text_secondary))
                 .child(text)
         };
-        let body = match (&self.bundle, presentation.granted) {
-            (Some(bundle), false) => self.render_application(bundle, appearance, cx),
-            (None, false) => div()
-                .h(px(ROW_HEIGHT))
+        let caption = |text: String| {
+            div()
+                .debug_selector(|| "setup-guide-caption".to_owned())
+                .h(px(CAPTION_HEIGHT))
                 .flex()
                 .items_center()
                 .pl(indent)
-                .child(detail(format!(
-                    "Use the add button below the list, then choose {application}."
-                )))
-                .into_any_element(),
+                .min_w_0()
+                .truncate()
+                .chrome_text(appearance.typography.style(TextRole::Caption))
+                .text_color(gpui_color(colors.text_secondary))
+                .child(text)
+        };
+        let guiding = |row: AnyElement, alternative: &str| {
+            let entry = if presentation.cleared {
+                format!("{application} removed any earlier entry.")
+            } else {
+                format!("If {application} is listed, turn it on.")
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(CAPTION_GAP))
+                .child(row)
+                .child(caption(format!("{entry}{alternative}")))
+                .into_any_element()
+        };
+        let body = match (&self.bundle, presentation.granted) {
+            (Some(bundle), false) => guiding(
+                self.render_application(bundle, appearance, cx),
+                " Or use the + button below the list.",
+            ),
+            (None, false) => guiding(
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .pl(indent)
+                    .child(detail(format!(
+                        "Use the + button below the list, then choose {application}."
+                    )))
+                    .into_any_element(),
+                "",
+            ),
             (_, true) => {
                 let advice = match presentation.permission {
                     ComputerUsePermission::ScreenRecording => {

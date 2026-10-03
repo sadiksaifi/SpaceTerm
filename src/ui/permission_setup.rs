@@ -105,6 +105,9 @@ pub(crate) enum SetupStep {
 pub(crate) struct GuidePresentation {
     pub(crate) permission: ComputerUsePermission,
     pub(crate) granted: bool,
+    /// Whether the setup removed any earlier entry for SpaceTerm, so the guide says why the list
+    /// no longer holds it.
+    pub(crate) cleared: bool,
     /// The permission set up after this one, when the setup holds another.
     pub(crate) next: Option<ComputerUsePermission>,
 }
@@ -127,6 +130,8 @@ struct SetupRun {
     permission: ComputerUsePermission,
     queued: VecDeque<ComputerUsePermission>,
     step: SetupStep,
+    /// Whether preparing the current permission removed any earlier entry for SpaceTerm.
+    cleared: bool,
     guide: Option<GuideWindow>,
     /// Tracking intervals with System Settings in front.
     intervals: u32,
@@ -299,6 +304,7 @@ impl PermissionSetup {
             permission,
             queued: requested,
             step: SetupStep::Preparing,
+            cleared: false,
             guide: None,
             intervals: 0,
             opened_at: cx.background_executor().now(),
@@ -335,6 +341,7 @@ impl PermissionSetup {
             return;
         };
         run.step = SetupStep::Preparing;
+        run.cleared = false;
         let permission = run.permission;
         let (sender, receiver) = async_channel::bounded(1);
         let started = self.access.prepare_setup(
@@ -365,7 +372,13 @@ impl PermissionSetup {
         }
         match readiness {
             Some(ComputerUseSetupReadiness::AlreadyGranted) => self.advance(cx),
-            Some(ComputerUseSetupReadiness::Ready) | None => self.open(cx),
+            Some(ComputerUseSetupReadiness::Ready { cleared }) => {
+                if let Some(run) = &mut self.run {
+                    run.cleared = cleared;
+                }
+                self.open(cx);
+            }
+            None => self.open(cx),
         }
     }
 
@@ -490,6 +503,7 @@ impl PermissionSetup {
         Some(GuidePresentation {
             permission: run.permission,
             granted: run.step == SetupStep::Granted,
+            cleared: run.cleared,
             next: run.queued.front().copied(),
         })
     }
@@ -527,10 +541,10 @@ impl PermissionSetup {
             self.dismiss_guide(cx);
             return;
         };
-        let bounds = placement::place_guide(content, visible, guide::GUIDE_HEIGHT);
         let Some(presentation) = self.presentation() else {
             return;
         };
+        let bounds = placement::place_guide(content, visible, guide::height(presentation));
         if self.bundle.is_none() {
             self.bundle = Some(self.host.application_bundle());
         }

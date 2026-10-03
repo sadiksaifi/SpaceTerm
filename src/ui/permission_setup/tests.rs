@@ -166,7 +166,7 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
     assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
-    assert_eq!(frame.size.height, super::guide::GUIDE_HEIGHT);
+    assert_eq!(frame.size.height, super::guide::GUIDING_HEIGHT);
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
     assert_eq!(fixture.host.glass_requests(), 1);
 }
@@ -492,6 +492,25 @@ fn a_guide_busy_with_an_event_is_not_replaced(cx: &mut TestAppContext) {
             .count()
     });
     assert_eq!(guides, 1);
+}
+
+/// The guide says when the setup removed an earlier entry, and otherwise says to turn on an entry
+/// the list may still hold.
+#[gpui::test]
+fn the_guide_reports_whether_the_setup_cleared_an_entry(cx: &mut TestAppContext) {
+    for resettable in [true, false] {
+        let fixture = install(NotGranted, NotGranted, cx);
+        fixture.access.resettable.set(resettable);
+        fixture.start(&[ScreenRecording], cx);
+        fixture.show_settings(settings_frame(), cx);
+
+        let cleared = fixture
+            .setup
+            .read_with(cx, |setup, _| setup.presentation().map(|shown| shown.cleared));
+        assert_eq!(cleared, Some(resettable));
+        fixture.setup.update(cx, |setup, cx| setup.cancel(cx));
+        cx.run_until_parked();
+    }
 }
 
 #[gpui::test]

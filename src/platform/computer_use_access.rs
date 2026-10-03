@@ -44,8 +44,10 @@ pub(crate) type ComputerUseResetCompletion =
 pub(crate) enum ComputerUseSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
-    /// System Settings is ready to accept SpaceTerm into the permission's list.
-    Ready,
+    /// System Settings is ready to accept SpaceTerm into the permission's list. `cleared` says
+    /// whether the setup removed any earlier entry for SpaceTerm first. The system does not say
+    /// whether an entry existed, so the removal may have found none.
+    Ready { cleared: bool },
 }
 
 pub(crate) type ComputerUseSetupCompletion =
@@ -87,9 +89,10 @@ pub(crate) trait ComputerUseAccess {
     /// Prepares System Settings for a Permission Setup of one permission.
     ///
     /// It verifies the authorization first and reports [`ComputerUseSetupReadiness::AlreadyGranted`]
-    /// without changing anything when tools already receive the permission. Otherwise it clears a
-    /// stale entry for the running application when it can, because System Settings ignores an
-    /// application dropped onto a list that already holds it. The completion may run on any thread.
+    /// without changing anything when tools already receive the permission. Otherwise it removes
+    /// any entry for the running application when it can, because System Settings ignores an
+    /// application dropped onto a list that already holds it, and an entry from an earlier build
+    /// grants nothing. The completion may run on any thread.
     fn prepare_setup(
         &self,
         permission: ComputerUsePermission,
@@ -238,7 +241,9 @@ pub(crate) mod testing {
             completion(self.authorization(permission).map(|authorization| {
                 match authorization {
                     ComputerUseAuthorization::Granted => ComputerUseSetupReadiness::AlreadyGranted,
-                    ComputerUseAuthorization::NotGranted => ComputerUseSetupReadiness::Ready,
+                    ComputerUseAuthorization::NotGranted => ComputerUseSetupReadiness::Ready {
+                        cleared: self.resettable.get(),
+                    },
                 }
             }));
             Ok(())

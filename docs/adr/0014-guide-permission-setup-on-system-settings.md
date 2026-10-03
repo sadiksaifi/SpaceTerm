@@ -18,6 +18,8 @@ Set Up clears the permission's entry with `tccutil` when a probe has just verifi
 granted. A stale entry from an earlier signature shows as present but grants nothing, and removing
 it lets the person add SpaceTerm afresh. A verified grant and a failed probe never reset. Troubleshoot
 resets only after the person confirms. A reset names only the running identity's bundle identifier.
+`tccutil` succeeds whether or not an entry existed, so the guide says that Set Up removed any earlier
+entry rather than claiming it removed one.
 
 The Setup Guide is a non-activating panel that follows System Settings' window by reading window
 geometry and owners, which needs no permission. It shows only while System Settings is frontmost, so
