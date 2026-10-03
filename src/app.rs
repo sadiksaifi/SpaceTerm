@@ -150,9 +150,6 @@ pub(crate) fn init(
     application_quit: Rc<dyn ApplicationQuitAdapter>,
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
-    if application_menu.uses_command_palette() {
-        crate::ui::application_commands::install(cx);
-    }
     install_application_quit(cx, Rc::clone(&application_quit))?;
     if application_quit.last_window_policy()
         == crate::platform::application_quit::LastWindowPolicy::Quit

@@ -753,13 +753,9 @@ impl DeveloperWorkbench {
                     .child(self.render_detail(&surface, window, cx))
                     .child(self.render_footer(&surface, cx)),
             );
-        let mut layer = ModalLayer::new(content).transient(self.palette.clone());
-        if let Some(palette) = super::application_commands::layer(window, cx)
-            && palette.read(cx).is_open()
-        {
-            layer = layer.transient(palette);
-        }
-        layer.into_any_element()
+        ModalLayer::new(content)
+            .transient(self.palette.clone())
+            .into_any_element()
     }
 
     fn render_sidebar(

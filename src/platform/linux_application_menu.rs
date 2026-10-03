@@ -1,4 +1,4 @@
-//! Linux desktops present no global application menu; menu-only commands are reached elsewhere.
+//! Linux desktops present no global application menu.
 use gpui::App;
 
 use super::application_menu::{ApplicationMenuAdapter, ApplicationMenuError};
@@ -23,10 +23,6 @@ impl ApplicationMenuAdapter for LinuxApplicationMenuAdapter {
         self.events.install(cx);
         Ok(())
     }
-
-    fn uses_command_palette(&self) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]
@@ -34,19 +30,19 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn linux_menu_exposes_help_through_the_portable_adapter(cx: &mut gpui::TestAppContext) {
+    fn linux_menu_has_no_about_or_help_surface(cx: &mut gpui::TestAppContext) {
+        use super::super::application_menu::ApplicationMenuCommand;
         let (_, events) = LinuxDesktopEvents::new();
         let adapter = LinuxApplicationMenuAdapter::new(ApplicationIdentity::current(), events);
-        cx.update(|cx| {
-            adapter.perform(
-                super::super::application_menu::ApplicationMenuCommand::OpenHelp,
-                cx,
-            )
-        })
-        .unwrap();
-        assert_eq!(
-            cx.opened_url().as_deref(),
-            Some(crate::platform::application_menu_model::HELP_URL)
-        );
+        for command in [
+            ApplicationMenuCommand::ShowAbout,
+            ApplicationMenuCommand::OpenHelp,
+        ] {
+            assert_eq!(
+                cx.update(|cx| adapter.perform(command, cx)),
+                Err(ApplicationMenuError::Unavailable)
+            );
+        }
+        assert_eq!(cx.opened_url(), None);
     }
 }

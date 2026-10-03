@@ -63,7 +63,6 @@ pub enum SystemReservation {
     Screenshot,
     Help,
     Settings,
-    CommandPalette,
     KeyboardNavigation,
     DockHiding,
     Zoom,

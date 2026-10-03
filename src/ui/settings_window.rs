@@ -802,13 +802,7 @@ impl SettingsWindow {
                     .child(self.render_detail(&settings, window, cx))
                     .child(self.render_footer(&settings)),
             );
-        let mut layer = ModalLayer::new(content);
-        if let Some(palette) = super::application_commands::layer(window, cx)
-            && palette.read(cx).is_open()
-        {
-            layer = layer.transient(div().absolute().inset_0().child(palette));
-        }
-        layer.into_any_element()
+        ModalLayer::new(content).into_any_element()
     }
 }
 

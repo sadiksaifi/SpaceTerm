@@ -31,16 +31,8 @@ pub(crate) enum ApplicationMenuError {
 pub(crate) trait ApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError>;
 
-    fn uses_command_palette(&self) -> bool {
-        false
-    }
-
-    fn perform(
-        &self,
-        command: ApplicationMenuCommand,
-        cx: &mut App,
-    ) -> Result<(), ApplicationMenuError> {
-        crate::ui::application_commands::perform(command, cx)
+    fn perform(&self, _: ApplicationMenuCommand, _: &mut App) -> Result<(), ApplicationMenuError> {
+        Err(ApplicationMenuError::Unavailable)
     }
 }
 
