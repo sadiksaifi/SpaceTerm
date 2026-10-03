@@ -483,18 +483,17 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_host_without_the_capability_offers_no_microphone_controls(cx: &mut TestAppContext) {
+fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
+    cx: &mut TestAppContext,
+) {
     let (window, cx) = open_settings(None, cx);
-    assert!(
-        cx.debug_bounds("settings-navigation-settings-section-privacy")
-            .is_none()
-    );
+    click("settings-navigation-settings-section-privacy", cx);
 
     assert_eq!(status(&window, cx), MicrophoneAccessStatus::Unsupported);
-    assert!(cx.debug_bounds(ROW_SELECTOR).is_none());
+    assert!(cx.debug_bounds(ROW_SELECTOR).is_some());
     assert!(
         cx.debug_bounds("settings-microphone-access-state-unavailable")
-            .is_none()
+            .is_some()
     );
     assert_eq!(action(&window, cx), None);
     assert_no_action_rendered(cx);

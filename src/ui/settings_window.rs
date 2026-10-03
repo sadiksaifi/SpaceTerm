@@ -58,6 +58,7 @@ use crate::appearance::{
     FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
     ThemeId,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
@@ -264,9 +265,12 @@ pub(crate) struct SettingsWindow {
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
+    /// The sections and rows this desktop presents. A desktop omits only the surfaces of features
+    /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
+    available_sections: Vec<SettingsSectionId>,
+    omitted_rows: Vec<SettingsRowId>,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
-    available_sections: Vec<SettingsSectionId>,
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
@@ -305,6 +309,22 @@ impl SidebarOwner for SettingsWindow {
         self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
+    }
+}
+
+/// The host feature a whole section presents, if any.
+fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
+    (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
+}
+
+/// The host feature one row presents, if any.
+fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
+    if let Some(feature) = section_feature(row.descriptor().section) {
+        Some(feature)
+    } else if row == SettingsRowId::MicrophoneAccess {
+        Some(HostFeature::MicrophoneAccess)
+    } else {
+        permission_access::row_permission(row).map(|_| HostFeature::SystemPermissions)
     }
 }
 
@@ -484,6 +504,19 @@ impl SettingsWindow {
             })
             .detach();
         }
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let available_sections = SettingsSectionId::ALL
+            .into_iter()
+            .filter(|section| {
+                section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
+            })
+            .collect();
+        let omitted_rows = catalog::rows()
+            .map(|row| row.id)
+            .filter(|row| {
+                row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
+            })
+            .collect();
         Self {
             window_appearance,
             window_traffic_lights,
@@ -499,6 +532,8 @@ impl SettingsWindow {
             focus_handle,
             navigation,
             window_movement,
+            available_sections,
+            omitted_rows,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
@@ -507,10 +542,6 @@ impl SettingsWindow {
                 cx,
             ),
             _permission_changes: permission_changes,
-            available_sections: SettingsSectionId::ALL.into_iter().filter(|section| match section {
-                SettingsSectionId::Updates => cx.try_global::<crate::updates::UpdateService>().is_some_and(|service| !matches!(service.0.read(cx).state(), crate::updates::UpdateState::Unavailable)),
-                _ => true,
-            }).collect(),
             theme_gallery,
             theme_store,
             shortcuts,
@@ -614,7 +645,13 @@ impl SettingsWindow {
     }
 
     fn matching_rows(&self) -> Vec<SettingsRowId> {
-        catalog::matching_rows(&self.query, self.permission_access.naming()).into_iter().filter(|row| self.available_sections.contains(&row.descriptor().section)).collect()
+        catalog::matching_rows(&self.query, self.permission_access.naming())
+            .into_iter()
+            .filter(|row| {
+                self.available_sections.contains(&row.descriptor().section)
+                    && !self.omitted_rows.contains(row)
+            })
+            .collect()
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {

@@ -5,7 +5,7 @@ use crate::app::{
 use crate::application_identity::ApplicationIdentity;
 use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
-    DesktopWording,
+    DesktopWording, HostFeature,
 };
 use crate::terminal::NativeTerminalSessionFactory;
 use std::{path::PathBuf, rc::Rc, sync::Arc};
@@ -93,7 +93,12 @@ fn desktop_profile(
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
-        ),
+        )
+        .without_features(&[
+            HostFeature::Updates,
+            HostFeature::MicrophoneAccess,
+            HostFeature::SystemPermissions,
+        ]),
         locale,
     )
     .with_fonts(super::linux_fonts::capture()))
@@ -255,6 +260,13 @@ mod tests {
                 presentation.wording().system_directory_selection,
                 "Choose Directory…"
             );
+            for feature in [
+                HostFeature::Updates,
+                HostFeature::MicrophoneAccess,
+                HostFeature::SystemPermissions,
+            ] {
+                assert!(!presentation.has_feature(feature), "{feature:?}");
+            }
         });
     }
 
