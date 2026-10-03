@@ -11,7 +11,7 @@ pub(super) fn shortcuts() -> Vec<SystemReserved> {
         ("ctrl-shift-v", Paste),
         ("shift-insert", Paste),
         ("ctrl-shift-q", Quit),
-        ("ctrl-shift-p", CommandPalette),
+        ("ctrl-shift-m", Minimize),
         ("ctrl-shift-,", Settings),
         ("f11", FullScreen),
         ("ctrl-shift-alt-left", MoveWindowToWorkspace),
@@ -55,6 +55,7 @@ mod tests {
             ("ctrl-shift-,", SystemReservation::Settings),
             ("ctrl-<", SystemReservation::Settings),
             ("ctrl-shift-c", SystemReservation::Copy),
+            ("ctrl-shift-m", SystemReservation::Minimize),
             ("ctrl-shift-u", SystemReservation::InputMethod),
             (
                 "ctrl-shift-alt-left",

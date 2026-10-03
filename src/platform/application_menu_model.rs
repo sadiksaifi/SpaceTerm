@@ -1,5 +1,5 @@
-//! Shared application menu contents and grouping for native menus and the Command Palette.
-use gpui::{Action, Menu, MenuItem, SharedString, SystemMenuType};
+//! Native macOS application menu contents and grouping.
+use gpui::{Menu, MenuItem, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::app::{
@@ -21,68 +21,6 @@ use crate::ui::{
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
 pub(crate) const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
 pub(crate) const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
-
-pub(crate) struct ApplicationCommand {
-    pub(crate) label: SharedString,
-    pub(crate) action: Box<dyn Action>,
-}
-
-/// Menu entries provided by a desktop with an application Command Palette.
-/// Repeated menu actions appear once, retaining the first menu's grouping.
-pub(crate) fn application_commands(application_name: &str) -> Vec<ApplicationCommand> {
-    fn collect(menu: Menu, path: &str, commands: &mut Vec<ApplicationCommand>) {
-        let path = if path.is_empty() {
-            menu.name.to_string()
-        } else {
-            format!("{path} › {}", menu.name)
-        };
-        for item in menu.items {
-            match item {
-                MenuItem::Submenu(menu) => collect(menu, &path, commands),
-                MenuItem::Action { name, action, .. }
-                    if palette_exclusion(action.as_ref()).is_none()
-                        && !commands
-                            .iter()
-                            .any(|item| item.action.partial_eq(action.as_ref())) =>
-                {
-                    commands.push(ApplicationCommand {
-                        label: format!("{path} › {name}").into(),
-                        action,
-                    });
-                }
-                MenuItem::Action { .. } | MenuItem::Separator | MenuItem::SystemMenu(_) => {}
-            }
-        }
-    }
-    let mut commands = Vec::new();
-    for menu in menus(application_name) {
-        collect(menu, "", &mut commands);
-    }
-    commands
-}
-
-fn palette_exclusion(action: &dyn Action) -> Option<&'static str> {
-    let action = action.as_any();
-    if action.is::<EditUndo>()
-        || action.is::<EditRedo>()
-        || action.is::<EditCut>()
-        || action.is::<EditCopy>()
-        || action.is::<EditPaste>()
-        || action.is::<EditSelectAll>()
-    {
-        Some("Editing is available through the focused control's shortcuts and context menu.")
-    } else if action.is::<HideApplication>()
-        || action.is::<HideOtherApplications>()
-        || action.is::<ShowAllApplications>()
-        || action.is::<BringAllWindowsToFront>()
-    {
-        Some("These application operations are not provided by this desktop.")
-    } else if action.is::<CheckForUpdates>() {
-        Some("This desktop uses source builds without an application updater.")
-    } else {
-        None
-    }
-}
 
 pub(crate) fn menus(application_name: &str) -> Vec<Menu> {
     let mut menus = vec![
@@ -262,51 +200,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_menu_item_is_reachable_or_has_a_justified_exclusion() {
-        fn verify(menu: Menu, commands: &[ApplicationCommand]) {
-            for item in menu.items {
-                match item {
-                    MenuItem::Submenu(menu) => verify(menu, commands),
-                    MenuItem::Action { action, .. } => {
-                        let reachable = commands
-                            .iter()
-                            .filter(|entry| entry.action.partial_eq(action.as_ref()))
-                            .count();
-                        assert_eq!(
-                            reachable,
-                            usize::from(palette_exclusion(action.as_ref()).is_none()),
-                            "{}",
-                            action.name()
-                        );
-                    }
-                    MenuItem::SystemMenu(menu) => {
-                        assert!(
-                            matches!(menu.menu_type, SystemMenuType::Services),
-                            "Only native Services have no equivalent on this desktop"
-                        );
-                    }
-                    MenuItem::Separator => {}
-                }
-            }
-        }
-        let commands = application_commands("SpaceTerm");
-        for menu in menus("SpaceTerm") {
-            verify(menu, &commands);
-        }
-        for action in [
-            Box::new(ShowAboutApplication) as Box<dyn Action>,
-            Box::new(OpenApplicationHelp),
-            Box::new(OpenReleaseNotes),
-            Box::new(ExportTerminalDiagnostics),
-            Box::new(ZoomActiveWindow),
-        ] {
-            assert!(
-                commands
-                    .iter()
-                    .any(|entry| entry.action.partial_eq(action.as_ref())),
-                "{}",
-                action.name()
-            );
+    fn shared_menus_preserve_the_development_actions_and_order() {
+        let menus = menus("SpaceTerm Development");
+        let names = menus
+            .iter()
+            .map(|menu| menu.name.as_ref())
+            .collect::<Vec<_>>();
+        let expected: &[&str] = if cfg!(feature = "developer-tools") {
+            &[
+                "SpaceTerm Development",
+                "File",
+                "Edit",
+                "View",
+                "Develop",
+                "Window",
+                "Help",
+            ]
+        } else {
+            &[
+                "SpaceTerm Development",
+                "File",
+                "Edit",
+                "View",
+                "Window",
+                "Help",
+            ]
+        };
+        assert_eq!(names, expected);
+        #[cfg(feature = "developer-tools")]
+        {
+            let develop = &menus[4];
+            assert!(matches!(&develop.items[0], MenuItem::Action { action, .. }
+                if action.as_any().is::<crate::ui::developer_workbench::OpenDeveloperWorkbench>()));
+            assert!(matches!(&develop.items[1], MenuItem::Action { action, .. }
+                if action.as_any().is::<crate::ui::developer_workbench::ToggleAppearancePreview>()));
         }
     }
 }

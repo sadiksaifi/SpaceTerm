@@ -1,5 +1,4 @@
 pub(crate) mod appearance;
-pub(crate) mod application_commands;
 pub(crate) mod appearance_runtime;
 pub(crate) mod application_prompt;
 mod button_theme;

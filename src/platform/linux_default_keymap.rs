@@ -224,8 +224,8 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             None,
         ),
         KeyBinding::new("ctrl-shift-q", QuitApplication, None),
+        KeyBinding::new("ctrl-shift-m", MinimizeWindow, None),
         KeyBinding::new("f11", ToggleFullScreen, None),
-        KeyBinding::new("ctrl-shift-p", crate::ui::application_commands::OpenApplicationCommands, None),
     ];
     #[cfg(feature = "developer-tools")]
     let bindings = bindings
@@ -475,6 +475,7 @@ mod tests {
             "shift-insert",
             "ctrl-<",
             "ctrl-shift-q",
+            "ctrl-shift-m",
             "f11",
         ] {
             assert!(
@@ -482,5 +483,24 @@ mod tests {
                 "{expected} missing from {keystrokes:?}"
             );
         }
+    }
+
+    #[test]
+    fn linux_application_palette_chord_can_be_assigned_to_a_command() {
+        let profile = profile();
+        let shortcut = crate::keybindings::Shortcut::parse("ctrl-shift-p").unwrap();
+        assert!(profile.fixed_bindings().iter().all(|binding| {
+            binding
+                .match_keystrokes(&[gpui::Keystroke::parse("ctrl-shift-p").unwrap()])
+                .is_none()
+        }));
+        let mut preferences = KeybindingPreferences::default();
+        profile
+            .assign(&mut preferences, Command::CreateTab, Some(shortcut.clone()))
+            .unwrap();
+        assert_eq!(
+            profile.resolve(&preferences).shortcut(Command::CreateTab),
+            Some(&shortcut)
+        );
     }
 }
