@@ -144,6 +144,16 @@ struct GuideWindow {
     bounds: Bounds<Pixels>,
 }
 
+impl GuideWindow {
+    /// Whether the window is still open. GPUI refuses an update while the window handles an
+    /// event, so a refused update alone does not mean the window closed.
+    fn is_open(&self, cx: &App) -> bool {
+        cx.windows()
+            .iter()
+            .any(|window| window.window_id() == self.handle.window_id())
+    }
+}
+
 impl PermissionSetup {
     /// Creates the application's one Permission Setup, which the composition hands to Settings
     /// and every Pane.
@@ -496,7 +506,8 @@ impl PermissionSetup {
             let presented = guide
                 .handle
                 .update(cx, |guide, _, cx| guide.present(presentation, cx));
-            if presented.is_err() {
+            // A window busy with an event keeps its guide; the next tick presents again.
+            if presented.is_err() && !guide.is_open(cx) {
                 run.guide = None;
             }
         }
@@ -540,6 +551,10 @@ impl PermissionSetup {
                 guide.bounds = bounds;
                 return;
             }
+            // A window busy with an event is still the guide; opening another would leave two.
+            if guide.is_open(cx) {
+                return;
+            }
             run.guide = None;
         }
         let setup = cx.weak_entity();
@@ -553,13 +568,18 @@ impl PermissionSetup {
         });
     }
 
-    /// Closes the guide. The guide's own buttons defer to the setup, so the guide never closes
-    /// itself while it handles an event.
+    /// Closes the guide. A guide busy with an event closes once the event ends, so no guide
+    /// outlives its setup.
     fn dismiss_guide(&mut self, cx: &mut Context<Self>) {
-        if let Some(guide) = self.run.as_mut().and_then(|run| run.guide.take()) {
-            let _ = guide
-                .handle
-                .update(cx, |_, window, _| window.remove_window());
+        let Some(guide) = self.run.as_mut().and_then(|run| run.guide.take()) else {
+            return;
+        };
+        let handle = guide.handle;
+        let removed = handle.update(cx, |_, window, _| window.remove_window());
+        if removed.is_err() && guide.is_open(cx) {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
         }
     }
 }

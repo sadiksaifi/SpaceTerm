@@ -450,6 +450,50 @@ fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppC
     );
 }
 
+/// A setup that ends while its guide handles an event still closes the guide once the event ends.
+#[gpui::test]
+fn a_guide_busy_with_an_event_closes_after_it(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    let handle = guide(cx).expect("the guide is open");
+
+    let setup = fixture.setup.clone();
+    handle
+        .update(cx, |_, _, cx| setup.update(cx, |setup, cx| setup.cancel(cx)))
+        .expect("the guide handles the event");
+    cx.run_until_parked();
+
+    assert!(guide(cx).is_none());
+    assert_eq!(fixture.current(cx), None);
+}
+
+/// A guide busy with an event stays the one guide; tracking never opens a second.
+#[gpui::test]
+fn a_guide_busy_with_an_event_is_not_replaced(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    let handle = guide(cx).expect("the guide is open");
+
+    let setup = fixture.setup.clone();
+    let located = fixture.host.locate_system_settings();
+    handle
+        .update(cx, |_, _, cx| {
+            setup.update(cx, |setup, cx| setup.follow(located, cx));
+        })
+        .expect("the guide handles the event");
+    cx.run_until_parked();
+
+    let guides = cx.update(|cx| {
+        cx.windows()
+            .into_iter()
+            .filter(|window| window.downcast::<SetupGuide>().is_some())
+            .count()
+    });
+    assert_eq!(guides, 1);
+}
+
 #[gpui::test]
 fn a_failed_open_ends_the_setup_with_a_failure(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
