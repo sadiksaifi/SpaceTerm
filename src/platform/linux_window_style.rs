@@ -1,4 +1,5 @@
 //! Local desktop and freedesktop icon theme facts, captured at the Linux composition seam.
+use super::app_directories::DesktopResourceDirectories;
 use super::linux_session_bus::{SessionBus, SessionBusError};
 use spaceterm_ui::{DesktopWindowControls, DesktopWindowStyle};
 use std::{
@@ -8,7 +9,10 @@ use std::{
     sync::Arc,
 };
 
-pub(super) fn capture(bus: Option<&SessionBus>) -> DesktopWindowControls {
+pub(super) fn capture(
+    bus: Option<&SessionBus>,
+    resources: &DesktopResourceDirectories,
+) -> DesktopWindowControls {
     let (theme, icons) = bus
         .and_then(|bus| {
             bus.query(|connection| {
@@ -39,7 +43,10 @@ pub(super) fn capture(bus: Option<&SessionBus>) -> DesktopWindowControls {
         &theme,
     );
     let icons = if style == DesktopWindowStyle::Breeze {
-        kde_icon_theme().unwrap_or_else(|| "breeze".into())
+        resources
+            .kde_globals_file()
+            .and_then(|file| kde_icon_theme(&file))
+            .unwrap_or_else(|| "breeze".into())
     } else {
         icons
     };
@@ -51,7 +58,7 @@ pub(super) fn capture(bus: Option<&SessionBus>) -> DesktopWindowControls {
     } else {
         &icons
     };
-    let roots = icon_roots();
+    let roots = resources.icon_theme_roots();
     DesktopWindowControls {
         style,
         icons: [
@@ -65,35 +72,6 @@ pub(super) fn capture(bus: Option<&SessionBus>) -> DesktopWindowControls {
                 .and_then(|path| read_bounded(&path, 256 * 1024).map(Arc::from))
         }),
     }
-}
-
-fn icon_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(&home).join(".icons"));
-        roots.push(
-            std::env::var_os("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(home).join(".local/share"))
-                .join("icons"),
-        );
-    }
-    roots.extend(
-        std::env::var_os("XDG_DATA_DIRS")
-            .map_or_else(
-                || {
-                    vec![
-                        PathBuf::from("/usr/local/share"),
-                        PathBuf::from("/usr/share"),
-                    ]
-                },
-                |dirs| std::env::split_paths(&dirs).collect(),
-            )
-            .into_iter()
-            .filter(|root| root.is_absolute())
-            .map(|root| root.join("icons")),
-    );
-    roots
 }
 
 fn safe_name(name: &str) -> bool {
@@ -208,6 +186,20 @@ fn resolve_icon(
         .find(|path| path.is_file())
 }
 
+fn kde_icon_theme(kde_globals: &Path) -> Option<String> {
+    let contents = String::from_utf8(read_bounded(kde_globals, 256 * 1024)?).ok()?;
+    let mut icons = false;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') {
+            icons = line == "[Icons]";
+        }
+        if icons && let Some(theme) = line.strip_prefix("Theme=") {
+            return Some(theme.trim().into());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,23 +287,4 @@ mod tests {
         assert!(read_bounded(&fallback, 4).is_none());
         std::fs::remove_dir_all(temporary).unwrap();
     }
-}
-
-fn kde_icon_theme() -> Option<String> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?
-        .join("kdeglobals");
-    let contents = String::from_utf8(read_bounded(&config, 256 * 1024)?).ok()?;
-    let mut icons = false;
-    for line in contents.lines().map(str::trim) {
-        if line.starts_with('[') {
-            icons = line == "[Icons]";
-        }
-        if icons && let Some(theme) = line.strip_prefix("Theme=") {
-            return Some(theme.trim().into());
-        }
-    }
-    None
 }

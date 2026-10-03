@@ -18,6 +18,8 @@ const XDG_DATA_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_HOME";
 const XDG_STATE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_STATE_HOME";
 const XDG_CACHE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CACHE_HOME";
 const XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE: &str = "XDG_RUNTIME_DIR";
+const XDG_DATA_DIRS_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_DIRS";
+const DEFAULT_XDG_DATA_DIRS: [&str; 2] = ["/usr/local/share", "/usr/share"];
 
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct AppDirectoryEnvironment {
@@ -353,6 +355,73 @@ pub enum DirectoryError {
     UnsupportedPlatform,
 }
 
+/// Read-only freedesktop locations of the host desktop's own resources, such as icon themes and
+/// desktop settings. They name no SpaceTerm directory and are never created or written.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct DesktopResourceDirectories {
+    home: Option<PathBuf>,
+    config_home: Option<PathBuf>,
+    data: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for DesktopResourceDirectories {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DesktopResourceDirectories(<redacted>)")
+    }
+}
+
+impl DesktopResourceDirectories {
+    pub fn capture() -> Self {
+        Self::resolve(
+            &AppDirectoryEnvironment::capture(),
+            std::env::var_os(XDG_DATA_DIRS_ENVIRONMENT_VARIABLE).as_deref(),
+        )
+    }
+
+    /// Resolve by the XDG Base Directory rules: relative or empty values are ignored, the data home
+    /// precedes the system data directories, and missing values use the specification defaults.
+    pub fn resolve(environment: &AppDirectoryEnvironment, data_dirs: Option<&OsStr>) -> Self {
+        let home = absolute_environment_path(environment.home.as_deref());
+        let config_home = absolute_environment_path(environment.xdg_config_home.as_deref())
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
+        let data_home = absolute_environment_path(environment.xdg_data_home.as_deref())
+            .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+        let mut system_data: Vec<PathBuf> = data_dirs
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                std::env::split_paths(value)
+                    .filter(|path| path.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if system_data.is_empty() {
+            system_data = DEFAULT_XDG_DATA_DIRS.map(PathBuf::from).to_vec();
+        }
+        Self {
+            home,
+            config_home,
+            data: data_home.into_iter().chain(system_data).collect(),
+        }
+    }
+
+    /// Icon theme base directories in lookup order: the legacy `~/.icons`, then `icons` in each
+    /// data directory.
+    pub fn icon_theme_roots(&self) -> Vec<PathBuf> {
+        self.home
+            .iter()
+            .map(|home| home.join(".icons"))
+            .chain(self.data.iter().map(|data| data.join("icons")))
+            .collect()
+    }
+
+    /// The desktop-wide KDE settings file.
+    pub fn kde_globals_file(&self) -> Option<PathBuf> {
+        self.config_home
+            .as_ref()
+            .map(|config| config.join("kdeglobals"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeDirectoryRoot {
     RoamingAppData,
@@ -557,6 +626,53 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn desktop_resources_follow_xdg_order_and_ignore_relative_values() {
+        let environment = AppDirectoryEnvironment {
+            home: Some("/home/test".into()),
+            xdg_config_home: Some("relative/config".into()),
+            xdg_data_home: Some("/explicit/data".into()),
+            ..Default::default()
+        };
+        let resources = DesktopResourceDirectories::resolve(
+            &environment,
+            Some(OsStr::new("relative/share:/opt/share::/usr/share")),
+        );
+        assert_eq!(
+            resources.icon_theme_roots(),
+            [
+                "/home/test/.icons",
+                "/explicit/data/icons",
+                "/opt/share/icons",
+                "/usr/share/icons",
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            resources.kde_globals_file(),
+            Some(PathBuf::from("/home/test/.config/kdeglobals"))
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn desktop_resources_use_specification_defaults_without_a_home() {
+        let resources = DesktopResourceDirectories::resolve(
+            &AppDirectoryEnvironment::default(),
+            Some(OsStr::new("relative/share")),
+        );
+        assert_eq!(
+            resources.icon_theme_roots(),
+            ["/usr/local/share/icons", "/usr/share/icons"].map(PathBuf::from)
+        );
+        assert_eq!(resources.kde_globals_file(), None);
+        assert_eq!(
+            format!("{resources:?}"),
+            "DesktopResourceDirectories(<redacted>)"
+        );
+    }
 
     #[cfg(not(target_os = "windows"))]
     fn environment() -> AppDirectoryEnvironment {

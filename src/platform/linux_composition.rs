@@ -163,7 +163,10 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
-    let controls = super::linux_window_style::capture(bus.as_ref());
+    let controls = super::linux_window_style::capture(
+        bus.as_ref(),
+        &super::app_directories::DesktopResourceDirectories::capture(),
+    );
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(
             Rc::new(super::linux_locale::LinuxLocale::capture(|key| std::env::var(key).ok())),
