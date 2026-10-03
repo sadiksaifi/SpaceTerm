@@ -367,9 +367,35 @@ impl SessionMetadataState {
     }
 }
 
+/// Requests are a bounded set of supported permissions, retained independently of UI wakeups.
+#[derive(Clone, Default)]
+struct SessionPermissionRequestState(Arc<Mutex<Option<PermissionRequest>>>);
+
+impl SessionPermissionRequestState {
+    fn snapshot(&self) -> Option<PermissionRequest> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn publish(&self, request: &PermissionRequest) {
+        let mut retained = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        match retained.as_mut() {
+            Some(retained) => retained.merge(request.clone()),
+            None => *retained = Some(request.clone()),
+        }
+    }
+}
+
 pub(crate) trait TerminalSessionHandle {
     /// The newest Terminal Metadata the Session has retained, whether or not it is presentable.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+        None
+    }
+
+    /// The permissions requested by this Terminal Session, retained across event replacement.
+    fn permission_request(&self) -> Option<PermissionRequest> {
         None
     }
 
@@ -434,6 +460,7 @@ pub(crate) trait TerminalSessionFactory {
 
 pub(crate) struct TerminalSession {
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -511,6 +538,10 @@ impl TerminalSession {
 impl TerminalSessionHandle for TerminalSession {
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.metadata_state.snapshot()
+    }
+
+    fn permission_request(&self) -> Option<PermissionRequest> {
+        self.permission_request_state.snapshot()
     }
 
     fn key(&self, input: KeyInput) {
@@ -877,6 +908,7 @@ impl fmt::Debug for Command {
 
 struct TerminalWorker {
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
@@ -906,6 +938,7 @@ struct TerminalWorkerContext {
 struct TerminalWorkerPublishers {
     clipboard: WorkerClipboard,
     metadata_state: SessionMetadataState,
+    permission_request_state: SessionPermissionRequestState,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -1046,6 +1079,7 @@ impl TerminalWorker {
         let TerminalWorkerPublishers {
             clipboard,
             metadata_state,
+            permission_request_state,
             events,
             accessibility,
         } = publishers;
@@ -1079,6 +1113,7 @@ impl TerminalWorker {
 
         let mut worker = Self {
             metadata_state,
+            permission_request_state,
             native_pty,
             input: PtyInput::default(),
             emulator,
@@ -1783,10 +1818,11 @@ impl TerminalWorker {
                 return false;
             }
         }
-        if let Some(request) = requested
-            && !self.send_terminal_event(SessionEvent::PermissionRequested(request))
-        {
-            return false;
+        if let Some(request) = requested {
+            self.permission_request_state.publish(&request);
+            if !self.send_terminal_event(SessionEvent::PermissionRequested(request)) {
+                return false;
+            }
         }
 
         if received_output {

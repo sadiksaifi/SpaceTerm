@@ -433,6 +433,7 @@ impl PaneSessionLifecycle {
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
+                        changed |= this.sync_permission_request(session_epoch, cx);
                         presentation_changed |= this.sync_metadata(session_epoch);
                         if presentation_changed {
                             cx.emit(TerminalPaneEvent::CaptionChanged);
@@ -2072,6 +2073,21 @@ impl TerminalPane {
             return false;
         };
         self.accept_metadata(snapshot)
+    }
+
+    /// Screen and lifecycle events can replace the request's wakeup before the Pane reads it.
+    fn sync_permission_request(&mut self, session_epoch: u64, cx: &mut Context<Self>) -> bool {
+        if self.terminal_session.session_epoch != session_epoch
+            || !self.terminal_session_available()
+        {
+            return false;
+        }
+        let request = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.permission_request());
+        request.is_some_and(|request| self.offer_permission_setup(request.permissions(), cx))
     }
 
     /// Accepts metadata no older than what this Pane already presents.
