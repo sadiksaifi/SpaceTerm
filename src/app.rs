@@ -1106,6 +1106,7 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
     }
     cx.set_global(host.window_frame);
     cx.set_global(host.window_chrome.clone());
+    host.window_chrome.install_controls(cx);
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(opener) = &host.adapters.selected_files {
         cx.set_global(SelectedFileAccess(Arc::clone(opener)));

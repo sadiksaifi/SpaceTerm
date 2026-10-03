@@ -50,6 +50,7 @@ pub(super) struct WorkspaceChromeLayout {
     pub(super) width: Pixels,
     sidebar_visible: bool,
     fullscreen: bool,
+    client_controls_width: Pixels,
 }
 
 impl WorkspaceChromeLayout {
@@ -67,6 +68,11 @@ impl WorkspaceChromeLayout {
             },
             sidebar_visible: sidebar.visible,
             fullscreen: window.is_fullscreen(),
+            client_controls_width: spaceterm_ui::ClientWindowControls::width(
+                spaceterm_ui::WindowControlSide::Left,
+                window,
+                cx,
+            ),
         }
     }
 
@@ -110,7 +116,19 @@ impl WorkspaceChromeLayout {
             + identity_width
             + status_width;
         let edge_reserve = trailing_reserve(appearance, cx);
-        (leading_clearance(window.is_fullscreen(), edge_reserve, cx)
+        let client_controls_width = spaceterm_ui::ClientWindowControls::width(
+            spaceterm_ui::WindowControlSide::Left,
+            window,
+            cx,
+        );
+        let leading_width = if client_controls_width > px(0.0) {
+            // The group width already includes the native window margin. Reserve its gap to
+            // the toggle separately from the toggle's gap to the switcher.
+            client_controls_width + edge_reserve
+        } else {
+            leading_clearance(window.is_fullscreen(), edge_reserve, cx)
+        };
+        (leading_width
             + edge_reserve
             + edge_reserve
             + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
@@ -123,6 +141,7 @@ impl WorkspaceChromeLayout {
         self,
         toggle: impl IntoElement,
         switcher: impl IntoElement,
+        leading_controls: impl IntoElement,
         cx: &App,
     ) -> AnyElement {
         let appearance = chrome(cx);
@@ -146,7 +165,17 @@ impl WorkspaceChromeLayout {
             // line.
             .top(window_edge)
             .bottom_0()
-            .left(leading_clearance(self.fullscreen, edge_reserve, cx))
+            .left(if self.client_controls_width > px(0.0) {
+                px(cx
+                    .try_global::<spaceterm_ui::DesktopWindowControls>()
+                    .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
+                        facts.style
+                    })
+                    .control_metrics()
+                    .3)
+            } else {
+                leading_clearance(self.fullscreen, edge_reserve, cx)
+            })
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
             // stops, so the identity area and the list under it share one trailing edge.
             .right(edge_reserve)
@@ -155,6 +184,9 @@ impl WorkspaceChromeLayout {
             // The toggle keeps the frame's edge air on its right as well, in every mode, so it
             // never hugs the switcher beside it.
             .gap(edge_reserve)
+            .when(self.client_controls_width > px(0.0), |controls| {
+                controls.child(leading_controls)
+            })
             .child(toggle)
             .child(
                 div()

@@ -788,9 +788,7 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        let content =
-            super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx));
-        super::window_shell::render(content, window, cx)
+        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
     }
 }
 
@@ -825,7 +823,7 @@ impl SettingsWindow {
                     .child(self.render_detail(&settings, window, cx))
                     .child(self.render_footer(&settings)),
             );
-        ModalLayer::new(content).into_any_element()
+        ModalLayer::new(super::window_shell::render(content, window, cx)).into_any_element()
     }
 }
 
@@ -858,7 +856,7 @@ impl SettingsWindow {
             close,
         )
         .scrolled(scrolled)
-        .render(settings, window)
+        .render(settings, window, cx)
     }
 
     fn render_sidebar(
@@ -889,7 +887,15 @@ impl SettingsWindow {
             })
             .collect();
         let movement = self.window_movement.clone();
+        let closing = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = closing.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         Sidebar::new("settings", entries, &movement)
+            .window_controls(close)
             .header(
                 SearchField::new("settings-search-frame", self.search.clone())
                     .debug_selectors("settings-search-frame", "settings-search-clear"),

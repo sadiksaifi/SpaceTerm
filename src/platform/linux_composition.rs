@@ -163,6 +163,7 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
+    let controls = super::linux_window_style::capture(bus.as_ref());
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(
             Rc::new(super::linux_locale::LinuxLocale::capture(|key| std::env::var(key).ok())),
@@ -203,8 +204,8 @@ fn compose(
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
-        window_frame: super::window_frame::WindowFrameGeometry::new(Some(16.0)).with_outer_edge_width(1.0),
-        window_chrome: super::window_chrome::WindowChrome::client(),
+        window_frame: super::window_frame::WindowFrameGeometry::new(Some(controls.style.corner_radius())).with_outer_edge_width(1.0),
+        window_chrome: super::window_chrome::WindowChrome::client().with_controls(controls),
     })
     .map(|host| {
         host.with_modal_prompts(true).with_appearance(

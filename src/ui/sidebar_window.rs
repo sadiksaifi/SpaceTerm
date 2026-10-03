@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Decorations, Div, Edges, FocusHandle, Pixels, SharedString, Size,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, px,
+    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
+    Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
     ClientWindowControls, HoverFade, Icon, IconName, WindowCloseHandler, WindowDragRegion,
@@ -302,6 +302,7 @@ impl WindowMovement {
         id: String,
         content: impl IntoElement,
         pointer_insets: Edges<Pixels>,
+        window: &Window,
     ) -> WindowDragRegion {
         let movement = self.clone();
         WindowDragRegion::new(
@@ -312,6 +313,10 @@ impl WindowMovement {
             ),
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .pointer_insets(pointer_insets)
         .debug_selector(id)
         .on_event(move |event, window, cx| movement.handle(*event, window, cx))
@@ -339,6 +344,10 @@ impl WindowMovement {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -427,6 +436,7 @@ pub(crate) struct Sidebar<'a, T: SidebarOwner> {
     entries: Vec<NavigationEntry<T::Section>>,
     header: Option<AnyElement>,
     movement: &'a WindowMovement,
+    close: Option<WindowCloseHandler>,
 }
 
 impl<'a, T: SidebarOwner> Sidebar<'a, T> {
@@ -441,7 +451,13 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             entries,
             header: None,
             movement,
+            close: None,
         }
+    }
+
+    pub(crate) fn window_controls(mut self, close: WindowCloseHandler) -> Self {
+        self.close = Some(close);
+        self
     }
 
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
@@ -466,7 +482,26 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             .child(
                 self.movement.region(
                     format!("{prefix}-sidebar-drag-region"),
-                    div().size_full(),
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .pl(px(cx
+                            .try_global::<spaceterm_ui::DesktopWindowControls>()
+                            .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
+                                facts.style
+                            })
+                            .control_metrics()
+                            .3))
+                        .when_some(self.close, |titlebar, close| {
+                            titlebar.child(
+                                ClientWindowControls::new(close)
+                                    .side(spaceterm_ui::WindowControlSide::Left)
+                                    .surface_color(gpui_color(
+                                        appearance.colors.title_bar_background,
+                                    )),
+                            )
+                        }),
                     Edges {
                         left: cx
                             .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
@@ -474,6 +509,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                             .unwrap_or(px(0.0)),
                         ..Edges::default()
                     },
+                    window,
                 ),
             );
         let list = render_navigation_list(prefix, self.entries, owner, appearance, window, cx);
@@ -719,11 +755,17 @@ impl<'a> DetailHeading<'a> {
         self
     }
 
-    pub(crate) fn render(self, surface: &SettingsAppearance, window: &Window) -> AnyElement {
+    pub(crate) fn render(
+        self,
+        surface: &SettingsAppearance,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
-        let client_controls = matches!(window.window_decorations(), Decorations::Client { .. })
-            && !window.is_fullscreen();
+        let client_controls =
+            ClientWindowControls::width(spaceterm_ui::WindowControlSide::Right, window, cx)
+                > px(0.0);
         let heading = div()
             .size_full()
             .px(appearance.spacing(CONTENT_GUTTER))
@@ -734,6 +776,7 @@ impl<'a> DetailHeading<'a> {
             format!("{prefix}-detail-drag-region"),
             heading,
             Edges::default(),
+            window,
         );
         div()
             .debug_selector(move || format!("{prefix}-detail-heading"))
@@ -763,8 +806,17 @@ impl<'a> DetailHeading<'a> {
                         .flex_none()
                         .items_center()
                         .h(appearance.top_height())
-                        .pr(appearance.spacing(CONTENT_GUTTER))
-                        .child(ClientWindowControls::new(self.close)),
+                        .pr(px(cx
+                            .try_global::<spaceterm_ui::DesktopWindowControls>()
+                            .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
+                                facts.style
+                            })
+                            .control_metrics()
+                            .3))
+                        .child(
+                            ClientWindowControls::new(self.close)
+                                .surface_color(gpui_color(appearance.colors.title_bar_background)),
+                        ),
                 )
             })
             .when(self.scrolled, |heading| {

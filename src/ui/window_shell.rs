@@ -1,14 +1,14 @@
 //! A client frame around application content, driven by the window's decoration facts.
 
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, ClientFrame, Corners, CursorStyle, Decorations, Edges,
-    HitboxBehavior, MouseButton, MouseDownEvent, Pixels, ResizeEdge, Size, Tiling, Window, canvas,
-    div, point, prelude::*, px, rgba, size,
+    AnyElement, App, Bounds, ClientFrame, Corners, CursorStyle, Decorations, Edges, HitboxBehavior,
+    MouseButton, MouseDownEvent, Pixels, ResizeEdge, Size, Tiling, Window, canvas, div, point,
+    prelude::*, px, rgba, size,
 };
 
-use crate::platform::window_chrome::{
-    CLIENT_FRAME_INSET, CLIENT_FRAME_SHADOW_BLUR, CLIENT_FRAME_SHADOW_OFFSET_Y,
-};
+#[cfg(test)]
+use crate::platform::window_chrome::CLIENT_FRAME_INSET;
+use crate::platform::window_chrome::{frame_inset, frame_shadows};
 
 const RESIZE_BAND: f32 = 10.0;
 const CORNER_TARGET: f32 = 24.0;
@@ -122,6 +122,22 @@ fn cursor(edge: ResizeEdge) -> CursorStyle {
     }
 }
 
+fn frame_corners(tiling: Tiling, transparent: bool, radius: f32) -> Corners<Pixels> {
+    let corner = |first, second| {
+        px(if first || second || !transparent {
+            0.0
+        } else {
+            radius
+        })
+    };
+    Corners {
+        top_left: corner(tiling.top, tiling.left),
+        top_right: corner(tiling.top, tiling.right),
+        bottom_left: corner(tiling.bottom, tiling.left),
+        bottom_right: corner(tiling.bottom, tiling.right),
+    }
+}
+
 pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut App) -> AnyElement {
     window.use_keyed_state("client-window-frame-observer", cx, |window, _| {
         window.observe_window_appearance(|window, _| window.refresh())
@@ -137,9 +153,14 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
     } else {
         tiling
     };
+    let style = cx
+        .try_global::<spaceterm_ui::DesktopWindowControls>()
+        .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
+            facts.style
+        });
     let transparent_frame = window.supports_transparent_client_frame();
     let frame_inset = if transparent_frame {
-        CLIENT_FRAME_INSET
+        frame_inset(style)
     } else {
         0.0
     };
@@ -151,15 +172,13 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
     window.set_client_frame(transparent_frame.then(|| {
         ClientFrame {
             inset: px(frame_inset),
-            corner_radius: px(16.0),
+            corner_radius: px(style.corner_radius()),
             tiling,
-            shadows: vec![BoxShadow {
-                color: rgba(if active { 0x00000060 } else { 0x00000030 }).into(),
-                offset: point(px(0.0), px(CLIENT_FRAME_SHADOW_OFFSET_Y)),
-                blur_radius: px(CLIENT_FRAME_SHADOW_BLUR),
-                spread_radius: px(0.0),
-                inset: false,
-            }]
+            shadows: if tiling == Tiling::tiled() {
+                Vec::new()
+            } else {
+                frame_shadows(style, active)
+            }
             .into(),
         }
     }));
@@ -180,20 +199,26 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
             viewport.height - input_top - input_bottom,
         ),
     )]));
-    let radius = |a: bool, b: bool| {
-        px(if a || b || !transparent_frame {
-            0.0
-        } else {
-            16.0
-        })
-    };
-    let radii = Corners {
-        top_left: radius(tiling.top, tiling.left),
-        top_right: radius(tiling.top, tiling.right),
-        bottom_left: radius(tiling.bottom, tiling.left),
-        bottom_right: radius(tiling.bottom, tiling.right),
-    };
-    let edge = super::appearance::gpui_color(super::appearance::chrome(cx).colors.border);
+    let radii = frame_corners(tiling, transparent_frame, style.corner_radius());
+    let dark = spaceterm_ui::window_controls_dark(super::appearance::gpui_color(
+        super::appearance::chrome(cx).colors.title_bar_background,
+    ));
+    let edge = rgba(match style {
+        spaceterm_ui::DesktopWindowStyle::Adwaita => {
+            if dark {
+                0xffffff12
+            } else {
+                0xffffff4d
+            }
+        }
+        spaceterm_ui::DesktopWindowStyle::Breeze => {
+            if dark {
+                0xffffff33
+            } else {
+                0x00000033
+            }
+        }
+    });
     let resizable = window.is_resizable() && !window.is_fullscreen();
     div()
         .size_full()
@@ -207,7 +232,10 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
                 div()
                     .absolute()
                     .inset_0()
-                    .border_1()
+                    .border_t(px(if tiling.top { 0.0 } else { 1.0 }))
+                    .border_r(px(if tiling.right { 0.0 } else { 1.0 }))
+                    .border_b(px(if tiling.bottom { 0.0 } else { 1.0 }))
+                    .border_l(px(if tiling.left { 0.0 } else { 1.0 }))
                     .border_color(edge)
                     .rounded_tl(radii.top_left)
                     .rounded_tr(radii.top_right)
@@ -258,6 +286,69 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn native_frame_geometry_removes_radii_padding_and_resize_on_tiled_edges() {
+        for style in [
+            spaceterm_ui::DesktopWindowStyle::Adwaita,
+            spaceterm_ui::DesktopWindowStyle::Breeze,
+        ] {
+            for mask in 0u8..16 {
+                let tiling = Tiling {
+                    top: mask & 1 != 0,
+                    right: mask & 2 != 0,
+                    bottom: mask & 4 != 0,
+                    left: mask & 8 != 0,
+                };
+                let corners = frame_corners(tiling, true, style.corner_radius());
+                assert_eq!(
+                    corners.top_left,
+                    px(if tiling.top || tiling.left {
+                        0.0
+                    } else {
+                        style.corner_radius()
+                    })
+                );
+                assert_eq!(
+                    corners.top_right,
+                    px(if tiling.top || tiling.right {
+                        0.0
+                    } else {
+                        style.corner_radius()
+                    })
+                );
+                assert_eq!(
+                    corners.bottom_left,
+                    px(if tiling.bottom || tiling.left {
+                        0.0
+                    } else {
+                        style.corner_radius()
+                    })
+                );
+                assert_eq!(
+                    corners.bottom_right,
+                    px(if tiling.bottom || tiling.right {
+                        0.0
+                    } else {
+                        style.corner_radius()
+                    })
+                );
+                let inset = padding(tiling, frame_inset(style));
+                assert_eq!(inset.top == px(0.0), tiling.top);
+                assert_eq!(inset.left == px(0.0), tiling.left);
+                assert_eq!(inset.right == px(0.0), tiling.right);
+                assert_eq!(inset.bottom == px(0.0), tiling.bottom);
+            }
+            assert_eq!(
+                frame_corners(Tiling::tiled(), true, style.corner_radius()),
+                Corners::default()
+            );
+            assert_eq!(
+                frame_corners(Tiling::default(), false, style.corner_radius()),
+                Corners::default()
+            );
+        }
+    }
 
     struct ChromeHarness(Rc<Cell<usize>>);
 

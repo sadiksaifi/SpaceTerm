@@ -315,6 +315,8 @@ mod linux_shortcut_text;
 mod linux_window_drag;
 
 #[cfg(target_os = "linux")]
+mod linux_window_style;
+#[cfg(target_os = "linux")]
 mod linux_window_visibility;
 
 #[cfg(target_os = "linux")]

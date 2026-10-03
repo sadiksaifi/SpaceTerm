@@ -995,6 +995,10 @@ impl TabManager {
                     .show_window_menu(window, position);
                 WindowDragRegionResponse::Continue
             }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
+            }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
@@ -1874,11 +1878,18 @@ impl TabManager {
                     content.child(
                         div()
                             .flex_none()
-                            .pr(super::workspace_frame::WorkspaceFrame::for_appearance(
-                                appearance, cx,
-                            )
-                            .space())
-                            .child(spaceterm_ui::ControlHost::TitleBar.mount(spaceterm_ui::ClientWindowControls::new(close))),
+                            .pr(px(cx
+                                .try_global::<spaceterm_ui::DesktopWindowControls>()
+                                .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
+                                    facts.style
+                                })
+                                .control_metrics()
+                                .3))
+                            .child(spaceterm_ui::ControlHost::TitleBar.mount(
+                                spaceterm_ui::ClientWindowControls::new(close).surface_color(
+                                    gpui_color(appearance.colors.title_bar_background),
+                                ),
+                            )),
                     )
                 },
             );
@@ -1888,6 +1899,10 @@ impl TabManager {
             "Move Operating-System Window from Tab chrome",
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
             left: super::resize_handle_theme::spacious_target_half_thickness(cx),

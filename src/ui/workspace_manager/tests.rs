@@ -5338,25 +5338,52 @@ fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mu
 
 #[gpui::test]
 fn client_window_close_preserves_running_work_until_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_decorations(gpui::Decorations::Client {
-        tiling: gpui::Tiling::default(),
-    });
-    redraw(cx);
-    click("window-close", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Window)
-    );
-    click("modal-action-close-confirmation-cancel", cx);
-    assert_eq!(cx.windows().len(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-    click("window-close", cx);
-    click("modal-action-close-confirmation-confirm", cx);
-    assert!(cx.windows().is_empty());
+    for layout in [
+        gpui::WindowButtonLayout {
+            left: [None; 3],
+            right: [Some(gpui::WindowButton::Close), None, None],
+        },
+        gpui::WindowButtonLayout {
+            left: [Some(gpui::WindowButton::Close), None, None],
+            right: [None; 3],
+        },
+    ] {
+        let (manager, records, cx) = workspace_manager(cx);
+        cx.simulate_button_layout(Some(layout));
+        cx.simulate_decorations(gpui::Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        });
+        redraw(cx);
+        click("window-close", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window)
+        );
+        click("modal-action-close-confirmation-cancel", cx);
+        assert_eq!(cx.windows().len(), 1);
+        assert!(records.dropped_session_ids().is_empty());
+        click("window-close", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window),
+            "the second native close activation must reopen confirmation after cancellation"
+        );
+        click("modal-action-close-confirmation-confirm", cx);
+        assert!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .is_none()),
+            "confirmation must consume the pending close request"
+        );
+        assert!(cx.windows().is_empty());
+    }
 }
 
 #[gpui::test]
@@ -9832,4 +9859,80 @@ fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mu
             "no surface should paint over the strip-start mark at {mark:?}, got {covering:?}"
         );
     });
+}
+
+#[gpui::test]
+fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    for collapsed in [false, true] {
+        if collapsed {
+            click("toggle-sidebar-button", cx);
+        }
+        for style in [
+            spaceterm_ui::DesktopWindowStyle::Adwaita,
+            spaceterm_ui::DesktopWindowStyle::Breeze,
+        ] {
+            cx.update(|window, cx| {
+                cx.set_global(spaceterm_ui::DesktopWindowControls {
+                    style,
+                    ..Default::default()
+                });
+                window.refresh();
+            });
+            let (target, diameter, gap) = match style {
+                spaceterm_ui::DesktopWindowStyle::Adwaita => (34.0, 24.0, 3.0),
+                spaceterm_ui::DesktopWindowStyle::Breeze => (20.0, 18.0, 4.0),
+            };
+            for (left, right) in [
+                ([None; 3], [Some(gpui::WindowButton::Close), None, None]),
+                (
+                    [None; 3],
+                    [
+                        Some(gpui::WindowButton::Minimize),
+                        Some(gpui::WindowButton::Maximize),
+                        Some(gpui::WindowButton::Close),
+                    ],
+                ),
+                (
+                    [
+                        Some(gpui::WindowButton::Close),
+                        Some(gpui::WindowButton::Minimize),
+                        Some(gpui::WindowButton::Maximize),
+                    ],
+                    [None; 3],
+                ),
+            ] {
+                cx.simulate_button_layout(Some(gpui::WindowButtonLayout { left, right }));
+                redraw(cx);
+                let toggle = cx.debug_bounds("toggle-sidebar-button").unwrap();
+                let close = cx.debug_bounds("window-close").unwrap();
+                assert_eq!(close.size.width, px(target));
+                if style == spaceterm_ui::DesktopWindowStyle::Adwaita {
+                    cx.update(|window, _| {
+                    let circle = close.inset(px((target - diameter) / 2.0)).scale(window.scale_factor());
+                    assert!(
+                        window
+                            .painted_quads()
+                            .iter()
+                            .any(|quad| { quad.bounds == circle && !quad.background.is_transparent() }),
+                        "the native 24px circle must retain its full size inside the 34px target"
+                    );
+                });
+                }
+                if left[0].is_some() {
+                    let minimize = cx.debug_bounds("window-minimize").unwrap();
+                    let maximize = cx.debug_bounds("window-maximize").unwrap();
+                    assert!(close.right() < minimize.left());
+                    assert!(minimize.right() < maximize.left());
+                    assert!(maximize.right() < toggle.left());
+                    assert_eq!(minimize.left() - close.right(), px(gap));
+                } else {
+                    assert!(toggle.right() < close.left());
+                }
+            }
+        }
+    }
 }

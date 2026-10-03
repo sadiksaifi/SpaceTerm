@@ -876,6 +876,10 @@ impl WorkspaceManager {
                     .show_window_menu(window, position);
                 WindowDragRegionResponse::Continue
             }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
+            }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
@@ -3146,6 +3150,7 @@ impl WorkspaceManager {
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
         let toggle_manager = manager.clone();
+        let close_owner = manager.clone();
         let combo_lifecycle_manager = manager.clone();
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
@@ -3306,6 +3311,12 @@ impl WorkspaceManager {
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         });
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
+        });
+        let leading_controls = spaceterm_ui::ClientWindowControls::new(close)
+            .side(spaceterm_ui::WindowControlSide::Left)
+            .surface_color(gpui_color(appearance.colors.title_bar_background));
         let content = div().relative().size_full().child(
             layout.render_controls(
                 IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
@@ -3328,6 +3339,7 @@ impl WorkspaceManager {
                     });
                 }),
                 chooser,
+                leading_controls,
                 cx,
             ),
         );
@@ -3336,6 +3348,10 @@ impl WorkspaceManager {
             "Move Operating-System Window from Workspace chrome",
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
             right: super::resize_handle_theme::spacious_target_half_thickness(cx),
@@ -3448,8 +3464,7 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        let content = activity.mount(activity.with_scope(|| self.render_chrome(window, cx)));
-        super::window_shell::render(content, window, cx)
+        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
 }
 
@@ -3522,7 +3537,7 @@ impl WorkspaceManager {
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.pin_picker.iter().cloned());
-        ModalLayer::new(content).transient(transients)
+        ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
     }
 }
 

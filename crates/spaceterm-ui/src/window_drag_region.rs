@@ -107,6 +107,8 @@ pub enum WindowDragRegionEvent {
         /// Pointer position in window coordinates.
         position: Point<Pixels>,
     },
+    /// A middle-pointer activation requests the configured desktop titlebar action.
+    MiddleActivationRequested,
     /// The region released ownership of a primary-pointer interaction.
     InteractionFinished {
         /// Stable identity for this interaction.
@@ -171,6 +173,7 @@ pub struct WindowDragRegion {
     disabled: bool,
     drag_threshold: Pixels,
     pointer_insets: Edges<Pixels>,
+    middle_activation: bool,
     debug_selector: Option<String>,
     on_event: Option<WindowDragHandler>,
 }
@@ -193,6 +196,7 @@ impl WindowDragRegion {
             disabled: false,
             drag_threshold: px(DEFAULT_DRAG_THRESHOLD),
             pointer_insets: Edges::default(),
+            middle_activation: false,
             debug_selector: None,
             on_event: None,
         }
@@ -201,6 +205,12 @@ impl WindowDragRegion {
     /// Connects a retained read-only status handle for application policy derivation.
     pub fn status(mut self, status: WindowDragRegionStatus) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Enables the desktop's middle-click titlebar gesture where the host supports it.
+    pub fn middle_activation(mut self, enabled: bool) -> Self {
+        self.middle_activation = enabled;
         self
     }
 
@@ -278,16 +288,30 @@ impl RenderOnce for WindowDragRegion {
         let move_handler = self.on_event.clone();
         let up_handler = self.on_event.clone();
         let exit_handler = self.on_event.clone();
+        let middle_activation = self.middle_activation;
         let pointer_tracker = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
             move |_, hitbox, window, _| {
                 let down_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.bubble()
-                        || !matches!(event.button, MouseButton::Left | MouseButton::Right)
+                        || !(matches!(event.button, MouseButton::Left | MouseButton::Right)
+                            || (middle_activation && event.button == MouseButton::Middle))
                         || !down_hitbox.is_hovered(window)
                         || !down_state.read(cx).enabled
                     {
+                        return;
+                    }
+
+                    if event.button == MouseButton::Middle {
+                        emit_events(
+                            down_handler.clone(),
+                            vec![WindowDragRegionEvent::MiddleActivationRequested],
+                            window,
+                            cx,
+                        );
+                        window.prevent_default();
+                        cx.stop_propagation();
                         return;
                     }
 
@@ -821,6 +845,7 @@ mod tests {
         pointer_insets: Edges<Pixels>,
         overlay: bool,
         capture_overlay: bool,
+        middle_activation: bool,
     }
 
     impl Render for TestRoot {
@@ -850,6 +875,7 @@ mod tests {
                 content,
             )
             .disabled(self.disabled)
+            .middle_activation(self.middle_activation)
             .pointer_insets(self.pointer_insets)
             .debug_selector("test-window-drag-region")
             .on_event(move |event, _, _| region_events.borrow_mut().push(*event));
@@ -977,6 +1003,7 @@ mod tests {
             pointer_insets: Edges::default(),
             overlay: false,
             capture_overlay: false,
+            middle_activation: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1316,6 +1343,36 @@ mod tests {
             events.borrow().as_slice(),
             [WindowDragRegionEvent::DoubleActivationRequested]
         );
+    }
+
+    #[gpui::test]
+    fn native_titlebar_middle_click_claims_only_empty_chrome_when_enabled(cx: &mut TestAppContext) {
+        let DragWindow {
+            root,
+            events,
+            parent_events,
+            cx,
+            ..
+        } = drag_window(cx);
+        root.update(cx, |root, cx| {
+            root.middle_activation = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let child = cx.debug_bounds("window-drag-child").unwrap().center();
+        cx.simulate_mouse_down(child, MouseButton::Middle, Modifiers::none());
+        assert!(events.borrow().is_empty());
+        let empty = point(
+            region_bounds(cx).left() + px(20.0),
+            region_bounds(cx).center().y,
+        );
+        parent_events.borrow_mut().clear();
+        cx.simulate_mouse_down(empty, MouseButton::Middle, Modifiers::none());
+        assert_eq!(
+            *events.borrow(),
+            vec![WindowDragRegionEvent::MiddleActivationRequested]
+        );
+        assert!(parent_events.borrow().is_empty());
     }
 
     #[gpui::test]
