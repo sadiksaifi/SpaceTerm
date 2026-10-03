@@ -7574,6 +7574,37 @@ mod permission_requests {
     }
 
     #[gpui::test]
+    fn a_notice_that_moves_waits_again_before_it_accepts_an_answer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        cursor_on_row(&pane, 2, cx);
+        request(&pane, &[ScreenRecording], cx);
+
+        cursor_on_row(&pane, 8, cx);
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "the program moved the notice, so it answers nothing yet"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
     fn repeated_requests_merge_into_one_notice(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(

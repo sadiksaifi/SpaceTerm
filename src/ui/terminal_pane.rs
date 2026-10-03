@@ -3366,20 +3366,27 @@ impl TerminalPane {
         true
     }
 
-    /// Records when the notice began showing its offer, and reports whether it accepts answers.
-    /// An offer that gains a permission starts the delay again; one that loses a permission keeps
-    /// it.
-    fn show_permission_request(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
-        if !shown {
+    /// Records when the notice began showing its offer at `edge`, and reports whether it accepts
+    /// answers. An offer that gains a permission starts the delay again; one that loses a
+    /// permission keeps it. Moving to the other edge also starts it again, because the program
+    /// moves the cursor that picks the edge and could otherwise slide an answering button under
+    /// the pointer.
+    fn show_permission_request(
+        &mut self,
+        edge: Option<NoticeEdge>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(edge) = edge else {
             self.permission_request_showing = None;
             return false;
-        }
+        };
         match &mut self.permission_request_showing {
             Some(showing)
-                if self
-                    .permission_request
-                    .iter()
-                    .all(|permission| showing.offer.contains(permission)) =>
+                if showing.edge == edge
+                    && self
+                        .permission_request
+                        .iter()
+                        .all(|permission| showing.offer.contains(permission)) =>
             {
                 showing.offer.clone_from(&self.permission_request);
             }
@@ -3392,6 +3399,7 @@ impl TerminalPane {
                 });
                 self.permission_request_showing = Some(PermissionRequestShowing {
                     offer: self.permission_request.clone(),
+                    edge,
                     since: cx.background_executor().now(),
                     _arming: arming,
                 });
@@ -4153,8 +4161,12 @@ impl Render for TerminalPane {
             }
             _ => NoticeEdge::Bottom,
         };
-        let permission_request_armed =
-            self.show_permission_request(permission_request.is_some(), cx);
+        let permission_request_armed = self.show_permission_request(
+            permission_request
+                .is_some()
+                .then_some(permission_request_edge),
+            cx,
+        );
         // The notice's shortcuts apply only once it accepts answers. Until then the keys reach the
         // program, which is what the person meant them for.
         let mut key_context = gpui::KeyContext::default();
@@ -4654,9 +4666,10 @@ fn render_paste_confirmation(
     )
 }
 
-/// The offer a Permission Request notice shows and when it began showing it.
+/// The offer a Permission Request notice shows, where, and since when.
 struct PermissionRequestShowing {
     offer: Vec<ComputerUsePermission>,
+    edge: NoticeEdge,
     since: Instant,
     /// Renders the notice again once it accepts answers.
     _arming: Task<()>,
