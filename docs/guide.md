@@ -110,7 +110,7 @@ Wayland and X11 are supported. On Debian or Ubuntu, install:
 ```sh
 sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
   libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
-  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils
+  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils zsh
 
 mise run setup:linux
 mise run doctor:linux
