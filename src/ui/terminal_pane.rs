@@ -2594,8 +2594,14 @@ impl TerminalPane {
             return;
         };
 
+        // Shift overrides application mouse tracking for PRIMARY paste as it does for selection,
+        // so a Selection made with Shift-drag can be pasted the same way.
         if button == PointerButton::Middle
-            && !self.screen.mouse_tracking
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            )
             && self.primary_selection.is_some()
         {
             if let Some(text) = self
