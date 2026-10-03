@@ -11,10 +11,12 @@ toggle sits at the far left because Linux has no traffic lights. The Settings Wi
 window kind on Linux and remains non-resizable. Background transparency and blur follow host
 capabilities, with an opaque fallback when unavailable.
 
-The Linux Keymap assigns application Shortcuts to Ctrl+Shift, optionally with Alt. Plain Ctrl and
-Alt reach the terminal; Super belongs to the desktop. Shortcut labels use text. Application commands
-normally reached through the macOS menu are available through the Linux Command Palette.
-Ctrl+click activates Terminal Hyperlinks on Linux; Command+click remains the macOS gesture.
+The Linux Keymap assigns application Shortcuts to Ctrl+Shift, optionally with Alt, including digits
+for Tabs and minus for font size. Unshifted xterm Control forms remain available to the terminal;
+Super belongs to the desktop. Shortcut labels use text. Linux has no application Command Palette
+or About entry point. Ctrl+click activates Terminal Hyperlinks and is not a secondary click.
+PRIMARY Selection and middle-click paste follow Linux conventions. Right-clicking empty titlebar
+space opens the desktop window menu. macOS retains its existing pointer gestures.
 
 Host font facts preserve `.SystemUIFont` and Menlo on macOS. Linux Application Chrome uses the
 bundled Inter 4.1 release under the SIL Open Font License, privately named SpaceTerm UI to avoid
@@ -23,10 +25,11 @@ Terminal text starts with the bundled SpaceTerm Default family and falls back to
 monospace on Linux.
 
 Linux accessibility uses GPUI's AccessKit integration with AT-SPI. File Preview uses GNOME Sushi
-when its D-Bus service is activatable; the command is otherwise absent. Services, Secure Input, and
-microphone permission controls have no Linux capability. Linux quit confirmations use SpaceTerm's
-Modal presentation, and a session-bus application identity makes subsequent launches activate the
-existing instance.
+when its D-Bus service is activatable; the command is otherwise absent. Hide, Hide Others, Show All,
+Bring All to Front, the character palette, Services, Secure Input, System Permissions, and
+microphone controls have no Linux capability. Linux quit confirmations use SpaceTerm's Alert,
+closing the last window quits, and a session-bus application identity makes subsequent launches
+activate the existing instance.
 
 Linux supports source builds through mise only. This change adds no packaging, distribution, or
 updates: the Linux update adapter stays inert and update controls are absent.
