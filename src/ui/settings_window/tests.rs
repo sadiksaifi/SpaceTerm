@@ -28,24 +28,20 @@ struct Harness {
 }
 
 #[gpui::test]
-fn unsupported_blur_keeps_desktop_transparency_and_explains_the_blur_row(cx: &mut TestAppContext) {
+fn unsupported_blur_explains_how_to_use_available_desktop_transparency(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     harness
         .platform
         .set_native_window_transparency_supported(true);
     harness.platform.set_native_window_blur_supported(false);
     cx.run_until_parked();
-    assert_eq!(
-        cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
-        crate::appearance::WindowBackgroundAppearance::Transparent
-    );
     let guidance = window.read_with(cx, |settings, cx| {
-        settings.row_description(SettingsRowId::Blur, cx)
+        settings.row_description(SettingsRowId::Transparency, cx)
     });
     assert_eq!(
         guidance,
         Some(
-            "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
+            "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
         )
     );
     click("settings-blur", cx);

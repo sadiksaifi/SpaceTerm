@@ -2005,6 +2005,12 @@ impl SettingsWindow {
                     SettingsRowId::Transparency if native_unavailable => {
                         "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
+                    SettingsRowId::Transparency
+                        if !composition.capabilities.native_window_blur
+                            && self.editor.document().preferences.window.blur =>
+                    {
+                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+                    }
                     SettingsRowId::Transparency => {
                         "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
