@@ -109,6 +109,7 @@ fn compose(
         activity,
         visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
         wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
+        permission_setup: None,
     };
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
@@ -166,6 +167,14 @@ fn compose(
                 Rc::new(super::macos_microphone_access::MacosMicrophoneAccess::new())
                     as Rc<dyn crate::platform::microphone_access::MicrophoneAccess>
             }),
+            // Every identity offers these controls. A grant belongs to the signature of the build
+            // that holds it, so a rebuilt SpaceTerm Development is where stale grants recur most.
+            computer_use_access: Some(Rc::new(
+                super::macos_computer_use_access::MacosComputerUseAccess::new(identity),
+            )
+                as Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>),
+            setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
+                as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },

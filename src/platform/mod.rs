@@ -4,6 +4,7 @@ pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 pub(crate) mod application_quit;
+pub(crate) mod computer_use_access;
 pub(crate) mod control_socket;
 pub(crate) mod https_transport;
 pub(crate) mod keyboard_layout;
@@ -21,6 +22,7 @@ pub(crate) mod microphone_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
+pub(crate) mod setup_guide_host;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
 
@@ -54,6 +56,15 @@ pub(crate) mod macos_application_menu;
 mod macos_application_quit;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application_quit;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_computer_use_access;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) mod macos_computer_use_access;
+#[cfg(target_os = "macos")]
+mod macos_computer_use_probe;
+#[cfg(target_os = "macos")]
+mod macos_setup_guide_host;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_control_socket;
@@ -172,8 +183,13 @@ pub(crate) mod services_registration;
 pub(crate) mod window_movement;
 #[cfg(target_os = "macos")]
 pub(crate) use macos_composition::main;
+
+/// Runs a helper role this process was started for, returning its exit code.
 #[cfg(target_os = "macos")]
-pub(crate) use macos_askpass_transport::dispatch_helper_from_environment;
+pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
+    macos_askpass_transport::dispatch_helper_from_environment()
+        .or_else(macos_computer_use_probe::dispatch_probe_from_environment)
+}
 
 pub(crate) mod locale;
 

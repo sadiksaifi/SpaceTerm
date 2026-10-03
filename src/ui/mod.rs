@@ -26,6 +26,7 @@ mod modal_theme;
 mod native_remote_workspace_flow_backend;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
+pub(crate) mod permission_setup;
 mod progress_theme;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;
@@ -105,6 +106,8 @@ actions!(
         PasteClipboard,
         ConfirmUnsafePaste,
         CancelUnsafePaste,
+        SetUpPermissionRequest,
+        DeclinePermissionRequest,
         ExportTerminalDiagnostics,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
@@ -160,6 +163,8 @@ actions!(
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
 pub(crate) const TERMINAL_FIND_KEY_CONTEXT: &str = "TerminalFind";
 pub(crate) const TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT: &str = "TerminalPasteConfirmation";
+/// Added to a Pane's key context while it offers a Permission Request.
+pub(crate) const TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT: &str = "TerminalPermissionRequest";
 #[cfg(test)]
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;

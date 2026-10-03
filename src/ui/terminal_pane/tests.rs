@@ -7292,3 +7292,498 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
     assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
     assert_eq!(glyph(StatusIntent::Error, cx), ["CircleAlert"]);
 }
+
+mod permission_requests {
+    use super::*;
+    use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
+    use crate::platform::computer_use_access::{ComputerUseAuthorization, ComputerUsePermission};
+    use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
+    use crate::terminal::permission_request::PermissionRequest;
+    use crate::ui::permission_setup::PermissionSetup;
+    use ComputerUsePermission::{Accessibility, ScreenRecording};
+
+    /// Gives the Pane a Permission Setup over the scripted authorizations.
+    fn install_setup(
+        pane: &Entity<TerminalPane>,
+        screen_recording: ComputerUseAuthorization,
+        accessibility: ComputerUseAuthorization,
+        cx: &mut VisualTestContext,
+    ) -> Rc<ScriptedComputerUseAccess> {
+        let access = ScriptedComputerUseAccess::new(Ok(screen_recording), Ok(accessibility));
+        let host = ScriptedSetupGuideHost::new();
+        let setup = cx.update(|_, cx| PermissionSetup::create(access.clone(), host, cx));
+        pane.update(cx, |pane, _| pane.set_permission_setup(setup));
+        access
+    }
+
+    fn permission_setup(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<PermissionSetup> {
+        pane.read_with(cx, |pane, _| pane.permission_setup().expect("a setup"))
+    }
+
+    /// Raises a request and waits until the notice accepts answers.
+    fn request(
+        pane: &Entity<TerminalPane>,
+        permissions: &[ComputerUsePermission],
+        cx: &mut VisualTestContext,
+    ) {
+        raise_request(pane, permissions, cx);
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+    }
+
+    fn raise_request(
+        pane: &Entity<TerminalPane>,
+        permissions: &[ComputerUsePermission],
+        cx: &mut VisualTestContext,
+    ) {
+        pane.update(cx, |pane, cx| {
+            if pane.handle_event(
+                SessionEvent::PermissionRequested(PermissionRequest::for_test(permissions)),
+                cx,
+            ) {
+                cx.notify();
+            }
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn set_up_starts_a_permission_setup_for_the_ungranted_permissions(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert!(cx.debug_bounds("permission-request").is_some());
+        assert!(
+            cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)),
+            "the notice must leave keyboard focus with the terminal"
+        );
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "a request starts nothing by itself"
+        );
+
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+        let setup = permission_setup(&pane, cx);
+        assert_eq!(
+            setup.read_with(cx, |setup, _| setup.status(Accessibility)),
+            crate::ui::permission_setup::PermissionSetupStatus::Running
+        );
+    }
+
+    #[gpui::test]
+    fn granted_permissions_are_not_offered(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility]
+        );
+    }
+
+    #[gpui::test]
+    fn not_now_silences_later_requests_for_the_declined_permissions(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility]
+        );
+        assert!(access.prepared.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn the_notice_answers_its_shortcuts_only_while_it_shows(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        cx.simulate_keystrokes("cmd-enter cmd-.");
+        assert!(access.prepared.borrow().is_empty());
+
+        request(&pane, &[ScreenRecording], cx);
+        cx.simulate_keystrokes("enter escape");
+        assert!(
+            cx.debug_bounds("permission-request").is_some(),
+            "terminal input never answers the notice"
+        );
+        assert!(access.prepared.borrow().is_empty());
+        assert!(
+            !records.commands().is_empty(),
+            "terminal input still reaches the program"
+        );
+
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
+    fn the_notice_ignores_answers_until_it_has_shown_briefly(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        raise_request(&pane, &[ScreenRecording], cx);
+        let sent = records.commands().len();
+        cx.simulate_keystrokes("cmd-enter");
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("permission-request").is_some(),
+            "a fresh notice answers nothing"
+        );
+        assert!(access.prepared.borrow().is_empty());
+        assert!(
+            records.commands().len() > sent,
+            "a shortcut pressed before the notice accepts answers reaches the program"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+        raise_request(&pane, &[Accessibility], cx);
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "a permission added to the offer starts the delay again"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
+    fn the_decline_shortcut_answers_not_now(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        cx.simulate_keystrokes("cmd-.");
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert!(access.prepared.borrow().is_empty());
+    }
+
+    /// Places the cursor on `row` of a ten-row screen.
+    fn cursor_on_row(pane: &Entity<TerminalPane>, row: u16, cx: &mut VisualTestContext) {
+        pane.update(cx, |pane, cx| {
+            let mut screen = text_screen(1, &["x"; 10]);
+            Arc::make_mut(&mut screen).cursor = crate::terminal::CursorSnapshot {
+                position: Some(crate::terminal::CursorPositionSnapshot {
+                    column: 0,
+                    row,
+                    width_cells: 1,
+                }),
+                visible: true,
+                ..crate::terminal::CursorSnapshot::default()
+            };
+            pane.screen = screen;
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_notice_docks_away_from_the_cursor(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+        let middle = cx.update(|window, _| window.viewport_size().height / 2.0);
+
+        cursor_on_row(&pane, 2, cx);
+        let notice = cx.debug_bounds("permission-request").unwrap();
+        assert!(
+            notice.top() > middle,
+            "a cursor near the top leaves the notice at the bottom"
+        );
+
+        cursor_on_row(&pane, 8, cx);
+        let notice = cx.debug_bounds("permission-request").unwrap();
+        assert!(
+            notice.bottom() < middle,
+            "a cursor near the bottom moves the notice to the top"
+        );
+    }
+
+    #[gpui::test]
+    fn a_notice_that_moves_waits_again_before_it_accepts_an_answer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        cursor_on_row(&pane, 2, cx);
+        request(&pane, &[ScreenRecording], cx);
+
+        cursor_on_row(&pane, 8, cx);
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "the program moved the notice, so it answers nothing yet"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
+    fn repeated_requests_merge_into_one_notice(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[Accessibility], cx);
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility, ScreenRecording]
+        );
+        assert!(cx.debug_bounds("permission-request-message").is_some());
+    }
+
+    #[gpui::test]
+    fn a_remote_pane_ignores_permission_requests(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_remote_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert!(pane.read_with(cx, |pane, _| pane.permission_request.is_empty()));
+    }
+
+    #[gpui::test]
+    fn a_session_exit_withdraws_the_notice(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Exited(SessionExit::Success), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_none());
+    }
+
+    fn offered(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<ComputerUsePermission> {
+        pane.read_with(cx, |pane, _| pane.permission_request.clone())
+    }
+
+    /// A program that repeats its request reads authorization once per permission, because a
+    /// native read can start a verification process.
+    #[gpui::test]
+    fn repeated_requests_read_authorization_once(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        let reads = access.reads();
+        for _ in 0..20 {
+            request(&pane, &[ScreenRecording], cx);
+        }
+        assert_eq!(access.reads(), reads);
+
+        let not_now = {
+            request(&pane, &[Accessibility], cx);
+            cx.debug_bounds("permission-request-not-now").unwrap()
+        };
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        let reads = access.reads();
+        for _ in 0..20 {
+            request(&pane, &[Accessibility], cx);
+        }
+        assert_eq!(access.reads(), reads);
+    }
+
+    #[gpui::test]
+    fn a_grant_withdraws_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording, Accessibility], cx);
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        access.report_change();
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [Accessibility]);
+    }
+
+    /// The system reports no change to Screen Recording, so a person who turns it on directly in
+    /// System Settings is seen when they return to the window.
+    #[gpui::test]
+    fn returning_to_the_window_reads_a_grant_made_elsewhere(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(offered(&pane, cx).is_empty());
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+    }
+
+    /// A grant read from a cache can be stale. When a verification finds it withdrawn, the Pane
+    /// offers the setup the program asked for.
+    #[gpui::test]
+    fn a_withdrawn_grant_renews_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::Granted,
+            ComputerUseAuthorization::Granted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        access.report_change();
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+        assert!(cx.debug_bounds("permission-request").is_some());
+    }
+
+    /// A setup started anywhere else holds the permission, so this Pane stops offering it.
+    #[gpui::test]
+    fn a_setup_started_elsewhere_withdraws_the_offer(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+
+        let setup = permission_setup(&pane, cx);
+        setup.update(cx, |setup, cx| setup.start(&[ScreenRecording], cx));
+        cx.run_until_parked();
+        assert!(offered(&pane, cx).is_empty());
+
+        setup.update(cx, |setup, cx| setup.cancel(cx));
+        cx.run_until_parked();
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+    }
+}

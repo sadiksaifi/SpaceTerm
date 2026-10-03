@@ -8,6 +8,7 @@
 mod advanced;
 mod catalog;
 mod clipboard;
+mod computer_use;
 mod editor;
 mod import;
 mod keybindings;
@@ -22,6 +23,9 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod control_tests;
+
+#[cfg(test)]
+mod computer_use_tests;
 
 #[cfg(test)]
 mod microphone_tests;
@@ -53,6 +57,7 @@ use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
     FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
 };
+use crate::platform::computer_use_access::{ComputerUseAccess, ComputerUsePermission};
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
@@ -77,6 +82,7 @@ use crate::ui::sidebar_window::form::{
 };
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
+use computer_use::{ComputerUseAccessChanges, ComputerUseAccessRows};
 use microphone::MicrophoneAccessRow;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -102,29 +108,49 @@ const WINDOW_HEIGHT: f32 = 640.0;
 struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
 impl Global for OpenSettingsWindow {}
 
+/// The system permissions the Privacy section reads and recovers.
+///
+/// A host without one of these authorizations composes none, and the Privacy section says so.
+#[derive(Clone, Default)]
+pub(crate) struct PermissionCapabilities {
+    pub(crate) microphone: Option<Rc<dyn MicrophoneAccess>>,
+    pub(crate) computer_use: Option<Rc<dyn ComputerUseAccess>>,
+    /// The application's Permission Setup, shared with every Pane.
+    pub(crate) permission_setup: Option<Entity<super::permission_setup::PermissionSetup>>,
+}
+
 /// Host-owned capabilities needed by the Settings window's app-drawn titlebar and Privacy section.
 ///
 /// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
-/// Settings portable and gives each opened window one independent pointer-interaction owner. A
-/// host without microphone authorization composes none, and the Privacy section says so.
+/// Settings portable and gives each opened window one independent pointer-interaction owner.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
-    microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+    permissions: PermissionCapabilities,
     theme_registry: Option<ZedThemeRegistry>,
 }
 impl Global for SettingsWindowComposition {}
 
 pub(crate) fn configure_window_chrome(
     window_movement: Rc<dyn WindowMovementFactory>,
-    microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+    permissions: PermissionCapabilities,
     theme_registry: Option<ZedThemeRegistry>,
     cx: &mut App,
 ) {
     cx.set_global(SettingsWindowComposition {
         window_movement,
-        microphone_access,
+        permissions,
         theme_registry,
     });
+}
+
+/// The open Settings Window. Membership, not a root-view read, decides this: the root view is
+/// leased while an action dispatches inside Settings, so a read would miss the open window.
+fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
+    let handle = cx.try_global::<OpenSettingsWindow>()?.0;
+    cx.windows()
+        .iter()
+        .any(|window| window.window_id() == handle.window_id())
+        .then_some(handle)
 }
 
 /// Opens Settings, or activates it when it is already open.
@@ -135,11 +161,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         eprintln!("SpaceTerm Settings is unavailable because appearance is not installed");
         return;
     }
-    if let Some(existing) = cx
-        .try_global::<OpenSettingsWindow>()
-        .map(|global| global.0)
-        .filter(|handle| handle.read(cx).is_ok())
-    {
+    if let Some(existing) = open_settings_window(cx) {
         cx.defer(move |cx| {
             let _ = existing.update(cx, |_, window, _| window.activate_window());
         });
@@ -150,7 +172,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         return;
     };
     let window_drag = composition.window_movement.create();
-    let microphone_access = composition.microphone_access.clone();
+    let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
     let opened = cx.open_window(
         super::sidebar_window::window_options(
@@ -162,7 +184,7 @@ pub(crate) fn open_or_activate(cx: &mut App) {
             let settings = cx.new(|cx| {
                 SettingsWindow::new_with_capabilities(
                     Rc::clone(&window_drag),
-                    microphone_access.clone(),
+                    permissions.clone(),
                     theme_registry.clone(),
                     window,
                     cx,
@@ -243,6 +265,8 @@ pub(crate) struct SettingsWindow {
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
+    computer_use_access: ComputerUseAccessRows,
+    _computer_use_changes: Option<ComputerUseAccessChanges>,
     theme_gallery: ThemeGallery,
     /// The Get More Themes sheet, kept for the window's life so the registry is listed once.
     theme_store: Entity<ThemeStore>,
@@ -265,7 +289,7 @@ impl SidebarOwner for SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = catalog::matching_rows(&self.query, self.computer_use_access.naming());
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -298,7 +322,7 @@ impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            None,
+            PermissionCapabilities::default(),
             None,
             window,
             cx,
@@ -307,7 +331,7 @@ impl SettingsWindow {
 
     fn new_with_capabilities(
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        microphone_access: Option<Rc<dyn MicrophoneAccess>>,
+        permissions: PermissionCapabilities,
         theme_registry: Option<ZedThemeRegistry>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -424,6 +448,7 @@ impl SettingsWindow {
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
+                settings.refresh_computer_use_access(cx);
             } else {
                 settings.shortcuts.end_search_capture(cx);
             }
@@ -447,6 +472,18 @@ impl SettingsWindow {
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
         let settings_file = advanced::SettingsFileView::new(window, cx);
+        let computer_use_changes =
+            ComputerUseAccessChanges::observe(permissions.computer_use.as_ref(), cx);
+        // A Permission Setup reports its progress and the grant it finds while this window waits
+        // in the background.
+        let permission_setup = permissions.permission_setup.clone();
+        if let Some(setup) = &permission_setup {
+            cx.observe(setup, |settings, _, cx| {
+                settings.computer_use_access.synchronize_setup(cx);
+                cx.notify();
+            })
+            .detach();
+        }
         Self {
             window_appearance,
             window_traffic_lights,
@@ -462,7 +499,14 @@ impl SettingsWindow {
             focus_handle,
             navigation,
             window_movement,
-            microphone_access: MicrophoneAccessRow::new(microphone_access),
+            microphone_access: MicrophoneAccessRow::new(permissions.microphone),
+            computer_use_access: ComputerUseAccessRows::new(
+                permissions.computer_use,
+                permission_setup,
+                crate::application_identity::ApplicationIdentity::current().display_name(),
+                cx,
+            ),
+            _computer_use_changes: computer_use_changes,
             theme_gallery,
             theme_store,
             shortcuts,
@@ -567,14 +611,14 @@ impl SettingsWindow {
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        catalog::matching_rows(&self.query)
+        catalog::matching_rows(&self.query, self.computer_use_access.naming())
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = catalog::matching_rows(&self.query, self.computer_use_access.naming());
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -647,7 +691,7 @@ impl SettingsWindow {
         Some(
             reset_button(
                 format!("{}-reset", row.descriptor().selector),
-                row.descriptor().label,
+                row.descriptor().label(self.computer_use_access.naming()),
                 appearance
                     .icons
                     .mark_metrics(crate::ui::chrome_icons::MarkRole::Reset)
@@ -953,7 +997,7 @@ impl SettingsWindow {
         let matched_indices = if self.query.trim().is_empty() {
             Vec::new()
         } else {
-            catalog::matching_row_matches(&self.query)
+            catalog::matching_row_matches(&self.query, self.computer_use_access.naming())
                 .into_iter()
                 .find(|matched| matched.id == row)
                 .map_or_else(Vec::new, |matched| matched.matched_indices)
@@ -978,13 +1022,24 @@ impl SettingsWindow {
             appearance
         };
         let control = self.render_control(row, content_appearance, window, cx);
-        let mut rendered = FormRow::new(descriptor.selector, descriptor.label, control)
+        let mut rendered = FormRow::new(
+            descriptor.selector,
+            descriptor.label(self.computer_use_access.naming()),
+            control,
+        )
             .layout(row_layout(row))
             .reset(self.row_reset(row, appearance, cx))
             .matched_indices(matched_indices)
             .highlighted(highlighted);
         if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
+        } else if let Some(permission) = computer_use::row_permission(row) {
+            rendered = rendered.description(
+                self.computer_use_access
+                    .row(permission)
+                    .presentation()
+                    .explanation,
+            );
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -1018,6 +1073,16 @@ impl SettingsWindow {
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
             SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
+            SettingsRowId::ScreenRecordingAccess => self.render_computer_use_access(
+                ComputerUsePermission::ScreenRecording,
+                appearance,
+                cx,
+            ),
+            SettingsRowId::AccessibilityAccess => self.render_computer_use_access(
+                ComputerUsePermission::Accessibility,
+                appearance,
+                cx,
+            ),
             SettingsRowId::ClipboardWrites | SettingsRowId::ClipboardReads => {
                 self.render_clipboard_preference(row, cx)
             }
@@ -1401,7 +1466,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         settings_selector(
             selector,
-            row.descriptor().label,
+            row.descriptor().label(self.computer_use_access.naming()),
             Some(current),
             "Choose a weight",
             items,
@@ -1636,6 +1701,11 @@ impl SettingsWindow {
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let accessibility = self
+            .computer_use_access
+            .row(ComputerUsePermission::Accessibility)
+            .copy()
+            .name;
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
@@ -1662,10 +1732,11 @@ impl SettingsWindow {
         .intent(AlertIntent::Critical)
         // Installed themes are the one thing here the reset cannot give back, so the alert says
         // so rather than leaving that to be discovered.
-        .detail(
+        .detail(format!(
             "This cannot be undone. Themes can be installed again from their Zed extension or file. \
-             Microphone access is a system permission and is not affected.",
-        )
+             Microphone, Screen Recording, and {accessibility} access are system permissions and \
+             are not affected."
+        ))
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

@@ -273,6 +273,19 @@ fn control_bindings() -> Vec<KeyBinding> {
             CancelUnsafePaste,
             Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
         ),
+        // A program can raise a Permission Request at any moment, so its answers avoid Return and
+        // Escape, which every program reads. A Pane also ignores them until the notice has shown
+        // briefly, because an enhanced keyboard mode can send these keys to a program too.
+        KeyBinding::new(
+            "cmd-enter",
+            SetUpPermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-.",
+            DeclinePermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
+        ),
         KeyBinding::new(
             "cmd-w",
             crate::ui::settings_window::CloseSettingsWindow,
