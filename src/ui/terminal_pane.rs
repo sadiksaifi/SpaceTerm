@@ -761,6 +761,11 @@ impl TerminalPane {
         .detach();
         cx.observe_window_activation(window, |pane, window, cx| {
             pane.refresh_surface(window, cx);
+            // The system reports no Screen Recording change, so a waiting Permission Request reads
+            // again when the person returns, for example from granting it in System Settings.
+            if window.is_window_active() {
+                pane.refresh_permission_offer(cx);
+            }
             cx.notify();
         })
         .detach();

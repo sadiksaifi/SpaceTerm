@@ -7683,6 +7683,35 @@ mod permission_requests {
         assert_eq!(offered(&pane, cx), [Accessibility]);
     }
 
+    /// The system reports no change to Screen Recording, so a person who turns it on directly in
+    /// System Settings is seen when they return to the window.
+    #[gpui::test]
+    fn returning_to_the_window_reads_a_grant_made_elsewhere(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(offered(&pane, cx).is_empty());
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert_eq!(offered(&pane, cx), [ScreenRecording]);
+    }
+
     /// A grant read from a cache can be stale. When a verification finds it withdrawn, the Pane
     /// offers the setup the program asked for.
     #[gpui::test]

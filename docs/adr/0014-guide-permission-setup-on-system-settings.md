@@ -14,8 +14,9 @@ person grants it.
 
 SpaceTerm reads grants from a fresh child process of its own executable. The Screen Recording answer
 in a running process keeps its launch value, so an in-process read cannot see a grant made during
-the setup. At most one probe runs at a time, and a Pane reads authorization only when a request adds
-a permission it has not seen.
+the setup. At most one probe runs at a time. A Pane reads authorization when a request adds a
+permission it has not seen, and again when its window becomes active while a request waits, because
+the system reports no Screen Recording change.
 
 Set Up clears the permission's entry with `tccutil` when a probe has just verified that it is not
 granted. A stale entry from an earlier signature shows as present but grants nothing, and removing
