@@ -63,11 +63,12 @@ printf '\033]7701;permissions=screen-recording,accessibility\033\\'
 The list names `screen-recording`, `accessibility`, or both. SpaceTerm ignores unknown names, shows
 a notice in the Pane only for permissions it lacks, and starts the setup only when you choose Set
 Up. Not Now silences later requests for those permissions in that Pane. While the notice shows,
-Command-Return chooses Set Up and Command-Period chooses Not Now. The notice docks at the top of the
-Pane when the cursor is in its lower half. Any output a Local Pane shows can carry a request,
-including output from `ssh` or a file you print, so the notice never claims which program asked.
-Remote Panes ignore Permission Requests. Inside tmux, wrap the request in tmux passthrough and
-enable `set -g allow-passthrough on`.
+Command-Return chooses Set Up and Command-Period chooses Not Now. The notice accepts no click or
+shortcut during its first half second, so a key you meant for a program still reaches it. The notice
+docks at the top of the Pane when the cursor is in its lower half. Any output a Local Pane shows can
+carry a request, including output from `ssh` or a file you print, so the notice never claims which
+program asked. Remote Panes ignore Permission Requests. Inside tmux, wrap the request in tmux
+passthrough and enable `set -g allow-passthrough on`.
 
 ## Built with
 

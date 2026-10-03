@@ -273,8 +273,9 @@ fn control_bindings() -> Vec<KeyBinding> {
             CancelUnsafePaste,
             Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
         ),
-        // A program can raise a Permission Request at any moment, so its answers use keys that
-        // terminal input never sends, unlike Return and Escape.
+        // A program can raise a Permission Request at any moment, so its answers avoid Return and
+        // Escape, which every program reads. A Pane also ignores them until the notice has shown
+        // briefly, because an enhanced keyboard mode can send these keys to a program too.
         KeyBinding::new(
             "cmd-enter",
             SetUpPermissionRequest,

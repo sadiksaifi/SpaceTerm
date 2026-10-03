@@ -7323,7 +7323,19 @@ mod permission_requests {
         pane.read_with(cx, |pane, _| pane.permission_setup().expect("a setup"))
     }
 
+    /// Raises a request and waits until the notice accepts answers.
     fn request(
+        pane: &Entity<TerminalPane>,
+        permissions: &[ComputerUsePermission],
+        cx: &mut VisualTestContext,
+    ) {
+        raise_request(pane, permissions, cx);
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+    }
+
+    fn raise_request(
         pane: &Entity<TerminalPane>,
         permissions: &[ComputerUsePermission],
         cx: &mut VisualTestContext,
@@ -7445,6 +7457,52 @@ mod permission_requests {
             "terminal input still reaches the program"
         );
 
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
+    fn the_notice_ignores_answers_until_it_has_shown_briefly(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        raise_request(&pane, &[ScreenRecording], cx);
+        let sent = records.commands().len();
+        cx.simulate_keystrokes("cmd-enter");
+        let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
+        cx.simulate_click(set_up.center(), Modifiers::none());
+        let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
+        cx.simulate_click(not_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("permission-request").is_some(),
+            "a fresh notice answers nothing"
+        );
+        assert!(access.prepared.borrow().is_empty());
+        assert!(
+            records.commands().len() > sent,
+            "a shortcut pressed before the notice accepts answers reaches the program"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
+        raise_request(&pane, &[Accessibility], cx);
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "a permission added to the offer starts the delay again"
+        );
+
+        cx.executor()
+            .advance_clock(super::PERMISSION_REQUEST_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_keystrokes("cmd-enter");
         assert!(cx.debug_bounds("permission-request").is_none());
         assert_eq!(*access.prepared.borrow(), [ScreenRecording]);

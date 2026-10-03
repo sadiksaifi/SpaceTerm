@@ -104,6 +104,10 @@ const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
 /// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
 /// because the caller filters those out before recording.
 const DOUBLE_ESCAPE_FULLSCREEN_WINDOW: Duration = Duration::from_millis(500);
+/// How long a Permission Request notice shows an offer before it accepts an answer. Any key can
+/// reach a program in an enhanced keyboard mode, so without the delay a program could raise a
+/// request just before a click or keystroke meant for itself and redirect it to the notice.
+pub(crate) const PERMISSION_REQUEST_ARMING_DELAY: Duration = Duration::from_millis(500);
 
 /// Pending first half of a double-Escape fullscreen exit.
 #[derive(Default)]
@@ -590,6 +594,8 @@ pub(crate) struct TerminalPane {
     permission_request: Vec<ComputerUsePermission>,
     /// Permissions the person chose Not Now for; later requests for them stay silent.
     declined_permissions: Vec<ComputerUsePermission>,
+    /// The offer the notice shows now and when it began, while the notice shows.
+    permission_request_showing: Option<PermissionRequestShowing>,
     /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
     /// first request on.
     _permission_setup: Option<gpui::Subscription>,
@@ -870,6 +876,7 @@ impl TerminalPane {
             requested_permissions: Vec::new(),
             permission_request: Vec::new(),
             declined_permissions: Vec::new(),
+            permission_request_showing: None,
             _permission_setup: None,
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
@@ -3354,7 +3361,55 @@ impl TerminalPane {
         true
     }
 
+    /// Records when the notice began showing its offer, and reports whether it accepts answers.
+    /// An offer that gains a permission starts the delay again; one that loses a permission keeps
+    /// it.
+    fn show_permission_request(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
+        if !shown {
+            self.permission_request_showing = None;
+            return false;
+        }
+        match &mut self.permission_request_showing {
+            Some(showing)
+                if self
+                    .permission_request
+                    .iter()
+                    .all(|permission| showing.offer.contains(permission)) =>
+            {
+                showing.offer.clone_from(&self.permission_request);
+            }
+            _ => {
+                let arming = cx.spawn(async move |pane, cx| {
+                    cx.background_executor()
+                        .timer(PERMISSION_REQUEST_ARMING_DELAY)
+                        .await;
+                    let _ = pane.update(cx, |_, cx| cx.notify());
+                });
+                self.permission_request_showing = Some(PermissionRequestShowing {
+                    offer: self.permission_request.clone(),
+                    since: cx.background_executor().now(),
+                    _arming: arming,
+                });
+            }
+        }
+        self.permission_request_armed(cx)
+    }
+
+    /// Whether the notice has shown its offer long enough to accept an answer.
+    fn permission_request_armed(&self, cx: &App) -> bool {
+        self.permission_request_showing
+            .as_ref()
+            .is_some_and(|showing| {
+                showing.offer == self.permission_request
+                    && cx.background_executor().now().duration_since(showing.since)
+                        >= PERMISSION_REQUEST_ARMING_DELAY
+            })
+    }
+
     fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
+        if !self.permission_request_armed(cx) {
+            return;
+        }
         let permissions = std::mem::take(&mut self.permission_request);
         self.requested_permissions
             .retain(|permission| !permissions.contains(permission));
@@ -3402,6 +3457,9 @@ impl TerminalPane {
     }
 
     fn decline_permission_request(&mut self, cx: &mut Context<Self>) {
+        if !self.permission_request_armed(cx) {
+            return;
+        }
         let declined = std::mem::take(&mut self.permission_request);
         self.requested_permissions
             .retain(|permission| !declined.contains(permission));
@@ -4090,13 +4148,16 @@ impl Render for TerminalPane {
             }
             _ => NoticeEdge::Bottom,
         };
-        // The notice's shortcuts apply only while the notice shows.
+        let permission_request_armed =
+            self.show_permission_request(permission_request.is_some(), cx);
+        // The notice's shortcuts apply only once it accepts answers. Until then the keys reach the
+        // program, which is what the person meant them for.
         let mut key_context = gpui::KeyContext::default();
         if paste_confirmation.is_some() {
             key_context.add(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT);
         } else {
             key_context.add(TERMINAL_KEY_CONTEXT);
-            if permission_request.is_some() {
+            if permission_request_armed {
                 key_context.add(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT);
             }
         }
@@ -4344,6 +4405,7 @@ impl Render for TerminalPane {
                 root.child(render_permission_request(
                     copies,
                     permission_request_edge,
+                    permission_request_armed,
                     cx.entity().downgrade(),
                     appearance.clone(),
                     notice_shell,
@@ -4587,6 +4649,14 @@ fn render_paste_confirmation(
     )
 }
 
+/// The offer a Permission Request notice shows and when it began showing it.
+struct PermissionRequestShowing {
+    offer: Vec<ComputerUsePermission>,
+    since: Instant,
+    /// Renders the notice again once it accepts answers.
+    _arming: Task<()>,
+}
+
 /// The Pane edge a notice docks on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NoticeEdge {
@@ -4597,11 +4667,13 @@ enum NoticeEdge {
 /// Presents a Permission Request on the shared Notice surface.
 ///
 /// The notice never takes keyboard focus, so terminal input still reaches the program. Its answers
-/// are clicks or shortcuts terminal input never sends, so a program cannot answer it by writing to
-/// the terminal or by timing a request before a keystroke.
+/// are clicks and shortcuts, which a program cannot produce by writing to the terminal. They stay
+/// off until the notice is `armed`, so a program cannot redirect a click or keystroke by timing a
+/// request just before it.
 fn render_permission_request(
     copies: Vec<&'static super::permission_setup::PermissionCopy>,
     edge: NoticeEdge,
+    armed: bool,
     pane: gpui::WeakEntity<TerminalPane>,
     appearance: Arc<super::appearance::ChromeAppearance>,
     shell: FloatingShell,
@@ -4660,6 +4732,7 @@ fn render_permission_request(
                             .variant(ButtonVariant::Secondary)
                             .size(ButtonSize::Small)
                             .role(ButtonRole::Cancel)
+                            .disabled(!armed)
                             .debug_selector("permission-request-not-now")
                             .on_activate(move |_, _, cx| {
                                 let _ = decline_pane
@@ -4670,6 +4743,7 @@ fn render_permission_request(
                         Button::new("permission-request-set-up", "Set Up…")
                             .variant(ButtonVariant::Primary)
                             .size(ButtonSize::Small)
+                            .disabled(!armed)
                             .debug_selector("permission-request-set-up")
                             .on_activate(move |_, _, cx| {
                                 let _ = pane
