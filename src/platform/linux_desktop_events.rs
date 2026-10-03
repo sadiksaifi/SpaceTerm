@@ -155,6 +155,7 @@ mod tests {
     struct Notifications {
         submitted: mpsc::Sender<Notification>,
         closed: mpsc::Sender<u32>,
+        reply_delay: Duration,
     }
     #[zbus::interface(name = "org.freedesktop.Notifications")]
     impl Notifications {
@@ -186,6 +187,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(hints.len(), 2);
+            std::thread::sleep(self.reply_delay);
             42
         }
         fn close_notification(&self, id: u32) {
@@ -216,7 +218,11 @@ mod tests {
             .server()
             .serve_at(
                 "/org/freedesktop/Notifications",
-                Notifications { submitted, closed },
+                Notifications {
+                    submitted,
+                    closed,
+                    reply_delay: Duration::ZERO,
+                },
             )
             .unwrap()
             .name("org.freedesktop.Notifications")
@@ -295,6 +301,56 @@ mod tests {
     }
 
     #[test]
+    fn linux_desktop_notifications_own_an_id_that_arrives_after_the_method_timeout() {
+        let private = PrivateBus::new();
+        let (submitted, notifications) = mpsc::channel();
+        let (closed, closes) = mpsc::channel();
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                Notifications {
+                    submitted,
+                    closed,
+                    reply_delay: crate::platform::linux_session_bus::METHOD_TIMEOUT
+                        + Duration::from_millis(250),
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
+            Some(private.client()),
+            crate::application_identity::ApplicationIdentity::current(),
+            sender,
+        );
+
+        let wait = Duration::from_secs(3);
+        adapter.submit(1).unwrap();
+        assert_eq!(notifications.recv_timeout(wait).unwrap().replaces, 0);
+        adapter.clear().unwrap();
+        assert_eq!(
+            closes.recv_timeout(wait).unwrap(),
+            42,
+            "clearing closes the notification whose id arrives later"
+        );
+
+        adapter.submit(2).unwrap();
+        assert_eq!(notifications.recv_timeout(wait).unwrap().replaces, 0);
+        adapter.submit(3).unwrap();
+        let replacement = notifications.recv_timeout(wait).unwrap();
+        assert_eq!(
+            replacement.replaces, 42,
+            "replacement uses the id the server returned late"
+        );
+        assert_eq!(replacement.body, "Terminal requested attention (3)");
+        assert!(closes.try_recv().is_err());
+    }
+
+    #[test]
     fn linux_desktop_second_instance_forwards_token_without_claiming_the_name() {
         let private = PrivateBus::new();
         let primary = private.client();
@@ -305,6 +361,7 @@ mod tests {
             !crate::platform::linux_application_instance::forward_if_secondary(
                 &primary,
                 identity,
+                crate::platform::linux_application_instance::InstanceLaunch::Activate,
                 sender.clone(),
                 None
             )
@@ -314,6 +371,7 @@ mod tests {
             crate::platform::linux_application_instance::forward_if_secondary(
                 &secondary,
                 identity,
+                crate::platform::linux_application_instance::InstanceLaunch::Activate,
                 sender,
                 Some("launch-token".into())
             )
@@ -323,6 +381,64 @@ mod tests {
         assert!(events.pending.lock().unwrap().activation.is_none());
     }
 
+    #[test]
+    fn linux_desktop_new_instance_runs_beside_the_owner_and_inherits_activation() {
+        use crate::platform::linux_application_instance::{InstanceLaunch, forward_if_secondary};
+        let private = PrivateBus::new();
+        let identity = crate::application_identity::ApplicationIdentity::current();
+        let name = identity.application_id();
+        let earlier = private.server().name(name).unwrap().build().unwrap();
+        let fresh = private.client();
+        let (sender, events) = super::LinuxDesktopEvents::new();
+
+        assert!(
+            !forward_if_secondary(&fresh, identity, InstanceLaunch::New, sender, None).unwrap(),
+            "a new instance runs even while another owns activation"
+        );
+
+        earlier.release_name(name).unwrap();
+        let (later, _) = super::LinuxDesktopEvents::new();
+        assert!(
+            forward_if_secondary(
+                &private.client(),
+                identity,
+                InstanceLaunch::Activate,
+                later,
+                Some("launch-token".into())
+            )
+            .unwrap()
+        );
+        assert_eq!(wait_activation(&events).as_deref(), Some("launch-token"));
+    }
+
+    #[test]
+    fn linux_desktop_only_the_new_instance_argument_selects_a_new_instance() {
+        use crate::platform::linux_application_instance::InstanceLaunch;
+        let launch = |arguments: &[&str]| {
+            InstanceLaunch::from_arguments(arguments.iter().map(std::ffi::OsString::from))
+        };
+        assert_eq!(launch(&["--new-instance"]), InstanceLaunch::New);
+        assert_eq!(launch(&[]), InstanceLaunch::Activate);
+        assert_eq!(launch(&["--new-instance", "x"]), InstanceLaunch::Activate);
+        assert_eq!(launch(&["--new"]), InstanceLaunch::Activate);
+    }
+
+    /// Dark, increased contrast, and reduced motion: every fact differs from the defaults.
+    fn non_default_settings() -> HashMap<String, HashMap<String, OwnedValue>> {
+        HashMap::from([
+            (
+                "org.freedesktop.appearance".into(),
+                HashMap::from([
+                    ("color-scheme".into(), 1u32.into()),
+                    ("contrast".into(), 1u32.into()),
+                ]),
+            ),
+            (
+                "org.gnome.desktop.interface".into(),
+                HashMap::from([("enable-animations".into(), false.into())]),
+            ),
+        ])
+    }
     struct Settings;
     #[zbus::interface(name = "org.freedesktop.portal.Settings")]
     impl Settings {
@@ -330,19 +446,7 @@ mod tests {
             &self,
             _namespaces: Vec<String>,
         ) -> HashMap<String, HashMap<String, OwnedValue>> {
-            HashMap::from([
-                (
-                    "org.freedesktop.appearance".into(),
-                    HashMap::from([
-                        ("color-scheme".into(), 1u32.into()),
-                        ("contrast".into(), 1u32.into()),
-                    ]),
-                ),
-                (
-                    "org.gnome.desktop.interface".into(),
-                    HashMap::from([("enable-animations".into(), false.into())]),
-                ),
-            ])
+            non_default_settings()
         }
     }
     #[test]
@@ -386,8 +490,9 @@ mod tests {
         );
         let changed = observation.changed.clone();
         drop(observation);
-        assert!(
-            receive(&changed).is_err(),
+        assert_eq!(
+            receive(&changed),
+            Err(async_channel::TryRecvError::Closed),
             "dropping observation stops and closes the watcher"
         );
     }
@@ -422,8 +527,10 @@ mod tests {
             &self,
             _namespaces: Vec<String>,
         ) -> HashMap<String, HashMap<String, OwnedValue>> {
+            // Later than the method timeout but within the caller's wait, so only the
+            // method timeout keeps these late facts out.
             std::thread::sleep(Duration::from_millis(750));
-            HashMap::new()
+            non_default_settings()
         }
     }
     #[test]

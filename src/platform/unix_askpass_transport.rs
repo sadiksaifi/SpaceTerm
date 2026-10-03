@@ -19,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -165,7 +165,18 @@ fn validate_broker_process(
     }
 }
 
-pub(super) struct AskPassWindowFactory;
+/// Starts each window's AskPass broker with the helper executable composition resolved once at
+/// startup, so a later upgrade of the installed file cannot change what OpenSSH executes.
+pub(super) struct AskPassWindowFactory {
+    helper_path: Option<PathBuf>,
+}
+
+impl AskPassWindowFactory {
+    /// `None` makes every attempt report AskPass as unavailable.
+    pub(super) fn new(helper_path: Option<PathBuf>) -> Self {
+        Self { helper_path }
+    }
+}
 
 impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
     fn create(
@@ -177,7 +188,7 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
             window,
             cx,
             Arc::new(UnixAskPassLocalIpc),
-            std::env::current_exe().map_err(|_| AskPassUnavailable)?,
+            self.helper_path.clone().ok_or(AskPassUnavailable)?,
         )
         .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
     }
@@ -304,6 +315,42 @@ mod tests {
 
         assert_eq!(process, 0x1020_3040);
         assert_eq!(parsed_path, path);
+    }
+
+    #[test]
+    fn askpass_endpoint_avoids_a_pre_created_shared_runtime_name() {
+        let directory = TestDirectory::new();
+        let temporary = directory.0.join("temporary");
+        let elsewhere = directory.0.join("elsewhere");
+        fs::create_dir_all(&temporary).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, temporary.join("spaceterm")).unwrap();
+        let paths = AppPaths::resolve(
+            &AppDirectoryEnvironment {
+                home: Some(directory.0.join("home").into_os_string()),
+                ..Default::default()
+            },
+            &AppPathHostFacts::new(temporary.clone(), 104).unwrap(),
+            Arc::new(UnixSecureFilesystem),
+        )
+        .unwrap();
+
+        let attempt = start_attempt_with_presenter(
+            &paths,
+            PathBuf::from("/opt/spaceterm/bin/spaceterm"),
+            &UnixAskPassLocalIpc,
+            Arc::new(FakePresenter::new([])),
+        )
+        .unwrap();
+
+        let endpoint = lease_value(&attempt.lease, ENDPOINT_ENV);
+        let (_, socket_path) = parse_authenticated_endpoint(&endpoint).unwrap();
+        let runtime = socket_path.parent().unwrap().parent().unwrap();
+        assert_eq!(runtime.parent(), Some(temporary.as_path()));
+        assert_ne!(runtime, temporary.join("spaceterm"));
+        assert!(socket_path.exists());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        attempt.lease.cancel();
     }
 
     #[test]

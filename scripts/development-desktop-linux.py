@@ -6,15 +6,34 @@ AppDirectories. The desktop owns discovery; each source launch replaces only the
 Development identity's entry so its Exec follows the current source prefix.
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 APPLICATION_ID = "io.github.sadiksaifi.spaceterm-development"
 APPLICATION_NAME = "SpaceTerm Development"
+ICON_DOCUMENT = (
+    Path(__file__).resolve().parent.parent
+    / "packaging" / "macos" / "development" / "SpaceTerm Development.icon"
+)
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+# The icon document's canvas and the 824-point shape macOS draws inside a 1024-point icon.
+ARTWORK_SIZE = 1025
+ICON_SIZE = 1024
+ICON_SHAPE = 824
+# The artwork's outer window outline has 267-point circular corners.
+SHAPE_CORNER_RADIUS = 267
+# Linear Display P3 to linear sRGB, both with D65 white.
+DISPLAY_P3_TO_SRGB = (
+    (1.2249401, -0.2249404, 0.0),
+    (-0.0420569, 1.0420571, 0.0),
+    (-0.0196376, -0.0786361, 1.0982735),
+)
 
 
 def desktop_registry() -> Path:
@@ -54,6 +73,74 @@ def exec_value(executable: Path) -> str:
     ))
 
 
+def icon_value(icon: Path) -> str:
+    # An absolute path starts with "/", so only backslashes need string value escaping.
+    return str(icon).replace("\\", "\\\\")
+
+
+def srgb_hex(color: str) -> str:
+    space, _, components = color.partition(":")
+    if space != "display-p3":
+        raise ValueError("the icon uses an unsupported color space")
+    encoded = [float(component) for component in components.split(",")[:3]]
+    if len(encoded) != 3:
+        raise ValueError("the icon has an incomplete color")
+
+    def linear(value: float) -> float:
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    def encode(value: float) -> float:
+        value = min(max(value, 0.0), 1.0)
+        return value * 12.92 if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+
+    linear_p3 = [linear(value) for value in encoded]
+    srgb = [encode(sum(weight * value for weight, value in zip(row, linear_p3))) for row in DISPLAY_P3_TO_SRGB]
+    return "#" + "".join(f"{round(value * 255):02X}" for value in srgb)
+
+
+def development_icon_svg(document: Path) -> str:
+    """Flatten the Development icon document's light appearance into one scalable icon."""
+    try:
+        icon = json.loads((document / "icon.json").read_text(encoding="utf-8"))
+        top, bottom = (srgb_hex(color) for color in icon["fill"]["linear-gradient"])
+        layers = [layer for group in icon["groups"] for layer in group["layers"] if not layer.get("hidden")]
+    except (KeyError, TypeError) as error:
+        raise ValueError("the icon document has an unexpected structure") from error
+
+    ElementTree.register_namespace("", SVG_NAMESPACE)
+    svg = ElementTree.Element(f"{{{SVG_NAMESPACE}}}svg", {
+        "width": str(ICON_SIZE), "height": str(ICON_SIZE), "viewBox": f"0 0 {ICON_SIZE} {ICON_SIZE}",
+    })
+    gradient = ElementTree.SubElement(
+        ElementTree.SubElement(svg, f"{{{SVG_NAMESPACE}}}defs"),
+        f"{{{SVG_NAMESPACE}}}linearGradient",
+        {"id": "fill", "x1": "0", "y1": "0", "x2": "0", "y2": "1"},
+    )
+    ElementTree.SubElement(gradient, f"{{{SVG_NAMESPACE}}}stop", {"offset": "0", "stop-color": top})
+    ElementTree.SubElement(gradient, f"{{{SVG_NAMESPACE}}}stop", {"offset": "1", "stop-color": bottom})
+    margin = (ICON_SIZE - ICON_SHAPE) / 2
+    artwork = ElementTree.SubElement(svg, f"{{{SVG_NAMESPACE}}}g", {
+        "transform": f"translate({margin:g} {margin:g}) scale({ICON_SHAPE / ARTWORK_SIZE:.6f})",
+    })
+    ElementTree.SubElement(artwork, f"{{{SVG_NAMESPACE}}}rect", {
+        "width": str(ARTWORK_SIZE), "height": str(ARTWORK_SIZE),
+        "rx": str(SHAPE_CORNER_RADIUS), "fill": "url(#fill)",
+    })
+    # The first layer is frontmost. The light appearance draws each layer in white.
+    for layer in reversed(layers):
+        try:
+            source = ElementTree.parse(document / "Assets" / layer["image-name"]).getroot()
+        except ElementTree.ParseError as error:
+            raise ValueError("the icon has an unreadable layer") from error
+        group = ElementTree.SubElement(artwork, f"{{{SVG_NAMESPACE}}}g")
+        for element in source:
+            for paint in ("fill", "stroke"):
+                if element.get(paint) not in (None, "none"):
+                    element.set(paint, "#FFFFFF")
+            group.append(element)
+    return ElementTree.tostring(svg, encoding="unicode") + "\n"
+
+
 def atomic_write(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -76,12 +163,17 @@ def register(prefix: Path) -> None:
         raise ValueError("a staged Development executable is required")
     destination = desktop_registry() / (APPLICATION_ID + ".desktop")
     entry = prefix / "share" / "applications" / destination.name
+    # The source prefix holds the icon, so the entry follows it like Exec does.
+    icon = prefix / "share" / "icons" / "hicolor" / "scalable" / "apps" / (APPLICATION_ID + ".svg")
+    if any(ord(character) < 32 or ord(character) == 127 for character in str(icon)):
+        raise ValueError("the source path contains characters unsupported by desktop launchers")
+    atomic_write(icon, development_icon_svg(ICON_DOCUMENT))
     contents = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={APPLICATION_NAME}\n"
         f"Exec={exec_value(executable)}\n"
-        "Icon=utilities-terminal\n"
+        f"Icon={icon_value(icon)}\n"
         "Terminal=false\n"
         "StartupNotify=true\n"
         f"StartupWMClass={APPLICATION_ID}\n"

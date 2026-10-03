@@ -583,6 +583,10 @@ command -v desktop-file-validate >/dev/null || {
 }
 command -v dbus-daemon
 command -v ssh
+test -x /bin/zsh || {
+  echo "Install zsh; native shell integration tests run /bin/zsh" >&2
+  exit 1
+}
 '''
 
 [tasks."development:linux"]

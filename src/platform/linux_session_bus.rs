@@ -9,6 +9,10 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::export::futures_core::Stream;
 
 pub(super) const METHOD_TIMEOUT: Duration = Duration::from_millis(500);
+/// A service that creates a desktop object, such as a notification or a preview window, can
+/// answer after `METHOD_TIMEOUT` while starting. Its owner waits this long on a dedicated
+/// connection, so a slow reply still transfers ownership without stalling shared work.
+pub(super) const RETAINED_REPLY_TIMEOUT: Duration = Duration::from_secs(25);
 const QUEUE_LIMIT: usize = 32;
 type Job = Box<dyn FnOnce(&Connection) + Send>;
 
@@ -56,7 +60,8 @@ impl From<zbus::Error> for SessionBusError {
 #[derive(Clone)]
 pub(super) struct SessionBus {
     jobs: SyncSender<Job>,
-    cleanup: SyncSender<Job>,
+    /// `None` is the user's session bus.
+    address: Option<String>,
 }
 
 impl SessionBus {
@@ -64,19 +69,29 @@ impl SessionBus {
         Self::connect_to(None)
     }
     pub(super) fn connect_to(address: Option<String>) -> Result<Self, SessionBusError> {
+        Self::connect_with(address, METHOD_TIMEOUT)
+    }
+    /// A separate connection and worker on the same bus, for one service's ordered calls.
+    pub(super) fn dedicated(&self, method_timeout: Duration) -> Result<Self, SessionBusError> {
+        Self::connect_with(self.address.clone(), method_timeout)
+    }
+    fn connect_with(
+        address: Option<String>,
+        method_timeout: Duration,
+    ) -> Result<Self, SessionBusError> {
         let (jobs, receiver) = mpsc::sync_channel::<Job>(QUEUE_LIMIT);
-        let (cleanup, cleanup_receiver) = mpsc::sync_channel::<Job>(1);
         let (ready, result) = mpsc::sync_channel::<Result<(), SessionBusError>>(1);
+        let connection_address = address.clone();
         std::thread::Builder::new()
             .name("desktop-session-bus".into())
             .spawn(move || {
-                let connection = match address {
+                let connection = match connection_address {
                     Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
                     None => zbus::blocking::connection::Builder::session(),
                 }
                 .and_then(|builder| {
                     builder
-                        .method_timeout(METHOD_TIMEOUT)
+                        .method_timeout(method_timeout)
                         .max_queued(QUEUE_LIMIT)
                         .build()
                 });
@@ -85,13 +100,7 @@ impl SessionBus {
                         if ready.send(Ok(())).is_err() {
                             return;
                         }
-                        loop {
-                            // One coalesced cleanup cannot be starved by ordinary backpressure.
-                            // Still run ordinary work between cleanups so both queues progress.
-                            if let Ok(job) = cleanup_receiver.try_recv() {
-                                job(&connection);
-                            }
-                            let Ok(job) = receiver.recv() else { break };
+                        while let Ok(job) = receiver.recv() {
                             job(&connection);
                         }
                     }
@@ -104,7 +113,7 @@ impl SessionBus {
         result
             .recv_timeout(METHOD_TIMEOUT)
             .map_err(|_| SessionBusError::TimedOut)??;
-        Ok(Self { jobs, cleanup })
+        Ok(Self { jobs, address })
     }
 
     /// Enqueues work without blocking the UI or retaining an unbounded request backlog.
@@ -118,23 +127,6 @@ impl SessionBus {
                 mpsc::TrySendError::Full(_) => SessionBusError::Rejected,
                 mpsc::TrySendError::Disconnected(_) => SessionBusError::Unavailable,
             })
-    }
-
-    /// Reserved retirement capacity for the shared preview owner. The owner coalesces
-    /// pending Close requests before calling this, independently of the ordinary job queue.
-    pub(super) fn dispatch_cleanup(
-        &self,
-        job: impl FnOnce(&Connection) + Send + 'static,
-    ) -> Result<(), SessionBusError> {
-        self.cleanup
-            .try_send(Box::new(job))
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => SessionBusError::Rejected,
-                mpsc::TrySendError::Disconnected(_) => SessionBusError::Unavailable,
-            })?;
-        // Wake an idle worker. A full ordinary queue already guarantees it will wake.
-        let _ = self.jobs.try_send(Box::new(|_| {}));
-        Ok(())
     }
 
     /// Startup-only bounded discovery. Runtime operations use `dispatch`.

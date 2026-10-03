@@ -13,6 +13,37 @@ pub(crate) fn resource_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
+/// This running executable, resolved once by composition for helper roles such as AskPass.
+///
+/// `None` when the path no longer names the running image, for example after an upgrade removed
+/// or replaced it before startup finished.
+pub(crate) fn running_executable() -> Option<PathBuf> {
+    running_executable_of_host()
+}
+
+#[cfg(target_os = "macos")]
+fn running_executable_of_host() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .filter(|path| path.is_absolute())
+}
+
+#[cfg(target_os = "linux")]
+fn running_executable_of_host() -> Option<PathBuf> {
+    running_executable_of(Path::new("/proc/self/exe"))
+}
+
+/// Linux names a replaced image `<path> (deleted)`, so the path must still be the running file.
+#[cfg(target_os = "linux")]
+fn running_executable_of(image: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::fs::read_link(image).ok()?;
+    let running = std::fs::metadata(image).ok()?;
+    let named = std::fs::metadata(&path).ok()?;
+    (path.is_absolute() && running.dev() == named.dev() && running.ino() == named.ino())
+        .then_some(path)
+}
+
 /// `SpaceTerm.app/Contents/MacOS/spaceterm` reads `SpaceTerm.app/Contents/Resources`.
 #[cfg(target_os = "macos")]
 fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
@@ -121,6 +152,38 @@ pub(crate) fn local_hostname() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// macOS removes only the shared foreign terminal variables.
+#[cfg(target_os = "macos")]
+const HOST_RUNTIME_ENVIRONMENT: &[&str] = &[];
+
+/// Desktop launch tokens and the markers of terminals that commonly start SpaceTerm on Linux.
+#[cfg(target_os = "linux")]
+const HOST_RUNTIME_ENVIRONMENT: &[&str] = &[
+    "ALACRITTY_LOG",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "DESKTOP_STARTUP_ID",
+    "GIO_LAUNCHED_DESKTOP_FILE",
+    "GIO_LAUNCHED_DESKTOP_FILE_PID",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "KITTY_INSTALLATION_DIR",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "KONSOLE_VERSION",
+    "TERMINATOR_DBUS_NAME",
+    "TERMINATOR_DBUS_PATH",
+    "TERMINATOR_UUID",
+    "TILIX_ID",
+    "VTE_VERSION",
+    "WINDOWID",
+    "XDG_ACTIVATION_TOKEN",
+    "XTERM_LOCALE",
+    "XTERM_SHELL",
+    "XTERM_VERSION",
+];
+
 /// Capture every shell planning fact once at composition.
 pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner {
     shell_launch_planner_with(user_shell(), resource_root(), |key| std::env::var_os(key))
@@ -147,6 +210,7 @@ pub(super) fn shell_launch_planner_with(
             env: read("ENV"),
         },
         policy,
+        HOST_RUNTIME_ENVIRONMENT,
     )
 }
 
@@ -163,6 +227,84 @@ mod tests {
         );
         assert!(shell_integration_supported(Path::new("/bin/bash")));
         assert!(fallback_shell().is_absolute());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_desktop_launch_variables_are_host_policy_not_shared_removals() {
+        let directory = std::env::temp_dir();
+        let removals = |planner: super::super::shell_launch::ShellLaunchPlanner| {
+            planner
+                .local(&directory)
+                .unwrap()
+                .environment_removals()
+                .to_vec()
+        };
+        let host = removals(shell_launch_planner_with(
+            "/fixture/zsh".into(),
+            "/fixture/resources".into(),
+            |_| None,
+        ));
+        let shared = removals(super::super::shell_launch::ShellLaunchPlanner::for_test(
+            "/fixture/zsh".into(),
+            "/fixture/resources".into(),
+        ));
+        for name in HOST_RUNTIME_ENVIRONMENT {
+            assert!(
+                host.contains(&(*name).into()),
+                "{name} reaches Linux shells"
+            );
+            assert!(!shared.contains(&(*name).into()), "{name} is shared policy");
+        }
+        assert!(shared.iter().all(|name| host.contains(name)));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "native-tests"))]
+    #[test]
+    fn linux_running_executable_rejects_an_image_whose_path_was_replaced() {
+        struct Fixture(PathBuf, Option<std::process::Child>);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(child) = &mut self.1 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut fixture = Fixture(
+            std::env::temp_dir().join(format!("spaceterm-running-image-{}", std::process::id())),
+            None,
+        );
+        std::fs::create_dir_all(&fixture.0).unwrap();
+        let image = fixture.0.join("spaceterm");
+        std::fs::copy("/bin/sleep", &image).unwrap();
+        // Another test thread can briefly hold the copy's descriptor across fork.
+        let child = (0..50)
+            .find_map(
+                |_| match std::process::Command::new(&image).arg("30").spawn() {
+                    Ok(child) => Some(child),
+                    Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        None
+                    }
+                    Err(error) => panic!("{error}"),
+                },
+            )
+            .expect("the copied image should start");
+        let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        fixture.1 = Some(child);
+        assert_eq!(running_executable_of(&link), Some(image.clone()));
+
+        let replacement = fixture.0.join("replacement");
+        std::fs::copy("/bin/sleep", &replacement).unwrap();
+        std::fs::rename(&replacement, &image).unwrap();
+        let reported = std::fs::read_link(&link).unwrap();
+        assert_ne!(reported, image, "the kernel marks the replaced image");
+        assert_eq!(running_executable_of(&link), None);
+        // A file that happens to carry the reported name is still not the running image.
+        std::fs::write(&reported, b"impostor").unwrap();
+        assert_eq!(running_executable_of(&link), None);
     }
 
     #[cfg(target_os = "macos")]
