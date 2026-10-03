@@ -155,6 +155,7 @@ mod tests {
     struct Notifications {
         submitted: mpsc::Sender<Notification>,
         closed: mpsc::Sender<u32>,
+        reply_delay: Duration,
     }
     #[zbus::interface(name = "org.freedesktop.Notifications")]
     impl Notifications {
@@ -186,6 +187,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(hints.len(), 2);
+            std::thread::sleep(self.reply_delay);
             42
         }
         fn close_notification(&self, id: u32) {
@@ -216,7 +218,11 @@ mod tests {
             .server()
             .serve_at(
                 "/org/freedesktop/Notifications",
-                Notifications { submitted, closed },
+                Notifications {
+                    submitted,
+                    closed,
+                    reply_delay: Duration::ZERO,
+                },
             )
             .unwrap()
             .name("org.freedesktop.Notifications")
@@ -292,6 +298,56 @@ mod tests {
                 .replaces,
             0
         );
+    }
+
+    #[test]
+    fn linux_desktop_notifications_own_an_id_that_arrives_after_the_method_timeout() {
+        let private = PrivateBus::new();
+        let (submitted, notifications) = mpsc::channel();
+        let (closed, closes) = mpsc::channel();
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                Notifications {
+                    submitted,
+                    closed,
+                    reply_delay: crate::platform::linux_session_bus::METHOD_TIMEOUT
+                        + Duration::from_millis(250),
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
+            Some(private.client()),
+            crate::application_identity::ApplicationIdentity::current(),
+            sender,
+        );
+
+        let wait = Duration::from_secs(3);
+        adapter.submit(1).unwrap();
+        assert_eq!(notifications.recv_timeout(wait).unwrap().replaces, 0);
+        adapter.clear().unwrap();
+        assert_eq!(
+            closes.recv_timeout(wait).unwrap(),
+            42,
+            "clearing closes the notification whose id arrives later"
+        );
+
+        adapter.submit(2).unwrap();
+        assert_eq!(notifications.recv_timeout(wait).unwrap().replaces, 0);
+        adapter.submit(3).unwrap();
+        let replacement = notifications.recv_timeout(wait).unwrap();
+        assert_eq!(
+            replacement.replaces, 42,
+            "replacement uses the id the server returned late"
+        );
+        assert_eq!(replacement.body, "Terminal requested attention (3)");
+        assert!(closes.try_recv().is_err());
     }
 
     #[test]

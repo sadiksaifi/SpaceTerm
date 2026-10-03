@@ -9,6 +9,10 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::export::futures_core::Stream;
 
 pub(super) const METHOD_TIMEOUT: Duration = Duration::from_millis(500);
+/// A service that creates a desktop object, such as a notification or a preview window, can
+/// answer after `METHOD_TIMEOUT` while starting. Its owner waits this long on a dedicated
+/// connection, so a slow reply still transfers ownership without stalling shared work.
+pub(super) const RETAINED_REPLY_TIMEOUT: Duration = Duration::from_secs(25);
 const QUEUE_LIMIT: usize = 32;
 type Job = Box<dyn FnOnce(&Connection) + Send>;
 
@@ -57,6 +61,8 @@ impl From<zbus::Error> for SessionBusError {
 pub(super) struct SessionBus {
     jobs: SyncSender<Job>,
     cleanup: SyncSender<Job>,
+    /// `None` is the user's session bus.
+    address: Option<String>,
 }
 
 impl SessionBus {
@@ -64,19 +70,30 @@ impl SessionBus {
         Self::connect_to(None)
     }
     pub(super) fn connect_to(address: Option<String>) -> Result<Self, SessionBusError> {
+        Self::connect_with(address, METHOD_TIMEOUT)
+    }
+    /// A separate connection and worker on the same bus, for one service's ordered calls.
+    pub(super) fn dedicated(&self, method_timeout: Duration) -> Result<Self, SessionBusError> {
+        Self::connect_with(self.address.clone(), method_timeout)
+    }
+    fn connect_with(
+        address: Option<String>,
+        method_timeout: Duration,
+    ) -> Result<Self, SessionBusError> {
         let (jobs, receiver) = mpsc::sync_channel::<Job>(QUEUE_LIMIT);
         let (cleanup, cleanup_receiver) = mpsc::sync_channel::<Job>(1);
         let (ready, result) = mpsc::sync_channel::<Result<(), SessionBusError>>(1);
+        let connection_address = address.clone();
         std::thread::Builder::new()
             .name("desktop-session-bus".into())
             .spawn(move || {
-                let connection = match address {
+                let connection = match connection_address {
                     Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
                     None => zbus::blocking::connection::Builder::session(),
                 }
                 .and_then(|builder| {
                     builder
-                        .method_timeout(METHOD_TIMEOUT)
+                        .method_timeout(method_timeout)
                         .max_queued(QUEUE_LIMIT)
                         .build()
                 });
@@ -104,7 +121,11 @@ impl SessionBus {
         result
             .recv_timeout(METHOD_TIMEOUT)
             .map_err(|_| SessionBusError::TimedOut)??;
-        Ok(Self { jobs, cleanup })
+        Ok(Self {
+            jobs,
+            cleanup,
+            address,
+        })
     }
 
     /// Enqueues work without blocking the UI or retaining an unbounded request backlog.
