@@ -7299,19 +7299,28 @@ mod permission_requests {
     use crate::platform::computer_use_access::{ComputerUseAuthorization, ComputerUsePermission};
     use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
     use crate::terminal::permission_request::PermissionRequest;
+    use crate::ui::permission_setup::PermissionSetup;
     use ComputerUsePermission::{Accessibility, ScreenRecording};
 
+    /// Gives the Pane a Permission Setup over the scripted authorizations.
     fn install_setup(
+        pane: &Entity<TerminalPane>,
         screen_recording: ComputerUseAuthorization,
         accessibility: ComputerUseAuthorization,
         cx: &mut VisualTestContext,
     ) -> Rc<ScriptedComputerUseAccess> {
         let access = ScriptedComputerUseAccess::new(Ok(screen_recording), Ok(accessibility));
         let host = ScriptedSetupGuideHost::new();
-        cx.update(|_, cx| {
-            crate::ui::permission_setup::install(access.clone(), host, cx);
-        });
+        let setup = cx.update(|_, cx| PermissionSetup::create(access.clone(), host, cx));
+        pane.update(cx, |pane, _| pane.set_permission_setup(setup));
         access
+    }
+
+    fn permission_setup(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<PermissionSetup> {
+        pane.read_with(cx, |pane, _| pane.permission_setup().expect("a setup"))
     }
 
     fn request(
@@ -7334,6 +7343,7 @@ mod permission_requests {
     fn set_up_starts_a_permission_setup_for_the_ungranted_permissions(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7353,7 +7363,7 @@ mod permission_requests {
 
         assert!(cx.debug_bounds("permission-request").is_none());
         assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
-        let setup = cx.update(|_, cx| crate::ui::permission_setup::installed(cx).unwrap());
+        let setup = permission_setup(&pane, cx);
         assert_eq!(
             setup.read_with(cx, |setup, _| setup.status(Accessibility)),
             crate::ui::permission_setup::PermissionSetupStatus::Running
@@ -7364,6 +7374,7 @@ mod permission_requests {
     fn granted_permissions_are_not_offered(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
+            &pane,
             ComputerUseAuthorization::Granted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7383,6 +7394,7 @@ mod permission_requests {
     fn not_now_silences_later_requests_for_the_declined_permissions(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7409,6 +7421,7 @@ mod permission_requests {
     fn repeated_requests_merge_into_one_notice(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7427,6 +7440,7 @@ mod permission_requests {
     fn a_remote_pane_ignores_permission_requests(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_remote_terminal_pane(cx);
         install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7441,6 +7455,7 @@ mod permission_requests {
     fn a_session_exit_withdraws_the_notice(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7465,6 +7480,7 @@ mod permission_requests {
     fn repeated_requests_read_authorization_once(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
+            &pane,
             ComputerUseAuthorization::Granted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7494,6 +7510,7 @@ mod permission_requests {
     fn a_grant_withdraws_the_offer(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
@@ -7513,6 +7530,7 @@ mod permission_requests {
     fn a_withdrawn_grant_renews_the_offer(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
+            &pane,
             ComputerUseAuthorization::Granted,
             ComputerUseAuthorization::Granted,
             cx,
@@ -7533,13 +7551,14 @@ mod permission_requests {
     fn a_setup_started_elsewhere_withdraws_the_offer(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
+            &pane,
             ComputerUseAuthorization::NotGranted,
             ComputerUseAuthorization::NotGranted,
             cx,
         );
         request(&pane, &[ScreenRecording], cx);
 
-        let setup = cx.update(|_, cx| crate::ui::permission_setup::installed(cx).unwrap());
+        let setup = permission_setup(&pane, cx);
         setup.update(cx, |setup, cx| setup.start(&[ScreenRecording], cx));
         cx.run_until_parked();
         assert!(offered(&pane, cx).is_empty());

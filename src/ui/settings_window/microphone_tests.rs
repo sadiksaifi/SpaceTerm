@@ -95,7 +95,7 @@ fn open_settings(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             super::PermissionCapabilities {
                 microphone: access,
-                computer_use: None,
+                ..super::PermissionCapabilities::default()
             },
             None,
             window,

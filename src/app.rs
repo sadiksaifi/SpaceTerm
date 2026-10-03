@@ -502,7 +502,10 @@ pub(crate) fn open(
         key_input: Rc::clone(&host.adapters.key_input),
         accessibility: Rc::clone(&host.adapters.accessibility),
         native_services: host.adapters.native_services.clone(),
-        lifecycle: host.adapters.lifecycle.clone(),
+        lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+            permission_setup: host.permission_setup.get().cloned(),
+            ..host.adapters.lifecycle.clone()
+        },
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
@@ -851,6 +854,9 @@ pub(crate) struct HostComposition {
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
     )>,
+    /// The application's one Permission Setup, created once the application runs when the host
+    /// composes computer-use access and a Setup Guide.
+    permission_setup: std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
 }
 impl HostComposition {
     pub(crate) fn with_appearance(
@@ -883,6 +889,7 @@ impl HostComposition {
             window_frame: parts.window_frame,
             titlebar: parts.titlebar,
             appearance: None,
+            permission_setup: std::cell::OnceCell::new(),
         })
     }
 }
@@ -981,13 +988,19 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
         &host.adapters.computer_use_access,
         &host.adapters.setup_guide,
     ) {
-        crate::ui::permission_setup::install(Rc::clone(access), Arc::clone(guide), cx);
+        let setup = crate::ui::permission_setup::PermissionSetup::create(
+            Rc::clone(access),
+            Arc::clone(guide),
+            cx,
+        );
+        let _ = host.permission_setup.set(setup);
     }
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         crate::ui::settings_window::PermissionCapabilities {
             microphone: host.adapters.microphone_access.clone(),
             computer_use: host.adapters.computer_use_access.clone(),
+            permission_setup: host.permission_setup.get().cloned(),
         },
         host.adapters
             .theme_registry

@@ -3303,7 +3303,7 @@ impl TerminalPane {
         if self.terminal_session.session_factory.is_remote() {
             return false;
         }
-        let Some(setup) = super::permission_setup::installed(cx) else {
+        let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() else {
             return false;
         };
         let mut added = false;
@@ -3331,7 +3331,7 @@ impl TerminalPane {
 
     /// Reads which requested permissions the notice offers, and reports whether that changed.
     fn refresh_permission_offer(&mut self, cx: &App) -> bool {
-        let offered = match super::permission_setup::installed(cx) {
+        let offered = match &self.lifecycle_dependencies.permission_setup {
             Some(setup) if !self.requested_permissions.is_empty() => {
                 let setup = setup.read(cx);
                 setup
@@ -3356,10 +3356,20 @@ impl TerminalPane {
         let permissions = std::mem::take(&mut self.permission_request);
         self.requested_permissions
             .retain(|permission| !permissions.contains(permission));
-        if let Some(setup) = super::permission_setup::installed(cx) {
+        if let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() {
             setup.update(cx, |setup, cx| setup.start(&permissions, cx));
         }
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_permission_setup(&mut self, setup: Entity<super::permission_setup::PermissionSetup>) {
+        self.lifecycle_dependencies.permission_setup = Some(setup);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_setup(&self) -> Option<Entity<super::permission_setup::PermissionSetup>> {
+        self.lifecycle_dependencies.permission_setup.clone()
     }
 
     fn decline_permission_request(&mut self, cx: &mut Context<Self>) {

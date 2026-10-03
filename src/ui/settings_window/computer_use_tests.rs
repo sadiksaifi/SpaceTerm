@@ -43,12 +43,13 @@ fn open_settings(
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     let access = access.map(|access| access as Rc<dyn ComputerUseAccess>);
-    cx.update(|cx| {
+    let permission_setup = cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        if let (Some(access), Some(host)) = (&access, host) {
-            crate::ui::permission_setup::install(access.clone(), host, cx);
+        match (&access, host) {
+            (Some(access), Some(host)) => Some(crate::ui::permission_setup::PermissionSetup::create(access.clone(), host, cx)),
+            _ => None,
         }
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
@@ -57,6 +58,7 @@ fn open_settings(
             PermissionCapabilities {
                 microphone: None,
                 computer_use: access,
+                permission_setup,
             },
             None,
             window,

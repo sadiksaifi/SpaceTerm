@@ -51,9 +51,9 @@ fn install(
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        super::install(access.clone(), host.clone(), cx);
+        let setup = PermissionSetup::create(access.clone(), host.clone(), cx);
         let display = cx.primary_display().expect("a display").id();
-        (super::installed(cx).expect("the setup is installed"), display)
+        (setup, display)
     });
     Fixture {
         access,

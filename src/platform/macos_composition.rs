@@ -109,6 +109,7 @@ fn compose(
         activity,
         visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
         wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
+        permission_setup: None,
     };
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(

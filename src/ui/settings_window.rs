@@ -115,6 +115,8 @@ impl Global for OpenSettingsWindow {}
 pub(crate) struct PermissionCapabilities {
     pub(crate) microphone: Option<Rc<dyn MicrophoneAccess>>,
     pub(crate) computer_use: Option<Rc<dyn ComputerUseAccess>>,
+    /// The application's Permission Setup, shared with every Pane.
+    pub(crate) permission_setup: Option<Entity<super::permission_setup::PermissionSetup>>,
 }
 
 /// Host-owned capabilities needed by the Settings window's app-drawn titlebar and Privacy section.
@@ -474,7 +476,7 @@ impl SettingsWindow {
             ComputerUseAccessChanges::observe(permissions.computer_use.as_ref(), cx);
         // A Permission Setup reports its progress and the grant it finds while this window waits
         // in the background.
-        let permission_setup = super::permission_setup::installed(cx);
+        let permission_setup = permissions.permission_setup.clone();
         if let Some(setup) = &permission_setup {
             cx.observe(setup, |settings, _, cx| {
                 settings.computer_use_access.synchronize_setup(cx);

@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Global, Pixels, Task};
+use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Task};
 
 use crate::platform::computer_use_access::{
     ComputerUseAccess, ComputerUseAccessSubscription, ComputerUseAuthorization,
@@ -42,26 +42,6 @@ const AUTHORIZATION_INTERVALS: u32 = 30;
 /// How long System Settings may take to come forward before the setup reports it did not.
 const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The installed Permission Setup, shared by Settings and every Pane.
-struct InstalledPermissionSetup(Entity<PermissionSetup>);
-
-impl Global for InstalledPermissionSetup {}
-
-/// Installs the Permission Setup a host with computer-use access and a Setup Guide composes.
-pub(crate) fn install(
-    access: Rc<dyn ComputerUseAccess>,
-    host: Arc<dyn SetupGuideHost>,
-    cx: &mut App,
-) {
-    let setup = cx.new(|_| PermissionSetup::new(access, host));
-    cx.set_global(InstalledPermissionSetup(setup));
-}
-
-/// The installed Permission Setup, or `None` when the host composes none.
-pub(crate) fn installed(cx: &App) -> Option<Entity<PermissionSetup>> {
-    cx.try_global::<InstalledPermissionSetup>()
-        .map(|installed| installed.0.clone())
-}
 
 /// How SpaceTerm names one permission and the System Settings list that holds it.
 pub(crate) struct PermissionCopy {
@@ -165,6 +145,16 @@ struct GuideWindow {
 }
 
 impl PermissionSetup {
+    /// Creates the application's one Permission Setup, which the composition hands to Settings
+    /// and every Pane.
+    pub(crate) fn create(
+        access: Rc<dyn ComputerUseAccess>,
+        host: Arc<dyn SetupGuideHost>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|_| Self::new(access, host))
+    }
+
     fn new(access: Rc<dyn ComputerUseAccess>, host: Arc<dyn SetupGuideHost>) -> Self {
         Self {
             access,
