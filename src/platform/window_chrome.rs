@@ -1,6 +1,6 @@
 //! Host facts for ordinary application windows and their native decoration policy.
 
-use gpui::{App, TitlebarOptions, WindowBounds, WindowDecorations, WindowKind, WindowOptions, px};
+use gpui::{App, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions, px};
 use std::rc::Rc;
 
 /// Space for the client frame's shadow outside each untiled edge.
@@ -49,7 +49,7 @@ impl WindowChrome {
         &self,
         role: WindowRole,
         mut options: WindowOptions,
-        cx: &App,
+        _cx: &App,
     ) -> WindowOptions {
         options.app_id = crate::app::window_application_id();
         if matches!(role, WindowRole::SidebarWindow) {
@@ -57,28 +57,43 @@ impl WindowChrome {
         }
         if self.client {
             options.window_decorations = Some(WindowDecorations::Client);
-            // X11 without a compositor uses server decorations and needs no shadow gutter.
-            if cx.window_background_support().transparent {
-                let extra = px(CLIENT_FRAME_INSET * 2.0);
-                // A resizable toplevel's compositor preserves its requested geometry when the
-                // client frame is published. Fixed windows already have surface-size constraints,
-                // so their initial surface must reserve the shadow before those limits are set.
-                if !options.is_resizable
-                    && let Some(WindowBounds::Windowed(bounds)) = options.window_bounds.as_mut()
-                {
-                    bounds.origin.x -= extra / 2.0;
-                    bounds.origin.y -= extra / 2.0;
-                    bounds.size.width += extra;
-                    bounds.size.height += extra;
-                }
-                if let Some(minimum) = options.window_min_size.as_mut() {
-                    minimum.width += extra;
-                    minimum.height += extra;
-                }
-            }
+            // Native backends reserve this gutter only for the actual client decoration mode.
+            // Bounds and minimum size describe visible content on every backend.
+            options.client_inset = px(CLIENT_FRAME_INSET);
         }
         options
     }
 }
 
 impl gpui::Global for WindowChrome {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use gpui::{Bounds, WindowBounds, point, size};
+
+    #[gpui::test]
+    fn linux_workspace_options_describe_visible_content_for_native_frame_conversion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let content = Bounds::new(point(px(100.), px(200.)), size(px(900.), px(580.)));
+            for resizable in [true, false] {
+                let options = WindowChrome::client().options(
+                    WindowRole::Workspace,
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(content)),
+                        window_min_size: Some(size(px(480.), px(260.))),
+                        is_resizable: resizable,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert_eq!(options.window_bounds, Some(WindowBounds::Windowed(content)));
+                assert_eq!(options.window_min_size, Some(size(px(480.), px(260.))));
+                assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
+                assert_eq!(options.client_inset, px(24.));
+            }
+        });
+    }
+}

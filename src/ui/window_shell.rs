@@ -11,30 +11,31 @@ use crate::platform::window_chrome::CLIENT_FRAME_INSET;
 const RESIZE_BAND: f32 = 10.0;
 const CORNER_TARGET: f32 = 24.0;
 
-fn padding(tiling: Tiling) -> Edges<Pixels> {
+fn padding(tiling: Tiling, frame_inset: f32) -> Edges<Pixels> {
     Edges {
-        top: px(if tiling.top { 0.0 } else { CLIENT_FRAME_INSET }),
-        right: px(if tiling.right {
-            0.0
-        } else {
-            CLIENT_FRAME_INSET
-        }),
-        bottom: px(if tiling.bottom {
-            0.0
-        } else {
-            CLIENT_FRAME_INSET
-        }),
-        left: px(if tiling.left { 0.0 } else { CLIENT_FRAME_INSET }),
+        top: px(if tiling.top { 0.0 } else { frame_inset }),
+        right: px(if tiling.right { 0.0 } else { frame_inset }),
+        bottom: px(if tiling.bottom { 0.0 } else { frame_inset }),
+        left: px(if tiling.left { 0.0 } else { frame_inset }),
     }
 }
 
-fn resize_regions(viewport: Size<Pixels>, tiling: Tiling) -> Vec<(Bounds<Pixels>, ResizeEdge)> {
-    let inset = padding(tiling);
+fn resize_regions(
+    viewport: Size<Pixels>,
+    tiling: Tiling,
+    frame_inset: f32,
+) -> Vec<(Bounds<Pixels>, ResizeEdge)> {
+    let inset = padding(tiling, frame_inset);
     let left = inset.left;
     let top = inset.top;
     let right = viewport.width - inset.right;
     let bottom = viewport.height - inset.bottom;
     let band = px(RESIZE_BAND);
+    let opaque = frame_inset == 0.0;
+    let left = if opaque { band } else { left };
+    let top = if opaque { band } else { top };
+    let right = if opaque { right - band } else { right };
+    let bottom = if opaque { bottom - band } else { bottom };
     let corner = px(CORNER_TARGET);
     let mut regions = Vec::with_capacity(8);
     let mut add = |x1, y1, x2, y2, edge| {
@@ -134,23 +135,31 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
     } else {
         tiling
     };
-    let inset = padding(tiling);
+    let transparent_frame = window.supports_transparent_client_frame();
+    let frame_inset = if transparent_frame {
+        CLIENT_FRAME_INSET
+    } else {
+        0.0
+    };
+    let inset = padding(tiling, frame_inset);
     // The native inset also depends on maximized and tiled edges. Republish the desired inset
     // after those facts change even when the nominal shadow width stays the same.
-    window.set_client_inset(px(CLIENT_FRAME_INSET));
+    window.set_client_inset(px(frame_inset));
     let active = window.is_window_active();
-    window.set_client_frame(Some(ClientFrame {
-        inset: px(CLIENT_FRAME_INSET),
-        corner_radius: px(16.0),
-        tiling,
-        shadows: vec![BoxShadow {
-            color: rgba(if active { 0x00000060 } else { 0x00000030 }).into(),
-            offset: point(px(0.0), px(5.0)),
-            blur_radius: px(20.0),
-            spread_radius: px(0.0),
-            inset: false,
-        }]
-        .into(),
+    window.set_client_frame(transparent_frame.then(|| {
+        ClientFrame {
+            inset: px(frame_inset),
+            corner_radius: px(16.0),
+            tiling,
+            shadows: vec![BoxShadow {
+                color: rgba(if active { 0x00000060 } else { 0x00000030 }).into(),
+                offset: point(px(0.0), px(5.0)),
+                blur_radius: px(20.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }]
+            .into(),
+        }
     }));
     let viewport = window.viewport_size();
     let band = if window.is_resizable() {
@@ -169,7 +178,13 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
             viewport.height - input_top - input_bottom,
         ),
     )]));
-    let radius = |a: bool, b: bool| px(if a || b { 0.0 } else { 16.0 });
+    let radius = |a: bool, b: bool| {
+        px(if a || b || !transparent_frame {
+            0.0
+        } else {
+            16.0
+        })
+    };
     let radii = Corners {
         top_left: radius(tiling.top, tiling.left),
         top_right: radius(tiling.top, tiling.right),
@@ -202,7 +217,7 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
             shell.child(
                 canvas(
                     move |bounds, window, _| {
-                        resize_regions(bounds.size, tiling)
+                        resize_regions(bounds.size, tiling, frame_inset)
                             .into_iter()
                             .map(|(mut region, edge)| {
                                 region.origin += bounds.origin;
@@ -252,11 +267,15 @@ mod tests {
         ) -> impl IntoElement {
             let closed = self.0.clone();
             super::render(
-                div().size_full().flex().justify_end().items_start().child(
-                    spaceterm_ui::ClientWindowControls::new(Rc::new(move |_, _| {
-                        closed.set(closed.get() + 1)
-                    })),
-                ),
+                div()
+                    .debug_selector(|| "chrome-content".into())
+                    .size_full()
+                    .flex()
+                    .justify_end()
+                    .items_start()
+                    .child(spaceterm_ui::ClientWindowControls::new(Rc::new(
+                        move |_, _| closed.set(closed.get() + 1),
+                    ))),
                 window,
                 cx,
             )
@@ -353,6 +372,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opaque_client_frame_keeps_controls_and_resizes_without_a_shadow_gutter(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| super::super::init(cx).unwrap());
+        let closed = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view(|_, _| ChromeHarness(closed.clone()));
+        cx.simulate_decorations(Decorations::Client {
+            tiling: Tiling::default(),
+        });
+        let handle = cx.window_handle();
+        cx.simulate_transparent_client_frame_support(handle, false);
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("chrome-content").unwrap();
+        cx.update(|window, _| {
+            assert_eq!(bounds.origin, point(px(0.), px(0.)));
+            assert_eq!(bounds.size, window.viewport_size());
+            assert_eq!(window.client_inset(), Some(px(0.)));
+        });
+        let close = cx.debug_bounds("window-close").unwrap().center();
+        cx.simulate_click(close, gpui::Modifiers::none());
+        assert_eq!(closed.get(), 1);
+        cx.simulate_click(point(px(2.), px(2.)), gpui::Modifiers::none());
+        assert_eq!(
+            cx.window_requests(),
+            [gpui::TestWindowRequest::StartWindowResize(
+                ResizeEdge::TopLeft
+            )]
+        );
+    }
+
+    #[gpui::test]
     fn client_resize_gutter_dispatches_only_available_edges(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| super::super::init(cx).unwrap());
         let (_, cx) = cx.add_window_view(|_, _| ChromeHarness(Rc::new(Cell::new(0))));
@@ -397,7 +447,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            padding(tiling),
+            padding(tiling, CLIENT_FRAME_INSET),
             Edges {
                 top: px(0.0),
                 left: px(0.0),
@@ -405,13 +455,13 @@ mod tests {
                 right: px(24.0)
             }
         );
-        let regions = resize_regions(viewport, tiling);
+        let regions = resize_regions(viewport, tiling, CLIENT_FRAME_INSET);
         assert!(regions.iter().all(|(_, edge)| matches!(
             edge,
             ResizeEdge::Right | ResizeEdge::Bottom | ResizeEdge::BottomRight
         )));
-        assert!(resize_regions(viewport, Tiling::tiled()).is_empty());
-        let regions = resize_regions(viewport, Tiling::default());
+        assert!(resize_regions(viewport, Tiling::tiled(), CLIENT_FRAME_INSET).is_empty());
+        let regions = resize_regions(viewport, Tiling::default(), CLIENT_FRAME_INSET);
         let edge_at = |position| {
             regions
                 .iter()
