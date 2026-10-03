@@ -1,6 +1,7 @@
 //! Native Adapter integration evidence.
 use super::tests::pane_command;
 use super::*;
+use crate::platform::unix_adapter_tests::short_temporary_root;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -10,8 +11,8 @@ static NEXT_PROBE_SCRIPT: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn pane_command_should_preserve_shell_umask_and_set_integration_markers() {
     let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-remote-shell-environment-{}-{sequence}",
+    let test_root = short_temporary_root().join(format!(
+        "spaceterm-remote-shell-environment-{}-{sequence}",
         std::process::id()
     ));
     let workspace = test_root.join("workspace");
@@ -55,8 +56,8 @@ printf '%s\n%s\n%s\n%s\n' \
 #[test]
 fn posix_sh_pane_command_should_use_the_verified_login_option() {
     let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-posix-sh-{}-{sequence}",
+    let test_root = short_temporary_root().join(format!(
+        "spaceterm-posix-sh-{}-{sequence}",
         std::process::id()
     ));
     let workspace = test_root.join("workspace with spaces");

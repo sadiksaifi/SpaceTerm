@@ -210,7 +210,8 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(format!("/tmp/sta-{}-{sequence}", std::process::id()));
+            let path = crate::platform::unix_adapter_tests::short_temporary_root()
+                .join(format!("sta-{}-{sequence}", std::process::id()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
