@@ -12,6 +12,7 @@ use gpui::{
 use super::*;
 use crate::appearance::{Color, TerminalColors};
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     test_local_directory,
@@ -136,6 +137,33 @@ impl FilePreviewPanel for RecordingFilePreviewPanel {
     ) -> Result<(), crate::terminal::native_services::file_preview::FilePreviewError> {
         self.previews.set(self.previews.get() + 1);
         Ok(())
+    }
+
+    fn dismiss(&mut self) {
+        self.dismissals.set(self.dismissals.get() + 1);
+    }
+}
+
+/// A deferred adapter whose failure the test sends after the request returns.
+struct DeferredFilePreviewPanel {
+    pending: Rc<std::cell::RefCell<Vec<async_channel::Sender<FilePreviewError>>>>,
+    dismissals: Rc<Cell<usize>>,
+}
+
+impl FilePreviewPanel for DeferredFilePreviewPanel {
+    fn preview_file(&mut self, _: &std::path::Path) -> Result<(), FilePreviewError> {
+        unreachable!("the deferred adapter previews in a window")
+    }
+
+    fn preview_file_in_window(
+        &mut self,
+        _: FilePreviewTarget,
+        _: &Window,
+        _: &mut App,
+    ) -> Result<FilePreviewSubmission, FilePreviewError> {
+        let (failure, pending) = async_channel::bounded(1);
+        self.pending.borrow_mut().push(failure);
+        Ok(FilePreviewSubmission::Pending(pending))
     }
 
     fn dismiss(&mut self) {
@@ -5910,6 +5938,80 @@ fn file_preview_command_revalidates_then_calls_the_retained_presenter(cx: &mut T
     assert_eq!(dismissals.get(), 0);
     pane.update(cx, |pane, _| pane.close());
     assert_eq!(dismissals.get(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
+fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut TestAppContext) {
+    let directory = std::env::temp_dir().join(format!(
+        "spaceterm-deferred-file-preview-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("preview.txt"), b"preview").unwrap();
+    let link = crate::terminal::HyperlinkTarget::osc8(
+        "file:preview.txt",
+        &directory,
+        None,
+        TerminalLocalFileCapabilities::Enabled,
+    )
+    .unwrap();
+    let pending = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let dismissals = Rc::new(Cell::new(0));
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let preview = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.preview_context_link(&link, window, cx);
+            });
+        });
+    };
+    let failure = |pane: &Entity<TerminalPane>, cx: &mut gpui::VisualTestContext| {
+        pane.read_with(cx, |pane, _| pane.pane_state.failure().cloned())
+    };
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, _| {
+            pane.file_preview = FilePreviewPresenter::new(Box::new(DeferredFilePreviewPanel {
+                pending: Rc::clone(&pending),
+                dismissals: Rc::clone(&dismissals),
+            }));
+        });
+    });
+
+    preview(cx);
+    preview(cx);
+    pending.borrow()[0]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(failure(&pane, cx), None, "a superseded request stays quiet");
+    assert_eq!(dismissals.get(), 0);
+
+    pending.borrow()[1]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        failure(&pane, cx),
+        Some(TerminalFailure::platform("preview-local-file"))
+    );
+    assert_eq!(
+        dismissals.get(),
+        1,
+        "a failed request releases its presentation"
+    );
+
+    preview(cx);
+    pane.update(cx, |pane, _| pane.file_preview.dismiss());
+    pending.borrow()[2]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        dismissals.get(),
+        2,
+        "only the explicit dismissal releases it"
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 

@@ -610,6 +610,8 @@ pub(crate) struct TerminalPane {
     )>,
     file_preview_available: bool,
     file_preview: FilePreviewPresenter<Box<dyn FilePreviewPanel>>,
+    /// Awaits the latest deferred preview request so its failure reaches this Pane.
+    _file_preview_task: Option<Task<()>>,
     context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
     blink_generation: u64,
@@ -893,6 +895,7 @@ impl TerminalPane {
             pressed_link: None,
             file_preview_available: native_service_adapters.file_preview.is_available(),
             file_preview: FilePreviewPresenter::new(native_service_adapters.file_preview.create()),
+            _file_preview_task: None,
             context_menu: None,
             blink_phase_visible: true,
             blink_generation: 0,
@@ -3199,14 +3202,27 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        if self
-            .file_preview
-            .preview_in_window(&target, window, cx)
-            .is_err()
-        {
-            self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
-            cx.notify();
+        match self.file_preview.preview_in_window(&target, window, cx) {
+            Ok(None) => {}
+            Ok(Some(completion)) => {
+                self._file_preview_task = Some(cx.spawn(async move |this, cx| {
+                    let Some(failure) = completion.failure().await else {
+                        return;
+                    };
+                    let _ = this.update(cx, |pane, cx| {
+                        if pane.file_preview.settle(failure).is_some() {
+                            pane.present_file_preview_failure(cx);
+                        }
+                    });
+                }));
+            }
+            Err(_) => self.present_file_preview_failure(cx),
         }
+    }
+
+    fn present_file_preview_failure(&mut self, cx: &mut Context<Self>) {
+        self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
+        cx.notify();
     }
 
     fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
