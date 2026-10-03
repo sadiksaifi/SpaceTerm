@@ -163,8 +163,9 @@ pub(crate) trait PermissionAccess {
     /// Forgets the Operating System's decision for one permission and the running application
     /// only, so a later Permission Setup adds the application again.
     ///
-    /// The completion follows a verification, so a read made on completion reflects the reset.
-    /// The completion may run on any thread.
+    /// Success requires a verified authorization after the reset, so a read made on successful
+    /// completion reflects the reset. A failed verification reports an error and may retain the
+    /// last known authorization. The completion may run on any thread.
     fn reset(
         &self,
         permission: SystemPermission,

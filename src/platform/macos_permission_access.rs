@@ -208,13 +208,26 @@ impl PermissionAccess for MacosPermissionAccess {
         std::thread::Builder::new()
             .name("spaceterm-permission-reset".to_owned())
             .spawn(move || {
-                let result = run_reset(permission, bundle_identifier);
-                verification.verify(run_probe);
-                completion(result);
+                completion(reset_and_verify(
+                    &verification,
+                    || run_reset(permission, bundle_identifier),
+                    run_probe,
+                ));
             })
             .map(drop)
             .map_err(|_| PermissionAccessError::PlatformUnavailable)
     }
+}
+
+/// Resets one grant and refreshes authorization before reporting the result.
+fn reset_and_verify(
+    verification: &Verification,
+    reset: impl FnOnce() -> Result<(), PermissionAccessError>,
+    probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
+) -> Result<(), PermissionAccessError> {
+    let result = reset();
+    let verified = verification.verify(probe);
+    result.and(verified)
 }
 
 /// Prepares once no probe or earlier preparation runs, so a setup cancelled and started again
@@ -341,12 +354,14 @@ impl Verification {
     }
 
     /// Probes once no other probe or setup preparation runs, and records the report. A failed
-    /// probe keeps the last report rather than inventing one.
-    fn verify(&self, probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>) {
+    /// probe reports its error and keeps the last report rather than inventing one.
+    fn verify(
+        &self,
+        probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
+    ) -> Result<(), PermissionAccessError> {
         let _probing = self.probing();
-        if let Ok(report) = probe() {
-            self.record(report);
-        }
+        self.record(probe()?);
+        Ok(())
     }
 
     fn start(this: &Arc<Self>) {
@@ -363,7 +378,8 @@ impl Verification {
             .name("spaceterm-permission-probe".to_owned())
             .spawn(move || {
                 loop {
-                    verification.verify(run_probe);
+                    // Background failures retain the last known authorization; a later read retries.
+                    let _ = verification.verify(run_probe);
                     let mut state = verification.lock();
                     if !std::mem::take(&mut state.requested_again) {
                         state.running = false;
@@ -657,10 +673,12 @@ mod tests {
         let older = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
-                verification.verify(|| {
-                    sender.send(()).expect("the older probe");
-                    Ok(report(true))
-                });
+                verification
+                    .verify(|| {
+                        sender.send(()).expect("the older probe");
+                        Ok(report(true))
+                    })
+                    .expect("the older report");
             }
         });
         older_probed
@@ -671,10 +689,12 @@ mod tests {
         let newer = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
-                verification.verify(|| {
-                    sender.send(()).expect("the newer probe");
-                    Ok(report(false))
-                });
+                verification
+                    .verify(|| {
+                        sender.send(()).expect("the newer probe");
+                        Ok(report(false))
+                    })
+                    .expect("the newer report");
             }
         });
         let overtook_publication = newer_probed
@@ -722,6 +742,54 @@ mod tests {
                 Vec::new()
             )
         );
+    }
+
+    #[test]
+    fn a_successful_reset_publishes_authorization_before_reporting_success() {
+        let verification = Verification::default();
+        verification.record(report(true));
+
+        let result = reset_and_verify(&verification, || Ok(()), || Ok(report(false)));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(verification.latest(), Some(report(false)));
+    }
+
+    #[test]
+    fn a_reset_reports_failed_verification_instead_of_success() {
+        let verification = Verification::default();
+        verification.record(report(true));
+        let reset = std::cell::Cell::new(false);
+
+        let result = reset_and_verify(
+            &verification,
+            || {
+                reset.set(true);
+                Ok(())
+            },
+            || {
+                assert!(reset.get(), "verification follows the reset");
+                Err(PermissionAccessError::PlatformUnavailable)
+            },
+        );
+
+        assert_eq!(result, Err(PermissionAccessError::PlatformUnavailable));
+        assert_eq!(verification.latest(), Some(report(true)));
+    }
+
+    #[test]
+    fn a_failed_reset_reports_its_error_after_refreshing_authorization() {
+        let verification = Verification::default();
+        verification.record(report(true));
+
+        let result = reset_and_verify(
+            &verification,
+            || Err(PermissionAccessError::PlatformRejected),
+            || Ok(report(false)),
+        );
+
+        assert_eq!(result, Err(PermissionAccessError::PlatformRejected));
+        assert_eq!(verification.latest(), Some(report(false)));
     }
 
     #[test]
