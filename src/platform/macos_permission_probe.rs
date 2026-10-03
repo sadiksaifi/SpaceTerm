@@ -33,6 +33,13 @@ impl ProbeReport {
         }
     }
 
+    /// This report with `permission` not granted and the other permission as it was.
+    pub(super) fn revoking(self, permission: SystemPermission) -> Self {
+        Self::read(|read| {
+            read != permission && self.authorization(read) == PermissionAuthorization::Granted
+        })
+    }
+
     pub(super) fn authorization(self, permission: SystemPermission) -> PermissionAuthorization {
         let granted = match permission {
             SystemPermission::ScreenRecording => self.screen_recording,

@@ -210,6 +210,7 @@ impl PermissionAccess for MacosPermissionAccess {
             .spawn(move || {
                 completion(reset_and_verify(
                     &verification,
+                    permission,
                     || run_reset(permission, bundle_identifier),
                     run_probe,
                 ));
@@ -219,15 +220,32 @@ impl PermissionAccess for MacosPermissionAccess {
     }
 }
 
-/// Resets one grant and refreshes authorization before reporting the result.
+/// Resets one grant, refreshes authorization, and reports the reset's own result.
+///
+/// The reset and its verification hold the probing lock together, so no earlier probe's report
+/// lands after them. A removed entry grants nothing, so a verification that fails after a
+/// successful reset records the permission as not granted instead of keeping the grant the reset
+/// removed. Without an earlier report, the other permission then reads as not granted until a
+/// probe succeeds; a Permission Setup of it verifies again before it changes anything.
 fn reset_and_verify(
     verification: &Verification,
+    permission: SystemPermission,
     reset: impl FnOnce() -> Result<(), PermissionAccessError>,
     probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
 ) -> Result<(), PermissionAccessError> {
+    let _probing = verification.probing();
     let result = reset();
-    let verified = verification.verify(probe);
-    result.and(verified)
+    match probe() {
+        Ok(report) => verification.record(report),
+        Err(_) if result.is_ok() => verification.record(
+            verification
+                .latest()
+                .unwrap_or_else(|| ProbeReport::read(|_| false))
+                .revoking(permission),
+        ),
+        Err(_) => {}
+    }
+    result
 }
 
 /// Prepares once no probe or earlier preparation runs, so a setup cancelled and started again
@@ -353,15 +371,14 @@ impl Verification {
         }
     }
 
-    /// Probes once no other probe or setup preparation runs, and records the report. A failed
-    /// probe reports its error and keeps the last report rather than inventing one.
-    fn verify(
-        &self,
-        probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
-    ) -> Result<(), PermissionAccessError> {
+    /// Probes once no other probe, setup preparation, or reset runs, and records the report before
+    /// releasing the probing lock, so reports land in the order their probes ran. A failed probe
+    /// keeps the last report rather than inventing one.
+    fn verify(&self, probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>) {
         let _probing = self.probing();
-        self.record(probe()?);
-        Ok(())
+        if let Ok(report) = probe() {
+            self.record(report);
+        }
     }
 
     fn start(this: &Arc<Self>) {
@@ -378,8 +395,7 @@ impl Verification {
             .name("spaceterm-permission-probe".to_owned())
             .spawn(move || {
                 loop {
-                    // Background failures retain the last known authorization; a later read retries.
-                    let _ = verification.verify(run_probe);
+                    verification.verify(run_probe);
                     let mut state = verification.lock();
                     if !std::mem::take(&mut state.requested_again) {
                         state.running = false;
@@ -673,12 +689,10 @@ mod tests {
         let older = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
-                verification
-                    .verify(|| {
-                        sender.send(()).expect("the older probe");
-                        Ok(report(true))
-                    })
-                    .expect("the older report");
+                verification.verify(|| {
+                    sender.send(()).expect("the older probe");
+                    Ok(report(true))
+                });
             }
         });
         older_probed
@@ -689,12 +703,10 @@ mod tests {
         let newer = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
-                verification
-                    .verify(|| {
-                        sender.send(()).expect("the newer probe");
-                        Ok(report(false))
-                    })
-                    .expect("the newer report");
+                verification.verify(|| {
+                    sender.send(()).expect("the newer probe");
+                    Ok(report(false))
+                });
             }
         });
         let overtook_publication = newer_probed
@@ -744,25 +756,37 @@ mod tests {
         );
     }
 
+    fn both_granted() -> ProbeReport {
+        ProbeReport::read(|_| true)
+    }
+
     #[test]
     fn a_successful_reset_publishes_authorization_before_reporting_success() {
         let verification = Verification::default();
-        verification.record(report(true));
+        verification.record(both_granted());
 
-        let result = reset_and_verify(&verification, || Ok(()), || Ok(report(false)));
+        let result = reset_and_verify(
+            &verification,
+            SystemPermission::ScreenRecording,
+            || Ok(()),
+            || Ok(report(false)),
+        );
 
         assert_eq!(result, Ok(()));
         assert_eq!(verification.latest(), Some(report(false)));
     }
 
+    /// A failed verification does not undo a reset: the removed entry grants nothing, so the
+    /// reset reports success and its permission reads as not granted.
     #[test]
-    fn a_reset_reports_failed_verification_instead_of_success() {
+    fn a_failed_verification_after_a_reset_records_the_removed_grant() {
         let verification = Verification::default();
-        verification.record(report(true));
+        verification.record(both_granted());
         let reset = std::cell::Cell::new(false);
 
         let result = reset_and_verify(
             &verification,
+            SystemPermission::ScreenRecording,
             || {
                 reset.set(true);
                 Ok(())
@@ -773,8 +797,13 @@ mod tests {
             },
         );
 
-        assert_eq!(result, Err(PermissionAccessError::PlatformUnavailable));
-        assert_eq!(verification.latest(), Some(report(true)));
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            verification.latest(),
+            Some(ProbeReport::read(
+                |permission| permission == SystemPermission::Accessibility
+            ))
+        );
     }
 
     #[test]
@@ -784,12 +813,71 @@ mod tests {
 
         let result = reset_and_verify(
             &verification,
+            SystemPermission::ScreenRecording,
             || Err(PermissionAccessError::PlatformRejected),
             || Ok(report(false)),
         );
 
         assert_eq!(result, Err(PermissionAccessError::PlatformRejected));
         assert_eq!(verification.latest(), Some(report(false)));
+    }
+
+    #[test]
+    fn a_failed_reset_and_verification_keep_the_last_report() {
+        let verification = Verification::default();
+        verification.record(both_granted());
+
+        let result = reset_and_verify(
+            &verification,
+            SystemPermission::ScreenRecording,
+            || Err(PermissionAccessError::PlatformRejected),
+            || Err(PermissionAccessError::PlatformUnavailable),
+        );
+
+        assert_eq!(result, Err(PermissionAccessError::PlatformRejected));
+        assert_eq!(verification.latest(), Some(both_granted()));
+    }
+
+    /// A probe that starts during a reset waits for the reset's verification, so its report lands
+    /// after the reset's instead of between the reset and its verification.
+    #[test]
+    fn no_probe_runs_between_a_reset_and_its_verification() {
+        let verification = Arc::new(Verification::default());
+        let (sender, probed) = std::sync::mpsc::channel();
+        let mut competing = None;
+
+        let result = reset_and_verify(
+            &verification,
+            SystemPermission::ScreenRecording,
+            || {
+                competing = Some(std::thread::spawn({
+                    let verification = Arc::clone(&verification);
+                    move || {
+                        verification.verify(|| {
+                            sender.send(()).expect("the competing probe");
+                            Ok(both_granted())
+                        });
+                    }
+                }));
+                assert!(
+                    probed.recv_timeout(Duration::from_millis(100)).is_err(),
+                    "a probe must wait for the reset's verification"
+                );
+                Ok(())
+            },
+            || Ok(report(false)),
+        );
+        competing
+            .expect("the competing probe started")
+            .join()
+            .expect("the competing verification");
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            probed.try_recv().is_ok(),
+            "the competing probe ran afterward"
+        );
+        assert_eq!(verification.latest(), Some(both_granted()));
     }
 
     #[test]
