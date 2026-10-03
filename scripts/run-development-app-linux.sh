@@ -61,5 +61,7 @@ rm -rf -- "$PREFIX"
 mv -- "$STAGING_ROOT" "$PREFIX"
 STAGING_ROOT=""
 
-APPLICATION_COMMAND+=("$PREFIX/bin/spaceterm")
-exec "${APPLICATION_COMMAND[@]}"
+python3 "$SCRIPT_DIR/development-desktop-linux.py" "$PREFIX"
+# Like macOS `open -n`, run this build beside a running Development instance instead of
+# activating it. Desktop launches of the registered entry still activate the running instance.
+exec "$PREFIX/bin/spaceterm" --new-instance
