@@ -125,6 +125,7 @@ pub struct AppDirectories {
     pub runtime: Option<PathBuf>,
     layout: DirectoryLayout,
     temporary: Option<PathBuf>,
+    runtime_in_shared_temporary: bool,
 }
 
 impl AppDirectories {
@@ -218,7 +219,9 @@ impl AppDirectories {
             app_name,
         )?;
         let temporary = runtime_fallback.filter(|path| is_absolute_normal_path(path));
-        let runtime = match environment.configured_runtime_root() {
+        let configured_runtime = environment.configured_runtime_root();
+        let runtime_in_shared_temporary = configured_runtime.is_none() && temporary.is_some();
+        let runtime = match configured_runtime {
             Some(root) => Some(root.join(app_name)),
             None => temporary
                 .as_ref()
@@ -232,6 +235,7 @@ impl AppDirectories {
             runtime,
             layout: DirectoryLayout::Xdg,
             temporary,
+            runtime_in_shared_temporary,
         })
     }
 
@@ -266,6 +270,7 @@ impl AppDirectories {
             runtime,
             layout: DirectoryLayout::Windows,
             temporary,
+            runtime_in_shared_temporary: false,
         })
     }
 
@@ -309,6 +314,13 @@ impl AppDirectories {
 
     pub fn temporary_directory(&self) -> Option<&Path> {
         self.temporary.as_deref()
+    }
+
+    /// Whether `runtime` is the predictable name in a shared temporary root because
+    /// `XDG_RUNTIME_DIR` is unset. Another account can pre-create that name, so the write
+    /// boundary may need an unpredictable private sibling instead.
+    pub fn runtime_in_shared_temporary(&self) -> bool {
+        self.runtime_in_shared_temporary
     }
 
     pub fn root(&self, root: AppDirectoryRoot) -> &Path {
@@ -588,6 +600,7 @@ mod tests {
             directories.temporary_directory(),
             Some(Path::new("/temporary"))
         );
+        assert!(directories.runtime_in_shared_temporary());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -608,6 +621,7 @@ mod tests {
             directories.runtime.as_deref(),
             Some(Path::new("/run/user/1000/spaceterm"))
         );
+        assert!(!directories.runtime_in_shared_temporary());
     }
 
     #[cfg(not(target_os = "windows"))]

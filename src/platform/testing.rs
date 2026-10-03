@@ -12,6 +12,8 @@ pub(crate) struct RecordingFilesystem {
     sockets: Mutex<std::collections::BTreeMap<PathBuf, u64>>,
     next: std::sync::atomic::AtomicU64,
     pub(crate) root_failure: Mutex<Option<SecureFilesystemError>>,
+    /// Directories another account already owns, so `ensure_private_directory` refuses them.
+    pub(crate) foreign_directories: Mutex<BTreeSet<PathBuf>>,
     prepared_files: Arc<AtomicUsize>,
     pub(crate) files: Mutex<RecordingPrivateFiles>,
 }
@@ -83,6 +85,9 @@ impl SecureFilesystem for RecordingFilesystem {
         self.events.lock().unwrap().push("ensure");
         if let Some(error) = *self.root_failure.lock().unwrap() {
             return Err(error);
+        }
+        if self.foreign_directories.lock().unwrap().contains(path) {
+            return Err(SecureFilesystemError::Unsafe);
         }
         self.directories.lock().unwrap().insert(path.to_path_buf());
         Ok(Self::directory(path.to_path_buf()))
