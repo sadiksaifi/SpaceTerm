@@ -25,6 +25,10 @@ The Setup Guide is a non-activating panel that follows System Settings' window b
 geometry and owners, which needs no permission. It shows only while System Settings is frontmost, so
 it never covers another application, and it polls less often while System Settings is covered.
 Locating the window and its content column is host code; placement within the column is portable.
+Dragging SpaceTerm out of the guide shows a copy of the guide's row under the pointer, so the row
+seems to move into the list. GPUI promotes the drag to a native file drag as it leaves the window,
+and the SpaceTerm GPUI fork lets the caller supply that drag image; the host draws the row with
+AppKit from the same measurements the guide renders.
 
 A Permission Request is an OSC 7701 sequence that any terminal output can carry, including remote
 programs and printed files. It can only offer the setup; the person decides. The filter abandons a

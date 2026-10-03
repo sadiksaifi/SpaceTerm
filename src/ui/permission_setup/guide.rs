@@ -7,17 +7,19 @@
 //! SpaceTerm, so System Settings stays the application a person works in. It never takes keyboard
 //! focus; every action is a click.
 
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, CursorStyle, DisplayId,
-    ExternalDragPayload, FileDragIcon, FileDragPaths, FontWeight, HighlightStyle, Pixels,
+    ExternalDragPayload, FileDragIcon, FileDragPaths, FontWeight, HighlightStyle, Pixels, Point,
     SharedString, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, img, px,
+    WindowHandle, WindowKind, WindowOptions, canvas, div, img, px,
 };
 use spaceterm_ui::{
     Button, ButtonActivation, ButtonRole, ButtonSize, ButtonVariant, ControlHost, ControlMotion,
@@ -26,7 +28,7 @@ use spaceterm_ui::{
 
 use super::{GuidePresentation, PermissionSetup, permission_copy};
 use crate::platform::computer_use_access::ComputerUsePermission;
-use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost};
+use crate::platform::setup_guide_host::{ApplicationBundle, ApplicationRowImage, SetupGuideHost};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
@@ -49,8 +51,10 @@ const ROW_ICON_SIZE: f32 = 24.0;
 /// The application row's tint of the text color, at rest and under the pointer.
 const ROW_TINT: u8 = 0x14;
 const ROW_HOVER_TINT: u8 = 0x24;
-/// The icon that follows the pointer while a person drags SpaceTerm.
+/// The icon the system drags when the host cannot draw the row.
 const DRAG_ICON_SIZE: f32 = 32.0;
+/// The opacity of the row's copy under the pointer, which lets the list show through it.
+const DRAG_ROW_OPACITY: u8 = 0xD9;
 /// How long the arrow takes to point at the list again after a click that did not drag.
 const NUDGE_DURATION: Duration = Duration::from_millis(450);
 /// How far the arrow rises while it points.
@@ -97,8 +101,10 @@ pub(super) fn open(
                 presentation,
                 bundle,
                 setup,
+                host,
                 glass,
                 nudges: 0,
+                row_bounds: Rc::default(),
             })
         },
     );
@@ -115,23 +121,94 @@ pub(crate) struct SetupGuide {
     presentation: GuidePresentation,
     bundle: Option<ApplicationBundle>,
     setup: WeakEntity<PermissionSetup>,
+    host: Arc<dyn SetupGuideHost>,
     /// Whether the host's glass material lies behind the guide. Without it the guide paints its
     /// own surface.
     glass: bool,
     /// Counts clicks on the application row that did not drag it. Each one points the arrow at
     /// the list again.
     nudges: usize,
+    /// Where the application row was last laid out, so its copy matches it.
+    row_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 /// The running application while a person drags it out of the guide.
-struct ApplicationDrag(PathBuf);
+struct ApplicationDrag {
+    path: PathBuf,
+    /// The row's copy, recorded when the drag begins. The system draws it once the drag leaves
+    /// the guide.
+    row: Rc<RefCell<Option<HeldRow>>>,
+}
 
-/// What follows the pointer until the drag leaves the guide and the system draws the icon.
-struct ApplicationDragPreview(Arc<gpui::Image>);
+/// The row's copy and where the pointer holds it.
+struct HeldRow {
+    image: ApplicationRowImage,
+    cursor_offset: Point<Pixels>,
+}
+
+/// The row's copy that follows the pointer until the drag leaves the guide, at the place the
+/// pointer took hold of the row.
+struct ApplicationDragPreview {
+    icon: Arc<gpui::Image>,
+    row: ApplicationRowImage,
+}
 
 impl Render for ApplicationDragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        img(self.0.clone()).size(px(DRAG_ICON_SIZE))
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let row = &self.row;
+        let appearance = crate::ui::appearance::chrome(cx);
+        div()
+            .w(row.size.width)
+            .h(row.size.height)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(row.gap)
+            .px(row.padding)
+            .rounded(row.corner_radius)
+            .border_1()
+            .border_color(row.border)
+            .bg(row.fill)
+            .cursor(CursorStyle::ClosedHand)
+            .child(img(self.icon.clone()).size(row.icon_size).flex_none())
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
+                    .text_color(row.name_color)
+                    .child(row.name.clone()),
+            )
+    }
+}
+
+/// The application row's copy for a drag: the guide's surface under the row's contents, so it
+/// stays legible over the list.
+fn row_copy(
+    name: &str,
+    bounds: Bounds<Pixels>,
+    appearance: &ChromeAppearance,
+    window: &Window,
+) -> ApplicationRowImage {
+    let colors = &appearance.floating_colors;
+    let style = appearance.typography.style(TextRole::BodyEmphasis);
+    ApplicationRowImage {
+        size: bounds.size,
+        scale: window.scale_factor(),
+        corner_radius: RadiusRole::Control.pixels(),
+        fill: gpui_color(
+            colors
+                .elevated_surface_background
+                .with_alpha(DRAG_ROW_OPACITY),
+        ),
+        border: gpui_color(colors.border_variant),
+        padding: appearance.spacing(8.0),
+        gap: appearance.spacing(8.0),
+        icon_size: px(ROW_ICON_SIZE),
+        name: name.to_owned(),
+        name_color: gpui_color(colors.text),
+        font_size: style.size,
+        font_weight: style.font.weight.0,
     }
 }
 
@@ -213,6 +290,8 @@ impl SetupGuide {
         let colors = &appearance.floating_colors;
         let icon = bundle.icon.clone();
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
+        let row_bounds = self.row_bounds.clone();
+        let host = self.host.clone();
         div()
             .id("setup-guide-application")
             .debug_selector(|| "setup-guide-application".to_owned())
@@ -225,12 +304,19 @@ impl SetupGuide {
             .items_center()
             .gap(appearance.spacing(8.0))
             .px(appearance.spacing(8.0))
+            .relative()
             .rounded(RadiusRole::Control.pixels())
             // A tint of the text color rather than a fill, so the row lets the material behind
             // the guide through in either appearance.
             .bg(gpui_color(colors.text.with_alpha(ROW_TINT)))
             .hover(|style| style.bg(gpui_color(colors.text.with_alpha(ROW_HOVER_TINT))))
             .cursor(CursorStyle::OpenHand)
+            .child({
+                let row_bounds = self.row_bounds.clone();
+                canvas(move |bounds, _, _| row_bounds.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
             .child(img(bundle.icon.clone()).size(px(ROW_ICON_SIZE)).flex_none())
             .child(
                 div()
@@ -243,14 +329,35 @@ impl SetupGuide {
                 guide.nudges += 1;
                 cx.notify();
             }))
-            .on_drag(ApplicationDrag(bundle.path.clone()), move |_, _, _, cx| {
-                cx.new(|_| ApplicationDragPreview(icon.clone()))
-            })
-            .external_drag_payload(|drag: &ApplicationDrag, _, _| {
+            .on_drag(
+                ApplicationDrag {
+                    path: bundle.path.clone(),
+                    row: Rc::default(),
+                },
+                move |drag, cursor_offset, window, cx| {
+                    let appearance = crate::ui::appearance::chrome(cx);
+                    let row = row_copy(name, row_bounds.get(), appearance, window);
+                    *drag.row.borrow_mut() = Some(HeldRow {
+                        image: row.clone(),
+                        cursor_offset,
+                    });
+                    let icon = icon.clone();
+                    cx.new(|_| ApplicationDragPreview { icon, row })
+                },
+            )
+            .external_drag_payload(move |drag: &ApplicationDrag, _, _| {
+                let drawn = drag.row.borrow().as_ref().and_then(|held| {
+                    Some(FileDragIcon::Image {
+                        image: host.draw_application_row(&held.image)?,
+                        size: held.image.size,
+                        cursor_offset: held.cursor_offset,
+                    })
+                });
+                let icon = drawn.unwrap_or(FileDragIcon::File {
+                    size: px(DRAG_ICON_SIZE),
+                });
                 Some(ExternalDragPayload::Files(
-                    FileDragPaths::new([(drag.0.clone(), true)]).with_icon(FileDragIcon::File {
-                        size: px(DRAG_ICON_SIZE),
-                    }),
+                    FileDragPaths::new([(drag.path.clone(), true)]).with_icon(icon),
                 ))
             })
             .into_any_element()

@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon, FileDragPaths,
+    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon,
     Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, WindowHandle, bounds, point,
     px, size,
 };
@@ -15,12 +15,13 @@ use super::{
     TRACKING_INTERVAL,
 };
 use crate::appearance::{Appearance, SettingsDocument};
+use crate::application_identity::ApplicationIdentity;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
 use crate::platform::computer_use_access::{
     ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
 };
-use crate::platform::setup_guide_host::SystemSettingsWindow;
+use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::test_support::MemoryStorage;
@@ -418,20 +419,20 @@ fn closing_the_guide_cancels_and_leaves_system_settings_alone(cx: &mut TestAppCo
     assert_eq!(fixture.access.opened.borrow().len(), 1);
 }
 
-/// Dragging the application out of the guide hands its bundle to the system with its own icon,
-/// which is what a System Settings list accepts.
+/// Dragging the application out of the guide hands its bundle to the system, which is what a
+/// System Settings list accepts, drawn as a copy of the row held where the pointer took it.
 #[gpui::test]
 fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
     let handle: AnyWindowHandle = guide(cx).expect("the guide is open").into();
-    {
+    let row = {
         let guide = guide_context(cx);
-        let start = guide
+        let row = guide
             .debug_bounds("setup-guide-application")
-            .expect("the application is offered")
-            .center();
+            .expect("the application is offered");
+        let start = row.center();
         guide.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         guide.simulate_mouse_move(
             start + point(px(10.0), px(0.0)),
@@ -439,14 +440,30 @@ fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppC
             Modifiers::none(),
         );
         guide.simulate_mouse_move(point(px(-1.0), start.y), MouseButton::Left, Modifiers::none());
-    }
+        row
+    };
 
-    assert_eq!(
-        cx.external_drag_payloads(handle),
-        [ExternalDragPayload::Files(
-            FileDragPaths::new([("/Applications/SpaceTerm.app".into(), true)])
-                .with_icon(FileDragIcon::File { size: px(32.0) })
-        )]
+    let drawn = fixture.host.drawn_rows();
+    assert_eq!(drawn.len(), 1);
+    assert_eq!(drawn[0].size, row.size);
+    assert_eq!(drawn[0].name, ApplicationIdentity::current().display_name());
+    let payloads = cx.external_drag_payloads(handle);
+    let [ExternalDragPayload::Files(files)] = payloads.as_slice() else {
+        panic!("one file drag");
+    };
+    assert_eq!(files.entries(), [("/Applications/SpaceTerm.app".into(), true)]);
+    let FileDragIcon::Image {
+        size,
+        cursor_offset,
+        ..
+    } = files.icon()
+    else {
+        panic!("the drag shows the row");
+    };
+    assert_eq!(*size, row.size);
+    assert!(
+        Bounds::new(point(px(0.0), px(0.0)), row.size).contains(cursor_offset),
+        "the pointer holds the row"
     );
 }
 
