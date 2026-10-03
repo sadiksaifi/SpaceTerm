@@ -7418,6 +7418,95 @@ mod permission_requests {
     }
 
     #[gpui::test]
+    fn the_notice_answers_its_shortcuts_only_while_it_shows(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        cx.simulate_keystrokes("cmd-enter cmd-.");
+        assert!(access.prepared.borrow().is_empty());
+
+        request(&pane, &[ScreenRecording], cx);
+        cx.simulate_keystrokes("enter escape");
+        assert!(
+            cx.debug_bounds("permission-request").is_some(),
+            "terminal input never answers the notice"
+        );
+        assert!(access.prepared.borrow().is_empty());
+        assert!(
+            !records.commands().is_empty(),
+            "terminal input still reaches the program"
+        );
+
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
+    }
+
+    #[gpui::test]
+    fn the_decline_shortcut_answers_not_now(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let access = install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+
+        request(&pane, &[ScreenRecording], cx);
+        cx.simulate_keystrokes("cmd-.");
+        assert!(cx.debug_bounds("permission-request").is_none());
+
+        request(&pane, &[ScreenRecording], cx);
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert!(access.prepared.borrow().is_empty());
+    }
+
+    /// Places the cursor on `row` of a ten-row screen.
+    fn cursor_on_row(pane: &Entity<TerminalPane>, row: u16, cx: &mut VisualTestContext) {
+        pane.update(cx, |pane, cx| {
+            let mut screen = text_screen(1, &["x"; 10]);
+            Arc::make_mut(&mut screen).cursor = crate::terminal::CursorSnapshot {
+                position: Some(crate::terminal::CursorPositionSnapshot {
+                    column: 0,
+                    row,
+                    width_cells: 1,
+                }),
+                visible: true,
+                ..crate::terminal::CursorSnapshot::default()
+            };
+            pane.screen = screen;
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_notice_docks_away_from_the_cursor(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[ScreenRecording], cx);
+        let middle = cx.update(|window, _| window.viewport_size().height / 2.0);
+
+        cursor_on_row(&pane, 2, cx);
+        let notice = cx.debug_bounds("permission-request").unwrap();
+        assert!(notice.top() > middle, "a cursor near the top leaves the notice at the bottom");
+
+        cursor_on_row(&pane, 8, cx);
+        let notice = cx.debug_bounds("permission-request").unwrap();
+        assert!(notice.bottom() < middle, "a cursor near the bottom moves the notice to the top");
+    }
+
+    #[gpui::test]
     fn repeated_requests_merge_into_one_notice(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(

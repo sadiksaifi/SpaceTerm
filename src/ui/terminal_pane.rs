@@ -33,7 +33,9 @@ use super::{
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
     OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
     TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
+    TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
+use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
@@ -3372,6 +3374,28 @@ impl TerminalPane {
         self.lifecycle_dependencies.permission_setup.clone()
     }
 
+    fn set_up_permission_request(
+        &mut self,
+        _: &SetUpPermissionRequest,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.permission_request.is_empty() {
+            self.set_up_requested_permissions(cx);
+        }
+    }
+
+    fn decline_permission_request_action(
+        &mut self,
+        _: &DeclinePermissionRequest,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.permission_request.is_empty() {
+            self.decline_permission_request(cx);
+        }
+    }
+
     fn decline_permission_request(&mut self, cx: &mut Context<Self>) {
         let declined = std::mem::take(&mut self.permission_request);
         self.requested_permissions
@@ -4013,11 +4037,6 @@ impl Render for TerminalPane {
         });
         let native_context_actions = self.native_context_actions();
         let paste_confirmation = self.pending_paste;
-        let key_context = if paste_confirmation.is_some() {
-            TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT
-        } else {
-            TERMINAL_KEY_CONTEXT
-        };
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
@@ -4046,6 +4065,22 @@ impl Render for TerminalPane {
             && paste_confirmation.is_none()
             && status.is_none())
         .then(|| self.permission_request.clone());
+        // The notice docks on the half of the Pane away from the cursor, so it never hides the
+        // line a person types on.
+        let permission_request_edge = match self.screen.cursor.position {
+            Some(cursor) if usize::from(cursor.row) * 2 >= self.screen.rows.len() => NoticeEdge::Top,
+            _ => NoticeEdge::Bottom,
+        };
+        // The notice's shortcuts apply only while the notice shows.
+        let mut key_context = gpui::KeyContext::default();
+        if paste_confirmation.is_some() {
+            key_context.add(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT);
+        } else {
+            key_context.add(TERMINAL_KEY_CONTEXT);
+            if permission_request.is_some() {
+                key_context.add(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT);
+            }
+        }
         // A failed Terminal Session reads as an error notice.
         let status_intent = match self.pane_state {
             PaneTerminalState::Failed { .. } => Some(StatusIntent::Error),
@@ -4219,6 +4254,8 @@ impl Render for TerminalPane {
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
+            .on_action(cx.listener(Self::set_up_permission_request))
+            .on_action(cx.listener(Self::decline_permission_request_action))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -4287,6 +4324,7 @@ impl Render for TerminalPane {
             .when_some(permission_request, |root, permissions| {
                 root.child(render_permission_request(
                     permissions,
+                    permission_request_edge,
                     cx.entity().downgrade(),
                     appearance.clone(),
                     notice_shell,
@@ -4530,11 +4568,21 @@ fn render_paste_confirmation(
     )
 }
 
+/// The Pane edge a notice docks on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoticeEdge {
+    Top,
+    Bottom,
+}
+
 /// Presents a Permission Request on the shared Notice surface.
 ///
-/// The notice never takes keyboard focus, so a program cannot answer it by writing to the terminal.
+/// The notice never takes keyboard focus, so terminal input still reaches the program. Its answers
+/// are clicks or shortcuts terminal input never sends, so a program cannot answer it by writing to
+/// the terminal or by timing a request before a keystroke.
 fn render_permission_request(
     permissions: Vec<ComputerUsePermission>,
+    edge: NoticeEdge,
     pane: gpui::WeakEntity<TerminalPane>,
     appearance: Arc<super::appearance::ChromeAppearance>,
     shell: FloatingShell,
@@ -4564,7 +4612,10 @@ fn render_permission_request(
             .absolute()
             .left(appearance.spacing(16.0))
             .right(appearance.spacing(16.0))
-            .bottom(appearance.spacing(16.0))
+            .map(|notice| match edge {
+                NoticeEdge::Top => notice.top(appearance.spacing(16.0)),
+                NoticeEdge::Bottom => notice.bottom(appearance.spacing(16.0)),
+            })
             .flex()
             .flex_col()
             .items_start()

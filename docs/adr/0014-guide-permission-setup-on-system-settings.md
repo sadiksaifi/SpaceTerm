@@ -31,5 +31,7 @@ and the SpaceTerm GPUI fork lets the caller supply that drag image; the host dra
 AppKit from the same measurements the guide renders.
 
 A Permission Request is an OSC 7701 sequence that any terminal output can carry, including remote
-programs and printed files. It can only offer the setup; the person decides. The filter abandons a
+programs and printed files. It can only offer the setup; the person decides. The notice never takes
+keyboard focus, and its shortcuts, Command-Return and Command-Period, are keys terminal input never
+sends, so a program cannot answer it by timing a request just before a keystroke. The filter abandons a
 request on any escape, as Ghostty's parser does, so a truncated request cannot hide later output.

@@ -273,6 +273,18 @@ fn control_bindings() -> Vec<KeyBinding> {
             CancelUnsafePaste,
             Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
         ),
+        // A program can raise a Permission Request at any moment, so its answers use keys that
+        // terminal input never sends, unlike Return and Escape.
+        KeyBinding::new(
+            "cmd-enter",
+            SetUpPermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-.",
+            DeclinePermissionRequest,
+            Some(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT),
+        ),
         KeyBinding::new(
             "cmd-w",
             crate::ui::settings_window::CloseSettingsWindow,

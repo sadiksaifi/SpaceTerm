@@ -106,6 +106,8 @@ actions!(
         PasteClipboard,
         ConfirmUnsafePaste,
         CancelUnsafePaste,
+        SetUpPermissionRequest,
+        DeclinePermissionRequest,
         ExportTerminalDiagnostics,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
@@ -161,6 +163,8 @@ actions!(
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
 pub(crate) const TERMINAL_FIND_KEY_CONTEXT: &str = "TerminalFind";
 pub(crate) const TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT: &str = "TerminalPasteConfirmation";
+/// Added to a Pane's key context while it offers a Permission Request.
+pub(crate) const TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT: &str = "TerminalPermissionRequest";
 #[cfg(test)]
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
