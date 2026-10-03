@@ -5,7 +5,7 @@
 //! keeps its launch value until SpaceTerm reopens, so only a child follows a grant made since.
 
 use std::io::{Read as _, Write as _};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use super::computer_use_access::{
@@ -18,7 +18,7 @@ const PROBE_ENV: &str = "SPACETERM_COMPUTER_USE_PROBE";
 const PROBE_ROLE: &str = "report";
 /// A probe answers within milliseconds. A slower one is stuck and is stopped.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-const PROBE_POLL: Duration = Duration::from_millis(5);
+const CHILD_POLL: Duration = Duration::from_millis(5);
 
 /// Both authorizations one probe read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,18 +98,8 @@ pub(super) fn run_probe() -> Result<ProbeReport, ComputerUseAccessError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| ComputerUseAccessError::PlatformUnavailable)?;
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ComputerUseAccessError::PlatformUnavailable);
-            }
-        }
-    };
+    let status = wait_bounded(&mut child, PROBE_TIMEOUT)
+        .ok_or(ComputerUseAccessError::PlatformUnavailable)?;
     let mut output = Vec::new();
     let read = child
         .stdout
@@ -123,9 +113,48 @@ pub(super) fn run_probe() -> Result<ProbeReport, ComputerUseAccessError> {
     }
 }
 
+/// Waits up to `timeout` for `child` to exit. A child still running then is stuck, so it is
+/// stopped and reaped, and the wait returns `None`.
+pub(super) fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(CHILD_POLL),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bounded_wait_stops_a_stuck_child() {
+        let mut stuck = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child");
+        let started = Instant::now();
+
+        assert_eq!(wait_bounded(&mut stuck, Duration::from_millis(50)), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            stuck.try_wait().expect("a reaped child").is_some(),
+            "the stuck child is stopped and reaped"
+        );
+
+        let mut finished = Command::new("/usr/bin/true").spawn().expect("a child");
+        assert!(
+            wait_bounded(&mut finished, Duration::from_secs(5))
+                .is_some_and(|status| status.success())
+        );
+    }
 
     #[test]
     fn a_report_round_trips_through_its_exact_encoding() {

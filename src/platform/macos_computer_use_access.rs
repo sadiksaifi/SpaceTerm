@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::process::{Command, ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -16,7 +17,7 @@ use super::computer_use_access::{
     ComputerUseResetCompletion, ComputerUseSetupCancellation, ComputerUseSetupCompletion,
     ComputerUseSetupPreparation, ComputerUseSetupReadiness,
 };
-use super::macos_computer_use_probe::{ProbeReport, run_probe};
+use super::macos_computer_use_probe::{ProbeReport, run_probe, wait_bounded};
 use super::permission_recovery::{
     PermissionRecovery, PermissionRecoveryError, PermissionRecoveryOpener,
 };
@@ -37,6 +38,9 @@ const ACCESSIBILITY_CHANGED_NOTIFICATION: &str = "com.apple.accessibility.api";
 
 /// The system's own privacy reset tool, addressed by absolute path so no search path can replace it.
 const TCCUTIL: &str = "/usr/bin/tccutil";
+/// A reset answers within a second. A slower one is stuck and is stopped, which reports the reset
+/// as failed.
+const RESET_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -275,7 +279,13 @@ fn run_reset(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn()
+        .and_then(|mut child| {
+            // A reset holds the probing lock during a setup, so a stuck one must not hold it
+            // for the rest of the session.
+            wait_bounded(&mut child, RESET_TIMEOUT)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))
+        });
     reset_result(status)
 }
 
@@ -626,9 +636,7 @@ mod tests {
         });
 
         assert!(
-            probed
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_err(),
+            probed.recv_timeout(Duration::from_millis(100)).is_err(),
             "a preparation does not probe beside a running probe"
         );
         drop(preparation);
