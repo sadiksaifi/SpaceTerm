@@ -169,10 +169,10 @@ fn compose(
             }),
             // Every identity offers these controls. A grant belongs to the signature of the build
             // that holds it, so a rebuilt SpaceTerm Development is where stale grants recur most.
-            computer_use_access: Some(Rc::new(
-                super::macos_computer_use_access::MacosComputerUseAccess::new(identity),
+            permission_access: Some(Rc::new(
+                super::macos_permission_access::MacosPermissionAccess::new(identity),
             )
-                as Rc<dyn crate::platform::computer_use_access::ComputerUseAccess>),
+                as Rc<dyn crate::platform::permission_access::PermissionAccess>),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),

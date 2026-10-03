@@ -7295,21 +7295,21 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
 
 mod permission_requests {
     use super::*;
-    use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
-    use crate::platform::computer_use_access::{ComputerUseAuthorization, ComputerUsePermission};
+    use crate::platform::permission_access::testing::ScriptedPermissionAccess;
+    use crate::platform::permission_access::{PermissionAuthorization, SystemPermission};
     use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
     use crate::terminal::permission_request::PermissionRequest;
     use crate::ui::permission_setup::PermissionSetup;
-    use ComputerUsePermission::{Accessibility, ScreenRecording};
+    use SystemPermission::{Accessibility, ScreenRecording};
 
     /// Gives the Pane a Permission Setup over the scripted authorizations.
     fn install_setup(
         pane: &Entity<TerminalPane>,
-        screen_recording: ComputerUseAuthorization,
-        accessibility: ComputerUseAuthorization,
+        screen_recording: PermissionAuthorization,
+        accessibility: PermissionAuthorization,
         cx: &mut VisualTestContext,
-    ) -> Rc<ScriptedComputerUseAccess> {
-        let access = ScriptedComputerUseAccess::new(Ok(screen_recording), Ok(accessibility));
+    ) -> Rc<ScriptedPermissionAccess> {
+        let access = ScriptedPermissionAccess::new(Ok(screen_recording), Ok(accessibility));
         let host = ScriptedSetupGuideHost::new();
         let setup = cx.update(|_, cx| PermissionSetup::create(access.clone(), host, cx));
         pane.update(cx, |pane, _| pane.set_permission_setup(setup));
@@ -7326,7 +7326,7 @@ mod permission_requests {
     /// Raises a request and waits until the notice accepts answers.
     fn request(
         pane: &Entity<TerminalPane>,
-        permissions: &[ComputerUsePermission],
+        permissions: &[SystemPermission],
         cx: &mut VisualTestContext,
     ) {
         raise_request(pane, permissions, cx);
@@ -7337,7 +7337,7 @@ mod permission_requests {
 
     fn raise_request(
         pane: &Entity<TerminalPane>,
-        permissions: &[ComputerUsePermission],
+        permissions: &[SystemPermission],
         cx: &mut VisualTestContext,
     ) {
         pane.update(cx, |pane, cx| {
@@ -7358,8 +7358,8 @@ mod permission_requests {
         let (pane, cx, records) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         let session_id = records.starts().last().unwrap().session_id;
@@ -7390,8 +7390,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7424,8 +7424,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::Granted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::Granted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7444,8 +7444,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7471,8 +7471,8 @@ mod permission_requests {
         let (pane, cx, records) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7501,8 +7501,8 @@ mod permission_requests {
         let (pane, cx, records) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7547,8 +7547,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7585,8 +7585,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         request(&pane, &[ScreenRecording], cx);
@@ -7612,8 +7612,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         cursor_on_row(&pane, 2, cx);
@@ -7643,8 +7643,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7662,8 +7662,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_remote_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7677,8 +7677,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7691,10 +7691,7 @@ mod permission_requests {
         assert!(cx.debug_bounds("permission-request").is_none());
     }
 
-    fn offered(
-        pane: &Entity<TerminalPane>,
-        cx: &mut VisualTestContext,
-    ) -> Vec<ComputerUsePermission> {
+    fn offered(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) -> Vec<SystemPermission> {
         pane.read_with(cx, |pane, _| pane.permission_request.clone())
     }
 
@@ -7705,8 +7702,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::Granted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::Granted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
 
@@ -7735,13 +7732,13 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         request(&pane, &[ScreenRecording, Accessibility], cx);
 
-        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        access.set(ScreenRecording, Ok(PermissionAuthorization::Granted));
         access.report_change();
         cx.run_until_parked();
 
@@ -7755,13 +7752,13 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         request(&pane, &[ScreenRecording], cx);
 
-        access.set(ScreenRecording, Ok(ComputerUseAuthorization::Granted));
+        access.set(ScreenRecording, Ok(PermissionAuthorization::Granted));
         cx.deactivate_window();
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -7769,7 +7766,7 @@ mod permission_requests {
         assert!(offered(&pane, cx).is_empty());
         assert!(cx.debug_bounds("permission-request").is_none());
 
-        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        access.set(ScreenRecording, Ok(PermissionAuthorization::NotGranted));
         cx.deactivate_window();
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -7784,14 +7781,14 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(
             &pane,
-            ComputerUseAuthorization::Granted,
-            ComputerUseAuthorization::Granted,
+            PermissionAuthorization::Granted,
+            PermissionAuthorization::Granted,
             cx,
         );
         request(&pane, &[ScreenRecording], cx);
         assert!(cx.debug_bounds("permission-request").is_none());
 
-        access.set(ScreenRecording, Ok(ComputerUseAuthorization::NotGranted));
+        access.set(ScreenRecording, Ok(PermissionAuthorization::NotGranted));
         access.report_change();
         cx.run_until_parked();
 
@@ -7805,8 +7802,8 @@ mod permission_requests {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
-            ComputerUseAuthorization::NotGranted,
-            ComputerUseAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
             cx,
         );
         request(&pane, &[ScreenRecording], cx);

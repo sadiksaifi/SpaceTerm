@@ -8,7 +8,7 @@ use spaceterm_ui::{FuzzyTarget, fuzzy_filter};
 
 use crate::appearance::{Appearance, ResetTarget};
 use crate::keybindings::{Command, CommandGroup};
-use crate::platform::computer_use_access::AccessibilityNaming;
+use crate::platform::permission_access::AccessibilityNaming;
 
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -109,11 +109,11 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
-    /// The system's Screen Recording authorization, which computer-use tools in a Terminal Session
-    /// inherit to take screenshots.
+    /// The system's Screen Recording authorization, which programs in a Terminal Session inherit
+    /// to take screenshots.
     ScreenRecordingAccess,
-    /// The system's Accessibility authorization, which computer-use tools in a Terminal Session
-    /// inherit to click and type. Its label follows the name System Settings gives it.
+    /// The system's Accessibility authorization, which programs in a Terminal Session inherit to
+    /// click and type. Its label follows the name System Settings gives it.
     AccessibilityAccess,
     ClipboardWrites,
     ClipboardReads,
@@ -954,10 +954,10 @@ mod tests {
         }
     }
 
-    /// A person whose computer-use tool cannot see or control the screen searches for what the
-    /// tool does or for the permission's name in System Settings.
+    /// A person whose program cannot see or control the screen searches for what the program
+    /// does, for the permission's name in System Settings, or for a common use of both.
     #[test]
-    fn a_computer_use_query_reaches_its_permission() {
+    fn a_permission_query_reaches_its_row() {
         for (query, row) in [
             ("screen recording", SettingsRowId::ScreenRecordingAccess),
             ("screenshot", SettingsRowId::ScreenRecordingAccess),
@@ -971,13 +971,13 @@ mod tests {
                 "{query:?} should rank {row:?} first"
             );
         }
-        let computer_use = matching_rows("computer use");
+        let common_use = matching_rows("computer use");
         for row in [
             SettingsRowId::ScreenRecordingAccess,
             SettingsRowId::AccessibilityAccess,
         ] {
             assert!(
-                computer_use.contains(&row),
+                common_use.contains(&row),
                 "computer use should reach {row:?}"
             );
         }

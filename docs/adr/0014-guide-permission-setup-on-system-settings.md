@@ -1,12 +1,13 @@
 # Guide Permission Setup on System Settings
 
-Computer-use tools need Screen Recording and Accessibility, and macOS grants both only through
-System Settings. macOS 27 renamed the Accessibility list Device Control and Data Access, so the
-macOS adapter reports which name the running system uses and every SpaceTerm label follows it; a
-person is never sent to a list their System Settings does not show. SpaceTerm cannot grant them
-itself and must not change privacy settings without a person. Permission Setup therefore opens the
-relevant privacy list and docks a Setup Guide on System Settings' window, from which the person
-drags SpaceTerm into the list and turns it on.
+Terminal programs that take screenshots or control other apps need Screen Recording and
+Accessibility, and macOS grants both only through System Settings. macOS 27 renamed the
+Accessibility list Device Control and Data Access, so the macOS adapter reports which name the
+running system uses and every SpaceTerm label follows it; a person is never sent to a list their
+System Settings does not show. SpaceTerm cannot grant them itself and must not change privacy
+settings without a person. Permission Setup therefore opens the relevant privacy list and docks a
+Setup Guide on System Settings' window, from which the person drags SpaceTerm into the list and
+turns it on.
 
 Permission Setup starts only from a person's action: Set Up in Settings, or Set Up on a Permission
 Request notice in a Pane. Onboarding never starts it, and every permission stays off until the
@@ -21,8 +22,9 @@ the system reports no Screen Recording change.
 Set Up clears the permission's entry with `tccutil` when a probe has just verified that it is not
 granted. A stale entry from an earlier signature shows as present but grants nothing, and removing
 it lets the person add SpaceTerm afresh. A verified grant and a failed probe never reset, and
-cancelling the setup before its reset begins prevents the reset.
-Troubleshoot resets only after the person confirms. A reset names only the running identity's bundle
+cancelling the setup before its reset begins prevents the reset. Set Up therefore also recovers a
+stale grant, so only an allowed grant offers Troubleshoot. Its alert resets only after the person
+chooses Reset, then starts a Permission Setup. A reset names only the running identity's bundle
 identifier. `tccutil` succeeds whether or not an entry existed, so the guide says that Set Up
 removed any earlier entry rather than claiming it removed one.
 

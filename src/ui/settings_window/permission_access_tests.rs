@@ -8,25 +8,24 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
-use crate::platform::computer_use_access::{
-    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization,
-    ComputerUsePermission,
+use crate::platform::permission_access::testing::ScriptedPermissionAccess;
+use crate::platform::permission_access::{
+    AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAuthorization,
+    SystemPermission,
 };
 use crate::platform::setup_guide_host::SystemSettingsWindow;
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ui::appearance_runtime;
 
-use super::computer_use::{
-    ACCESSIBILITY, ComputerUseAccessAction, ComputerUseAccessStatus, RecoveryNotice,
-    SCREEN_RECORDING, TroubleshootAvailability,
+use super::permission_access::{
+    ACCESSIBILITY, PermissionAccessAction, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
 };
 use super::test_support::MemoryStorage;
 use super::{PermissionCapabilities, SettingsRowId, SettingsSectionId, SettingsWindow};
 
-use ComputerUseAuthorization::{Granted, NotGranted};
-use ComputerUsePermission::{Accessibility, ScreenRecording};
+use PermissionAuthorization::{Granted, NotGranted};
+use SystemPermission::{Accessibility, ScreenRecording};
 
 const SCREEN_RECORDING_ROW: &str = "settings-row-screen-recording-access";
 const ACCESSIBILITY_ROW: &str = "settings-row-accessibility-access";
@@ -35,7 +34,7 @@ const APPLICATION: &str =
 
 /// Opens Settings beside `access`. A `host` also installs the Permission Setup the rows start.
 fn open_settings(
-    access: Option<Rc<ScriptedComputerUseAccess>>,
+    access: Option<Rc<ScriptedPermissionAccess>>,
     host: Option<Arc<ScriptedSetupGuideHost>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
@@ -44,7 +43,7 @@ fn open_settings(
     ));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
-    let access = access.map(|access| access as Rc<dyn ComputerUseAccess>);
+    let access = access.map(|access| access as Rc<dyn PermissionAccess>);
     let permission_setup = cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
@@ -61,7 +60,7 @@ fn open_settings(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             PermissionCapabilities {
                 microphone: None,
-                computer_use: access,
+                system_permissions: access,
                 permission_setup,
             },
             None,
@@ -75,7 +74,7 @@ fn open_settings(
 }
 
 fn open_privacy_with<'a>(
-    access: &Rc<ScriptedComputerUseAccess>,
+    access: &Rc<ScriptedPermissionAccess>,
     host: Arc<ScriptedSetupGuideHost>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
@@ -85,7 +84,7 @@ fn open_privacy_with<'a>(
 }
 
 fn open_privacy<'a>(
-    access: &Rc<ScriptedComputerUseAccess>,
+    access: &Rc<ScriptedPermissionAccess>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
     open_privacy_with(access, ScriptedSetupGuideHost::new(), cx)
@@ -112,50 +111,50 @@ fn click_modal_action(debug_identity: &str, cx: &mut VisualTestContext) {
 
 fn status(
     window: &Entity<SettingsWindow>,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     cx: &mut VisualTestContext,
-) -> ComputerUseAccessStatus {
+) -> PermissionAccessStatus {
     window.read_with(cx, |window, _| {
-        window.computer_use_access.row(permission).status()
+        window.permission_access.row(permission).status()
     })
 }
 
 fn action(
     window: &Entity<SettingsWindow>,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     cx: &mut VisualTestContext,
-) -> Option<ComputerUseAccessAction> {
+) -> Option<PermissionAccessAction> {
     window.read_with(cx, |window, _| {
         window
-            .computer_use_access
+            .permission_access
             .row(permission)
             .presentation()
             .action
     })
 }
 
-fn troubleshoot(
+fn action_enabled(
     window: &Entity<SettingsWindow>,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     cx: &mut VisualTestContext,
-) -> Option<TroubleshootAvailability> {
+) -> bool {
     window.read_with(cx, |window, _| {
         window
-            .computer_use_access
+            .permission_access
             .row(permission)
             .presentation()
-            .troubleshoot
+            .action_enabled
     })
 }
 
 fn explanation(
     window: &Entity<SettingsWindow>,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     cx: &mut VisualTestContext,
 ) -> String {
     window.read_with(cx, |window, _| {
         window
-            .computer_use_access
+            .permission_access
             .row(permission)
             .presentation()
             .explanation
@@ -165,11 +164,11 @@ fn explanation(
 
 fn notice(
     window: &Entity<SettingsWindow>,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     cx: &mut VisualTestContext,
 ) -> Option<RecoveryNotice> {
     window.read_with(cx, |window, _| {
-        window.computer_use_access.row(permission).notice()
+        window.permission_access.row(permission).notice()
     })
 }
 
@@ -182,7 +181,7 @@ fn return_to_settings(cx: &mut VisualTestContext) {
 
 #[gpui::test]
 fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(Granted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     for selector in [
@@ -192,7 +191,6 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
         SCREEN_RECORDING.control,
         SCREEN_RECORDING.state_not_allowed,
         SCREEN_RECORDING.set_up,
-        SCREEN_RECORDING.troubleshoot,
         ACCESSIBILITY_ROW,
         ACCESSIBILITY.control,
         ACCESSIBILITY.state_allowed,
@@ -213,8 +211,19 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
             "{row} should share the group"
         );
     }
-    // The guidance names the application the person turns on in System Settings.
-    assert!(explanation(&window, ScreenRecording, cx).contains(APPLICATION));
+    // Each row offers one action: Set Up already recovers a missing grant, so only an allowed
+    // grant offers Troubleshoot.
+    assert!(cx.debug_bounds(SCREEN_RECORDING.troubleshoot).is_none());
+    assert!(cx.debug_bounds(ACCESSIBILITY.set_up).is_none());
+    // The description says what the permission lets terminal programs do, in any state.
+    assert_eq!(
+        explanation(&window, ScreenRecording, cx),
+        "Lets terminal programs take screenshots."
+    );
+    assert_eq!(
+        explanation(&window, Accessibility, cx),
+        "Lets terminal programs click and type in other apps."
+    );
     // Reading authorization starts nothing: a Permission Setup waits for the explicit action.
     assert!(access.prepared.borrow().is_empty());
     assert!(access.opened.borrow().is_empty());
@@ -222,7 +231,7 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
 
 #[gpui::test]
 fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(NotGranted));
     let (window, cx) = open_settings(Some(access), Some(ScriptedSetupGuideHost::new()), cx);
 
     cx.update(|_, cx| {
@@ -244,7 +253,7 @@ fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppCon
 /// Set Up starts a Permission Setup, the row follows it, and only a read reports the grant.
 #[gpui::test]
 fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let host = ScriptedSetupGuideHost::new();
     let (window, cx) = open_privacy_with(&access, host.clone(), cx);
 
@@ -254,19 +263,19 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
     assert_eq!(*access.opened.borrow(), [ScreenRecording]);
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(ComputerUseAccessAction::CancelSetup)
+        Some(PermissionAccessAction::CancelSetup)
     );
-    assert!(explanation(&window, ScreenRecording, cx).contains("Follow the guide"));
+    assert!(explanation(&window, ScreenRecording, cx).contains("Continue in System Settings"));
     // The other permission is untouched by this row's setup.
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::SetUp)
+        Some(PermissionAccessAction::SetUp)
     );
     // Opening System Settings alone never reports access as allowed.
     return_to_settings(cx);
     assert_eq!(
         status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
+        PermissionAccessStatus::Authorization(NotGranted)
     );
 
     host.set_window(SystemSettingsWindow::Frontmost {
@@ -285,19 +294,18 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
 
     assert_eq!(
         status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(Granted)
+        PermissionAccessStatus::Authorization(Granted)
     );
-    assert_eq!(action(&window, ScreenRecording, cx), None);
     assert_eq!(
-        troubleshoot(&window, ScreenRecording, cx),
-        Some(TroubleshootAvailability::Enabled)
+        action(&window, ScreenRecording, cx),
+        Some(PermissionAccessAction::Troubleshoot)
     );
     assert!(cx.debug_bounds(SCREEN_RECORDING.state_allowed).is_some());
 }
 
 #[gpui::test]
 fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
     click(ACCESSIBILITY.set_up, cx);
 
@@ -305,9 +313,9 @@ fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
 
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::SetUp)
+        Some(PermissionAccessAction::SetUp)
     );
-    assert!(!explanation(&window, Accessibility, cx).contains("Follow the guide"));
+    assert!(!explanation(&window, Accessibility, cx).contains("Continue in System Settings"));
     assert_eq!(
         access.observers(),
         1,
@@ -318,19 +326,14 @@ fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
 /// A host without a Permission Setup still leads to the permission's list in System Settings.
 #[gpui::test]
 fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
     click("settings-navigation-settings-section-privacy", cx);
 
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(ComputerUseAccessAction::OpenSettings)
+        Some(PermissionAccessAction::OpenSettings)
     );
-    assert!(
-        explanation(&window, ScreenRecording, cx)
-            .contains("Privacy & Security > Screen & System Audio Recording")
-    );
-
     click(SCREEN_RECORDING.open_settings, cx);
 
     assert_eq!(*access.opened.borrow(), [ScreenRecording]);
@@ -340,25 +343,25 @@ fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppConte
 /// Revocation and reauthorization both arrive through reads on return.
 #[gpui::test]
 fn a_revoked_grant_is_read_on_return_and_offers_a_setup(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     access.set(Accessibility, Ok(NotGranted));
     return_to_settings(cx);
     assert_eq!(
         status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
+        PermissionAccessStatus::Authorization(NotGranted)
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::SetUp)
+        Some(PermissionAccessAction::SetUp)
     );
 
     access.set(Accessibility, Ok(Granted));
     return_to_settings(cx);
     assert_eq!(
         status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(Granted)
+        PermissionAccessStatus::Authorization(Granted)
     );
 }
 
@@ -366,7 +369,7 @@ fn a_revoked_grant_is_read_on_return_and_offers_a_setup(cx: &mut TestAppContext)
 /// active again, so the reported change refreshes the rows without another activation.
 #[gpui::test]
 fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
     assert_eq!(access.observers(), 1);
 
@@ -374,14 +377,14 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(
         status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
+        PermissionAccessStatus::Authorization(NotGranted)
     );
 
     access.report_change();
     cx.run_until_parked();
     assert_eq!(
         status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(Granted)
+        PermissionAccessStatus::Authorization(Granted)
     );
     assert!(cx.debug_bounds(ACCESSIBILITY.state_allowed).is_some());
 
@@ -398,7 +401,7 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
 fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     cx: &mut TestAppContext,
 ) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (_window, cx) = open_settings(Some(access), None, cx);
 
     let options = cx.update(|_, cx| {
@@ -411,114 +414,103 @@ fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     assert!(options.kind == gpui::WindowKind::Normal);
 }
 
-/// An apparently allowed grant can still fail, so Troubleshoot reaches System Settings from it.
+/// Stale-grant recovery: an allowed grant can still fail, so Troubleshoot offers one alert whose
+/// Reset clears one permission of this application and starts a Permission Setup again.
 #[gpui::test]
-fn troubleshooting_an_allowed_grant_opens_system_settings(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
-    let (window, cx) = open_privacy(&access, cx);
-
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    assert!(
-        cx.debug_bounds(SCREEN_RECORDING.troubleshoot_reset)
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_reset))
-            .is_some(),
-        "the guide should offer a reset when the capability supports one"
-    );
-    click_modal_action(SCREEN_RECORDING.troubleshoot_open_settings, cx);
-
-    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
-    assert!(access.resets.borrow().is_empty());
-    assert_eq!(
-        status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(Granted)
-    );
-}
-
-/// Stale-grant recovery: a confirmed reset clears one permission of this application, then the
-/// row offers a new setup.
-#[gpui::test]
-fn a_confirmed_reset_clears_one_permission_and_offers_a_new_setup(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+fn troubleshoot_resets_one_permission_and_sets_it_up_again(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     click(ACCESSIBILITY.troubleshoot, cx);
-    click_modal_action(ACCESSIBILITY.troubleshoot_reset, cx);
-    // The guide leads to a confirmation; nothing is reset before the person confirms.
+    assert!(
+        cx.debug_bounds(modal_action(ACCESSIBILITY.troubleshoot_open_settings))
+            .is_none(),
+        "a resettable identity is offered Reset, which leads to System Settings itself"
+    );
+    // The alert alone resets nothing.
     assert!(access.resets.borrow().is_empty());
-    click_modal_action(ACCESSIBILITY.reset_confirm, cx);
+    click_modal_action(ACCESSIBILITY.troubleshoot_reset, cx);
 
     assert_eq!(*access.resets.borrow(), [Accessibility]);
     assert_eq!(
         notice(&window, Accessibility, cx),
         Some(RecoveryNotice::Resetting)
     );
-    assert_eq!(
-        troubleshoot(&window, Accessibility, cx),
-        Some(TroubleshootAvailability::Busy)
-    );
+    assert!(!action_enabled(&window, Accessibility, cx));
     // The grant can disappear before the reset reports, and a return to the window meanwhile
-    // keeps reporting the reset as running.
+    // keeps reporting the reset as running and withholds Set Up.
     access.set(Accessibility, Ok(NotGranted));
     return_to_settings(cx);
     assert_eq!(
         notice(&window, Accessibility, cx),
         Some(RecoveryNotice::Resetting)
     );
+    assert!(!action_enabled(&window, Accessibility, cx));
+    click(ACCESSIBILITY.set_up, cx);
+    assert!(access.prepared.borrow().is_empty());
 
-    let completion = access.take_reset();
-    completion(Ok(()));
+    access.take_reset()(Ok(()));
     cx.run_until_parked();
 
-    assert_eq!(
-        status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
-    );
+    assert_eq!(*access.prepared.borrow(), [Accessibility]);
+    assert_eq!(*access.opened.borrow(), [Accessibility]);
+    assert_eq!(notice(&window, Accessibility, cx), None);
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::SetUp)
+        Some(PermissionAccessAction::CancelSetup)
     );
-    assert_eq!(
-        notice(&window, Accessibility, cx),
-        Some(RecoveryNotice::ResetCompleted)
-    );
-    assert_eq!(
-        troubleshoot(&window, Accessibility, cx),
-        Some(TroubleshootAvailability::Enabled)
-    );
+    assert!(action_enabled(&window, Accessibility, cx));
     // The other permission keeps its grant and its presentation.
     assert_eq!(
         status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(Granted)
+        PermissionAccessStatus::Authorization(Granted)
     );
     assert_eq!(notice(&window, ScreenRecording, cx), None);
 }
 
+/// A host without a Permission Setup goes straight to System Settings after a reset.
 #[gpui::test]
-fn a_cancelled_reset_changes_nothing(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+fn a_reset_without_a_permission_setup_opens_system_settings(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
+    let (window, cx) = open_settings(Some(access.clone()), None, cx);
+    click("settings-navigation-settings-section-privacy", cx);
+
+    click(SCREEN_RECORDING.troubleshoot, cx);
+    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
+    access.set(ScreenRecording, Ok(NotGranted));
+    access.take_reset()(Ok(()));
+    cx.run_until_parked();
+
+    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
+    assert!(access.prepared.borrow().is_empty());
+    assert_eq!(
+        action(&window, ScreenRecording, cx),
+        Some(PermissionAccessAction::OpenSettings)
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_troubleshoot_changes_nothing(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, ScreenRecording, cx);
 
     click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
-    click_modal_action(SCREEN_RECORDING.reset_cancel, cx);
+    click_modal_action(SCREEN_RECORDING.troubleshoot_cancel, cx);
 
     assert!(access.resets.borrow().is_empty());
+    assert!(access.opened.borrow().is_empty());
     assert_eq!(explanation(&window, ScreenRecording, cx), guidance);
 }
 
 #[gpui::test]
 fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     click(SCREEN_RECORDING.troubleshoot, cx);
     click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
-    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
-    access.take_reset()(Err(ComputerUseAccessError::PlatformRejected));
+    access.take_reset()(Err(PermissionAccessError::PlatformRejected));
     cx.run_until_parked();
 
     assert_eq!(
@@ -526,17 +518,18 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
         Some(RecoveryNotice::ResetFailed)
     );
     let failure = explanation(&window, ScreenRecording, cx);
-    assert!(failure.contains("could not reset"));
+    assert!(failure.contains("could not be reset"));
     assert!(failure.contains("Privacy & Security > Screen & System Audio Recording"));
     assert!(!failure.contains("PlatformRejected"));
+    // A failed reset starts no setup.
+    assert!(access.prepared.borrow().is_empty());
 
     // A reset that cannot start reports the same failure.
     access
         .reset_failure
-        .set(Some(ComputerUseAccessError::PlatformUnavailable));
+        .set(Some(PermissionAccessError::PlatformUnavailable));
     click(SCREEN_RECORDING.troubleshoot, cx);
     click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
-    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     assert_eq!(
         notice(&window, ScreenRecording, cx),
         Some(RecoveryNotice::ResetFailed)
@@ -547,12 +540,11 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
 /// A reset dropped without a result never reports success.
 #[gpui::test]
 fn a_reset_dropped_without_a_result_reports_failure(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     click(SCREEN_RECORDING.troubleshoot, cx);
     click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
-    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     drop(access.take_reset());
     cx.run_until_parked();
 
@@ -560,41 +552,38 @@ fn a_reset_dropped_without_a_result_reports_failure(cx: &mut TestAppContext) {
         notice(&window, ScreenRecording, cx),
         Some(RecoveryNotice::ResetFailed)
     );
+    assert!(access.prepared.borrow().is_empty());
 }
 
-/// A running bundle that is not this build's identity offers the manual steps only.
+/// A running bundle that is not this build's identity is offered the manual steps only.
 #[gpui::test]
-fn the_guide_omits_reset_when_the_identity_cannot_be_reset(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(Granted));
+fn troubleshoot_offers_system_settings_when_the_identity_cannot_be_reset(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     access.resettable.set(false);
     let (window, cx) = open_privacy(&access, cx);
 
     click(SCREEN_RECORDING.troubleshoot, cx);
 
     assert!(
-        cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_done))
-            .is_some()
-    );
-    assert!(
         cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_reset))
             .is_none()
     );
-    click_modal_action(SCREEN_RECORDING.troubleshoot_done, cx);
+    click_modal_action(SCREEN_RECORDING.troubleshoot_open_settings, cx);
+    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            settings.reset_computer_use_access(ScreenRecording, cx);
+            settings.reset_permission(ScreenRecording, cx);
         });
     });
     assert!(access.resets.borrow().is_empty());
-    assert!(access.opened.borrow().is_empty());
 }
 
 #[gpui::test]
 fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     access
         .open_failure
-        .set(Some(ComputerUseAccessError::PlatformRejected));
+        .set(Some(PermissionAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, Accessibility, cx);
 
@@ -602,11 +591,11 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
 
     assert_eq!(
         status(&window, Accessibility, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
+        PermissionAccessStatus::Authorization(NotGranted)
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(ComputerUseAccessAction::SetUp)
+        Some(PermissionAccessAction::SetUp)
     );
     let failure = explanation(&window, Accessibility, cx);
     assert_ne!(failure, guidance);
@@ -616,17 +605,17 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
 
     access.open_failure.set(None);
     click(ACCESSIBILITY.set_up, cx);
-    assert!(explanation(&window, Accessibility, cx).contains("Follow the guide"));
+    assert!(explanation(&window, Accessibility, cx).contains("Continue in System Settings"));
 }
 
 /// A system whose System Settings calls the list Accessibility sends the person there.
 #[gpui::test]
 fn an_earlier_system_names_the_accessibility_list(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     access.naming.set(AccessibilityNaming::Accessibility);
     access
         .open_failure
-        .set(Some(ComputerUseAccessError::PlatformRejected));
+        .set(Some(PermissionAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
 
     click(ACCESSIBILITY.set_up, cx);
@@ -635,22 +624,20 @@ fn an_earlier_system_names_the_accessibility_list(cx: &mut TestAppContext) {
     assert!(failure.contains("Privacy & Security > Accessibility"));
     assert!(!failure.contains("Device Control"));
     assert_eq!(
-        window.read_with(cx, |window, _| window.computer_use_access.naming()),
+        window.read_with(cx, |window, _| window.permission_access.naming()),
         AccessibilityNaming::Accessibility
     );
 }
 
 #[gpui::test]
 fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(
-        Err(ComputerUseAccessError::PlatformUnavailable),
-        Ok(Granted),
-    );
+    let access =
+        ScriptedPermissionAccess::new(Err(PermissionAccessError::PlatformUnavailable), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
     assert_eq!(
         status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Failed(ComputerUseAccessError::PlatformUnavailable)
+        PermissionAccessStatus::Failed(PermissionAccessError::PlatformUnavailable)
     );
     assert!(
         cx.debug_bounds(SCREEN_RECORDING.state_unavailable)
@@ -658,10 +645,9 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
     );
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(ComputerUseAccessAction::CheckAgain)
+        Some(PermissionAccessAction::CheckAgain)
     );
     // Neither success nor recovery is offered for a state the system did not report.
-    assert_eq!(troubleshoot(&window, ScreenRecording, cx), None);
     assert!(cx.debug_bounds(SCREEN_RECORDING.troubleshoot).is_none());
 
     access.set(ScreenRecording, Ok(NotGranted));
@@ -669,7 +655,7 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
 
     assert_eq!(
         status(&window, ScreenRecording, cx),
-        ComputerUseAccessStatus::Authorization(NotGranted)
+        PermissionAccessStatus::Authorization(NotGranted)
     );
     assert!(cx.debug_bounds(SCREEN_RECORDING.set_up).is_some());
 }
@@ -677,17 +663,17 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
 /// Every failure explanation is fixed product copy, never a native error's text.
 #[gpui::test]
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
     let mut explanations = Vec::new();
     for error in [
-        ComputerUseAccessError::OffMainThread,
-        ComputerUseAccessError::PlatformUnavailable,
-        ComputerUseAccessError::PlatformRejected,
+        PermissionAccessError::OffMainThread,
+        PermissionAccessError::PlatformUnavailable,
+        PermissionAccessError::PlatformRejected,
     ] {
         access.set(ScreenRecording, Err(error));
         cx.update(|_, cx| {
-            window.update(cx, |settings, cx| settings.refresh_computer_use_access(cx));
+            window.update(cx, |settings, cx| settings.refresh_permission_access(cx));
         });
         let presented = explanation(&window, ScreenRecording, cx);
         assert_ne!(presented, error.to_string());
@@ -708,11 +694,10 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &m
     ] {
         assert_eq!(
             status(&window, permission, cx),
-            ComputerUseAccessStatus::Unsupported
+            PermissionAccessStatus::Unsupported
         );
         assert!(cx.debug_bounds(text.state_unavailable).is_some());
         assert_eq!(action(&window, permission, cx), None);
-        assert_eq!(troubleshoot(&window, permission, cx), None);
         for selector in [
             text.set_up,
             text.cancel_setup,
@@ -728,16 +713,16 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &m
     }
 }
 
-/// The badge and two buttons share the control column with wrapped guidance, so every state keeps
+/// The badge and its button share the control column with wrapped guidance, so every state keeps
 /// each row at its natural height with the control centered on it.
 #[gpui::test]
-fn permission_rows_keep_their_natural_height_with_two_actions(cx: &mut TestAppContext) {
-    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
     let states = [
         Ok(NotGranted),
         Ok(Granted),
-        Err(ComputerUseAccessError::PlatformRejected),
+        Err(PermissionAccessError::PlatformRejected),
     ];
     for width in [super::WINDOW_WIDTH, 1100.0, 1400.0] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(super::WINDOW_HEIGHT)));
@@ -745,7 +730,7 @@ fn permission_rows_keep_their_natural_height_with_two_actions(cx: &mut TestAppCo
         for state in states {
             access.set(ScreenRecording, state);
             cx.update(|_, cx| {
-                window.update(cx, |settings, cx| settings.refresh_computer_use_access(cx));
+                window.update(cx, |settings, cx| settings.refresh_permission_access(cx));
             });
             cx.run_until_parked();
 

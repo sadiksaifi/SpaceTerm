@@ -1,17 +1,19 @@
-//! Portable authorization seam for the system permissions terminal-hosted computer-use tools need.
+//! Portable authorization seam for the System Permissions that programs in a Terminal Session
+//! inherit from SpaceTerm.
 //!
-//! A computer-use tool running in a Terminal Session takes screenshots and sends input through
-//! SpaceTerm's grants, so SpaceTerm reads, sets up, and recovers them for the tool.
+//! A program running in a Terminal Session takes screenshots and sends input through SpaceTerm's
+//! grants, so SpaceTerm reads, sets up, and recovers them for the program.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// One system permission that computer-use tools in a Terminal Session inherit from SpaceTerm.
+/// One permission that programs in a Terminal Session inherit from SpaceTerm and that only System
+/// Settings grants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ComputerUsePermission {
-    /// Capturing the screen, which a tool needs to take screenshots.
+pub(crate) enum SystemPermission {
+    /// Capturing the screen, which a program needs to take screenshots.
     ScreenRecording,
-    /// Controlling other applications, which a tool needs to click and type. System Settings names
+    /// Controlling other applications, which a program needs to click and type. System Settings names
     /// it as [`AccessibilityNaming`] describes.
     Accessibility,
 }
@@ -26,35 +28,34 @@ pub(crate) enum AccessibilityNaming {
     DeviceControl,
 }
 
-/// The authorization a computer-use tool started now in a Terminal Session receives for one
-/// permission.
+/// The authorization a program started now in a Terminal Session receives for one permission.
 ///
 /// The Operating System reports only whether the grant is usable. A denial, a restriction, and a
-/// request nobody answered read the same. A tool that was already running keeps the authorization
+/// request nobody answered read the same. A program that was already running keeps the authorization
 /// it started with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ComputerUseAuthorization {
+pub(crate) enum PermissionAuthorization {
     NotGranted,
     Granted,
 }
 
-/// Content-free failures from native computer-use authorization and recovery operations.
+/// Content-free failures from native permission authorization and recovery operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ComputerUseAccessError {
-    #[error("computer-use access is unavailable off the main thread")]
+pub(crate) enum PermissionAccessError {
+    #[error("permission access is unavailable off the main thread")]
     OffMainThread,
-    #[error("computer-use access is unavailable on this platform")]
+    #[error("permission access is unavailable on this platform")]
     PlatformUnavailable,
-    #[error("the platform rejected the computer-use permission operation")]
+    #[error("the platform rejected the permission operation")]
     PlatformRejected,
 }
 
-pub(crate) type ComputerUseResetCompletion =
-    Box<dyn FnOnce(Result<(), ComputerUseAccessError>) + Send>;
+pub(crate) type PermissionResetCompletion =
+    Box<dyn FnOnce(Result<(), PermissionAccessError>) + Send>;
 
 /// What preparing a Permission Setup found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ComputerUseSetupReadiness {
+pub(crate) enum PermissionSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
     /// System Settings is ready to accept SpaceTerm into the permission's list. `cleared` says
@@ -63,62 +64,62 @@ pub(crate) enum ComputerUseSetupReadiness {
     Ready { cleared: bool },
 }
 
-pub(crate) type ComputerUseSetupCompletion =
-    Box<dyn FnOnce(Result<ComputerUseSetupReadiness, ComputerUseAccessError>) + Send>;
+pub(crate) type PermissionSetupCompletion =
+    Box<dyn FnOnce(Result<PermissionSetupReadiness, PermissionAccessError>) + Send>;
 
-/// A preparation [`ComputerUseAccess::prepare_setup`] started. Dropping it cancels the
+/// A preparation [`PermissionAccess::prepare_setup`] started. Dropping it cancels the
 /// preparation: an entry it has not begun removing stays, and its completion may never run.
-pub(crate) struct ComputerUseSetupPreparation {
+pub(crate) struct PermissionSetupPreparation {
     cancelled: Arc<AtomicBool>,
 }
 
-impl ComputerUseSetupPreparation {
+impl PermissionSetupPreparation {
     /// A preparation and the signal its native work reads to learn of the cancellation.
-    pub(crate) fn new() -> (Self, ComputerUseSetupCancellation) {
+    pub(crate) fn new() -> (Self, PermissionSetupCancellation) {
         let cancelled = Arc::default();
         (
             Self {
                 cancelled: Arc::clone(&cancelled),
             },
-            ComputerUseSetupCancellation { cancelled },
+            PermissionSetupCancellation { cancelled },
         )
     }
 }
 
-impl Drop for ComputerUseSetupPreparation {
+impl Drop for PermissionSetupPreparation {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
     }
 }
 
-/// Whether the owner of a [`ComputerUseSetupPreparation`] cancelled it.
+/// Whether the owner of a [`PermissionSetupPreparation`] cancelled it.
 #[derive(Clone)]
-pub(crate) struct ComputerUseSetupCancellation {
+pub(crate) struct PermissionSetupCancellation {
     cancelled: Arc<AtomicBool>,
 }
 
-impl ComputerUseSetupCancellation {
+impl PermissionSetupCancellation {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
 
 /// Keeps a native authorization-change observation alive until its owner drops it.
-pub(crate) trait ComputerUseAccessSubscription {}
+pub(crate) trait PermissionAccessSubscription {}
 
-/// Signals that the Operating System reported a computer-use authorization change.
+/// Signals that the Operating System reported a permission authorization change.
 ///
 /// Each signal means authorization may differ from the last read, so the owner reads it again.
-pub(crate) struct ComputerUseAccessObservation {
+pub(crate) struct PermissionAccessObservation {
     pub(crate) changed: async_channel::Receiver<()>,
-    pub(crate) subscription: Box<dyn ComputerUseAccessSubscription>,
+    pub(crate) subscription: Box<dyn PermissionAccessSubscription>,
 }
 
-/// Native computer-use authorization and its explicit recovery operations.
+/// Native permission authorization and its explicit recovery operations.
 ///
 /// Every operation acts on the running application's own grant for one permission. None of them
 /// captures the screen or sends input to test access.
-pub(crate) trait ComputerUseAccess {
+pub(crate) trait PermissionAccess {
     /// Returns the latest known authorization.
     ///
     /// A read may also start a background verification. A verified value that differs from the
@@ -126,19 +127,19 @@ pub(crate) trait ComputerUseAccess {
     /// each signal converges on what the system reports.
     fn authorization(
         &self,
-        permission: ComputerUsePermission,
-    ) -> Result<ComputerUseAuthorization, ComputerUseAccessError>;
+        permission: SystemPermission,
+    ) -> Result<PermissionAuthorization, PermissionAccessError>;
 
     /// Observes authorization changes the Operating System reports or a verification finds.
     ///
     /// A read can return a value the system cached before the change until the system delivers its
     /// change report, so a read made only when the application becomes active can miss a grant.
     /// `None` means the platform reports no changes.
-    fn observe(&self) -> Option<ComputerUseAccessObservation>;
+    fn observe(&self) -> Option<PermissionAccessObservation>;
 
     /// Prepares System Settings for a Permission Setup of one permission.
     ///
-    /// It verifies the authorization first and reports [`ComputerUseSetupReadiness::AlreadyGranted`]
+    /// It verifies the authorization first and reports [`PermissionSetupReadiness::AlreadyGranted`]
     /// without changing anything when tools already receive the permission. Otherwise it removes
     /// any entry for the running application when it can, because System Settings ignores an
     /// application dropped onto a list that already holds it, and an entry from an earlier build
@@ -146,14 +147,11 @@ pub(crate) trait ComputerUseAccess {
     /// preparation for as long as it wants the result.
     fn prepare_setup(
         &self,
-        permission: ComputerUsePermission,
-        completion: ComputerUseSetupCompletion,
-    ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError>;
+        permission: SystemPermission,
+        completion: PermissionSetupCompletion,
+    ) -> Result<PermissionSetupPreparation, PermissionAccessError>;
 
-    fn open_settings(
-        &self,
-        permission: ComputerUsePermission,
-    ) -> Result<(), ComputerUseAccessError>;
+    fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError>;
 
     /// What System Settings calls the Accessibility permission, so SpaceTerm sends a person to a
     /// list they can find.
@@ -165,12 +163,15 @@ pub(crate) trait ComputerUseAccess {
     /// Forgets the Operating System's decision for one permission and the running application
     /// only, so a later Permission Setup adds the application again.
     ///
-    /// The completion may run on any thread.
+    /// The result reports the reset alone. The completion follows a verification, so a read made
+    /// on completion reflects the reset. When that verification fails after a successful reset,
+    /// the permission reads as not granted, because a removed entry grants nothing. The completion
+    /// may run on any thread.
     fn reset(
         &self,
-        permission: ComputerUsePermission,
-        completion: ComputerUseResetCompletion,
-    ) -> Result<(), ComputerUseAccessError>;
+        permission: SystemPermission,
+        completion: PermissionResetCompletion,
+    ) -> Result<(), PermissionAccessError>;
 }
 
 #[cfg(test)]
@@ -180,22 +181,22 @@ pub(crate) mod testing {
 
     use super::*;
 
-    type Authorization = Result<ComputerUseAuthorization, ComputerUseAccessError>;
+    type Authorization = Result<PermissionAuthorization, PermissionAccessError>;
 
     /// A capability whose authorization, failures, and pending resets the test controls.
-    pub(crate) struct ScriptedComputerUseAccess {
+    pub(crate) struct ScriptedPermissionAccess {
         screen_recording: Cell<Authorization>,
         accessibility: Cell<Authorization>,
-        pub(crate) setup_failure: Cell<Option<ComputerUseAccessError>>,
-        pub(crate) open_failure: Cell<Option<ComputerUseAccessError>>,
+        pub(crate) setup_failure: Cell<Option<PermissionAccessError>>,
+        pub(crate) open_failure: Cell<Option<PermissionAccessError>>,
         pub(crate) resettable: Cell<bool>,
-        pub(crate) reset_failure: Cell<Option<ComputerUseAccessError>>,
-        pub(crate) prepared: RefCell<Vec<ComputerUsePermission>>,
+        pub(crate) reset_failure: Cell<Option<PermissionAccessError>>,
+        pub(crate) prepared: RefCell<Vec<SystemPermission>>,
         /// One signal for each preparation, in order, which tells whether its owner cancelled it.
-        pub(crate) preparations: RefCell<Vec<ComputerUseSetupCancellation>>,
-        pub(crate) opened: RefCell<Vec<ComputerUsePermission>>,
-        pub(crate) resets: RefCell<Vec<ComputerUsePermission>>,
-        pending_resets: RefCell<Vec<ComputerUseResetCompletion>>,
+        pub(crate) preparations: RefCell<Vec<PermissionSetupCancellation>>,
+        pub(crate) opened: RefCell<Vec<SystemPermission>>,
+        pub(crate) resets: RefCell<Vec<SystemPermission>>,
+        pending_resets: RefCell<Vec<PermissionResetCompletion>>,
         /// Reports a change to every observer, as the system does after a grant changes.
         changes: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
         observers: Rc<Cell<usize>>,
@@ -206,7 +207,7 @@ pub(crate) mod testing {
     /// Counts an observation until its owner drops it.
     struct ScriptedSubscription(Rc<Cell<usize>>);
 
-    impl ComputerUseAccessSubscription for ScriptedSubscription {}
+    impl PermissionAccessSubscription for ScriptedSubscription {}
 
     impl Drop for ScriptedSubscription {
         fn drop(&mut self) {
@@ -214,7 +215,7 @@ pub(crate) mod testing {
         }
     }
 
-    impl ScriptedComputerUseAccess {
+    impl ScriptedPermissionAccess {
         pub(crate) fn new(
             screen_recording: Authorization,
             accessibility: Authorization,
@@ -257,14 +258,14 @@ pub(crate) mod testing {
             }
         }
 
-        pub(crate) fn set(&self, permission: ComputerUsePermission, authorization: Authorization) {
+        pub(crate) fn set(&self, permission: SystemPermission, authorization: Authorization) {
             match permission {
-                ComputerUsePermission::ScreenRecording => self.screen_recording.set(authorization),
-                ComputerUsePermission::Accessibility => self.accessibility.set(authorization),
+                SystemPermission::ScreenRecording => self.screen_recording.set(authorization),
+                SystemPermission::Accessibility => self.accessibility.set(authorization),
             }
         }
 
-        pub(crate) fn take_reset(&self) -> ComputerUseResetCompletion {
+        pub(crate) fn take_reset(&self) -> PermissionResetCompletion {
             self.pending_resets
                 .borrow_mut()
                 .pop()
@@ -272,22 +273,22 @@ pub(crate) mod testing {
         }
     }
 
-    impl ComputerUseAccess for ScriptedComputerUseAccess {
-        fn authorization(&self, permission: ComputerUsePermission) -> Authorization {
+    impl PermissionAccess for ScriptedPermissionAccess {
+        fn authorization(&self, permission: SystemPermission) -> Authorization {
             self.reads.set(self.reads.get() + 1);
             match permission {
-                ComputerUsePermission::ScreenRecording => self.screen_recording.get(),
-                ComputerUsePermission::Accessibility => self.accessibility.get(),
+                SystemPermission::ScreenRecording => self.screen_recording.get(),
+                SystemPermission::Accessibility => self.accessibility.get(),
             }
         }
 
-        fn observe(&self) -> Option<ComputerUseAccessObservation> {
+        fn observe(&self) -> Option<PermissionAccessObservation> {
             let (sender, changed) = async_channel::bounded(1);
             let mut changes = self.changes.borrow_mut();
             changes.retain(|sender| !sender.is_closed());
             changes.push(sender);
             self.observers.set(self.observers.get() + 1);
-            Some(ComputerUseAccessObservation {
+            Some(PermissionAccessObservation {
                 changed,
                 subscription: Box::new(ScriptedSubscription(self.observers.clone())),
             })
@@ -296,22 +297,22 @@ pub(crate) mod testing {
         /// Completes at once with what the scripted authorization reports.
         fn prepare_setup(
             &self,
-            permission: ComputerUsePermission,
-            completion: ComputerUseSetupCompletion,
-        ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError> {
+            permission: SystemPermission,
+            completion: PermissionSetupCompletion,
+        ) -> Result<PermissionSetupPreparation, PermissionAccessError> {
             self.prepared.borrow_mut().push(permission);
             if let Some(error) = self.setup_failure.get() {
                 return Err(error);
             }
-            let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+            let (preparation, cancellation) = PermissionSetupPreparation::new();
             self.preparations.borrow_mut().push(cancellation);
             completion(
                 self.authorization(permission)
                     .map(|authorization| match authorization {
-                        ComputerUseAuthorization::Granted => {
-                            ComputerUseSetupReadiness::AlreadyGranted
+                        PermissionAuthorization::Granted => {
+                            PermissionSetupReadiness::AlreadyGranted
                         }
-                        ComputerUseAuthorization::NotGranted => ComputerUseSetupReadiness::Ready {
+                        PermissionAuthorization::NotGranted => PermissionSetupReadiness::Ready {
                             cleared: self.resettable.get(),
                         },
                     }),
@@ -319,10 +320,7 @@ pub(crate) mod testing {
             Ok(preparation)
         }
 
-        fn open_settings(
-            &self,
-            permission: ComputerUsePermission,
-        ) -> Result<(), ComputerUseAccessError> {
+        fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError> {
             self.opened.borrow_mut().push(permission);
             self.open_failure.get().map_or(Ok(()), Err)
         }
@@ -337,9 +335,9 @@ pub(crate) mod testing {
 
         fn reset(
             &self,
-            permission: ComputerUsePermission,
-            completion: ComputerUseResetCompletion,
-        ) -> Result<(), ComputerUseAccessError> {
+            permission: SystemPermission,
+            completion: PermissionResetCompletion,
+        ) -> Result<(), PermissionAccessError> {
             self.resets.borrow_mut().push(permission);
             if let Some(error) = self.reset_failure.get() {
                 return Err(error);

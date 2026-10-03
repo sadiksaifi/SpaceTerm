@@ -234,6 +234,11 @@ Bounded recognition of terminal clipboard escape sequences before Terminal Emula
 Session-scoped permission to consult the system text clipboard while the originating Pane retains Terminal Input Focus.
 Copying is enabled by default; reading requires the Privacy Setting.
 
+**System Permission**:
+An Operating-System privacy grant that programs in a Terminal Session inherit from SpaceTerm and that
+only System Settings gives: Screen Recording and Accessibility. Microphone access is not one,
+because the system can ask for it with a prompt.
+
 **Permission Request**:
 A Local Pane's offer to start a Permission Setup after its output carries `OSC 7701`. Any output the
 Pane shows can carry one, including output a remote shell or a file relays, so it names no program.
@@ -244,9 +249,9 @@ permission as System Settings does: Accessibility before macOS 27, and Device Co
 after its Device Control and Data Access list.
 
 **Permission Setup**:
-One guided pass through System Settings that adds SpaceTerm to the computer-use privacy lists,
-started only from a Settings Row or a Permission Request. Computer-use permissions stay off until
-then; onboarding never asks for them.
+One guided pass through System Settings that adds SpaceTerm to a System Permission's privacy list,
+started only from a Settings Row or a Permission Request. System Permissions stay off until then;
+onboarding never asks for them.
 
 **Setup Guide**:
 The non-activating panel a Permission Setup docks inside the bottom of System Settings' window

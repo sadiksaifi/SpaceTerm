@@ -1,5 +1,5 @@
-//! Permission Request filtering: a program in a Terminal Session asks SpaceTerm to set up
-//! computer-use permissions with `OSC 7701 ; permissions=<list> ST`.
+//! Permission Request filtering: a program in a Terminal Session asks SpaceTerm to set up System
+//! Permissions with `OSC 7701 ; permissions=<list> ST`.
 //!
 //! `<list>` is a comma-separated set of `screen-recording` and `accessibility`. The filter removes
 //! every Permission Request from the output before the Terminal Emulator sees it. A request only
@@ -7,7 +7,7 @@
 
 use std::mem;
 
-use crate::platform::computer_use_access::ComputerUsePermission;
+use crate::platform::permission_access::SystemPermission;
 
 const PREFIX: &[u8] = b"\x1b]7701;";
 /// The longest body worth parsing. Longer requests are discarded unread.
@@ -16,11 +16,11 @@ const MAX_BODY_BYTES: usize = 256;
 /// The permissions one Permission Request asks for, in the order they were named.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PermissionRequest {
-    permissions: Vec<ComputerUsePermission>,
+    permissions: Vec<SystemPermission>,
 }
 
 impl PermissionRequest {
-    pub(crate) fn permissions(&self) -> &[ComputerUsePermission] {
+    pub(crate) fn permissions(&self) -> &[SystemPermission] {
         &self.permissions
     }
 
@@ -34,7 +34,7 @@ impl PermissionRequest {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(permissions: &[ComputerUsePermission]) -> Self {
+    pub(crate) fn for_test(permissions: &[SystemPermission]) -> Self {
         Self {
             permissions: permissions.to_vec(),
         }
@@ -206,8 +206,8 @@ fn parse(body: &[u8]) -> Option<PermissionRequest> {
     let mut permissions = Vec::new();
     for name in list.split(|byte| *byte == b',') {
         let permission = match name {
-            b"screen-recording" => ComputerUsePermission::ScreenRecording,
-            b"accessibility" => ComputerUsePermission::Accessibility,
+            b"screen-recording" => SystemPermission::ScreenRecording,
+            b"accessibility" => SystemPermission::Accessibility,
             _ => continue,
         };
         if !permissions.contains(&permission) {
@@ -220,12 +220,12 @@ fn parse(body: &[u8]) -> Option<PermissionRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ComputerUsePermission::{Accessibility, ScreenRecording};
+    use SystemPermission::{Accessibility, ScreenRecording};
 
     #[derive(Debug, PartialEq)]
     enum Output {
         Terminal(Vec<u8>),
-        Request(Vec<ComputerUsePermission>),
+        Request(Vec<SystemPermission>),
     }
 
     /// Feeds `chunks` in order and merges adjacent terminal output.

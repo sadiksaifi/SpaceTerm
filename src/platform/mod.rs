@@ -4,7 +4,6 @@ pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 pub(crate) mod application_quit;
-pub(crate) mod computer_use_access;
 pub(crate) mod control_socket;
 pub(crate) mod https_transport;
 pub(crate) mod keyboard_layout;
@@ -19,6 +18,7 @@ mod macos_selected_file;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
+pub(crate) mod permission_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
@@ -58,11 +58,11 @@ mod macos_application_quit;
 pub(crate) mod macos_application_quit;
 
 #[cfg(all(target_os = "macos", not(test)))]
-mod macos_computer_use_access;
+mod macos_permission_access;
 #[cfg(all(target_os = "macos", test))]
-pub(crate) mod macos_computer_use_access;
+pub(crate) mod macos_permission_access;
 #[cfg(target_os = "macos")]
-mod macos_computer_use_probe;
+mod macos_permission_probe;
 #[cfg(target_os = "macos")]
 mod macos_setup_guide_host;
 
@@ -188,7 +188,7 @@ pub(crate) use macos_composition::main;
 #[cfg(target_os = "macos")]
 pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
     macos_askpass_transport::dispatch_helper_from_environment()
-        .or_else(macos_computer_use_probe::dispatch_probe_from_environment)
+        .or_else(macos_permission_probe::dispatch_probe_from_environment)
 }
 
 pub(crate) mod locale;
