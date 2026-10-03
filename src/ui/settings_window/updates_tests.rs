@@ -15,13 +15,6 @@ use super::updates::{CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
 
 fn open_updates(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    open_with_update_capability(cx, true)
-}
-
-fn open_with_update_capability(
-    cx: &mut TestAppContext,
-    available: bool,
-) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
         &SettingsDocument::default(),
     ));
@@ -31,17 +24,6 @@ fn open_with_update_capability(
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        if available {
-            crate::updates::ApplicationUpdates::install(
-                Rc::new(crate::updates::testing::RecordingAdapter::available()),
-                cx,
-            );
-        } else {
-            crate::updates::ApplicationUpdates::install(
-                Rc::new(crate::updates::UnavailableUpdates),
-                cx,
-            );
-        }
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -54,9 +36,7 @@ fn open_with_update_capability(
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    if available {
-        click("settings-navigation-settings-section-updates", cx);
-    }
+    click("settings-navigation-settings-section-updates", cx);
     (window, cx)
 }
 
@@ -154,12 +134,8 @@ fn settings_search_should_find_the_overdue_reminder_from_another_section(cx: &mu
 }
 
 #[gpui::test]
-fn a_host_without_updates_offers_no_update_section_or_actions(cx: &mut TestAppContext) {
-    let (window, cx) = open_with_update_capability(cx, false);
-    assert!(
-        cx.debug_bounds("settings-navigation-settings-section-updates")
-            .is_none()
-    );
+fn status_should_offer_no_update_action_without_the_update_service(cx: &mut TestAppContext) {
+    let (window, cx) = open_updates(cx);
 
     let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
     assert_eq!(status.action, None);
@@ -171,6 +147,6 @@ fn a_host_without_updates_offers_no_update_section_or_actions(cx: &mut TestAppCo
     }
     assert!(
         cx.debug_bounds("settings-row-update-status-description")
-            .is_none()
+            .is_some()
     );
 }

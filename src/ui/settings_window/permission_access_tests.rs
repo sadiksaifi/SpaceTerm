@@ -8,7 +8,6 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::microphone_access::{MicrophoneAccess, MicrophoneAuthorization};
 use crate::platform::permission_access::testing::ScriptedPermissionAccess;
 use crate::platform::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAuthorization,
@@ -39,15 +38,6 @@ fn open_settings(
     host: Option<Arc<ScriptedSetupGuideHost>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    open_settings_with_microphone(access, host, None, cx)
-}
-
-fn open_settings_with_microphone(
-    access: Option<Rc<ScriptedPermissionAccess>>,
-    host: Option<Arc<ScriptedSetupGuideHost>>,
-    microphone: Option<Rc<dyn MicrophoneAccess>>,
-    cx: &mut TestAppContext,
-) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
         &SettingsDocument::default(),
     ));
@@ -69,7 +59,7 @@ fn open_settings_with_microphone(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             PermissionCapabilities {
-                microphone,
+                microphone: None,
                 system_permissions: access,
                 permission_setup,
             },
@@ -192,15 +182,7 @@ fn return_to_settings(cx: &mut VisualTestContext) {
 #[gpui::test]
 fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(Granted));
-    let (window, cx) = open_settings_with_microphone(
-        Some(access.clone()),
-        Some(ScriptedSetupGuideHost::new()),
-        Some(super::microphone_tests::ScriptedMicrophoneAccess::new(Ok(
-            MicrophoneAuthorization::Authorized,
-        ))),
-        cx,
-    );
-    click("settings-navigation-settings-section-privacy", cx);
+    let (window, cx) = open_privacy(&access, cx);
 
     for selector in [
         "settings-section-privacy-group-permissions",
@@ -702,20 +684,10 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_host_without_the_capability_omits_permission_rows_and_keeps_clipboard(
-    cx: &mut TestAppContext,
-) {
+fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &mut TestAppContext) {
     let (window, cx) = open_settings(None, Some(ScriptedSetupGuideHost::new()), cx);
     click("settings-navigation-settings-section-privacy", cx);
 
-    window.read_with(cx, |settings, _| {
-        assert!(!settings.permission_access.is_supported());
-        assert!(settings.permission_access.setup().is_none());
-    });
-    assert!(cx.debug_bounds(SCREEN_RECORDING_ROW).is_none());
-    assert!(cx.debug_bounds(ACCESSIBILITY_ROW).is_none());
-    assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
-    assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
     for (permission, text) in [
         (ScreenRecording, &SCREEN_RECORDING),
         (Accessibility, &ACCESSIBILITY),
@@ -724,7 +696,7 @@ fn a_host_without_the_capability_omits_permission_rows_and_keeps_clipboard(
             status(&window, permission, cx),
             PermissionAccessStatus::Unsupported
         );
-        assert!(cx.debug_bounds(text.state_unavailable).is_none());
+        assert!(cx.debug_bounds(text.state_unavailable).is_some());
         assert_eq!(action(&window, permission, cx), None);
         for selector in [
             text.set_up,

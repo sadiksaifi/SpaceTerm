@@ -79,10 +79,6 @@ impl MicrophoneAccessRow {
         row
     }
 
-    pub(super) fn is_supported(&self) -> bool {
-        self.access.is_some()
-    }
-
     #[cfg(test)]
     pub(super) fn status(&self) -> MicrophoneAccessStatus {
         self.status

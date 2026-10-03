@@ -24,7 +24,7 @@ use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
 
 /// A capability whose authorization, failures, and pending decisions the test controls.
-pub(super) struct ScriptedMicrophoneAccess {
+struct ScriptedMicrophoneAccess {
     authorization: Cell<Result<MicrophoneAuthorization, MicrophoneAccessError>>,
     request_failure: Cell<Option<MicrophoneAccessError>>,
     open_failure: Cell<Option<MicrophoneAccessError>>,
@@ -34,9 +34,7 @@ pub(super) struct ScriptedMicrophoneAccess {
 }
 
 impl ScriptedMicrophoneAccess {
-    pub(super) fn new(
-        authorization: Result<MicrophoneAuthorization, MicrophoneAccessError>,
-    ) -> Rc<Self> {
+    fn new(authorization: Result<MicrophoneAuthorization, MicrophoneAccessError>) -> Rc<Self> {
         Rc::new(Self {
             authorization: Cell::new(authorization),
             request_failure: Cell::new(None),
@@ -82,19 +80,6 @@ fn open_settings(
     access: Option<Rc<dyn MicrophoneAccess>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    open_settings_with_capabilities(
-        super::PermissionCapabilities {
-            microphone: access,
-            ..super::PermissionCapabilities::default()
-        },
-        cx,
-    )
-}
-
-fn open_settings_with_capabilities(
-    capabilities: super::PermissionCapabilities,
-    cx: &mut TestAppContext,
-) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
         &SettingsDocument::default(),
     ));
@@ -108,7 +93,10 @@ fn open_settings_with_capabilities(
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            capabilities,
+            super::PermissionCapabilities {
+                microphone: access,
+                ..super::PermissionCapabilities::default()
+            },
             None,
             window,
             cx,
@@ -495,19 +483,17 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_host_without_the_capability_offers_no_microphone_controls(cx: &mut TestAppContext) {
+fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
+    cx: &mut TestAppContext,
+) {
     let (window, cx) = open_settings(None, cx);
-    assert!(
-        cx.debug_bounds("settings-navigation-settings-section-privacy")
-            .is_some()
-    );
     click("settings-navigation-settings-section-privacy", cx);
 
     assert_eq!(status(&window, cx), MicrophoneAccessStatus::Unsupported);
-    assert!(cx.debug_bounds(ROW_SELECTOR).is_none());
+    assert!(cx.debug_bounds(ROW_SELECTOR).is_some());
     assert!(
         cx.debug_bounds("settings-microphone-access-state-unavailable")
-            .is_none()
+            .is_some()
     );
     assert_eq!(action(&window, cx), None);
     assert_no_action_rendered(cx);
@@ -530,20 +516,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     const LAST_ROW_SELECTOR: &str = "settings-row-accessibility-access";
 
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
-    let (window, cx) = open_settings_with_capabilities(
-        super::PermissionCapabilities {
-            microphone: Some(access.clone()),
-            system_permissions: Some(
-                crate::platform::permission_access::testing::ScriptedPermissionAccess::new(
-                    Ok(crate::platform::permission_access::PermissionAuthorization::Granted),
-                    Ok(crate::platform::permission_access::PermissionAuthorization::Granted),
-                ),
-            ),
-            ..super::PermissionCapabilities::default()
-        },
-        cx,
-    );
-    click("settings-navigation-settings-section-privacy", cx);
+    let (window, cx) = open_privacy(&access, cx);
     let states = [
         Ok(MicrophoneAuthorization::NotDetermined),
         Ok(MicrophoneAuthorization::Denied),
