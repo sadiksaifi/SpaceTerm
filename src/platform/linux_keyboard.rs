@@ -458,3 +458,218 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "native-tests"))]
+mod native_compose_tests {
+    use super::*;
+    use crate::terminal::WorkspaceTerminalSessionFactory;
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TerminalEmulator, TestTerminalSessionFactory,
+        TestTerminalSessionRecords, test_local_directory,
+    };
+    use gpui::AppContext as _;
+    use std::{path::PathBuf, rc::Rc, time::Duration};
+
+    enum DriverRequest {
+        Begin,
+        MoveFocus,
+        Finished,
+    }
+
+    fn focus_x11_window(title: &str) {
+        assert!(
+            std::process::Command::new("xdotool")
+                .args(["search", "--onlyvisible", "--name", title, "windowfocus"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn drive_keys(
+        requests: async_channel::Sender<DriverRequest>,
+        ready: async_channel::Receiver<()>,
+    ) {
+        ready.recv_blocking().unwrap();
+        let backend = std::env::var("SPACETERM_COMPOSE_BACKEND").unwrap();
+        if backend == "x11" {
+            focus_x11_window("^SpaceTerm Compose Primary$");
+        }
+        let connection = zbus::blocking::Connection::session().unwrap();
+        let session = if backend == "wayland" {
+            let manager = zbus::blocking::Proxy::new(
+                &connection,
+                "org.gnome.Mutter.RemoteDesktop",
+                "/org/gnome/Mutter/RemoteDesktop",
+                "org.gnome.Mutter.RemoteDesktop",
+            )
+            .unwrap();
+            let path: zbus::zvariant::OwnedObjectPath = manager.call("CreateSession", &()).unwrap();
+            let remote = zbus::blocking::Proxy::new(
+                &connection,
+                "org.gnome.Mutter.RemoteDesktop",
+                path,
+                "org.gnome.Mutter.RemoteDesktop.Session",
+            )
+            .unwrap();
+            remote.call::<_, _, ()>("Start", &()).unwrap();
+            Some(remote)
+        } else {
+            None
+        };
+        let key = |name: &str, keycode: u32, pressed: bool| {
+            if let Some(remote) = &session {
+                remote
+                    .call::<_, _, ()>("NotifyKeyboardKeycode", &(keycode, pressed))
+                    .unwrap();
+            } else {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args([if pressed { "keydown" } else { "keyup" }, name])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        };
+        if backend == "wayland" {
+            // A newly created Mutter virtual keyboard consumes its first key.
+            key("Shift_L", 42, true);
+            key("Shift_L", 42, false);
+            key("Escape", 1, true);
+            key("Escape", 1, false);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        requests.send_blocking(DriverRequest::Begin).unwrap();
+        ready.recv_blocking().unwrap();
+        for move_focus in [false, true] {
+            key("dead_acute", 40, true);
+            key("dead_acute", 40, false);
+            key("e", 18, true);
+            if move_focus {
+                requests.send_blocking(DriverRequest::MoveFocus).unwrap();
+                ready.recv_blocking().unwrap();
+            }
+            key("e", 18, false);
+        }
+        key("x", 45, true);
+        key("x", 45, false);
+        requests.send_blocking(DriverRequest::Finished).unwrap();
+        if let Some(remote) = session {
+            remote.call::<_, _, ()>("Stop", &()).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "run mise run test:compose:linux on a private display"]
+    fn linux_compose_input_native_press_commit_release_reaches_kitty_encoder() {
+        let backend =
+            std::env::var("SPACETERM_COMPOSE_BACKEND").expect("private display runner required");
+        match backend.as_str() {
+            "x11" => assert_eq!(std::env::var("DISPLAY").unwrap(), ":96"),
+            "wayland" => assert_eq!(
+                std::env::var("WAYLAND_DISPLAY").unwrap(),
+                "spaceterm-compose-test"
+            ),
+            _ => panic!("unsupported test backend"),
+        }
+        let records = TestTerminalSessionRecords::default();
+        let (requests, receiver) = async_channel::unbounded();
+        let (ready, ready_receiver) = async_channel::bounded(1);
+        let driver = std::thread::spawn(move || drive_keys(requests, ready_receiver));
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let first_command = Rc::new(std::cell::Cell::new(0));
+        gpui_platform::application().run({
+            let records = records.clone();
+            let completed = completed.clone();
+            let first_command = first_command.clone();
+            move |cx| {
+                crate::ui::init(cx).unwrap();
+                let factory = WorkspaceTerminalSessionFactory::new_local(
+                    Rc::new(TestTerminalSessionFactory::new(records.clone())),
+                    test_local_directory(PathBuf::from("/compose-test")),
+                );
+                let prepared = factory.prepare_child_launch().unwrap();
+                let primary = cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let pane = cx.new(|cx| crate::ui::TerminalPane::new_with_prepared_launch(
+                        factory, prepared, LinuxTerminalKeyInputAdapterFactory::new().create(),
+                        &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                        crate::terminal::native_services::testing::adapters(),
+                        crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,
+                    ));
+                    window.set_window_title("SpaceTerm Compose Primary");
+                    window.activate_window();
+                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                    pane
+                }).unwrap();
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    ready.send(()).await.unwrap();
+                    while let Ok(request) = receiver.recv().await {
+                        match request {
+                            DriverRequest::Begin => {
+                                first_command.set(records.commands().len());
+                                ready.send(()).await.unwrap();
+                            }
+                            DriverRequest::MoveFocus => {
+                                let secondary = cx.update(|cx| cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                                    window.set_window_title("SpaceTerm Compose Secondary");
+                                    window.activate_window();
+                                    cx.new(|_| gpui::EmptyView)
+                                }).unwrap());
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                if backend == "x11" {
+                                    focus_x11_window("^SpaceTerm Compose Secondary$");
+                                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                                }
+                                cx.update(|cx| primary.update(cx, |pane, window, cx| {
+                                    window.activate_window();
+                                    pane.focus(window, cx);
+                                }).unwrap());
+                                if backend == "x11" {
+                                    focus_x11_window("^SpaceTerm Compose Primary$");
+                                }
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                cx.update(|cx| secondary.update(cx, |_, window, _| window.remove_window()).unwrap());
+                                ready.send(()).await.unwrap();
+                            }
+                            DriverRequest::Finished => {
+                                // Paint without a text responder so the native input handler releases its Pane.
+                                let empty = cx.update(|cx| primary.update(cx, |_, window, cx| {
+                                    window.replace_root(cx, |_, _| gpui::EmptyView);
+                                    window.window_handle()
+                                }).unwrap());
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                completed.set(true);
+                                cx.update(|cx| empty.update(cx, |_, window, _| window.remove_window()).unwrap());
+                                cx.update(|cx| cx.quit());
+                                break;
+                            }
+                        }
+                    }
+                }).detach();
+                cx.spawn(async |cx| {
+                    cx.background_executor().timer(Duration::from_secs(15)).await;
+                    cx.update(|cx| cx.quit());
+                }).detach();
+            }
+        });
+        assert!(completed.get(), "native input driver timed out");
+        driver.join().unwrap();
+        let geometry = crate::terminal::geometry::TerminalGeometry::from_grid(
+            crate::terminal::geometry::CellGridSize::new(80, 24),
+            crate::terminal::geometry::LogicalCellSize::new(10.0, 20.0),
+            crate::terminal::geometry::BackingScale::ONE,
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"\x1b[>11u");
+        let mut bytes = Vec::new();
+        for command in records.commands().into_iter().skip(first_command.get()) {
+            if let RecordedSessionCommand::Key(input) = command.command {
+                bytes.extend(emulator.key(input).unwrap().bytes);
+            }
+        }
+        assert_eq!(bytes, "éé\x1b[120u\x1b[120;1:3u".as_bytes());
+    }
+}
