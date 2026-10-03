@@ -96,12 +96,12 @@ fn desktop_profile(
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
-        )
-        .without_features(&[
-            HostFeature::Updates,
-            HostFeature::MicrophoneAccess,
-            HostFeature::SystemPermissions,
-        ]),
+            &[
+                HostFeature::Updates,
+                HostFeature::MicrophoneAccess,
+                HostFeature::SystemPermissions,
+            ],
+        ),
         locale,
     )
     .with_fonts(super::linux_fonts::capture()))

@@ -73,6 +73,8 @@ pub(crate) struct DesktopPresentation {
     selection: ShortcutSelection,
     shortcuts: Vec<PresentedShortcut>,
     layout: KeyboardLayout,
+    /// Features this desktop has no equivalent for; their surfaces are omitted rather than shown
+    /// as unavailable.
     absent_features: &'static [HostFeature],
 }
 
@@ -95,6 +97,7 @@ impl DesktopPresentation {
         wording: DesktopWording,
         formatter: Rc<dyn ShortcutFormatter>,
         selection: ShortcutSelection,
+        absent_features: &'static [HostFeature],
     ) -> Self {
         Self {
             wording,
@@ -102,16 +105,12 @@ impl DesktopPresentation {
             selection,
             shortcuts: Vec::new(),
             layout: KeyboardLayout::default(),
-            absent_features: &[],
+            absent_features,
         }
     }
 
-    /// Declares features this desktop has no equivalent for, so the application omits their
-    /// surfaces instead of presenting them as unavailable.
-    #[cfg_attr(
-        not(any(test, target_os = "linux")),
-        allow(dead_code, reason = "only a desktop lacking a feature composes this")
-    )]
+    /// Replaces the features this desktop has no equivalent for.
+    #[cfg(test)]
     pub(crate) const fn without_features(mut self, absent: &'static [HostFeature]) -> Self {
         self.absent_features = absent;
         self
@@ -397,6 +396,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         },
         Rc::new(TestingShortcutFormatter),
         ShortcutSelection::NativeMenu,
+        &[],
     );
     let profile = default_keymap::profile(
         crate::platform::keyboard_layout::testing::us(),
@@ -605,6 +605,7 @@ mod tests {
                 native.wording(),
                 Rc::new(TestingShortcutFormatter),
                 ShortcutSelection::TerminalSurface,
+                &[],
             );
             terminal.refresh(cx);
             assert_eq!(
