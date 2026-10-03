@@ -359,7 +359,8 @@ impl ComputerUseAccessRow {
                                 format!(
                                     "Computer-use tools running in {application} need this to \
                                      {}. \
-                                     Choose Set Up to add {application} in System Settings.",
+                                     Choose Set Up to add {application} under Privacy & Security > \
+                                     {pane} in System Settings.",
                                     copy.purpose
                                 )
                             }),
