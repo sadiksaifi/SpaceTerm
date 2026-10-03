@@ -94,7 +94,7 @@ if [[ "$LAUNCH" == false ]]; then
 fi
 # LaunchServices makes the bundle the responsible process for its own privacy checks, as it is for
 # an installed SpaceTerm. Executing the binary from here would attribute those checks to the
-# terminal that ran this script, so computer-use permissions would follow that terminal instead.
+# terminal that ran this script, so System Permissions would follow that terminal instead.
 OUTPUT=/dev/null
 if [[ -t 0 ]]; then
     OUTPUT="$(tty)"

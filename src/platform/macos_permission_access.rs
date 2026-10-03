@@ -11,13 +11,13 @@ use objc2_foundation::{
     NSObject, NSObjectProtocol, NSProcessInfo, NSString,
 };
 
-use super::computer_use_access::{
-    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
-    ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
-    ComputerUseResetCompletion, ComputerUseSetupCancellation, ComputerUseSetupCompletion,
-    ComputerUseSetupPreparation, ComputerUseSetupReadiness,
+use super::macos_permission_probe::{ProbeReport, run_probe, wait_bounded};
+use super::permission_access::{
+    AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAccessObservation,
+    PermissionAccessSubscription, PermissionAuthorization, PermissionResetCompletion,
+    PermissionSetupCancellation, PermissionSetupCompletion, PermissionSetupPreparation,
+    PermissionSetupReadiness, SystemPermission,
 };
-use super::macos_computer_use_probe::{ProbeReport, run_probe, wait_bounded};
 use super::permission_recovery::{
     PermissionRecovery, PermissionRecoveryError, PermissionRecoveryOpener,
 };
@@ -56,15 +56,15 @@ unsafe extern "C" {
 ///
 /// The Screen Recording answer keeps its launch value for the life of the process, so only a
 /// process started after a change reads that change.
-pub(super) fn in_process_granted(permission: ComputerUsePermission) -> bool {
+pub(super) fn in_process_granted(permission: SystemPermission) -> bool {
     // SAFETY: Both functions read the calling process's own authorization and take no input.
     match permission {
-        ComputerUsePermission::ScreenRecording => unsafe { CGPreflightScreenCaptureAccess() },
-        ComputerUsePermission::Accessibility => unsafe { AXIsProcessTrusted() != 0 },
+        SystemPermission::ScreenRecording => unsafe { CGPreflightScreenCaptureAccess() },
+        SystemPermission::Accessibility => unsafe { AXIsProcessTrusted() != 0 },
     }
 }
 
-pub(crate) struct MacosComputerUseAccess {
+pub(crate) struct MacosPermissionAccess {
     screen_recording_settings: PermissionRecovery,
     accessibility_settings: PermissionRecovery,
     /// The bundle identifier a reset may name, present only when the running bundle is this build's
@@ -74,7 +74,7 @@ pub(crate) struct MacosComputerUseAccess {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl MacosComputerUseAccess {
+impl MacosPermissionAccess {
     pub(crate) fn new(identity: ApplicationIdentity) -> Self {
         let running = NSBundle::mainBundle()
             .bundleIdentifier()
@@ -100,26 +100,26 @@ impl MacosComputerUseAccess {
     }
 }
 
-impl ComputerUseAccess for MacosComputerUseAccess {
+impl PermissionAccess for MacosPermissionAccess {
     fn authorization(
         &self,
-        permission: ComputerUsePermission,
-    ) -> Result<ComputerUseAuthorization, ComputerUseAccessError> {
+        permission: SystemPermission,
+    ) -> Result<PermissionAuthorization, PermissionAccessError> {
         let verified = self.verification.latest();
         Verification::start(&self.verification);
         Ok(verified.map_or_else(
             || {
                 if in_process_granted(permission) {
-                    ComputerUseAuthorization::Granted
+                    PermissionAuthorization::Granted
                 } else {
-                    ComputerUseAuthorization::NotGranted
+                    PermissionAuthorization::NotGranted
                 }
             },
             |report| report.authorization(permission),
         ))
     }
 
-    fn observe(&self) -> Option<ComputerUseAccessObservation> {
+    fn observe(&self) -> Option<PermissionAccessObservation> {
         let mtm = MainThreadMarker::new()?;
         let (sender, changed) = async_channel::bounded(1);
         self.verification.subscribe(sender.clone());
@@ -140,9 +140,9 @@ impl ComputerUseAccess for MacosComputerUseAccess {
                 NSNotificationSuspensionBehavior::DeliverImmediately,
             );
         }
-        Some(ComputerUseAccessObservation {
+        Some(PermissionAccessObservation {
             changed,
-            subscription: Box::new(MacosComputerUseAccessSubscription {
+            subscription: Box::new(MacosPermissionAccessSubscription {
                 center,
                 observer,
                 name,
@@ -152,12 +152,12 @@ impl ComputerUseAccess for MacosComputerUseAccess {
 
     fn prepare_setup(
         &self,
-        permission: ComputerUsePermission,
-        completion: ComputerUseSetupCompletion,
-    ) -> Result<ComputerUseSetupPreparation, ComputerUseAccessError> {
+        permission: SystemPermission,
+        completion: PermissionSetupCompletion,
+    ) -> Result<PermissionSetupPreparation, PermissionAccessError> {
         let reset_bundle_identifier = self.reset_bundle_identifier;
         let verification = Arc::clone(&self.verification);
-        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (preparation, cancellation) = PermissionSetupPreparation::new();
         std::thread::Builder::new()
             .name("spaceterm-permission-setup".to_owned())
             .spawn(move || {
@@ -173,18 +173,15 @@ impl ComputerUseAccess for MacosComputerUseAccess {
                 }
             })
             .map(|_| preparation)
-            .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
+            .map_err(|_| PermissionAccessError::PlatformUnavailable)
     }
 
-    fn open_settings(
-        &self,
-        permission: ComputerUsePermission,
-    ) -> Result<(), ComputerUseAccessError> {
+    fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError> {
         match permission {
-            ComputerUsePermission::ScreenRecording => self.screen_recording_settings.open(),
-            ComputerUsePermission::Accessibility => self.accessibility_settings.open(),
+            SystemPermission::ScreenRecording => self.screen_recording_settings.open(),
+            SystemPermission::Accessibility => self.accessibility_settings.open(),
         }
-        .map_err(ComputerUseAccessError::from)
+        .map_err(PermissionAccessError::from)
     }
 
     fn accessibility_naming(&self) -> AccessibilityNaming {
@@ -201,22 +198,22 @@ impl ComputerUseAccess for MacosComputerUseAccess {
 
     fn reset(
         &self,
-        permission: ComputerUsePermission,
-        completion: ComputerUseResetCompletion,
-    ) -> Result<(), ComputerUseAccessError> {
+        permission: SystemPermission,
+        completion: PermissionResetCompletion,
+    ) -> Result<(), PermissionAccessError> {
         let bundle_identifier = self
             .reset_bundle_identifier
-            .ok_or(ComputerUseAccessError::PlatformUnavailable)?;
+            .ok_or(PermissionAccessError::PlatformUnavailable)?;
         let verification = Arc::clone(&self.verification);
         std::thread::Builder::new()
             .name("spaceterm-permission-reset".to_owned())
             .spawn(move || {
                 let result = run_reset(permission, bundle_identifier);
-                Verification::start(&verification);
+                verification.verify();
                 completion(result);
             })
             .map(drop)
-            .map_err(|_| ComputerUseAccessError::PlatformUnavailable)
+            .map_err(|_| PermissionAccessError::PlatformUnavailable)
     }
 }
 
@@ -225,12 +222,12 @@ impl ComputerUseAccess for MacosComputerUseAccess {
 /// while it waited.
 fn prepare_exclusively(
     verification: &Verification,
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     reset_bundle_identifier: Option<&'static str>,
-    cancellation: &ComputerUseSetupCancellation,
-    probe: impl FnOnce() -> Result<ProbeReport, ComputerUseAccessError>,
-    reset: impl FnOnce(ComputerUsePermission, &'static str) -> Result<(), ComputerUseAccessError>,
-) -> Option<ComputerUseSetupReadiness> {
+    cancellation: &PermissionSetupCancellation,
+    probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
+    reset: impl FnOnce(SystemPermission, &'static str) -> Result<(), PermissionAccessError>,
+) -> Option<PermissionSetupReadiness> {
     let _probing = verification.probing();
     if cancellation.is_cancelled() {
         return None;
@@ -249,31 +246,31 @@ fn prepare_exclusively(
 /// a grant made since the last read is never reset and a failed read resets nothing. A setup
 /// cancelled before the reset begins resets nothing either.
 fn prepare(
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     reset_bundle_identifier: Option<&'static str>,
-    cancellation: &ComputerUseSetupCancellation,
-    probe: impl FnOnce() -> Result<ProbeReport, ComputerUseAccessError>,
-    reset: impl FnOnce(ComputerUsePermission, &'static str) -> Result<(), ComputerUseAccessError>,
+    cancellation: &PermissionSetupCancellation,
+    probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>,
+    reset: impl FnOnce(SystemPermission, &'static str) -> Result<(), PermissionAccessError>,
     record: impl FnOnce(ProbeReport),
-) -> ComputerUseSetupReadiness {
+) -> PermissionSetupReadiness {
     let Ok(report) = probe() else {
-        return ComputerUseSetupReadiness::Ready { cleared: false };
+        return PermissionSetupReadiness::Ready { cleared: false };
     };
     record(report);
-    if report.authorization(permission) == ComputerUseAuthorization::Granted {
-        return ComputerUseSetupReadiness::AlreadyGranted;
+    if report.authorization(permission) == PermissionAuthorization::Granted {
+        return PermissionSetupReadiness::AlreadyGranted;
     }
     // A failed reset leaves an entry the person turns on instead.
     let cleared = reset_bundle_identifier
         .filter(|_| !cancellation.is_cancelled())
         .is_some_and(|bundle_identifier| reset(permission, bundle_identifier).is_ok());
-    ComputerUseSetupReadiness::Ready { cleared }
+    PermissionSetupReadiness::Ready { cleared }
 }
 
 fn run_reset(
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     bundle_identifier: &'static str,
-) -> Result<(), ComputerUseAccessError> {
+) -> Result<(), PermissionAccessError> {
     let status = Command::new(TCCUTIL)
         .args(reset_arguments(permission, bundle_identifier))
         .stdin(Stdio::null())
@@ -343,6 +340,18 @@ impl Verification {
         }
     }
 
+    /// Probes once no other probe or setup preparation runs, and records the report. A failed
+    /// probe keeps the last report rather than inventing one.
+    fn verify(&self) {
+        let probed = {
+            let _probing = self.probing();
+            run_probe()
+        };
+        if let Ok(report) = probed {
+            self.record(report);
+        }
+    }
+
     fn start(this: &Arc<Self>) {
         {
             let mut state = this.lock();
@@ -357,14 +366,7 @@ impl Verification {
             .name("spaceterm-permission-probe".to_owned())
             .spawn(move || {
                 loop {
-                    // A failed probe keeps the last report rather than inventing one.
-                    let probed = {
-                        let _probing = verification.probing();
-                        run_probe()
-                    };
-                    if let Ok(report) = probed {
-                        verification.record(report);
-                    }
+                    verification.verify();
                     let mut state = verification.lock();
                     if !std::mem::take(&mut state.requested_again) {
                         state.running = false;
@@ -386,7 +388,7 @@ struct AccessChangeObserverIvars {
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and define_class! drops the sender ivar.
     #[unsafe(super(NSObject))]
-    #[name = "SpaceTermComputerUseAccessObserver"]
+    #[name = "SpaceTermPermissionAccessObserver"]
     #[thread_kind = MainThreadOnly]
     #[ivars = AccessChangeObserverIvars]
     struct AccessChangeObserver;
@@ -417,15 +419,15 @@ impl AccessChangeObserver {
     }
 }
 
-struct MacosComputerUseAccessSubscription {
+struct MacosPermissionAccessSubscription {
     center: Retained<NSDistributedNotificationCenter>,
     observer: Retained<AccessChangeObserver>,
     name: Retained<NSString>,
 }
 
-impl ComputerUseAccessSubscription for MacosComputerUseAccessSubscription {}
+impl PermissionAccessSubscription for MacosPermissionAccessSubscription {}
 
-impl Drop for MacosComputerUseAccessSubscription {
+impl Drop for MacosPermissionAccessSubscription {
     fn drop(&mut self) {
         // SAFETY: The observer and name remain alive until the registration is removed.
         unsafe {
@@ -442,25 +444,25 @@ fn reset_bundle_identifier(running: Option<&str>, expected: &'static str) -> Opt
 
 /// The privacy service names `tccutil` uses for each permission.
 fn reset_arguments(
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     bundle_identifier: &'static str,
 ) -> [&'static str; 3] {
     let service = match permission {
-        ComputerUsePermission::ScreenRecording => "ScreenCapture",
-        ComputerUsePermission::Accessibility => "Accessibility",
+        SystemPermission::ScreenRecording => "ScreenCapture",
+        SystemPermission::Accessibility => "Accessibility",
     };
     ["reset", service, bundle_identifier]
 }
 
-fn reset_result(status: std::io::Result<ExitStatus>) -> Result<(), ComputerUseAccessError> {
+fn reset_result(status: std::io::Result<ExitStatus>) -> Result<(), PermissionAccessError> {
     match status {
         Ok(status) if status.success() => Ok(()),
-        Ok(_) => Err(ComputerUseAccessError::PlatformRejected),
-        Err(_) => Err(ComputerUseAccessError::PlatformUnavailable),
+        Ok(_) => Err(PermissionAccessError::PlatformRejected),
+        Err(_) => Err(PermissionAccessError::PlatformUnavailable),
     }
 }
 
-impl From<PermissionRecoveryError> for ComputerUseAccessError {
+impl From<PermissionRecoveryError> for PermissionAccessError {
     fn from(error: PermissionRecoveryError) -> Self {
         match error {
             PermissionRecoveryError::OffMainThread => Self::OffMainThread,
@@ -513,8 +515,8 @@ mod tests {
 
         assert_eq!(
             [
-                reset_arguments(ComputerUsePermission::ScreenRecording, bundle),
-                reset_arguments(ComputerUsePermission::Accessibility, bundle),
+                reset_arguments(SystemPermission::ScreenRecording, bundle),
+                reset_arguments(SystemPermission::Accessibility, bundle),
             ],
             [
                 ["reset", "ScreenCapture", bundle],
@@ -528,16 +530,16 @@ mod tests {
     /// Prepares a Screen Recording setup against a probe result and returns the readiness with the
     /// resets it made.
     fn prepare_with(
-        probe: Result<ProbeReport, ComputerUseAccessError>,
+        probe: Result<ProbeReport, PermissionAccessError>,
         reset_bundle_identifier: Option<&'static str>,
     ) -> (
-        ComputerUseSetupReadiness,
-        Vec<(ComputerUsePermission, &'static str)>,
+        PermissionSetupReadiness,
+        Vec<(SystemPermission, &'static str)>,
     ) {
         let mut resets = Vec::new();
-        let (_preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (_preparation, cancellation) = PermissionSetupPreparation::new();
         let readiness = prepare(
-            ComputerUsePermission::ScreenRecording,
+            SystemPermission::ScreenRecording,
             reset_bundle_identifier,
             &cancellation,
             || probe,
@@ -552,7 +554,7 @@ mod tests {
 
     fn report(screen_recording: bool) -> ProbeReport {
         ProbeReport::read(|permission| {
-            permission == ComputerUsePermission::ScreenRecording && screen_recording
+            permission == SystemPermission::ScreenRecording && screen_recording
         })
     }
 
@@ -561,37 +563,37 @@ mod tests {
         assert_eq!(
             prepare_with(Ok(report(false)), Some(BUNDLE)),
             (
-                ComputerUseSetupReadiness::Ready { cleared: true },
-                vec![(ComputerUsePermission::ScreenRecording, BUNDLE)]
+                PermissionSetupReadiness::Ready { cleared: true },
+                vec![(SystemPermission::ScreenRecording, BUNDLE)]
             )
         );
     }
 
     #[test]
     fn a_failed_reset_clears_nothing() {
-        let (_preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (_preparation, cancellation) = PermissionSetupPreparation::new();
         let readiness = prepare(
-            ComputerUsePermission::ScreenRecording,
+            SystemPermission::ScreenRecording,
             Some(BUNDLE),
             &cancellation,
             || Ok(report(false)),
-            |_, _| Err(ComputerUseAccessError::PlatformRejected),
+            |_, _| Err(PermissionAccessError::PlatformRejected),
             |_| {},
         );
 
         assert_eq!(
             readiness,
-            ComputerUseSetupReadiness::Ready { cleared: false }
+            PermissionSetupReadiness::Ready { cleared: false }
         );
     }
 
     #[test]
     fn a_setup_cancelled_during_its_probe_resets_nothing() {
-        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (preparation, cancellation) = PermissionSetupPreparation::new();
         let mut preparation = Some(preparation);
         let mut resets = Vec::new();
         let readiness = prepare(
-            ComputerUsePermission::ScreenRecording,
+            SystemPermission::ScreenRecording,
             Some(BUNDLE),
             &cancellation,
             || {
@@ -607,7 +609,7 @@ mod tests {
 
         assert_eq!(
             readiness,
-            ComputerUseSetupReadiness::Ready { cleared: false }
+            PermissionSetupReadiness::Ready { cleared: false }
         );
         assert!(resets.is_empty());
     }
@@ -616,14 +618,14 @@ mod tests {
     fn a_preparation_waits_for_a_running_probe() {
         let verification = Arc::new(Verification::default());
         let probing = verification.probing();
-        let (preparation, cancellation) = ComputerUseSetupPreparation::new();
+        let (preparation, cancellation) = PermissionSetupPreparation::new();
         let (sender, probed) = std::sync::mpsc::channel();
         let waiting = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
                 prepare_exclusively(
                     &verification,
-                    ComputerUsePermission::ScreenRecording,
+                    SystemPermission::ScreenRecording,
                     Some(BUNDLE),
                     &cancellation,
                     || {
@@ -653,7 +655,7 @@ mod tests {
     fn a_verified_grant_is_never_reset() {
         assert_eq!(
             prepare_with(Ok(report(true)), Some(BUNDLE)),
-            (ComputerUseSetupReadiness::AlreadyGranted, Vec::new())
+            (PermissionSetupReadiness::AlreadyGranted, Vec::new())
         );
     }
 
@@ -661,11 +663,11 @@ mod tests {
     fn a_failed_read_resets_nothing() {
         assert_eq!(
             prepare_with(
-                Err(ComputerUseAccessError::PlatformUnavailable),
+                Err(PermissionAccessError::PlatformUnavailable),
                 Some(BUNDLE)
             ),
             (
-                ComputerUseSetupReadiness::Ready { cleared: false },
+                PermissionSetupReadiness::Ready { cleared: false },
                 Vec::new()
             )
         );
@@ -676,7 +678,7 @@ mod tests {
         assert_eq!(
             prepare_with(Ok(report(false)), None),
             (
-                ComputerUseSetupReadiness::Ready { cleared: false },
+                PermissionSetupReadiness::Ready { cleared: false },
                 Vec::new()
             )
         );
@@ -692,14 +694,14 @@ mod tests {
             ],
             [
                 Ok(()),
-                Err(ComputerUseAccessError::PlatformRejected),
-                Err(ComputerUseAccessError::PlatformUnavailable),
+                Err(PermissionAccessError::PlatformRejected),
+                Err(PermissionAccessError::PlatformUnavailable),
             ]
         );
     }
 
     #[test]
-    fn computer_use_settings_routes_are_exact() {
+    fn permission_settings_routes_are_exact() {
         assert_eq!(
             [
                 SCREEN_RECORDING_SETTINGS_URI,

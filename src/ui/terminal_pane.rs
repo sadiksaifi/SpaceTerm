@@ -39,7 +39,7 @@ use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
-use crate::platform::computer_use_access::ComputerUsePermission;
+use crate::platform::permission_access::SystemPermission;
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
@@ -589,12 +589,12 @@ pub(crate) struct TerminalPane {
     pending_paste: Option<PasteConfirmation>,
     /// Permissions a Permission Request asked for that the person has not answered. The Pane
     /// keeps them while granted, so it offers a setup again if a grant is later withdrawn.
-    requested_permissions: Vec<ComputerUsePermission>,
+    requested_permissions: Vec<SystemPermission>,
     /// The requested permissions the notice offers now: those a tool started now would not receive
     /// and no running Permission Setup holds.
-    permission_request: Vec<ComputerUsePermission>,
+    permission_request: Vec<SystemPermission>,
     /// Permissions the person chose Not Now for; later requests for them stay silent.
-    declined_permissions: Vec<ComputerUsePermission>,
+    declined_permissions: Vec<SystemPermission>,
     /// The offer the notice shows now and when it began, while the notice shows.
     permission_request_showing: Option<PermissionRequestShowing>,
     /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
@@ -3327,7 +3327,7 @@ impl TerminalPane {
     /// authorization.
     fn offer_permission_setup(
         &mut self,
-        permissions: &[ComputerUsePermission],
+        permissions: &[SystemPermission],
         cx: &mut Context<Self>,
     ) -> bool {
         if self.terminal_session.session_factory.is_remote() {
@@ -4684,7 +4684,7 @@ fn render_paste_confirmation(
 
 /// The offer a Permission Request notice shows, where, and since when.
 struct PermissionRequestShowing {
-    offer: Vec<ComputerUsePermission>,
+    offer: Vec<SystemPermission>,
     edge: NoticeEdge,
     since: Instant,
     /// Renders the notice again once it accepts answers.

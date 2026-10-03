@@ -784,9 +784,7 @@ fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
 
 #[test]
 fn permission_requests_survive_screen_and_lifecycle_event_replacement() {
-    use crate::platform::computer_use_access::ComputerUsePermission::{
-        Accessibility, ScreenRecording,
-    };
+    use crate::platform::permission_access::SystemPermission::{Accessibility, ScreenRecording};
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();
 
@@ -1666,7 +1664,7 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
     };
     assert_eq!(
         request.permissions(),
-        [crate::platform::computer_use_access::ComputerUsePermission::ScreenRecording]
+        [crate::platform::permission_access::SystemPermission::ScreenRecording]
     );
     assert!(worker.publish_screen());
     let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
@@ -1683,9 +1681,7 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
 /// other events out.
 #[test]
 fn the_permission_requests_in_one_read_become_one_event() {
-    use crate::platform::computer_use_access::ComputerUsePermission::{
-        Accessibility, ScreenRecording,
-    };
+    use crate::platform::permission_access::SystemPermission::{Accessibility, ScreenRecording};
     let PermissionRequestWorker {
         mut worker,
         events: receiver,

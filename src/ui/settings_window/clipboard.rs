@@ -25,7 +25,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         Switch::new(
             selector,
-            row.descriptor().label(self.computer_use_access.naming()),
+            row.descriptor().label(self.permission_access.naming()),
             value,
         )
         .size(ToggleSize::Regular)

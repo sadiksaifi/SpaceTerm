@@ -1,5 +1,5 @@
 //! Permission Setup: one guided pass through System Settings that adds SpaceTerm to the privacy
-//! lists computer-use tools need.
+//! lists of the System Permissions programs in a Terminal Session need.
 //!
 //! A setup starts only when someone asks for it: a person choosing Set Up in Settings, or
 //! accepting a Permission Request from a tool in a Terminal Session. It verifies the permission,
@@ -20,10 +20,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Task};
 
-use crate::platform::computer_use_access::{
-    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessSubscription,
-    ComputerUseAuthorization, ComputerUsePermission, ComputerUseSetupPreparation,
-    ComputerUseSetupReadiness,
+use crate::platform::permission_access::{
+    AccessibilityNaming, PermissionAccess, PermissionAccessSubscription, PermissionAuthorization,
+    PermissionSetupPreparation, PermissionSetupReadiness, SystemPermission,
 };
 use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost, SystemSettingsWindow};
 
@@ -49,35 +48,31 @@ pub(crate) struct PermissionCopy {
     pub(crate) name: &'static str,
     /// The System Settings list that holds the grant.
     pub(crate) pane: &'static str,
-    /// What a computer-use tool does with the grant.
+    /// What a terminal program does with the grant.
     pub(crate) purpose: &'static str,
 }
 
 /// Names `permission` as System Settings does under `naming`.
 pub(crate) const fn permission_copy(
-    permission: ComputerUsePermission,
+    permission: SystemPermission,
     naming: AccessibilityNaming,
 ) -> &'static PermissionCopy {
     match (permission, naming) {
-        (ComputerUsePermission::ScreenRecording, _) => &PermissionCopy {
+        (SystemPermission::ScreenRecording, _) => &PermissionCopy {
             name: "Screen Recording",
             pane: "Screen & System Audio Recording",
             purpose: "take screenshots",
         },
-        (ComputerUsePermission::Accessibility, AccessibilityNaming::Accessibility) => {
-            &PermissionCopy {
-                name: "Accessibility",
-                pane: "Accessibility",
-                purpose: "click and type in other apps",
-            }
-        }
-        (ComputerUsePermission::Accessibility, AccessibilityNaming::DeviceControl) => {
-            &PermissionCopy {
-                name: "Device Control",
-                pane: "Device Control and Data Access",
-                purpose: "click and type in other apps",
-            }
-        }
+        (SystemPermission::Accessibility, AccessibilityNaming::Accessibility) => &PermissionCopy {
+            name: "Accessibility",
+            pane: "Accessibility",
+            purpose: "click and type in other apps",
+        },
+        (SystemPermission::Accessibility, AccessibilityNaming::DeviceControl) => &PermissionCopy {
+            name: "Device Control",
+            pane: "Device Control and Data Access",
+            purpose: "click and type in other apps",
+        },
     }
 }
 
@@ -116,35 +111,35 @@ pub(crate) enum SetupStep {
 /// What the Setup Guide shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GuidePresentation {
-    pub(crate) permission: ComputerUsePermission,
+    pub(crate) permission: SystemPermission,
     pub(crate) granted: bool,
     /// Whether the setup removed any earlier entry for SpaceTerm, so the guide says why the list
     /// no longer holds it.
     pub(crate) cleared: bool,
     /// The permission set up after this one, when the setup holds another.
-    pub(crate) next: Option<ComputerUsePermission>,
+    pub(crate) next: Option<SystemPermission>,
     pub(crate) naming: AccessibilityNaming,
 }
 
 /// Owns the one running setup and the Setup Guide window it presents.
 pub(crate) struct PermissionSetup {
-    access: Rc<dyn ComputerUseAccess>,
+    access: Rc<dyn PermissionAccess>,
     /// What System Settings calls the Accessibility permission, which holds for the process.
     naming: AccessibilityNaming,
     host: Arc<dyn SetupGuideHost>,
     run: Option<SetupRun>,
     /// The latest failure of each permission's setup, cleared when its next setup starts.
-    failures: Vec<(ComputerUsePermission, PermissionSetupFailure)>,
+    failures: Vec<(SystemPermission, PermissionSetupFailure)>,
     /// The running application as the guide offers it, resolved once on first use.
     bundle: Option<Option<ApplicationBundle>>,
     /// Notifies this setup's observers of authorization changes, from the first
     /// [`PermissionSetup::watch_authorization`] on.
-    watch: Option<(Box<dyn ComputerUseAccessSubscription>, Task<()>)>,
+    watch: Option<(Box<dyn PermissionAccessSubscription>, Task<()>)>,
 }
 
 struct SetupRun {
-    permission: ComputerUsePermission,
-    queued: VecDeque<ComputerUsePermission>,
+    permission: SystemPermission,
+    queued: VecDeque<SystemPermission>,
     step: SetupStep,
     /// Whether preparing the current permission removed any earlier entry for SpaceTerm.
     cleared: bool,
@@ -155,11 +150,11 @@ struct SetupRun {
     opened_at: Instant,
     /// The current permission's preparation. Ending the setup drops it, which cancels a reset it
     /// has not begun.
-    _preparation: Option<ComputerUseSetupPreparation>,
+    _preparation: Option<PermissionSetupPreparation>,
     /// Waits for the current step: the preparation's result or the opening timeout.
     _step: Option<Task<()>>,
     _tracking: Task<()>,
-    _changes: Option<(Box<dyn ComputerUseAccessSubscription>, Task<()>)>,
+    _changes: Option<(Box<dyn PermissionAccessSubscription>, Task<()>)>,
 }
 
 struct GuideWindow {
@@ -182,14 +177,14 @@ impl PermissionSetup {
     /// Creates the application's one Permission Setup, which the composition hands to Settings
     /// and every Pane.
     pub(crate) fn create(
-        access: Rc<dyn ComputerUseAccess>,
+        access: Rc<dyn PermissionAccess>,
         host: Arc<dyn SetupGuideHost>,
         cx: &mut App,
     ) -> Entity<Self> {
         cx.new(|_| Self::new(access, host))
     }
 
-    fn new(access: Rc<dyn ComputerUseAccess>, host: Arc<dyn SetupGuideHost>) -> Self {
+    fn new(access: Rc<dyn PermissionAccess>, host: Arc<dyn SetupGuideHost>) -> Self {
         Self {
             naming: access.accessibility_naming(),
             access,
@@ -221,7 +216,7 @@ impl PermissionSetup {
         });
     }
 
-    pub(crate) fn status(&self, permission: ComputerUsePermission) -> PermissionSetupStatus {
+    pub(crate) fn status(&self, permission: SystemPermission) -> PermissionSetupStatus {
         if self
             .run
             .as_ref()
@@ -238,27 +233,24 @@ impl PermissionSetup {
     }
 
     /// The permissions among `permissions` that a tool started now would not receive, in order.
-    pub(crate) fn ungranted(
-        &self,
-        permissions: &[ComputerUsePermission],
-    ) -> Vec<ComputerUsePermission> {
+    pub(crate) fn ungranted(&self, permissions: &[SystemPermission]) -> Vec<SystemPermission> {
         permissions
             .iter()
             .copied()
             .filter(|permission| {
-                self.access.authorization(*permission) != Ok(ComputerUseAuthorization::Granted)
+                self.access.authorization(*permission) != Ok(PermissionAuthorization::Granted)
             })
             .collect()
     }
 
     /// The permission being set up now and its step.
-    pub(crate) fn current(&self) -> Option<(ComputerUsePermission, SetupStep)> {
+    pub(crate) fn current(&self) -> Option<(SystemPermission, SetupStep)> {
         self.run.as_ref().map(|run| (run.permission, run.step))
     }
 
     /// Sets up each permission in order. A running setup takes the permissions it does not hold
     /// yet and brings System Settings forward again.
-    pub(crate) fn start(&mut self, permissions: &[ComputerUsePermission], cx: &mut Context<Self>) {
+    pub(crate) fn start(&mut self, permissions: &[SystemPermission], cx: &mut Context<Self>) {
         let mut requested = VecDeque::new();
         for permission in permissions {
             if !requested.contains(permission) {
@@ -395,16 +387,16 @@ impl PermissionSetup {
     /// to turn one on.
     fn prepared(
         &mut self,
-        permission: ComputerUsePermission,
-        readiness: Option<ComputerUseSetupReadiness>,
+        permission: SystemPermission,
+        readiness: Option<PermissionSetupReadiness>,
         cx: &mut Context<Self>,
     ) {
         if self.current() != Some((permission, SetupStep::Preparing)) {
             return;
         }
         match readiness {
-            Some(ComputerUseSetupReadiness::AlreadyGranted) => self.advance(cx),
-            Some(ComputerUseSetupReadiness::Ready { cleared }) => {
+            Some(PermissionSetupReadiness::AlreadyGranted) => self.advance(cx),
+            Some(PermissionSetupReadiness::Ready { cleared }) => {
                 if let Some(run) = &mut self.run {
                     run.cleared = cleared;
                 }
@@ -523,7 +515,7 @@ impl PermissionSetup {
         if run.step != SetupStep::Guiding {
             return;
         }
-        if self.access.authorization(run.permission) == Ok(ComputerUseAuthorization::Granted) {
+        if self.access.authorization(run.permission) == Ok(PermissionAuthorization::Granted) {
             run.step = SetupStep::Granted;
             self.present(cx);
             cx.notify();
@@ -542,7 +534,7 @@ impl PermissionSetup {
     }
 
     /// Names `permission` as System Settings does on the running system.
-    pub(crate) fn copy(&self, permission: ComputerUsePermission) -> &'static PermissionCopy {
+    pub(crate) fn copy(&self, permission: SystemPermission) -> &'static PermissionCopy {
         permission_copy(permission, self.naming)
     }
 

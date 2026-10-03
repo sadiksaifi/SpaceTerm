@@ -16,28 +16,28 @@ use super::{
 use crate::appearance::{Appearance, SettingsDocument};
 use crate::application_identity::ApplicationIdentity;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
-use crate::platform::computer_use_access::{
-    AccessibilityNaming, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+use crate::platform::permission_access::testing::ScriptedPermissionAccess;
+use crate::platform::permission_access::{
+    AccessibilityNaming, PermissionAccessError, PermissionAuthorization, SystemPermission,
 };
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::test_support::MemoryStorage;
 
-use ComputerUseAuthorization::{Granted, NotGranted};
-use ComputerUsePermission::{Accessibility, ScreenRecording};
+use PermissionAuthorization::{Granted, NotGranted};
+use SystemPermission::{Accessibility, ScreenRecording};
 
 struct Fixture {
-    access: Rc<ScriptedComputerUseAccess>,
+    access: Rc<ScriptedPermissionAccess>,
     host: Arc<ScriptedSetupGuideHost>,
     setup: Entity<PermissionSetup>,
     display: DisplayId,
 }
 
 fn install(
-    screen_recording: ComputerUseAuthorization,
-    accessibility: ComputerUseAuthorization,
+    screen_recording: PermissionAuthorization,
+    accessibility: PermissionAuthorization,
     cx: &mut TestAppContext,
 ) -> Fixture {
     let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
@@ -45,7 +45,7 @@ fn install(
     ));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Light));
-    let access = ScriptedComputerUseAccess::new(Ok(screen_recording), Ok(accessibility));
+    let access = ScriptedPermissionAccess::new(Ok(screen_recording), Ok(accessibility));
     let host = ScriptedSetupGuideHost::new();
     let (setup, display) = cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
@@ -64,19 +64,19 @@ fn install(
 }
 
 impl Fixture {
-    fn start(&self, permissions: &[ComputerUsePermission], cx: &mut TestAppContext) {
+    fn start(&self, permissions: &[SystemPermission], cx: &mut TestAppContext) {
         self.setup
             .update(cx, |setup, cx| setup.start(permissions, cx));
         cx.run_until_parked();
     }
 
-    fn current(&self, cx: &mut TestAppContext) -> Option<(ComputerUsePermission, SetupStep)> {
+    fn current(&self, cx: &mut TestAppContext) -> Option<(SystemPermission, SetupStep)> {
         self.setup.read_with(cx, |setup, _| setup.current())
     }
 
     fn status(
         &self,
-        permission: ComputerUsePermission,
+        permission: SystemPermission,
         cx: &mut TestAppContext,
     ) -> PermissionSetupStatus {
         self.setup
@@ -573,7 +573,7 @@ fn a_failed_open_ends_the_setup_with_a_failure(cx: &mut TestAppContext) {
     fixture
         .access
         .open_failure
-        .set(Some(ComputerUseAccessError::PlatformRejected));
+        .set(Some(PermissionAccessError::PlatformRejected));
 
     fixture.start(&[ScreenRecording], cx);
 
@@ -616,7 +616,7 @@ fn a_failed_preparation_still_guides(cx: &mut TestAppContext) {
     fixture
         .access
         .setup_failure
-        .set(Some(ComputerUseAccessError::PlatformUnavailable));
+        .set(Some(PermissionAccessError::PlatformUnavailable));
 
     fixture.start(&[ScreenRecording], cx);
 
@@ -643,7 +643,7 @@ fn the_setup_names_accessibility_as_the_system_does(cx: &mut TestAppContext) {
             "Device Control and Data Access",
         ),
     ] {
-        let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+        let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
         access.naming.set(naming);
         let setup = cx.update(|cx| {
             PermissionSetup::create(access.clone(), ScriptedSetupGuideHost::new(), cx)

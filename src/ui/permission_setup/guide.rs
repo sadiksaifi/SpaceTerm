@@ -27,7 +27,7 @@ use spaceterm_ui::{
 };
 
 use super::{GuidePresentation, PermissionSetup, permission_copy};
-use crate::platform::computer_use_access::ComputerUsePermission;
+use crate::platform::permission_access::SystemPermission;
 use crate::platform::setup_guide_host::{ApplicationBundle, ApplicationRowImage, SetupGuideHost};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
@@ -501,10 +501,10 @@ impl SetupGuide {
             ),
             (_, true) => {
                 let advice = match presentation.permission {
-                    ComputerUsePermission::ScreenRecording => {
+                    SystemPermission::ScreenRecording => {
                         format!("If System Settings offers to quit {application}, choose Later.")
                     }
-                    ComputerUsePermission::Accessibility => {
+                    SystemPermission::Accessibility => {
                         "Restart any tool that was already running.".to_owned()
                     }
                 };

@@ -136,39 +136,35 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Unsupported => (
                 "Unavailable",
                 "settings-microphone-access-state-unavailable",
-                "SpaceTerm does not manage microphone access on this platform.",
+                "Not available on this platform.",
                 None,
             ),
             MicrophoneAccessStatus::Authorization(Authorization::Authorized) => (
                 "Allowed",
                 "settings-microphone-access-state-allowed",
-                "Voice tools running in SpaceTerm can use the microphone.",
+                "Lets terminal programs use the microphone.",
                 None,
             ),
             MicrophoneAccessStatus::Authorization(Authorization::NotDetermined) => (
                 "Not Requested",
                 "settings-microphone-access-state-not-requested",
-                "Voice tools running in SpaceTerm need permission to use the microphone. The \
-                 system asks once.",
+                "Lets terminal programs use the microphone. The system asks once.",
                 Some(Action::Request),
             ),
             MicrophoneAccessStatus::Requesting => (
                 "Requesting",
                 "settings-microphone-access-state-requesting",
-                "Allow or deny microphone access in the system prompt.",
+                "Allow or deny access in the system prompt.",
                 Some(Action::Requesting),
             ),
             MicrophoneAccessStatus::Authorization(Authorization::Denied) => (
                 "Denied",
                 "settings-microphone-access-state-denied",
                 match self.recovery_failure {
-                    None => {
-                        "Voice tools running in SpaceTerm cannot use the microphone. Allow \
-                         SpaceTerm in System Settings, then try the tool again."
-                    }
+                    None => "Lets terminal programs use the microphone.",
                     Some(_) => {
-                        "System Settings could not be opened. Allow SpaceTerm under Privacy & \
-                         Security > Microphone, then try the tool again."
+                        "System Settings could not be opened. Turn on SpaceTerm in Privacy & \
+                         Security > Microphone."
                     }
                 },
                 Some(Action::OpenSettings),
@@ -176,8 +172,8 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Authorization(Authorization::Restricted) => (
                 "Restricted",
                 "settings-microphone-access-state-restricted",
-                "A system policy, such as device management, prevents microphone access. \
-                 SpaceTerm cannot change it.",
+                "A device management policy blocks microphone access. SpaceTerm cannot change \
+                 it.",
                 None,
             ),
             MicrophoneAccessStatus::Failed(error) => (
