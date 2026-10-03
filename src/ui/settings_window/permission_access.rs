@@ -438,11 +438,6 @@ impl PermissionAccessRows {
         }
     }
 
-    /// Whether the host composes the System Permission capability.
-    pub(super) fn is_supported(&self) -> bool {
-        self.accessibility.access.is_some()
-    }
-
     /// What System Settings calls the Accessibility permission on the running system.
     pub(super) fn naming(&self) -> AccessibilityNaming {
         self.accessibility.naming

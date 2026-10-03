@@ -48,6 +48,14 @@ pub(crate) enum ShortcutSelection {
     TerminalSurface,
 }
 
+/// An application feature a desktop may have no equivalent for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HostFeature {
+    Updates,
+    MicrophoneAccess,
+    SystemPermissions,
+}
+
 #[derive(Clone)]
 pub(crate) struct DesktopPresentation {
     wording: DesktopWording,
@@ -55,6 +63,7 @@ pub(crate) struct DesktopPresentation {
     selection: ShortcutSelection,
     shortcuts: Vec<PresentedShortcut>,
     layout: KeyboardLayout,
+    absent_features: &'static [HostFeature],
 }
 
 struct PresentedShortcut {
@@ -83,7 +92,25 @@ impl DesktopPresentation {
             selection,
             shortcuts: Vec::new(),
             layout: KeyboardLayout::default(),
+            absent_features: &[],
         }
+    }
+
+    /// Declares features this desktop has no equivalent for, so the application omits their
+    /// surfaces instead of presenting them as unavailable.
+    #[cfg_attr(
+        not(any(test, target_os = "linux")),
+        allow(dead_code, reason = "only a desktop lacking a feature composes this")
+    )]
+    pub(crate) const fn without_features(mut self, absent: &'static [HostFeature]) -> Self {
+        self.absent_features = absent;
+        self
+    }
+
+    /// Whether this desktop has `feature`. A present feature keeps its surfaces even while its
+    /// capability is unavailable, so they can explain why.
+    pub(crate) fn has_feature(&self, feature: HostFeature) -> bool {
+        !self.absent_features.contains(&feature)
     }
 
     pub(crate) fn get(cx: &App) -> &Self {

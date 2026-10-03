@@ -179,14 +179,18 @@ mod tests {
 
     use super::*;
     use crate::platform::askpass::AskPassCapabilityCopy;
+    use crate::platform::unix_adapter_tests::short_temporary_root;
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(
             PathBuf::from("/bin/sh"),
             vec![OsString::from("-c"), OsString::from(script)],
-            PathBuf::from("/tmp"),
+            short_temporary_root().to_path_buf(),
             vec![
-                (OsString::from("HOME"), OsString::from("/tmp")),
+                (
+                    OsString::from("HOME"),
+                    short_temporary_root().as_os_str().to_owned(),
+                ),
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
             ],
             SshProcessStdio::Null,
@@ -203,7 +207,7 @@ mod tests {
                 OsString::from("--exact"),
                 OsString::from(test),
             ],
-            PathBuf::from("/tmp"),
+            short_temporary_root().to_path_buf(),
             Vec::new(),
             SshProcessStdio::Null,
             SshProcessStdio::Null,
@@ -362,7 +366,7 @@ mod tests {
                 ProcessSignal::Terminate => "term",
                 ProcessSignal::Kill => "kill",
             };
-            let pid_file = std::env::temp_dir().join(format!(
+            let pid_file = short_temporary_root().join(format!(
                 "spaceterm-process-{sequence}-{}.pid",
                 std::process::id()
             ));

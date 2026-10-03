@@ -18,6 +18,7 @@ use super::*;
 use crate::domain::SshDestination;
 use crate::platform::app_directories::AppDirectoryEnvironment;
 use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
+use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_local_socket::UnixControlSocketProbe;
 use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
 use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
@@ -30,7 +31,7 @@ struct TestDirectory(PathBuf);
 impl TestDirectory {
     fn new() -> Self {
         let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = PathBuf::from(format!("/tmp/stc-{}-{sequence}", std::process::id()));
+        let path = short_temporary_root().join(format!("stc-{}-{sequence}", std::process::id()));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         Self(path)
     }
@@ -115,7 +116,7 @@ impl Default for FakeBackend {
             epoch: Instant::now(),
             state: Mutex::new(FakeState::default()),
             environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                PathBuf::from("/tmp"),
+                short_temporary_root().to_path_buf(),
                 None,
             )
             .unwrap(),
@@ -132,7 +133,7 @@ impl FakeBackend {
                 ..FakeState::default()
             }),
             environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                PathBuf::from("/tmp"),
+                short_temporary_root().to_path_buf(),
                 None,
             )
             .unwrap(),
@@ -450,12 +451,15 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
     let channel = prepare();
     let launch = PreparedShellLaunch::remote(Path::new("/tmp"), channel.take().unwrap()).unwrap();
     assert!(!launch.inherit_environment());
-    assert_eq!(launch.working_directory(), Path::new("/tmp"));
+    assert_eq!(launch.working_directory(), short_temporary_root());
     assert!(launch.environment_removals().is_empty());
     assert_eq!(
         launch.environment(),
         &[
-            (OsString::from("HOME"), OsString::from("/tmp")),
+            (
+                OsString::from("HOME"),
+                short_temporary_root().as_os_str().to_owned()
+            ),
             (OsString::from("PATH"), OsString::from("/fixture/bin")),
             (OsString::from("TERM"), OsString::from("xterm-256color")),
         ]
@@ -469,7 +473,9 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
         .transition(LiveConnectionState::ShuttingDown);
     let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
     assert_eq!(error, ShellLaunchFailure::RemoteChannelUnavailable);
-    assert!(!format!("{launch:?} {error:?} {error}").contains("/tmp"));
+    assert!(
+        !format!("{launch:?} {error:?} {error}").contains(short_temporary_root().to_str().unwrap())
+    );
 }
 
 #[gpui::test]

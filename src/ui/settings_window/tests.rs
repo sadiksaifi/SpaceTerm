@@ -5,6 +5,7 @@ use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, po
 use crate::appearance::{
     Appearance, AppearanceMode, ChromeDensity, SettingsDocument, builtin_fallback_theme,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
@@ -1191,10 +1192,10 @@ fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn every_available_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
+fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
 
         assert!(
@@ -1759,7 +1760,7 @@ fn the_themes_page_warns_only_when_something_could_not_be_resolved(cx: &mut Test
 fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -1896,8 +1897,8 @@ fn assert_the_footer_closes_only_the_content_column(
     document: SettingsDocument,
     cx: &mut TestAppContext,
 ) {
-    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    let (_window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
         let surface = cx.debug_bounds("settings-window-surface").unwrap();
         let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
@@ -2031,9 +2032,9 @@ fn client_chrome_geometry_tracks_comfortable_density(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
+    let (_window, _harness, cx) = open_settings(cx);
 
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
         let title_selector = leaked_owned(format!("{}-title", section.selector()));
         let description_selector = leaked_owned(format!("{}-description", section.selector()));
@@ -2107,7 +2108,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
 fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
 
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
@@ -2151,7 +2152,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 ) {
     let (window, _harness, cx) = open_settings(cx);
 
-    for section in window.read_with(cx, |window, _| window.available_sections.clone()) {
+    for section in SettingsSectionId::ALL {
         select_section(section, cx);
 
         let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
@@ -3653,8 +3654,32 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn absent_host_capabilities_hide_their_rows_but_keep_clipboard_privacy(cx: &mut TestAppContext) {
-    let (window, _, cx) = open_settings(cx);
+fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_privacy(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        appearance_runtime::install(
+            crate::settings::UserSettings::load(MemoryStorage::with_document(
+                &SettingsDocument::default(),
+            )),
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx)
+            .clone()
+            .without_features(&[
+                HostFeature::Updates,
+                HostFeature::MicrophoneAccess,
+                HostFeature::SystemPermissions,
+            ]);
+        cx.set_global(presentation);
+    });
+    let (window, cx) = cx.add_window_view(SettingsWindow::new);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
     window.read_with(cx, |settings, _| {
         assert!(
             settings
@@ -3676,15 +3701,13 @@ fn absent_host_capabilities_hide_their_rows_but_keep_clipboard_privacy(cx: &mut 
             .is_none()
     );
     select_section(SettingsSectionId::Privacy, cx);
-    assert!(cx.debug_bounds("settings-row-microphone-access").is_none());
-    assert!(
-        cx.debug_bounds("settings-row-screen-recording-access")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("settings-row-accessibility-access")
-            .is_none()
-    );
+    for omitted in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(cx.debug_bounds(omitted).is_none(), "{omitted} rendered");
+    }
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
     for query in [
@@ -3696,9 +3719,39 @@ fn absent_host_capabilities_hide_their_rows_but_keep_clipboard_privacy(cx: &mut 
     ] {
         set_query(&window, query, cx);
         window.read_with(cx, |settings, _| {
-            assert!(settings.matching_rows().is_empty());
+            assert!(settings.matching_rows().is_empty(), "{query} matched");
             assert!(settings.navigable_sections().is_empty());
             assert_eq!(settings.revealed, None);
+        });
+    }
+}
+
+#[gpui::test]
+fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_some()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    for unavailable in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(
+            cx.debug_bounds(unavailable).is_some(),
+            "{unavailable} omitted"
+        );
+    }
+    for query in ["microphone", "updates", "screen recording", "accessibility"] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(
+                !settings.matching_rows().is_empty(),
+                "{query} matched nothing"
+            );
         });
     }
 }

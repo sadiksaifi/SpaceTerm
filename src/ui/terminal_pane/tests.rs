@@ -7429,6 +7429,60 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
     );
 }
 
+#[gpui::test]
+fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_it(
+    cx: &mut TestAppContext,
+) {
+    struct Primary;
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, _: &SelectionCopy, _: &mut App) {}
+        fn read(&self, _: &App) -> Option<String> {
+            Some("primary selection".into())
+        }
+    }
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "unused".into(),
+            html: None,
+        },
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary));
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    let shift_middle_click = |cx: &mut VisualTestContext| {
+        let before = records.commands().len();
+        cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::shift());
+        cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::shift());
+        let commands = records.commands();
+        let pasted = commands.iter().skip(before).any(|record| {
+            record.command == RecordedSessionCommand::RequestPaste("primary selection".into())
+        });
+        let reported = commands.iter().skip(before).any(|record| {
+            matches!(
+                record.command,
+                RecordedSessionCommand::Pointer(PointerInput {
+                    button: Some(PointerButton::Middle),
+                    ..
+                })
+            )
+        });
+        (pasted, reported)
+    };
+
+    pane.update(cx, |pane, _| {
+        pane.shift_selection = ShiftSelectionPolicy::OverrideApplicationMouse
+    });
+    assert_eq!(shift_middle_click(cx), (true, false));
+
+    pane.update(cx, |pane, _| {
+        pane.shift_selection = ShiftSelectionPolicy::ReportToApplication
+    });
+    assert_eq!(shift_middle_click(cx), (false, true));
+}
+
 mod permission_requests {
     use super::*;
     use crate::platform::permission_access::testing::ScriptedPermissionAccess;
