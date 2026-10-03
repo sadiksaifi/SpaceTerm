@@ -14,40 +14,21 @@ use crate::ssh::command::SshCommandSpec;
 use crate::terminal::identity;
 
 const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
-    "ALACRITTY_LOG",
-    "ALACRITTY_SOCKET",
-    "ALACRITTY_WINDOW_ID",
-    "DESKTOP_STARTUP_ID",
     "GHOSTTY_BIN_DIR",
     "GHOSTTY_RESOURCES_DIR",
     "GHOSTTY_SHELL_FEATURES",
-    "GIO_LAUNCHED_DESKTOP_FILE",
-    "GIO_LAUNCHED_DESKTOP_FILE_PID",
-    "GNOME_TERMINAL_SCREEN",
-    "GNOME_TERMINAL_SERVICE",
     "ITERM_SESSION_ID",
-    "KITTY_INSTALLATION_DIR",
     "KITTY_LISTEN_ON",
     "KITTY_PID",
     "KITTY_PUBLIC_KEY",
     "KITTY_WINDOW_ID",
-    "KONSOLE_DBUS_SERVICE",
-    "KONSOLE_DBUS_SESSION",
-    "KONSOLE_DBUS_WINDOW",
-    "KONSOLE_VERSION",
     "LC_TERMINAL",
     "LC_TERMINAL_VERSION",
-    "SHELL_SESSION_ID",
     "STY",
-    "TERMINAL_EMULATOR",
-    "TERMINATOR_DBUS_NAME",
-    "TERMINATOR_DBUS_PATH",
-    "TERMINATOR_UUID",
     "TERM_SESSION_ID",
-    "TILIX_ID",
+    "TERMINAL_EMULATOR",
     "TMUX",
     "TMUX_PANE",
-    "VTE_VERSION",
     "WARP_SESSION_ID",
     "WARP_TERMINAL_SESSION_UUID",
     "WEZTERM_CONFIG_FILE",
@@ -55,13 +36,8 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "WEZTERM_EXECUTABLE_DIR",
     "WEZTERM_PANE",
     "WEZTERM_UNIX_SOCKET",
-    "WINDOWID",
     "WT_PROFILE_ID",
     "WT_SESSION",
-    "XDG_ACTIVATION_TOKEN",
-    "XTERM_LOCALE",
-    "XTERM_SHELL",
-    "XTERM_VERSION",
     "ZELLIJ",
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
@@ -81,21 +57,26 @@ pub(crate) struct ShellLaunchPlanner {
     resources: PathBuf,
     environment: (ShellIntegrationMode, ShellEnvironment),
     policy: ShellIntegrationPolicy,
+    host_runtime_environment: &'static [&'static str],
 }
 
 impl ShellLaunchPlanner {
+    /// `host_runtime_environment` names launch and terminal variables that only the host
+    /// desktop exports, removed in addition to the shared foreign terminal variables.
     pub(crate) fn new(
         shell: PathBuf,
         resources: PathBuf,
         mode: ShellIntegrationMode,
         inherited: ShellEnvironment,
         policy: ShellIntegrationPolicy,
+        host_runtime_environment: &'static [&'static str],
     ) -> Self {
         Self {
             shell,
             resources,
             environment: (mode, inherited),
             policy,
+            host_runtime_environment,
         }
     }
 
@@ -107,6 +88,7 @@ impl ShellLaunchPlanner {
             ShellIntegrationMode::Automatic,
             ShellEnvironment::default(),
             ShellIntegrationPolicy::fixture(),
+            &[],
         )
     }
 
@@ -171,6 +153,7 @@ impl ShellLaunchPlanner {
             inherit_environment: true,
             environment_removals: FOREIGN_RUNTIME_ENVIRONMENT
                 .iter()
+                .chain(self.host_runtime_environment)
                 .copied()
                 .chain(["TERMINFO"])
                 .map(OsString::from)
@@ -343,6 +326,7 @@ mod tests {
                 ShellIntegrationMode::Automatic,
                 inherited.clone(),
                 ShellIntegrationPolicy::fixture(),
+                &[],
             )
             .local(&directory)
             .unwrap();
@@ -418,6 +402,7 @@ mod tests {
                 mode,
                 ShellEnvironment::default(),
                 ShellIntegrationPolicy::fixture(),
+                &["HOST_LAUNCH_MARKER"],
             )
             .local(&std::env::temp_dir())
             .unwrap();
@@ -453,6 +438,11 @@ mod tests {
                 launch
                     .environment_removals()
                     .contains(&OsString::from("TERMINFO"))
+            );
+            assert!(
+                launch
+                    .environment_removals()
+                    .contains(&OsString::from("HOST_LAUNCH_MARKER"))
             );
         }
     }
