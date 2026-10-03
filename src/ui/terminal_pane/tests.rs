@@ -7352,6 +7352,40 @@ mod permission_requests {
     }
 
     #[gpui::test]
+    fn a_retained_request_survives_its_wakeup_only_while_the_session_is_live(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        install_setup(
+            &pane,
+            ComputerUseAuthorization::NotGranted,
+            ComputerUseAuthorization::NotGranted,
+            cx,
+        );
+        let session_id = records.starts().last().unwrap().session_id;
+        records
+            .retain_permission_request(session_id, PermissionRequest::for_test(&[Accessibility]));
+        let events = records.last_event_sender().unwrap();
+        // The request's event was replaced by a Screen before the Pane consumed it.
+        events
+            .try_send(SessionEvent::Screen(text_screen(1, &["prompt"])))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_some());
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
+            [Accessibility]
+        );
+
+        events
+            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("permission-request").is_none());
+        assert!(pane.read_with(cx, |pane, _| pane.permission_request.is_empty()));
+    }
+
+    #[gpui::test]
     fn set_up_starts_a_permission_setup_for_the_ungranted_permissions(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         let access = install_setup(

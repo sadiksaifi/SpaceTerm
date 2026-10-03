@@ -167,6 +167,8 @@ pub(crate) struct TestTerminalSessionRecords {
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
     metadata_snapshots:
         Rc<RefCell<BTreeMap<usize, Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>>>,
+    permission_requests:
+        Rc<RefCell<BTreeMap<usize, crate::terminal::permission_request::PermissionRequest>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
@@ -174,6 +176,16 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn retain_permission_request(
+        &self,
+        session_id: usize,
+        request: crate::terminal::permission_request::PermissionRequest,
+    ) {
+        self.permission_requests
+            .borrow_mut()
+            .insert(session_id, request);
+    }
+
     pub(crate) fn report_directory(
         &self,
         session_id: usize,
@@ -474,6 +486,14 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn permission_request(&self) -> Option<crate::terminal::permission_request::PermissionRequest> {
+        self.records
+            .permission_requests
+            .borrow()
+            .get(&self.session_id)
+            .cloned()
+    }
+
     fn metadata_snapshot(
         &self,
     ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
