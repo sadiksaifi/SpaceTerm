@@ -209,7 +209,7 @@ impl PermissionAccess for MacosPermissionAccess {
             .name("spaceterm-permission-reset".to_owned())
             .spawn(move || {
                 let result = run_reset(permission, bundle_identifier);
-                verification.verify();
+                verification.verify(run_probe);
                 completion(result);
             })
             .map(drop)
@@ -342,12 +342,9 @@ impl Verification {
 
     /// Probes once no other probe or setup preparation runs, and records the report. A failed
     /// probe keeps the last report rather than inventing one.
-    fn verify(&self) {
-        let probed = {
-            let _probing = self.probing();
-            run_probe()
-        };
-        if let Ok(report) = probed {
+    fn verify(&self, probe: impl FnOnce() -> Result<ProbeReport, PermissionAccessError>) {
+        let _probing = self.probing();
+        if let Ok(report) = probe() {
             self.record(report);
         }
     }
@@ -366,7 +363,7 @@ impl Verification {
             .name("spaceterm-permission-probe".to_owned())
             .spawn(move || {
                 loop {
-                    verification.verify();
+                    verification.verify(run_probe);
                     let mut state = verification.lock();
                     if !std::mem::take(&mut state.requested_again) {
                         state.running = false;
@@ -649,6 +646,49 @@ mod tests {
             probed.try_recv().is_err(),
             "a preparation cancelled while it waits neither probes nor resets"
         );
+    }
+
+    #[test]
+    fn a_probe_publishes_its_report_before_the_next_probe_runs() {
+        let verification = Arc::new(Verification::default());
+        // Hold publication while the older probe finishes, as a competing authorization read can.
+        let publication = verification.lock();
+        let (sender, older_probed) = std::sync::mpsc::channel();
+        let older = std::thread::spawn({
+            let verification = Arc::clone(&verification);
+            move || {
+                verification.verify(|| {
+                    sender.send(()).expect("the older probe");
+                    Ok(report(true))
+                });
+            }
+        });
+        older_probed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the older probe finished reading");
+
+        let (sender, newer_probed) = std::sync::mpsc::channel();
+        let newer = std::thread::spawn({
+            let verification = Arc::clone(&verification);
+            move || {
+                verification.verify(|| {
+                    sender.send(()).expect("the newer probe");
+                    Ok(report(false))
+                });
+            }
+        });
+        let overtook_publication = newer_probed
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        drop(publication);
+        older.join().expect("the older verification");
+        newer.join().expect("the newer verification");
+
+        assert!(
+            !overtook_publication,
+            "a newer probe must wait for the older report to be published"
+        );
+        assert_eq!(verification.latest(), Some(report(false)));
     }
 
     #[test]
