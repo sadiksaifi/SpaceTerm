@@ -32,7 +32,11 @@ impl Global for SettingsFile {}
 
 impl SettingsFile {
     /// Starts following the file for the application's life.
-    pub(crate) fn install(settings: UserSettings, access: Rc<dyn SettingsFileAccess>, cx: &mut App) {
+    pub(crate) fn install(
+        settings: UserSettings,
+        access: Rc<dyn SettingsFileAccess>,
+        cx: &mut App,
+    ) {
         let (changes, received) = async_channel::bounded(1);
         let settings_changed = settings.subscribe();
         let follow = cx.spawn(async move |cx| follow(settings, received, cx).await);
@@ -48,9 +52,8 @@ impl SettingsFile {
             // writes. Every write notifies subscribers, so each notification retries the watch.
             file._start_watching = Some(cx.spawn(async move |cx| {
                 while settings_changed.recv().await.is_ok() {
-                    let started = cx.update(|cx| {
-                        cx.update_global::<Self, _>(|file, _| file.start_watching())
-                    });
+                    let started = cx
+                        .update(|cx| cx.update_global::<Self, _>(|file, _| file.start_watching()));
                     if started {
                         break;
                     }

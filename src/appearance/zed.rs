@@ -196,8 +196,12 @@ fn source_text(root: &Value, key: &str, max: usize) -> Option<String> {
 
 /// The first key whose value parses as a color. Zed treats an unparseable color as absent.
 fn color(style: &Map<String, Value>, keys: &[&str]) -> Option<Color> {
-    keys.iter()
-        .find_map(|key| style.get(*key)?.as_str().and_then(|value| Color::parse(value).ok()))
+    keys.iter().find_map(|key| {
+        style
+            .get(*key)?
+            .as_str()
+            .and_then(|value| Color::parse(value).ok())
+    })
 }
 
 fn player_color(style: &Map<String, Value>, key: &str) -> Option<Color> {
@@ -236,16 +240,12 @@ fn terminal_colors(style: &Map<String, Value>, appearance: Appearance) -> Termin
     );
     let over = |color: Color| opaque(color, background);
     let foreground = over(
-        color(
-            style,
-            &["terminal.foreground", "editor.foreground", "text"],
-        )
-        .unwrap_or(base.foreground),
+        color(style, &["terminal.foreground", "editor.foreground", "text"])
+            .unwrap_or(base.foreground),
     );
     let palette = |prefix: &str, fallback: [Color; 8]| -> [Color; 8] {
         std::array::from_fn(|index| {
-            color(style, &[&format!("{prefix}{}", ANSI_NAMES[index])])
-                .map_or(fallback[index], over)
+            color(style, &[&format!("{prefix}{}", ANSI_NAMES[index])]).map_or(fallback[index], over)
         })
     };
     // A theme that authors its own normal palette keeps its hues in every register, so missing
@@ -265,8 +265,7 @@ fn terminal_colors(style: &Map<String, Value>, appearance: Appearance) -> Termin
     TerminalColors {
         foreground,
         background,
-        bright_foreground: color(style, &["terminal.bright_foreground"])
-            .map_or(foreground, over),
+        bright_foreground: color(style, &["terminal.bright_foreground"]).map_or(foreground, over),
         dim_foreground: color(style, &["terminal.dim_foreground"])
             .map_or_else(|| foreground.mix(background, 0.4), over),
         normal,

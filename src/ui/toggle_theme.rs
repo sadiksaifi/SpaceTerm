@@ -103,7 +103,6 @@ fn paint(background: Color, foreground: Color, border: Color, label: Color) -> T
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -246,8 +246,11 @@ mod tests {
     #[test]
     fn identity_icons_should_share_the_glyph_and_rank_by_channel_marks() {
         let glyphs = [
-            include_bytes!("../packaging/macos/spaceterm/SpaceTerm.icon/Assets/Glyph.svg").as_slice(),
-            include_bytes!("../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Glyph.svg"),
+            include_bytes!("../packaging/macos/spaceterm/SpaceTerm.icon/Assets/Glyph.svg")
+                .as_slice(),
+            include_bytes!(
+                "../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Glyph.svg"
+            ),
             include_bytes!(
                 "../packaging/macos/development/SpaceTerm Development.icon/Assets/Glyph.svg"
             ),

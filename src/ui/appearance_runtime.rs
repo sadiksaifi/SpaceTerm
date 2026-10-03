@@ -16,7 +16,7 @@ use crate::platform::window_frame::WindowFrameGeometry;
 use crate::appearance::{
     AppearanceChangeSet, AppearanceGeneration, AppearancePreferences, AvailableFont,
     AvailableFonts, CompositionCapabilities, DEFAULT_TERMINAL_FAMILIES, FontClass,
-    ResolvedAppearance, ThemeCatalog, SystemAppearance, TerminalFontFamily,
+    ResolvedAppearance, SystemAppearance, TerminalFontFamily, ThemeCatalog,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
 use crate::settings::{SettingsError, UserSettings};

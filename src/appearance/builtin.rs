@@ -1,5 +1,5 @@
-use super::terminal_theme::{TerminalTheme, ThemeMetadata, TerminalColorOverrides};
-use super::{Appearance, ChromeColors, Color, ThemeId, TerminalColors};
+use super::terminal_theme::{TerminalColorOverrides, TerminalTheme, ThemeMetadata};
+use super::{Appearance, ChromeColors, Color, TerminalColors, ThemeId};
 
 pub(crate) fn dark_terminal_id() -> ThemeId {
     ThemeId::builtin("builtin.spaceterm.dark")

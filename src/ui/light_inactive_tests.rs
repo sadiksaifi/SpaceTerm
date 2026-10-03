@@ -1,6 +1,6 @@
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeColors, Color, CompositionCapabilities, ThemeCatalog, SystemAppearance,
+    ChromeColors, Color, CompositionCapabilities, SystemAppearance, ThemeCatalog,
 };
 
 use super::appearance::{ChromeAppearance, settings};

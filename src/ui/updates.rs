@@ -15,9 +15,9 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant,
-    ButtonVariantStyle, DeterminateProgress, Icon, IconName, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
-    ProgressState, Tooltip,
+    ButtonVariantStyle, DeterminateProgress, Icon, IconName, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
+    Tooltip,
 };
 
 use super::WorkspaceManager;
@@ -667,20 +667,20 @@ struct ControlPresentation {
 impl ControlPresentation {
     /// `pending_version` is the release the service still knows about while its state has moved
     /// on to a check, a failure, or idle. Without one there is nothing to show.
-    fn resolve(state: &UpdateState, pending_version: Option<&str>, cancelling: bool) -> Option<Self> {
-        let control = |step: &str,
-                       version: &str,
-                       tooltip: String,
-                       glyph,
-                       prominent,
-                       command| Self {
-            label: format!("{step} {version}").into(),
-            tooltip: tooltip.into(),
-            glyph,
-            prominent,
-            command,
-            reminder: None,
-        };
+    fn resolve(
+        state: &UpdateState,
+        pending_version: Option<&str>,
+        cancelling: bool,
+    ) -> Option<Self> {
+        let control =
+            |step: &str, version: &str, tooltip: String, glyph, prominent, command| Self {
+                label: format!("{step} {version}").into(),
+                tooltip: tooltip.into(),
+                glyph,
+                prominent,
+                command,
+                reminder: None,
+            };
         let presentation = match state {
             UpdateState::Unavailable | UpdateState::UpToDate => return None,
             UpdateState::Idle => {

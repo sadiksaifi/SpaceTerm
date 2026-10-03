@@ -346,12 +346,10 @@ fn floating_material_with_floor(
     for (foreground, endpoint) in [preferred, alternate] {
         let endpoint = endpoint.with_alpha(material.a);
         let readable = |candidate: Color| {
-            [Color::BLACK, Color::WHITE]
-                .into_iter()
-                .all(|underlay| {
-                    let background = wash.source_over(candidate.source_over(underlay));
-                    foreground.contrast_ratio(background) >= minimum
-                })
+            [Color::BLACK, Color::WHITE].into_iter().all(|underlay| {
+                let background = wash.source_over(candidate.source_over(underlay));
+                foreground.contrast_ratio(background) >= minimum
+            })
         };
         if readable(material) {
             return Some(material);
@@ -1983,15 +1981,13 @@ fn resolve_floating_frame<const N: usize>(
     let unpainted = reference_fill.a == 0 && paint_fill.a == 0;
     if !unpainted {
         let target = reference_fill.source_over(reference_surface);
-        let endpoint = proposed
-            .first()
-            .map_or(Color::BLACK, |(content, _)| {
-                if content_is_lighter_than_background(*content, target) {
-                    Color::WHITE
-                } else {
-                    Color::BLACK
-                }
-            });
+        let endpoint = proposed.first().map_or(Color::BLACK, |(content, _)| {
+            if content_is_lighter_than_background(*content, target) {
+                Color::WHITE
+            } else {
+                Color::BLACK
+            }
+        });
         for alpha in paint_fill.a..=255 {
             let Some(fill) = equivalent_overlay(target, reference_surface, alpha) else {
                 continue;
@@ -2893,8 +2889,7 @@ fn feasible_non_floating_material_target(
     let rendered = |candidate| materials.paint(role, root, candidate).source_over(root);
     let feasible = |candidate| {
         let host = rendered(candidate);
-        Color::BLACK.contrast_ratio(host) >= minimum
-            || Color::WHITE.contrast_ratio(host) >= minimum
+        Color::BLACK.contrast_ratio(host) >= minimum || Color::WHITE.contrast_ratio(host) >= minimum
     };
     if feasible(target) {
         return target;
@@ -4012,13 +4007,10 @@ impl ChromeAppearance {
             let tone = Color::rgba(u32::from(shell.backdrop_tone()));
             let wash = Color::rgba(u32::from(shell.material()));
             let divider = Color::rgba(u32::from(shell.divider()));
-            if [Color::BLACK, Color::WHITE]
-                .into_iter()
-                .any(|underlay| {
-                    let background = wash.source_over(tone.source_over(underlay));
-                    divider.source_over(background).contrast_ratio(background) > ceiling
-                })
-            {
+            if [Color::BLACK, Color::WHITE].into_iter().any(|underlay| {
+                let background = wash.source_over(tone.source_over(underlay));
+                divider.source_over(background).contrast_ratio(background) > ceiling
+            }) {
                 hosts.push(label);
             }
         }
@@ -4089,12 +4081,8 @@ impl ChromeAppearance {
                 self.capabilities.increase_contrast,
                 self.rule_band(),
             );
-            FloatingSurfacePaint::new(
-                gpui_color(wash),
-                gpui_color(edge),
-                gpui_color(divider),
-            )
-            .backdrop_tone(gpui_color(tone))
+            FloatingSurfacePaint::new(gpui_color(wash), gpui_color(edge), gpui_color(divider))
+                .backdrop_tone(gpui_color(tone))
         };
         FloatingSurfaceTheme::new(
             FloatingSurfacePaints::new(
@@ -4840,19 +4828,11 @@ mod typography_tests {
         use crate::appearance::Color;
 
         assert_eq!(
-            host_relative_fill(
-                Color::BLACK,
-                Color::BLACK,
-                Color::rgb(0x202020),
-            ),
+            host_relative_fill(Color::BLACK, Color::BLACK, Color::rgb(0x202020),),
             Some(Color::rgb(0x202020)),
         );
         assert_eq!(
-            host_relative_fill(
-                Color::WHITE,
-                Color::BLACK,
-                Color::WHITE,
-            ),
+            host_relative_fill(Color::WHITE, Color::BLACK, Color::WHITE,),
             None,
         );
     }

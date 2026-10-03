@@ -25,12 +25,15 @@ use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, Tex
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
-
 /// A field action rests on its field and uses complete neutral paints while interacting.
 #[cfg(test)]
 pub(crate) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
     let paint = |background, foreground| {
-        spaceterm_ui::ButtonPaint::new(gpui_color(background), gpui_color(foreground), gpui::rgba(0))
+        spaceterm_ui::ButtonPaint::new(
+            gpui_color(background),
+            gpui_color(foreground),
+            gpui::rgba(0),
+        )
     };
     spaceterm_ui::ButtonVariantStyle::new(
         paint(colors.input_background, colors.input_text),

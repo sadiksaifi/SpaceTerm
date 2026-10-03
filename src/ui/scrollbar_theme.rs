@@ -17,7 +17,6 @@ pub(super) fn theme(colors: &ChromeColors) -> ScrollbarTheme {
     .track_background(gpui_color(colors.scrollbar_track))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

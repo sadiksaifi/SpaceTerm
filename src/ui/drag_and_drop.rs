@@ -14,9 +14,9 @@ use gpui::prelude::*;
 use std::rc::Rc;
 
 use gpui::{
-    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, KeystrokeEvent,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription,
-    Window, WindowId, canvas, div, px,
+    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, KeystrokeEvent, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription, Window,
+    WindowId, canvas, div, px,
 };
 
 use super::appearance::gpui_color;
@@ -150,10 +150,7 @@ fn strip_spans(
             .iter()
             .map(|bounds| {
                 let start = bounds.origin.along(axis);
-                (
-                    f32::from(start),
-                    f32::from(start + bounds.size.along(axis)),
-                )
+                (f32::from(start), f32::from(start + bounds.size.along(axis)))
             })
             .collect()
     })
@@ -457,32 +454,34 @@ mod tests {
     impl Render for Root {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let owner = self.owner.clone();
-            div().size_full().child(drag_release_observer(|_, _| {})).child(
-                div()
-                    .id("source")
-                    .debug_selector(|| "drag-source".to_owned())
-                    .size(px(40.0))
-                    .on_drag(Payload, move |_, _, window, cx| {
-                        if let Some(owner) = &owner {
-                            owner.update(cx, |owner, cx| {
-                                owner.session = Some(DragSession::begin(
-                                    cx,
-                                    |owner: &mut Owner, _, _| owner.cancelled += 1,
-                                ));
-                            });
-                        }
-                        {
-                            let preview =
-                                DragPreview::new(window, cx, |_, _| {
+            div()
+                .size_full()
+                .child(drag_release_observer(|_, _| {}))
+                .child(
+                    div()
+                        .id("source")
+                        .debug_selector(|| "drag-source".to_owned())
+                        .size(px(40.0))
+                        .on_drag(Payload, move |_, _, window, cx| {
+                            if let Some(owner) = &owner {
+                                owner.update(cx, |owner, cx| {
+                                    owner.session =
+                                        Some(DragSession::begin(cx, |owner: &mut Owner, _, _| {
+                                            owner.cancelled += 1
+                                        }));
+                                });
+                            }
+                            {
+                                let preview = DragPreview::new(window, cx, |_, _| {
                                     div()
                                         .debug_selector(|| "drag-face".to_owned())
                                         .size(px(40.0))
                                         .into_any_element()
                                 });
-                            cx.new(|_| preview)
-                        }
-                    }),
-            )
+                                cx.new(|_| preview)
+                            }
+                        }),
+                )
         }
     }
 
@@ -551,7 +550,11 @@ mod tests {
         // The first motion GPUI delivers lands far past the press.
         cx.simulate_mouse_move(far, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
-        cx.simulate_mouse_move(far + point(px(1.0), px(0.0)), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            far + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         cx.run_until_parked();
 
         let face = cx.debug_bounds("drag-face").unwrap();

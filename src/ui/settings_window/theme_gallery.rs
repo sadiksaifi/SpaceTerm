@@ -17,8 +17,8 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::{
-    Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, Color,
-    SystemAppearance, TerminalColors, ThemeCatalog, ThemeId, ThemeSummary,
+    Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, Color, SystemAppearance,
+    TerminalColors, ThemeCatalog, ThemeId, ThemeSummary,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color, prepared_font};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
@@ -81,7 +81,8 @@ impl ThemeGallery {
         });
         cx.subscribe(&search, |settings, search, event: &TextInputEvent, cx| {
             if matches!(event, TextInputEvent::ValueChanged(_)) {
-                settings.theme_gallery.query = SharedString::from(search.read(cx).value().to_owned());
+                settings.theme_gallery.query =
+                    SharedString::from(search.read(cx).value().to_owned());
                 cx.notify();
             }
         })
@@ -111,7 +112,9 @@ impl SettingsWindow {
             AppearanceMode::Light => Appearance::Light,
             AppearanceMode::Dark => Appearance::Dark,
             AppearanceMode::Auto => self.theme_gallery.auto_slot.unwrap_or_else(|| {
-                crate::ui::appearance_runtime::current(cx).terminal.appearance
+                crate::ui::appearance_runtime::current(cx)
+                    .terminal
+                    .appearance
             }),
         }
     }
@@ -186,7 +189,14 @@ impl SettingsWindow {
         let chosen = self.theme_slot(cx);
         let slots = [Appearance::Light, Appearance::Dark].map(|slot| {
             let preview = self.slot_preview(slot, &summaries);
-            self.render_slot_card(preview, chosen == slot, font.clone(), appearance, window, cx)
+            self.render_slot_card(
+                preview,
+                chosen == slot,
+                font.clone(),
+                appearance,
+                window,
+                cx,
+            )
         });
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         content
@@ -722,7 +732,11 @@ fn preview_name(preview: &SlotPreview) -> SharedString {
 
 /// Where the theme came from, in the words a person would use.
 fn preview_origin(preview: &SlotPreview) -> SharedString {
-    preview.summary.as_ref().map(theme_origin).unwrap_or_default()
+    preview
+        .summary
+        .as_ref()
+        .map(theme_origin)
+        .unwrap_or_default()
 }
 
 /// Where an installed theme came from, in the words a person would use.
@@ -747,7 +761,9 @@ fn selection_ring(
     focused: bool,
 ) -> impl IntoElement {
     let accent = appearance.colors.border_focused;
-    let hover_ring = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
+    let hover_ring = appearance
+        .host_colors(spaceterm_ui::ControlHost::Card)
+        .border;
     let outer_radius = radius.pixels() + px(RING_GAP + RING_WIDTH);
     // Keyboard focus surrounds the selection ring so the two states stay distinct: the focus ring
     // treats the selection ring's outer edge as the control's edge.
@@ -768,7 +784,9 @@ fn selection_ring(
         .border_color(gpui_color(if selected {
             accent
         } else {
-            hover_ring.with_alpha(0).fade(hover_ring, f64::from(hover_level))
+            hover_ring
+                .with_alpha(0)
+                .fade(hover_ring, f64::from(hover_level))
         }))
         .child(content.rounded(radius.pixels()))
         .when(!selected, |ring| ring.child(hover.tracker()));
@@ -794,7 +812,9 @@ fn terminal_preview(
         PreviewSize::Large => (11.0, 16.0, 14.0),
         PreviewSize::Small => (8.5, 12.0, 10.0),
     };
-    let edge = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
+    let edge = appearance
+        .host_colors(spaceterm_ui::ControlHost::Card)
+        .border;
     let prompt = [
         ("~/spaceterm", colors.normal[4]),
         (" main", colors.normal[5]),
@@ -832,7 +852,12 @@ fn terminal_preview(
         .text_size(px(text_size))
         .line_height(px(line_height))
         .text_color(gpui_color(foreground))
-        .child(line(&[prompt[0], prompt[1], prompt[2], (" ls", foreground)]))
+        .child(line(&[
+            prompt[0],
+            prompt[1],
+            prompt[2],
+            (" ls", foreground),
+        ]))
         .child(line(&[
             ("docs  src  ", colors.bright[4]),
             ("Cargo.toml  README.md", foreground),
@@ -843,8 +868,14 @@ fn terminal_preview(
             prompt[2],
             (" git status -s", foreground),
         ]))
-        .child(line(&[(" M ", colors.normal[1]), ("src/main.rs", foreground)]))
-        .child(line(&[("A  ", colors.normal[2]), ("src/theme.rs", foreground)]))
+        .child(line(&[
+            (" M ", colors.normal[1]),
+            ("src/main.rs", foreground),
+        ]))
+        .child(line(&[
+            ("A  ", colors.normal[2]),
+            ("src/theme.rs", foreground),
+        ]))
         .child(
             div()
                 .flex()
@@ -862,7 +893,9 @@ fn terminal_preview(
 
 /// A row-sized preview: the same session drawn as lines of color, legible at a glance.
 fn theme_miniature(colors: &TerminalColors, appearance: &ChromeAppearance) -> gpui::Div {
-    let edge = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
+    let edge = appearance
+        .host_colors(spaceterm_ui::ControlHost::Card)
+        .border;
     let bar = |width: f32, color: Color| {
         div()
             .h(px(2.0))
@@ -892,22 +925,39 @@ fn theme_miniature(colors: &TerminalColors, appearance: &ChromeAppearance) -> gp
                     bar(0.06, colors.normal[2]),
                     bar(0.12, colors.foreground),
                 ]))
-                .child(row(vec![bar(0.2, colors.bright[4]), bar(0.44, colors.foreground)]))
-                .child(row(vec![bar(0.06, colors.normal[1]), bar(0.36, colors.foreground)]))
-                .child(row(vec![bar(0.06, colors.normal[2]), bar(0.3, colors.foreground)])),
+                .child(row(vec![
+                    bar(0.2, colors.bright[4]),
+                    bar(0.44, colors.foreground),
+                ]))
+                .child(row(vec![
+                    bar(0.06, colors.normal[1]),
+                    bar(0.36, colors.foreground),
+                ]))
+                .child(row(vec![
+                    bar(0.06, colors.normal[2]),
+                    bar(0.3, colors.foreground),
+                ])),
         )
         .child(
-            div().flex().flex_row().gap(px(2.0)).children(
-                colors.normal[1..7]
-                    .iter()
-                    .map(|color| div().flex_1().h(px(3.0)).rounded(px(1.0)).bg(gpui_color(*color))),
-            ),
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(2.0))
+                .children(colors.normal[1..7].iter().map(|color| {
+                    div()
+                        .flex_1()
+                        .h(px(3.0))
+                        .rounded(px(1.0))
+                        .bg(gpui_color(*color))
+                })),
         )
 }
 
 /// The sixteen ANSI colors, normal above bright, as the palette a person scans to compare themes.
 fn palette(colors: &TerminalColors, appearance: &ChromeAppearance) -> impl IntoElement {
-    let edge = appearance.host_colors(spaceterm_ui::ControlHost::Card).border;
+    let edge = appearance
+        .host_colors(spaceterm_ui::ControlHost::Card)
+        .border;
     let dot = move |color: Color| {
         div()
             .size(px(12.0))
@@ -920,6 +970,18 @@ fn palette(colors: &TerminalColors, appearance: &ChromeAppearance) -> impl IntoE
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(div().flex().flex_row().gap(px(6.0)).children(colors.normal.map(dot)))
-        .child(div().flex().flex_row().gap(px(6.0)).children(colors.bright.map(dot)))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .children(colors.normal.map(dot)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .children(colors.bright.map(dot)),
+        )
 }

@@ -94,7 +94,6 @@ pub(super) fn prepared_with_rows(
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

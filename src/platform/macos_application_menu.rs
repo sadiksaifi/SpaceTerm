@@ -865,7 +865,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         let expected: &[&str] = if cfg!(feature = "developer-tools") {
-            &["SpaceTerm", "File", "Edit", "View", "Develop", "Window", "Help"]
+            &[
+                "SpaceTerm",
+                "File",
+                "Edit",
+                "View",
+                "Develop",
+                "Window",
+                "Help",
+            ]
         } else {
             &["SpaceTerm", "File", "Edit", "View", "Window", "Help"]
         };

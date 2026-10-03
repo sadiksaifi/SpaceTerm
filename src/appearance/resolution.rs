@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, ThemeCatalog, ThemeId,
-    TerminalColors, TerminalFontFamily, builtin, preferences::PreferenceError,
+    Appearance, AppearancePreferences, ChromeColors, ChromeDensity, TerminalColors,
+    TerminalFontFamily, ThemeCatalog, ThemeId, builtin, preferences::PreferenceError,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]

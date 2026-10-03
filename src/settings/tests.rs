@@ -93,7 +93,9 @@ fn zed_extension(version: &str, names: &[&str]) -> ZedExtension {
     ZedExtension {
         id: String::from("sample-themes"),
         version: version.to_owned(),
-        families: vec![serde_json::to_vec(&serde_json::json!({ "name": "Sample", "themes": themes })).unwrap()],
+        families: vec![
+            serde_json::to_vec(&serde_json::json!({ "name": "Sample", "themes": themes })).unwrap(),
+        ],
     }
 }
 
@@ -334,7 +336,13 @@ fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() 
 
     assert_eq!(installed_names(&settings), ["Added"]);
     assert_eq!(
-        settings.snapshot().candidate.preferences.terminal.themes.dark,
+        settings
+            .snapshot()
+            .candidate
+            .preferences
+            .terminal
+            .themes
+            .dark,
         ThemeId::builtin("builtin.spaceterm.dark")
     );
 }
@@ -364,7 +372,10 @@ fn a_failed_extension_update_keeps_the_installed_version() {
         ),
         Err(SettingsError::Import(ImportError::InvalidThemeCount))
     );
-    assert_eq!(settings.snapshot().catalog_revision, before.catalog_revision);
+    assert_eq!(
+        settings.snapshot().catalog_revision,
+        before.catalog_revision
+    );
     assert_eq!(
         settings.snapshot().candidate.terminal_themes,
         before.candidate.terminal_themes
@@ -879,9 +890,11 @@ fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
         state.backup = Some(b"old backup".to_vec());
     }
     assert_eq!(settings.reload(), Err(SettingsError::Invalid));
-    assert!(settings
-        .update_committed(before.committed.revision, (*before.committed).clone())
-        .is_err());
+    assert!(
+        settings
+            .update_committed(before.committed.revision, (*before.committed).clone())
+            .is_err()
+    );
     assert!(settings.snapshot().recoverable_candidate.is_some());
     let first = settings.subscribe();
     let second = settings.subscribe();
@@ -1072,8 +1085,12 @@ fn following_a_malformed_file_keeps_the_settings_until_a_valid_one_arrives() {
 fn following_the_file_waits_for_a_live_preview() {
     let (settings, storage) = setup();
     let token = settings.begin_preview(0).unwrap();
-    storage.0.lock().unwrap().snapshot =
-        Some((export_settings(&SettingsDocument::default()).unwrap().into_bytes(), 40));
+    storage.0.lock().unwrap().snapshot = Some((
+        export_settings(&SettingsDocument::default())
+            .unwrap()
+            .into_bytes(),
+        40,
+    ));
 
     assert_eq!(settings.follow_file(), Err(SettingsError::Busy));
     drop(token);
@@ -1084,10 +1101,23 @@ fn following_the_file_waits_for_a_live_preview() {
 fn ensuring_the_file_writes_only_a_document_no_file_holds() {
     let (settings, storage) = setup();
 
-    settings.ensure_file().unwrap().expect("no file yet").run().unwrap();
-    let written = storage.0.lock().unwrap().snapshot.clone().expect("the file");
+    settings
+        .ensure_file()
+        .unwrap()
+        .expect("no file yet")
+        .run()
+        .unwrap();
+    let written = storage
+        .0
+        .lock()
+        .unwrap()
+        .snapshot
+        .clone()
+        .expect("the file");
     assert_eq!(
-        crate::appearance::parse_settings(&written.0).unwrap().preferences,
+        crate::appearance::parse_settings(&written.0)
+            .unwrap()
+            .preferences,
         SettingsDocument::default().preferences
     );
 
@@ -1102,5 +1132,8 @@ fn ensuring_the_file_leaves_an_unreadable_file_alone() {
     let settings = UserSettings::load(storage.clone());
 
     assert!(settings.ensure_file().unwrap().is_none());
-    assert_eq!(storage.0.lock().unwrap().snapshot.as_ref().unwrap().0, b"{ broken");
+    assert_eq!(
+        storage.0.lock().unwrap().snapshot.as_ref().unwrap().0,
+        b"{ broken"
+    );
 }

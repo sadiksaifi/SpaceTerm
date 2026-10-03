@@ -240,8 +240,14 @@ fn developer_reservations() -> [SystemReserved; 2] {
     use crate::keybindings::{Shortcut, SystemReservation};
 
     [
-        (OPEN_DEVELOPER_WORKBENCH, SystemReservation::DeveloperWorkbench),
-        (TOGGLE_APPEARANCE_PREVIEW, SystemReservation::AppearancePreview),
+        (
+            OPEN_DEVELOPER_WORKBENCH,
+            SystemReservation::DeveloperWorkbench,
+        ),
+        (
+            TOGGLE_APPEARANCE_PREVIEW,
+            SystemReservation::AppearancePreview,
+        ),
     ]
     .map(|(source, reason)| SystemReserved {
         shortcut: Shortcut::parse(source).expect("static developer shortcut"),

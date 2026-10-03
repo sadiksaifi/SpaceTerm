@@ -41,7 +41,7 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
 fn highlighted_row_materializes_against_its_card_host() {
     use crate::appearance::{
         AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-        ThemeCatalog, SurfaceRole, SystemAppearance,
+        SurfaceRole, SystemAppearance, ThemeCatalog,
     };
 
     let mut preferences = AppearancePreferences::default();
@@ -83,9 +83,10 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     struct StepperCard(SettingsAppearance);
     impl Render for StepperCard {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-            let stepper = crate::ui::sidebar_window::form::Stepper::new("host-stepper", "Value", "1")
-                .render(&self.0.chrome)
-                .into_any_element();
+            let stepper =
+                crate::ui::sidebar_window::form::Stepper::new("host-stepper", "Value", "1")
+                    .render(&self.0.chrome)
+                    .into_any_element();
             div().size_full().p(px(20.0)).child(
                 crate::ui::sidebar_window::form::FormGroup::new(
                     "stepper-card".to_owned(),

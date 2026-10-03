@@ -2021,8 +2021,9 @@ mod tests {
                                     .present(window, cx, |_, _| {})
                                     .unwrap();
                                 }
-                                let opened =
-                                    harness.flow.update(cx, |flow, cx| flow.open(RemoteWorkspaceStart::Home, window, cx));
+                                let opened = harness.flow.update(cx, |flow, cx| {
+                                    flow.open(RemoteWorkspaceStart::Home, window, cx)
+                                });
                                 harness.successful_opens += usize::from(opened);
                             });
                         }),
@@ -2249,7 +2250,9 @@ mod tests {
             (1, 1)
         );
         cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| assert!(!flow.open(RemoteWorkspaceStart::Home, window, cx)));
+            flow.update(cx, |flow, cx| {
+                assert!(!flow.open(RemoteWorkspaceStart::Home, window, cx))
+            });
         });
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
@@ -3035,9 +3038,7 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> bool {
         flow.read_with(cx, |flow, cx| match &flow.state {
-            RemoteWorkspaceFlowState::ChoosingDirectory(choice) => {
-                choice.picker.read(cx).is_open()
-            }
+            RemoteWorkspaceFlowState::ChoosingDirectory(choice) => choice.picker.read(cx).is_open(),
             RemoteWorkspaceFlowState::AwaitingActivation(pending) => pending
                 .picker
                 .as_ref()
@@ -3106,7 +3107,10 @@ mod tests {
         let returned = handle.take().unwrap();
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
-                assert!(flow.activation_failed(&handle, returned, window, cx).is_ok());
+                assert!(
+                    flow.activation_failed(&handle, returned, window, cx)
+                        .is_ok()
+                );
             })
         });
         cx.run_until_parked();
@@ -3162,7 +3166,10 @@ mod tests {
         let returned = handle.take().unwrap();
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
-                assert!(flow.activation_failed(&handle, returned, window, cx).is_ok());
+                assert!(
+                    flow.activation_failed(&handle, returned, window, cx)
+                        .is_ok()
+                );
             })
         });
         cx.run_until_parked();

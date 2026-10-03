@@ -686,7 +686,9 @@ fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
     let first = emulator.snapshot().unwrap().unwrap();
     let visible = first.rows.len();
     let last_offset = first.scrollbar.total_rows.saturating_sub(visible as u64);
-    let mut rows = (0..visible).map(|row| row_text(&first, row)).collect::<Vec<_>>();
+    let mut rows = (0..visible)
+        .map(|row| row_text(&first, row))
+        .collect::<Vec<_>>();
 
     for offset in 1..=last_offset {
         emulator.scroll_to(offset);
@@ -1451,17 +1453,19 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
-        snapshot
-            .rows
+        snapshot.rows.iter().any(|row| row
             .iter()
-            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .starts_with("QA_RESIZE_MARKER")),
         "zsh must not erase the command output while redrawing its prompt"
     );
     assert!(
-        snapshot
-            .rows
+        snapshot.rows.iter().any(|row| row
             .iter()
-            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("PREVIOUS_OUTPUT")),
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .starts_with("PREVIOUS_OUTPUT")),
         "resize must not clear earlier command output"
     );
 
@@ -1470,10 +1474,11 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     emulator.feed(prompt);
     let shrunk = emulator.snapshot().unwrap().unwrap();
     assert!(
-        shrunk
-            .rows
+        shrunk.rows.iter().any(|row| row
             .iter()
-            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .starts_with("QA_RESIZE_MARKER")),
         "zsh must not erase the command output when the prompt wraps again"
     );
 }
@@ -1482,7 +1487,9 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
 fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
     let mut emulator = emulator(50, 5);
     let prompt = b"SpaceTerm on fix/resize-prompt-redraw is v0.0.0 via v1.98.1\r\n> ";
-    emulator.feed(b"header\r\n\x1b]133;A;redraw=1\x07> \x1b]133;B\x07echo QA_RESIZE_MARKER\x1b]133;C\x07");
+    emulator.feed(
+        b"header\r\n\x1b]133;A;redraw=1\x07> \x1b]133;B\x07echo QA_RESIZE_MARKER\x1b]133;C\x07",
+    );
     emulator.feed(b"\r\nQA_RESIZE_MARKER\r\n\x1b]133;D;0\x07\x1b]133;A;redraw=1\x07");
     emulator.feed(prompt);
     emulator.feed(b"\x1b]133;B\x07");
@@ -1493,10 +1500,11 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
-        snapshot
-            .rows
+        snapshot.rows.iter().any(|row| row
             .iter()
-            .any(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>().starts_with("QA_RESIZE_MARKER")),
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .starts_with("QA_RESIZE_MARKER")),
         "zsh must not erase command output below a bottom-aligned prompt"
     );
 }
@@ -1534,9 +1542,7 @@ fn zsh_resize_rows(
     emulator
         .resize(geometry(new_size.0, new_size.1, 10.0, 20.0))
         .unwrap();
-    emulator.feed(
-        format!("\r\r\x1b[{old_prompt_offset}A\x1b[0m\x1b[27m\x1b[24m\x1b[J").as_bytes(),
-    );
+    emulator.feed(format!("\r\r\x1b[{old_prompt_offset}A\x1b[0m\x1b[27m\x1b[24m\x1b[J").as_bytes());
     // Zsh emits this mark from PS1 on SIGWINCH. Its precmd hook does not run.
     emulator.feed(b"\x1b]133;A;redraw=1\x07");
     emulator.feed(prompt.as_bytes());
@@ -1633,8 +1639,16 @@ fn zsh_repeated_tall_prompt_redraw_has_one_prompt_and_right_prompt() {
     emulator.feed(b"\x1b]133;B\x07\x1b[K\x1b[42CRIGHT\x1b[47Dunfinished");
 
     for (cols, rows, redraw) in [
-        (20, 3, b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
-        (100, 10, b"\r\r\x1b[5A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
+        (
+            20,
+            3,
+            b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice(),
+        ),
+        (
+            100,
+            10,
+            b"\r\r\x1b[5A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice(),
+        ),
         (20, 3, b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J".as_slice()),
     ] {
         emulator.resize(geometry(cols, rows, 10.0, 20.0)).unwrap();
@@ -1667,7 +1681,10 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
     for cycle in 0..5 {
         for (cols, rows, up) in [(29, 10, 5), (76, 27, 12)] {
             emulator.resize(geometry(cols, rows, 10.0, 20.0)).unwrap();
-            emulator.feed(format!("\r\r\x1b[{up}A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07").as_bytes());
+            emulator.feed(
+                format!("\r\r\x1b[{up}A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07")
+                    .as_bytes(),
+            );
             emulator.feed(prompt.as_bytes());
             emulator.feed(b"\x1b]133;B\x07");
         }
@@ -1684,7 +1701,11 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
             assert_eq!(grid, expected, "one round trip left blank prompt rows");
             first_round_trip = Some(grid);
         } else {
-            assert_eq!(grid, first_round_trip.as_ref().unwrap().clone(), "cycle {cycle} changed screen or scrollback");
+            assert_eq!(
+                grid,
+                first_round_trip.as_ref().unwrap().clone(),
+                "cycle {cycle} changed screen or scrollback"
+            );
         }
     }
 }
@@ -1983,7 +2004,8 @@ fn wrapped_bash_prompt_redraw_keeps_one_prompt_and_command_output() {
     // Captured from bash 3.2 readline after SIGWINCH at 29 columns.
     emulator.feed(b"\r\x1b[KBASH_ABCDEFGHIJKLMNOPQRSTUVWXY\rYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ>\r> ");
     emulator.resize(geometry(76, 10, 10.0, 20.0)).unwrap();
-    emulator.feed(b"\r\x1b[K\x1b[A\x1b[ABASH_ABCDEFGHIJKLMNOPQRSTUVWXYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ> ");
+    emulator
+        .feed(b"\r\x1b[K\x1b[A\x1b[ABASH_ABCDEFGHIJKLMNOPQRSTUVWXYZ_ABCDEFGHIJKLMNOPQRSTUVWXYZ> ");
     emulator.feed(b"\r\n\x1b]133;C\x07QA_BASH_OUTPUT\r\n");
     let rows = all_grid_rows(&mut emulator);
     let mut expected = vec![
@@ -2016,11 +2038,7 @@ fn unoptioned_prompt_start_resets_the_previous_shell_redraw_policy() {
     emulator.feed(b"\x1b]133;A;redraw=0\x07OLD> \x1b]133;B\x07run\r\nQA_RESIZE_MARKER\r\n");
     emulator.feed(b"\x1b]133;A\x07NEW_TOP\r\n> ");
     emulator.resize(geometry(20, 5, 10.0, 20.0)).unwrap();
-    assert_grid_equals_bytes(
-        &mut emulator,
-        (20, 5),
-        b"OLD> run\r\nQA_RESIZE_MARKER\r\n",
-    );
+    assert_grid_equals_bytes(&mut emulator, (20, 5), b"OLD> run\r\nQA_RESIZE_MARKER\r\n");
 }
 
 fn pending_zsh_preexec_prompt() -> TerminalEmulator {
@@ -2058,7 +2076,9 @@ fn zsh_preexec_command_output_survives_another_resize_and_interrupt() {
 fn exec_bash_output_survives_resize_after_zsh_preexec() {
     let mut emulator = pending_zsh_preexec_prompt();
     // Zsh emits C before replacing itself. Bare bash then emits no OSC 133.
-    emulator.feed(b"\x1b]133;C;cmdline=exec%20bash%20--noprofile%20--norc\x07\r\nBASH_READY\r\nbash-3.2$ ");
+    emulator.feed(
+        b"\x1b]133;C;cmdline=exec%20bash%20--noprofile%20--norc\x07\r\nBASH_READY\r\nbash-3.2$ ",
+    );
     emulator.resize(geometry(150, 12, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\x1b[Kbash-3.2$ ");
     assert_grid_equals_bytes(

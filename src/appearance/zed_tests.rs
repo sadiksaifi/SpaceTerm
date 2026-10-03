@@ -73,7 +73,10 @@ fn every_translated_theme_stores_a_complete_palette() {
         let palette = palette.as_ref().unwrap();
         assert!((0..8).all(|index| palette.get(index).is_some()));
     }
-    assert_eq!(resolved(theme).background, builtin::terminal_base(Appearance::Light).background);
+    assert_eq!(
+        resolved(theme).background,
+        builtin::terminal_base(Appearance::Light).background
+    );
 }
 
 #[test]
@@ -101,7 +104,10 @@ fn extension_identity_survives_family_and_author_changes_between_versions() {
     let first = translate_zed_extension(&extension(
         "vague",
         "1.0.0",
-        vec![one_theme("dark", json!({ "terminal.background": "#101010" }))],
+        vec![one_theme(
+            "dark",
+            json!({ "terminal.background": "#101010" }),
+        )],
     ))
     .unwrap();
     let renamed = serde_json::to_vec(&json!({
@@ -138,7 +144,10 @@ fn an_unparseable_color_is_absent_and_the_next_source_applies() {
 
     assert_eq!(colors.background, Color::rgb(0x202020));
     assert_eq!(colors.foreground, Color::rgb(0xe0e0e0));
-    assert_eq!(colors.normal[1], builtin::terminal_base(Appearance::Dark).normal[1]);
+    assert_eq!(
+        colors.normal[1],
+        builtin::terminal_base(Appearance::Dark).normal[1]
+    );
 }
 
 #[test]
@@ -161,7 +170,10 @@ fn missing_registers_derive_from_the_theme_palette() {
     assert_eq!(colors.bright[1], red);
     assert_eq!(colors.dim[1], red.mix(Color::rgb(0x000000), 0.35));
     assert_eq!(colors.bright_foreground, Color::rgb(0xffffff));
-    assert_eq!(colors.dim_foreground, Color::rgb(0xffffff).mix(Color::rgb(0x000000), 0.4));
+    assert_eq!(
+        colors.dim_foreground,
+        Color::rgb(0xffffff).mix(Color::rgb(0x000000), 0.4)
+    );
     assert_eq!(colors.cursor, Color::rgb(0x00ff00));
     assert_eq!(colors.selection_background, Color::rgba(0x00ff0040));
     assert_eq!(colors.find_match_background, Color::rgba(0x0000ff40));
@@ -183,11 +195,18 @@ fn translucent_protocol_colors_composite_over_the_background() {
     ))
     .unwrap()[0];
     let colors = resolved(theme);
-    let background = Color::rgba(0xffffff80).source_over(builtin::terminal_base(Appearance::Dark).background);
+    let background =
+        Color::rgba(0xffffff80).source_over(builtin::terminal_base(Appearance::Dark).background);
 
     assert_eq!(colors.background, background);
-    assert_eq!(colors.foreground, Color::rgba(0xff000080).source_over(background));
-    assert_eq!(colors.normal[4], Color::rgba(0x0000ff80).source_over(background));
+    assert_eq!(
+        colors.foreground,
+        Color::rgba(0xff000080).source_over(background)
+    );
+    assert_eq!(
+        colors.normal[4],
+        Color::rgba(0x0000ff80).source_over(background)
+    );
     colors.validate().unwrap();
 }
 
@@ -225,10 +244,7 @@ fn a_family_the_user_selected_installs_nothing_when_any_theme_is_malformed() {
         translate_zed_family(&family(json!([]))),
         Err(ImportError::InvalidThemeCount)
     );
-    assert_eq!(
-        translate_zed_family(b"{"),
-        Err(ImportError::InvalidJson)
-    );
+    assert_eq!(translate_zed_family(b"{"), Err(ImportError::InvalidJson));
 }
 
 #[test]
@@ -283,7 +299,10 @@ fn a_selected_zed_theme_changes_terminal_colors_and_never_chrome() {
             .unwrap()
     };
     let builtin = resolve(&preferences);
-    preferences.terminal.themes.set(Appearance::Dark, theme.id.clone());
+    preferences
+        .terminal
+        .themes
+        .set(Appearance::Dark, theme.id.clone());
     let zed = resolve(&preferences);
 
     assert_eq!(zed.terminal.effective_theme, theme.id);

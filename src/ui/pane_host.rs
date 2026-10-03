@@ -58,9 +58,9 @@ use gpui::{
     Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName, ModalAction,
-    ModalActionRole, ModalId, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-    Tooltip,
+    Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName,
+    ModalAction, ModalActionRole, ModalId, ResizeAxis, ResizeHandle, ResizeHandleEvent,
+    ResizeInputSource, Tooltip,
 };
 
 /// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
@@ -1117,7 +1117,10 @@ impl PaneHost {
         };
         let caption = Bounds::new(
             pane.origin,
-            gpui::size(pane.size.width, super::appearance::chrome(cx).caption_height()),
+            gpui::size(
+                pane.size.width,
+                super::appearance::chrome(cx).caption_height(),
+            ),
         );
         let grab = grab_point(window, cx);
         let host = cx.entity().downgrade();
@@ -1192,10 +1195,9 @@ impl PaneHost {
             spaceterm_ui::floating_surface_theme(cx).shell(spaceterm_ui::FloatingRole::Popover);
         let card = shell
             .frame(
-                caption_row(appearance, paint.foreground)
-                    .child(render_caption_identity(
-                        pane_id, text, attention, layout, appearance, &paint,
-                    )),
+                caption_row(appearance, paint.foreground).child(render_caption_identity(
+                    pane_id, text, attention, layout, appearance, &paint,
+                )),
             )
             .debug_selector(move || format!("pane-caption-preview-{}", pane_id.get()))
             .absolute()
@@ -2024,9 +2026,7 @@ impl Render for PaneHost {
                 &appearance,
                 cx,
             ),
-            ZoomState::Zoomed(pane_id) => {
-                self.render_leaf(pane_id, &hovers, host, &appearance, cx)
-            }
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, host, &appearance, cx),
         };
 
         div()
@@ -2583,7 +2583,10 @@ fn render_caption_identity(
 }
 
 /// The caption strip's row: full height, padded, and set in the caption's text style.
-fn caption_row(appearance: &super::appearance::ChromeAppearance, color: crate::appearance::Color) -> gpui::Div {
+fn caption_row(
+    appearance: &super::appearance::ChromeAppearance,
+    color: crate::appearance::Color,
+) -> gpui::Div {
     div()
         // The row fills the caption strip rather than restating its height, so the contents centre
         // on the strip's own middle and the whole strip stays one hit target.
@@ -3514,7 +3517,10 @@ mod tests {
         cx.run_until_parked();
         let released = cx.update(|window, cx| {
             let host = host.read(cx);
-            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+            (
+                host.focused_pane_id(),
+                host.focused_terminal_is_focused(window, cx),
+            )
         });
 
         let caption = cx.debug_bounds("pane-caption-1-unfocused").unwrap();
@@ -3525,7 +3531,10 @@ mod tests {
         cx.run_until_parked();
         let cancelled = cx.update(|window, cx| {
             let host = host.read(cx);
-            (host.focused_pane_id(), host.focused_terminal_is_focused(window, cx))
+            (
+                host.focused_pane_id(),
+                host.focused_terminal_is_focused(window, cx),
+            )
         });
 
         assert_eq!(

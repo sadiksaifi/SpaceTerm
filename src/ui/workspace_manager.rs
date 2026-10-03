@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use super::workspace_creation::WorkspaceCreation;
 use super::directory_picker::{
     DirectoryPicker, DirectoryPickerEvent, DirectorySource, LocalDirectorySource,
     RemoteDirectorySource,
@@ -39,6 +38,7 @@ use super::remote_workspace_flow::{
 };
 use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
+use super::workspace_creation::WorkspaceCreation;
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
@@ -47,9 +47,9 @@ use super::{
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     NewRemoteWorkspace, NewWorkspace, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind,
-    RemoteChildLaunchUnavailable, SplitDown,
-    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT,
+    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -1241,9 +1241,12 @@ impl WorkspaceManager {
                                     })
                             });
                         let application = match (current, pinned.clone(), target.clone()) {
-                            (false, _, _) | (_, PinnedDirectory::Remote { .. }, PinTarget::NewLocalWorkspace { .. }) => {
-                                PinApplication::Failed
-                            }
+                            (false, _, _)
+                            | (
+                                _,
+                                PinnedDirectory::Remote { .. },
+                                PinTarget::NewLocalWorkspace { .. },
+                            ) => PinApplication::Failed,
                             (true, PinnedDirectory::Local(directory), target) => {
                                 manager.apply_local_pin_target(target, directory, window, cx)
                             }
@@ -2797,7 +2800,9 @@ impl WorkspaceManager {
                     Self::report_workspace_error("move", error);
                 }
             }
-            SidebarEvent::Create(WorkspaceCreation::Local) => self.create_local_workspace(window, cx),
+            SidebarEvent::Create(WorkspaceCreation::Local) => {
+                self.create_local_workspace(window, cx)
+            }
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
                 // the terminal before a chooser captures its cancel-restore target.

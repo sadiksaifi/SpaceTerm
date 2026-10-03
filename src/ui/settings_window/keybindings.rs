@@ -15,7 +15,6 @@ use spaceterm_ui::{
     ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
 };
 
-use crate::ui::sidebar_window::form::{CaptionTone, row_horizontal_inset};
 use super::{SettingsRowId, SettingsWindow, control_selector};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
@@ -24,6 +23,7 @@ use crate::keybindings::{
     ShortcutRejection, SystemReservation, TerminalConvention,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
+use crate::ui::sidebar_window::form::{CaptionTone, row_horizontal_inset};
 
 /// What the field shows for a Command without a Shortcut.
 const UNASSIGNED_LABEL: &str = "None";
@@ -292,7 +292,10 @@ fn reservation_message(
 }
 
 /// Who reserves a System Reserved Shortcut, and for what: "reserved by <owner> for <feature>".
-fn system_reservation_text(reason: SystemReservation, presentation: &DesktopPresentation) -> String {
+fn system_reservation_text(
+    reason: SystemReservation,
+    presentation: &DesktopPresentation,
+) -> String {
     let owner = match reason {
         #[cfg(feature = "developer-tools")]
         SystemReservation::DeveloperWorkbench | SystemReservation::AppearancePreview => {
