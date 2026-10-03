@@ -6,7 +6,9 @@ use gpui::{
     div, point, prelude::*, px, rgba, size,
 };
 
-use crate::platform::window_chrome::CLIENT_FRAME_INSET;
+use crate::platform::window_chrome::{
+    CLIENT_FRAME_INSET, CLIENT_FRAME_SHADOW_BLUR, CLIENT_FRAME_SHADOW_OFFSET_Y,
+};
 
 const RESIZE_BAND: f32 = 10.0;
 const CORNER_TARGET: f32 = 24.0;
@@ -153,8 +155,8 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
             tiling,
             shadows: vec![BoxShadow {
                 color: rgba(if active { 0x00000060 } else { 0x00000030 }).into(),
-                offset: point(px(0.0), px(5.0)),
-                blur_radius: px(20.0),
+                offset: point(px(0.0), px(CLIENT_FRAME_SHADOW_OFFSET_Y)),
+                blur_radius: px(CLIENT_FRAME_SHADOW_BLUR),
                 spread_radius: px(0.0),
                 inset: false,
             }]
@@ -411,12 +413,18 @@ mod tests {
         });
         cx.run_until_parked();
         cx.simulate_mouse_down(
-            point(px(20.0), px(20.0)),
+            point(
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+            ),
             MouseButton::Left,
             gpui::Modifiers::none(),
         );
         cx.simulate_mouse_up(
-            point(px(20.0), px(20.0)),
+            point(
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+            ),
             MouseButton::Left,
             gpui::Modifiers::none(),
         );
@@ -434,13 +442,22 @@ mod tests {
             },
         });
         cx.run_until_parked();
-        cx.simulate_click(point(px(20.0), px(20.0)), gpui::Modifiers::none());
+        cx.simulate_click(
+            point(
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+            ),
+            gpui::Modifiers::none(),
+        );
         assert_eq!(cx.window_requests().len(), 1);
     }
 
     #[test]
     fn tiled_edges_have_neither_insets_nor_resize_targets() {
-        let viewport = size(px(948.0), px(628.0));
+        let viewport = size(
+            px(900.0 + 2.0 * CLIENT_FRAME_INSET),
+            px(580.0 + 2.0 * CLIENT_FRAME_INSET),
+        );
         let tiling = Tiling {
             top: true,
             left: true,
@@ -451,8 +468,8 @@ mod tests {
             Edges {
                 top: px(0.0),
                 left: px(0.0),
-                bottom: px(24.0),
-                right: px(24.0)
+                bottom: px(CLIENT_FRAME_INSET),
+                right: px(CLIENT_FRAME_INSET)
             }
         );
         let regions = resize_regions(viewport, tiling, CLIENT_FRAME_INSET);
@@ -470,15 +487,30 @@ mod tests {
                 .map(|(_, edge)| *edge)
         };
         assert_eq!(
-            edge_at(point(px(20.0), px(20.0))),
+            edge_at(point(
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0),
+                px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0)
+            )),
             Some(ResizeEdge::TopLeft)
         );
-        assert_eq!(edge_at(point(px(500.0), px(20.0))), Some(ResizeEdge::Top));
         assert_eq!(
-            edge_at(point(px(930.0), px(610.0))),
+            edge_at(point(px(500.0), px(CLIENT_FRAME_INSET - RESIZE_BAND / 2.0))),
+            Some(ResizeEdge::Top)
+        );
+        assert_eq!(
+            edge_at(point(
+                px(900.0 + CLIENT_FRAME_INSET + RESIZE_BAND / 2.0),
+                px(580.0 + CLIENT_FRAME_INSET + RESIZE_BAND / 2.0)
+            )),
             Some(ResizeEdge::BottomRight)
         );
-        assert_eq!(edge_at(point(px(25.0), px(25.0))), None);
+        assert_eq!(
+            edge_at(point(
+                px(CLIENT_FRAME_INSET + 1.0),
+                px(CLIENT_FRAME_INSET + 1.0)
+            )),
+            None
+        );
         assert_eq!(edge_at(point(px(2.0), px(2.0))), None);
     }
 }

@@ -3,8 +3,15 @@
 use gpui::{App, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions, px};
 use std::rc::Rc;
 
-/// Space for the client frame's shadow outside each untiled edge.
-pub(crate) const CLIENT_FRAME_INSET: f32 = 24.0;
+/// Blur radius of the client frame's drop shadow. GPUI paints it as a Gaussian whose sigma is this
+/// radius and whose visible extent is three sigmas.
+pub(crate) const CLIENT_FRAME_SHADOW_BLUR: f32 = 10.0;
+/// Downward offset of the client frame's drop shadow.
+pub(crate) const CLIENT_FRAME_SHADOW_OFFSET_Y: f32 = 4.0;
+/// Space for the client frame's shadow outside each untiled edge: the shadow's full extent, so the
+/// surface edge never cuts it off.
+pub(crate) const CLIENT_FRAME_INSET: f32 =
+    3.0 * CLIENT_FRAME_SHADOW_BLUR + CLIENT_FRAME_SHADOW_OFFSET_Y;
 
 #[derive(Clone, Copy)]
 pub(crate) enum WindowRole {
@@ -96,7 +103,7 @@ mod tests {
                 assert_eq!(options.window_bounds, Some(WindowBounds::Windowed(content)));
                 assert_eq!(options.window_min_size, Some(size(px(480.), px(260.))));
                 assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
-                assert_eq!(options.client_inset, px(24.));
+                assert_eq!(options.client_inset, px(CLIENT_FRAME_INSET));
             }
         });
     }
