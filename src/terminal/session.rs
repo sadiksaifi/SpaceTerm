@@ -451,7 +451,11 @@ pub(crate) trait TerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>>;
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
-    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+    /// Copy the Selection, or forward the host Copy chord to enhanced keyboard applications.
+    fn copy_or_forward(
+        &self,
+        _: InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.copy_selection()
     }
     fn copy_selection_at(
@@ -718,14 +722,17 @@ impl TerminalSessionHandle for TerminalSession {
         self.copy_selection_query(None)
     }
 
-    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+    fn copy_or_forward(
+        &self,
+        modifiers: InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         let commands = self
             .commands
             .as_ref()
             .ok_or(SelectionCopyError::WorkerStopped)?;
         let (reply, receiver) = mpsc::sync_channel(1);
         commands
-            .send(Command::CopyOrForward(reply))
+            .send(Command::CopyOrForward(modifiers, reply))
             .map_err(|_| SelectionCopyError::WorkerStopped)?;
         receiver
             .recv()
@@ -883,7 +890,10 @@ enum Command {
     CompressScrollback,
     Shutdown,
     PollHiddenInput,
-    CopyOrForward(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    CopyOrForward(
+        InputModifiers,
+        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
+    ),
     CompleteClipboard(u64, ClipboardCompletion),
     ClipboardExpired,
     ResumeOutput(Option<u64>),
@@ -1481,7 +1491,7 @@ impl TerminalWorker {
                 self.process_paste_resolution(id, decision, reply)
             }
             Command::PasteConfirmationExpired => true,
-            Command::CopyOrForward(reply) => {
+            Command::CopyOrForward(modifiers, reply) => {
                 let selection = self
                     .emulator
                     .selection_copy(SelectionCopyOptions::default())
@@ -1497,10 +1507,7 @@ impl TerminalWorker {
                         logical_key: "c".into(),
                         text: None,
                         unshifted_codepoint: Some('c'),
-                        modifiers: InputModifiers {
-                            platform: true,
-                            ..InputModifiers::default()
-                        },
+                        modifiers,
                         consumed_modifiers: InputModifiers::default(),
                         option_as_alt: crate::terminal::key::OptionAsAltPolicy::None,
                     });

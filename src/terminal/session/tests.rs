@@ -4330,12 +4330,24 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events;
     let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert!(worker.process_command(Command::CopyOrForward(
+        InputModifiers {
+            platform: true,
+            ..InputModifiers::default()
+        },
+        reply
+    )));
     assert_eq!(result.recv().unwrap().unwrap(), None);
     assert!(records.snapshot().written.is_empty());
     worker.emulator.feed(b"\x1b[?1049h\x1b[>11u");
     let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert!(worker.process_command(Command::CopyOrForward(
+        InputModifiers {
+            platform: true,
+            ..InputModifiers::default()
+        },
+        reply
+    )));
     assert_eq!(result.recv().unwrap().unwrap(), None);
     assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
     let mut release = KeyInput::text_input("c");
@@ -4346,6 +4358,91 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     release.text = None;
     assert!(worker.process_command(Command::Key(release)));
     assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
+    worker.finish();
+}
+
+#[test]
+fn copy_or_forward_preserves_linux_chord_and_completes_one_gesture() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let modifiers = InputModifiers {
+        control: true,
+        shift: true,
+        ..Default::default()
+    };
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert!(records.snapshot().written.is_empty());
+    worker.emulator.feed(b"\x1b[?1049h\x1b[>11u");
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert_eq!(records.snapshot().written, b"\x1b[99;6u\x1b[99;6:3u");
+    let mut release = KeyInput::text_input("c");
+    release.action = KeyAction::Release;
+    release.physical_key = PhysicalKey::C;
+    release.unshifted_codepoint = Some('c');
+    release.modifiers = modifiers;
+    release.text = None;
+    assert!(worker.process_command(Command::Key(release)));
+    assert_eq!(records.snapshot().written, b"\x1b[99;6u\x1b[99;6:3u");
+    worker.finish();
+}
+
+#[test]
+fn linux_unshifted_xterm_control_forms_write_exact_pty_bytes() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let mut adapter = crate::terminal::testing::test_terminal_key_input_adapter();
+    for (chord, expected) in [
+        ("ctrl-2", b"\x00".as_slice()),
+        ("ctrl-6", b"\x1e".as_slice()),
+        ("ctrl-/", b"\x1f".as_slice()),
+        ("ctrl-[", b"\x1b".as_slice()),
+        ("ctrl-]", b"\x1d".as_slice()),
+    ] {
+        let before = records.snapshot().written.len();
+        let keystroke = gpui::Keystroke::parse(chord).unwrap();
+        let press = gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            prefer_character_input: false,
+            is_held: false,
+        };
+        let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_down(&press) else {
+            panic!("{chord} must be encoded");
+        };
+        assert!(worker.process_command(Command::Key(input)));
+        let release = gpui::KeyUpEvent { keystroke };
+        let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_up(&release) else {
+            panic!("{chord} must release its key");
+        };
+        assert!(worker.process_command(Command::Key(input)));
+        assert_eq!(&records.snapshot().written[before..], expected, "{chord}");
+    }
+    let before = records.snapshot().written.len();
+    worker.emulator.feed(b"\x1b[>11u");
+    let keystroke = gpui::Keystroke::parse("ctrl-[").unwrap();
+    let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_down(&gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    }) else {
+        panic!("enhanced Ctrl+[ must be encoded");
+    };
+    assert!(worker.process_command(Command::Key(input)));
+    let crate::terminal::KeyTranslation::Encoded(input) =
+        adapter.key_up(&gpui::KeyUpEvent { keystroke })
+    else {
+        panic!("enhanced Ctrl+[ must release its key");
+    };
+    assert!(worker.process_command(Command::Key(input)));
+    assert_eq!(
+        &records.snapshot().written[before..],
+        b"\x1b[91;5u\x1b[91;5:3u"
+    );
     worker.finish();
 }
 
@@ -4391,13 +4488,25 @@ fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority()
         let generation = worker.emulator.presentation_generation();
         assert!(worker.process_command(Command::Pointer(pointer(generation, phase, x, true))));
     }
-    let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
-    assert_eq!(
-        result.recv().unwrap().unwrap().unwrap().plain_text,
-        "selected"
-    );
-    assert_eq!(records.snapshot().written, mouse_bytes);
+    for modifiers in [
+        InputModifiers {
+            platform: true,
+            ..Default::default()
+        },
+        InputModifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        },
+    ] {
+        let (reply, result) = mpsc::sync_channel(1);
+        assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+        assert_eq!(
+            result.recv().unwrap().unwrap().unwrap().plain_text,
+            "selected"
+        );
+        assert_eq!(records.snapshot().written, mouse_bytes);
+    }
     worker.finish();
 }
 

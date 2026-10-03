@@ -3522,7 +3522,6 @@ impl WorkspaceManager {
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.pin_picker.iter().cloned());
-        let transients = transients.children(super::application_commands::layer(window, cx));
         ModalLayer::new(content).transient(transients)
     }
 }
