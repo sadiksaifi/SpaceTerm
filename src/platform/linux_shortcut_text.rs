@@ -62,7 +62,7 @@ fn key_name(key: &str) -> String {
         "down" => "Down".into(),
         "space" => "Space".into(),
         // Letters and function keys read in uppercase; symbols are unaffected.
-        key => key.to_uppercase(),
+        key => crate::desktop_profile::uppercase_shortcut_key(key),
     }
 }
 
@@ -95,6 +95,10 @@ mod tests {
             ("escape", "Esc"),
             ("f11", "F11"),
             ("cmd-space", "Super+Space"),
+            ("ctrl-shift-ß", "Ctrl+Shift+ß"),
+            ("ctrl-shift-é", "Ctrl+Shift+É"),
+            ("ctrl-shift-ﬃ", "Ctrl+Shift+ﬃ"),
+            ("ctrl-shift-ǰ", "Ctrl+Shift+ǰ"),
         ] {
             assert_eq!(format(source), label, "{source}");
         }
@@ -104,6 +108,17 @@ mod tests {
                 .format_modifiers(Modifiers::control_shift())
                 .as_ref(),
             "Ctrl+Shift"
+        );
+    }
+
+    #[test]
+    fn linux_shortcut_text_preserves_the_german_shifted_sharp_s_key() {
+        let layout = crate::platform::keyboard_layout::testing::de();
+        assert_eq!(
+            LinuxShortcutFormatter
+                .format_chord(Modifiers::control(), "?", &layout)
+                .as_ref(),
+            "Ctrl+Shift+ß"
         );
     }
 }

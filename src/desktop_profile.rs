@@ -31,6 +31,16 @@ pub(crate) trait ShortcutFormatter {
     fn format_modifiers(&self, modifiers: Modifiers) -> SharedString;
 }
 
+/// Uppercase shortcut keys without turning a single layout key into several characters.
+pub(crate) fn uppercase_shortcut_key(key: &str) -> String {
+    let uppercase = key.to_uppercase();
+    if key.chars().count() == 1 && uppercase.chars().count() != 1 {
+        key.to_owned()
+    } else {
+        uppercase
+    }
+}
+
 /// Which installed binding a desktop presents for an action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShortcutSelection {
@@ -316,7 +326,7 @@ impl ShortcutFormatter for TestingShortcutFormatter {
             "enter" => "Enter".to_owned(),
             "space" => "Space".to_owned(),
             "tab" => "Tab".to_owned(),
-            _ => key.to_uppercase(),
+            _ => uppercase_shortcut_key(key),
         };
         let modifiers = self.format_modifiers(modifiers);
         if modifiers.is_empty() {

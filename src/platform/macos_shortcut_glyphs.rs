@@ -27,7 +27,7 @@ impl ShortcutFormatter for MacosShortcutFormatter {
             "pagedown" => "⇟".into(),
             "space" => "Space".into(),
             "insert" => "Insert".into(),
-            key => key.to_uppercase(),
+            key => crate::desktop_profile::uppercase_shortcut_key(key),
         };
         format!("{}{key}", self.format_modifiers(modifiers)).into()
     }
@@ -81,6 +81,7 @@ mod tests {
             ("f20", "F20"),
             ("k", "K"),
             ("é", "É"),
+            ("ß", "ß"),
         ] {
             let shortcut = Shortcut::parse(&format!("cmd-shift-alt-ctrl-{key}")).unwrap();
             assert_eq!(format(&shortcut).as_ref(), format!("⌃⌥⇧⌘{glyph}"));
