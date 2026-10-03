@@ -10,7 +10,8 @@ use crate::appearance::{Appearance, SettingsDocument};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAuthorization,
+    ComputerUsePermission,
 };
 use crate::platform::setup_guide_host::SystemSettingsWindow;
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
@@ -18,7 +19,7 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::ui::appearance_runtime;
 
 use super::computer_use::{
-    ComputerUseAccessAction, ComputerUseAccessStatus, DEVICE_CONTROL, RecoveryNotice,
+    ACCESSIBILITY, ComputerUseAccessAction, ComputerUseAccessStatus, RecoveryNotice,
     SCREEN_RECORDING, TroubleshootAvailability,
 };
 use super::test_support::MemoryStorage;
@@ -28,7 +29,7 @@ use ComputerUseAuthorization::{Granted, NotGranted};
 use ComputerUsePermission::{Accessibility, ScreenRecording};
 
 const SCREEN_RECORDING_ROW: &str = "settings-row-screen-recording-access";
-const DEVICE_CONTROL_ROW: &str = "settings-row-device-control-access";
+const ACCESSIBILITY_ROW: &str = "settings-row-accessibility-access";
 const APPLICATION: &str =
     crate::application_identity::ApplicationIdentity::current().display_name();
 
@@ -192,10 +193,10 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
         SCREEN_RECORDING.state_not_allowed,
         SCREEN_RECORDING.set_up,
         SCREEN_RECORDING.troubleshoot,
-        DEVICE_CONTROL_ROW,
-        DEVICE_CONTROL.control,
-        DEVICE_CONTROL.state_allowed,
-        DEVICE_CONTROL.troubleshoot,
+        ACCESSIBILITY_ROW,
+        ACCESSIBILITY.control,
+        ACCESSIBILITY.state_allowed,
+        ACCESSIBILITY.troubleshoot,
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
@@ -205,7 +206,7 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
     let group = cx
         .debug_bounds("settings-section-privacy-group-permissions")
         .expect("group bounds");
-    for row in [SCREEN_RECORDING_ROW, DEVICE_CONTROL_ROW] {
+    for row in [SCREEN_RECORDING_ROW, ACCESSIBILITY_ROW] {
         let bounds = cx.debug_bounds(row).expect("row bounds");
         assert!(
             group.contains(&bounds.origin),
@@ -234,10 +235,10 @@ fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppCon
 
     window.read_with(cx, |settings, _| {
         assert_eq!(settings.active_section, SettingsSectionId::Privacy);
-        assert_eq!(settings.revealed, Some(SettingsRowId::DeviceControlAccess));
+        assert_eq!(settings.revealed, Some(SettingsRowId::AccessibilityAccess));
     });
-    assert!(cx.debug_bounds(DEVICE_CONTROL_ROW).is_some());
-    assert!(cx.debug_bounds(DEVICE_CONTROL.set_up).is_some());
+    assert!(cx.debug_bounds(ACCESSIBILITY_ROW).is_some());
+    assert!(cx.debug_bounds(ACCESSIBILITY.set_up).is_some());
 }
 
 /// Set Up starts a Permission Setup, the row follows it, and only a read reports the grant.
@@ -298,9 +299,9 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
 fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
-    click(DEVICE_CONTROL.set_up, cx);
+    click(ACCESSIBILITY.set_up, cx);
 
-    click(DEVICE_CONTROL.cancel_setup, cx);
+    click(ACCESSIBILITY.cancel_setup, cx);
 
     assert_eq!(
         action(&window, Accessibility, cx),
@@ -382,7 +383,7 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
         status(&window, Accessibility, cx),
         ComputerUseAccessStatus::Authorization(Granted)
     );
-    assert!(cx.debug_bounds(DEVICE_CONTROL.state_allowed).is_some());
+    assert!(cx.debug_bounds(ACCESSIBILITY.state_allowed).is_some());
 
     // Closing the window ends the observation with it.
     drop(window);
@@ -443,11 +444,11 @@ fn a_confirmed_reset_clears_one_permission_and_offers_a_new_setup(cx: &mut TestA
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
-    click(DEVICE_CONTROL.troubleshoot, cx);
-    click_modal_action(DEVICE_CONTROL.troubleshoot_reset, cx);
+    click(ACCESSIBILITY.troubleshoot, cx);
+    click_modal_action(ACCESSIBILITY.troubleshoot_reset, cx);
     // The guide leads to a confirmation; nothing is reset before the person confirms.
     assert!(access.resets.borrow().is_empty());
-    click_modal_action(DEVICE_CONTROL.reset_confirm, cx);
+    click_modal_action(ACCESSIBILITY.reset_confirm, cx);
 
     assert_eq!(*access.resets.borrow(), [Accessibility]);
     assert_eq!(
@@ -597,7 +598,7 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, Accessibility, cx);
 
-    click(DEVICE_CONTROL.set_up, cx);
+    click(ACCESSIBILITY.set_up, cx);
 
     assert_eq!(
         status(&window, Accessibility, cx),
@@ -614,8 +615,29 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
     assert!(failure.contains(APPLICATION));
 
     access.open_failure.set(None);
-    click(DEVICE_CONTROL.set_up, cx);
+    click(ACCESSIBILITY.set_up, cx);
     assert!(explanation(&window, Accessibility, cx).contains("Follow the guide"));
+}
+
+/// A system whose System Settings calls the list Accessibility sends the person there.
+#[gpui::test]
+fn an_earlier_system_names_the_accessibility_list(cx: &mut TestAppContext) {
+    let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+    access.naming.set(AccessibilityNaming::Accessibility);
+    access
+        .open_failure
+        .set(Some(ComputerUseAccessError::PlatformRejected));
+    let (window, cx) = open_privacy(&access, cx);
+
+    click(ACCESSIBILITY.set_up, cx);
+
+    let failure = explanation(&window, Accessibility, cx);
+    assert!(failure.contains("Privacy & Security > Accessibility"));
+    assert!(!failure.contains("Device Control"));
+    assert_eq!(
+        window.read_with(cx, |window, _| window.computer_use_access.naming()),
+        AccessibilityNaming::Accessibility
+    );
 }
 
 #[gpui::test]
@@ -682,7 +704,7 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &m
 
     for (permission, text) in [
         (ScreenRecording, &SCREEN_RECORDING),
-        (Accessibility, &DEVICE_CONTROL),
+        (Accessibility, &ACCESSIBILITY),
     ] {
         assert_eq!(
             status(&window, permission, cx),

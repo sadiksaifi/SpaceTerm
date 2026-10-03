@@ -20,12 +20,12 @@ use spaceterm_ui::{
 };
 
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessSubscription,
+    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessSubscription,
     ComputerUseAuthorization, ComputerUsePermission,
 };
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::permission_setup::{
-    PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, permission_copy,
+    PermissionCopy, PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, permission_copy,
 };
 
 use super::SettingsWindow;
@@ -70,30 +70,30 @@ pub(super) const SCREEN_RECORDING: PermissionText = PermissionText {
     reset_cancel: "settings-screen-recording-reset-cancel",
 };
 
-pub(super) const DEVICE_CONTROL: PermissionText = PermissionText {
-    control: "settings-device-control-access-control",
-    set_up: "settings-device-control-access-set-up",
-    cancel_setup: "settings-device-control-access-cancel-setup",
-    open_settings: "settings-device-control-access-open-settings",
-    check_again: "settings-device-control-access-check-again",
-    troubleshoot: "settings-device-control-access-troubleshoot",
-    state_allowed: "settings-device-control-access-state-allowed",
-    state_not_allowed: "settings-device-control-access-state-not-allowed",
-    state_unavailable: "settings-device-control-access-state-unavailable",
-    troubleshoot_modal: "settings-device-control-troubleshoot",
-    troubleshoot_open_settings: "settings-device-control-troubleshoot-open-settings",
-    troubleshoot_reset: "settings-device-control-troubleshoot-reset",
-    troubleshoot_done: "settings-device-control-troubleshoot-done",
-    reset_modal: "settings-device-control-reset",
-    reset_confirm: "settings-device-control-reset-confirm",
-    reset_cancel: "settings-device-control-reset-cancel",
+pub(super) const ACCESSIBILITY: PermissionText = PermissionText {
+    control: "settings-accessibility-access-control",
+    set_up: "settings-accessibility-access-set-up",
+    cancel_setup: "settings-accessibility-access-cancel-setup",
+    open_settings: "settings-accessibility-access-open-settings",
+    check_again: "settings-accessibility-access-check-again",
+    troubleshoot: "settings-accessibility-access-troubleshoot",
+    state_allowed: "settings-accessibility-access-state-allowed",
+    state_not_allowed: "settings-accessibility-access-state-not-allowed",
+    state_unavailable: "settings-accessibility-access-state-unavailable",
+    troubleshoot_modal: "settings-accessibility-troubleshoot",
+    troubleshoot_open_settings: "settings-accessibility-troubleshoot-open-settings",
+    troubleshoot_reset: "settings-accessibility-troubleshoot-reset",
+    troubleshoot_done: "settings-accessibility-troubleshoot-done",
+    reset_modal: "settings-accessibility-reset",
+    reset_confirm: "settings-accessibility-reset-confirm",
+    reset_cancel: "settings-accessibility-reset-cancel",
 };
 
 /// The permission a Settings Row presents, when it presents one of these.
 pub(super) const fn row_permission(row: super::SettingsRowId) -> Option<ComputerUsePermission> {
     match row {
         super::SettingsRowId::ScreenRecordingAccess => Some(ComputerUsePermission::ScreenRecording),
-        super::SettingsRowId::DeviceControlAccess => Some(ComputerUsePermission::Accessibility),
+        super::SettingsRowId::AccessibilityAccess => Some(ComputerUsePermission::Accessibility),
         _ => None,
     }
 }
@@ -101,7 +101,7 @@ pub(super) const fn row_permission(row: super::SettingsRowId) -> Option<Computer
 pub(super) const fn permission_text(permission: ComputerUsePermission) -> &'static PermissionText {
     match permission {
         ComputerUsePermission::ScreenRecording => &SCREEN_RECORDING,
-        ComputerUsePermission::Accessibility => &DEVICE_CONTROL,
+        ComputerUsePermission::Accessibility => &ACCESSIBILITY,
     }
 }
 
@@ -168,6 +168,8 @@ enum TroubleshootDecision {
 pub(super) struct ComputerUseAccessRow {
     permission: ComputerUsePermission,
     access: Option<Rc<dyn ComputerUseAccess>>,
+    /// What System Settings calls the Accessibility permission, which holds for the process.
+    naming: AccessibilityNaming,
     /// The running application, which is what a person turns on in System Settings.
     application_name: &'static str,
     status: ComputerUseAccessStatus,
@@ -187,6 +189,11 @@ impl ComputerUseAccessRow {
     ) -> Self {
         let mut row = Self {
             permission,
+            naming: access
+                .as_ref()
+                .map_or_else(AccessibilityNaming::default, |access| {
+                    access.accessibility_naming()
+                }),
             access,
             application_name,
             status: ComputerUseAccessStatus::Unsupported,
@@ -196,6 +203,11 @@ impl ComputerUseAccessRow {
         };
         row.refresh();
         row
+    }
+
+    /// Names the permission as System Settings does on the running system.
+    pub(super) fn copy(&self) -> &'static PermissionCopy {
+        permission_copy(self.permission, self.naming)
     }
 
     #[cfg(test)]
@@ -274,7 +286,7 @@ impl ComputerUseAccessRow {
         use ComputerUseAuthorization as Authorization;
 
         let text = permission_text(self.permission);
-        let copy = permission_copy(self.permission);
+        let copy = self.copy();
         let name = copy.name;
         let application = self.application_name;
         let pane = copy.pane;
@@ -401,7 +413,7 @@ impl ComputerUseAccessRow {
 
     /// The step-by-step recovery a person follows when a tool reports missing access.
     fn troubleshooting(&self) -> (String, String, String) {
-        let copy = permission_copy(self.permission);
+        let copy = self.copy();
         let name = copy.name;
         let application = self.application_name;
         let pane = copy.pane;
@@ -513,6 +525,11 @@ impl ComputerUseAccessRows {
             ),
             setup,
         }
+    }
+
+    /// What System Settings calls the Accessibility permission on the running system.
+    pub(super) fn naming(&self) -> AccessibilityNaming {
+        self.accessibility.naming
     }
 
     pub(super) fn setup(&self) -> Option<&Entity<PermissionSetup>> {
@@ -680,7 +697,7 @@ impl SettingsWindow {
             return;
         }
         let text = permission_text(permission);
-        let name = permission_copy(permission).name;
+        let name = row.copy().name;
         let application = row.application_name;
         let title = format!("Reset {name} for {application}?");
         let owner = cx.weak_entity();

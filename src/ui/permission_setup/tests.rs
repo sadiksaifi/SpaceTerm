@@ -18,7 +18,7 @@ use crate::application_identity::ApplicationIdentity;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
 use crate::platform::computer_use_access::{
-    ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
+    AccessibilityNaming, ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
 };
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
@@ -603,4 +603,33 @@ fn a_failed_preparation_still_guides(cx: &mut TestAppContext) {
         fixture.current(cx),
         Some((ScreenRecording, SetupStep::Opening))
     );
+}
+
+/// The setup names the Accessibility permission as System Settings does on the running system,
+/// so the guide and every Pane send the person to a list they can find.
+#[gpui::test]
+fn the_setup_names_accessibility_as_the_system_does(cx: &mut TestAppContext) {
+    for (naming, name, pane) in [
+        (
+            AccessibilityNaming::Accessibility,
+            "Accessibility",
+            "Accessibility",
+        ),
+        (
+            AccessibilityNaming::DeviceControl,
+            "Device Control",
+            "Device Control and Data Access",
+        ),
+    ] {
+        let access = ScriptedComputerUseAccess::new(Ok(NotGranted), Ok(NotGranted));
+        access.naming.set(naming);
+        let setup = cx.update(|cx| {
+            PermissionSetup::create(access.clone(), ScriptedSetupGuideHost::new(), cx)
+        });
+        setup.read_with(cx, |setup, _| {
+            assert_eq!(setup.copy(Accessibility).name, name);
+            assert_eq!(setup.copy(Accessibility).pane, pane);
+            assert_eq!(setup.copy(ScreenRecording).name, "Screen Recording");
+        });
+    }
 }

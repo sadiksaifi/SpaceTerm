@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Task};
 
 use crate::platform::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessSubscription, ComputerUseAuthorization,
-    ComputerUsePermission, ComputerUseSetupReadiness,
+    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessSubscription,
+    ComputerUseAuthorization, ComputerUsePermission, ComputerUseSetupReadiness,
 };
 use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost, SystemSettingsWindow};
 
@@ -52,18 +52,31 @@ pub(crate) struct PermissionCopy {
     pub(crate) purpose: &'static str,
 }
 
-pub(crate) const fn permission_copy(permission: ComputerUsePermission) -> &'static PermissionCopy {
-    match permission {
-        ComputerUsePermission::ScreenRecording => &PermissionCopy {
+/// Names `permission` as System Settings does under `naming`.
+pub(crate) const fn permission_copy(
+    permission: ComputerUsePermission,
+    naming: AccessibilityNaming,
+) -> &'static PermissionCopy {
+    match (permission, naming) {
+        (ComputerUsePermission::ScreenRecording, _) => &PermissionCopy {
             name: "Screen Recording",
             pane: "Screen & System Audio Recording",
             purpose: "take screenshots",
         },
-        ComputerUsePermission::Accessibility => &PermissionCopy {
-            name: "Device Control",
-            pane: "Device Control and Data Access",
-            purpose: "click and type in other apps",
-        },
+        (ComputerUsePermission::Accessibility, AccessibilityNaming::Accessibility) => {
+            &PermissionCopy {
+                name: "Accessibility",
+                pane: "Accessibility",
+                purpose: "click and type in other apps",
+            }
+        }
+        (ComputerUsePermission::Accessibility, AccessibilityNaming::DeviceControl) => {
+            &PermissionCopy {
+                name: "Device Control",
+                pane: "Device Control and Data Access",
+                purpose: "click and type in other apps",
+            }
+        }
     }
 }
 
@@ -109,11 +122,14 @@ pub(crate) struct GuidePresentation {
     pub(crate) cleared: bool,
     /// The permission set up after this one, when the setup holds another.
     pub(crate) next: Option<ComputerUsePermission>,
+    pub(crate) naming: AccessibilityNaming,
 }
 
 /// Owns the one running setup and the Setup Guide window it presents.
 pub(crate) struct PermissionSetup {
     access: Rc<dyn ComputerUseAccess>,
+    /// What System Settings calls the Accessibility permission, which holds for the process.
+    naming: AccessibilityNaming,
     host: Arc<dyn SetupGuideHost>,
     run: Option<SetupRun>,
     /// The latest failure of each permission's setup, cleared when its next setup starts.
@@ -171,6 +187,7 @@ impl PermissionSetup {
 
     fn new(access: Rc<dyn ComputerUseAccess>, host: Arc<dyn SetupGuideHost>) -> Self {
         Self {
+            naming: access.accessibility_naming(),
             access,
             host,
             run: None,
@@ -512,7 +529,13 @@ impl PermissionSetup {
             granted: run.step == SetupStep::Granted,
             cleared: run.cleared,
             next: run.queued.front().copied(),
+            naming: self.naming,
         })
+    }
+
+    /// Names `permission` as System Settings does on the running system.
+    pub(crate) fn copy(&self, permission: ComputerUsePermission) -> &'static PermissionCopy {
+        permission_copy(permission, self.naming)
     }
 
     /// Shows the latest presentation in an open guide.

@@ -289,7 +289,7 @@ impl SidebarOwner for SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = catalog::matching_rows(&self.query, self.computer_use_access.naming());
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -611,14 +611,14 @@ impl SettingsWindow {
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        catalog::matching_rows(&self.query)
+        catalog::matching_rows(&self.query, self.computer_use_access.naming())
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = catalog::matching_rows(&self.query);
+        let matching = catalog::matching_rows(&self.query, self.computer_use_access.naming());
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -691,7 +691,7 @@ impl SettingsWindow {
         Some(
             reset_button(
                 format!("{}-reset", row.descriptor().selector),
-                row.descriptor().label,
+                row.descriptor().label(self.computer_use_access.naming()),
                 appearance
                     .icons
                     .mark_metrics(crate::ui::chrome_icons::MarkRole::Reset)
@@ -997,7 +997,7 @@ impl SettingsWindow {
         let matched_indices = if self.query.trim().is_empty() {
             Vec::new()
         } else {
-            catalog::matching_row_matches(&self.query)
+            catalog::matching_row_matches(&self.query, self.computer_use_access.naming())
                 .into_iter()
                 .find(|matched| matched.id == row)
                 .map_or_else(Vec::new, |matched| matched.matched_indices)
@@ -1022,7 +1022,11 @@ impl SettingsWindow {
             appearance
         };
         let control = self.render_control(row, content_appearance, window, cx);
-        let mut rendered = FormRow::new(descriptor.selector, descriptor.label, control)
+        let mut rendered = FormRow::new(
+            descriptor.selector,
+            descriptor.label(self.computer_use_access.naming()),
+            control,
+        )
             .layout(row_layout(row))
             .reset(self.row_reset(row, appearance, cx))
             .matched_indices(matched_indices)
@@ -1074,7 +1078,7 @@ impl SettingsWindow {
                 appearance,
                 cx,
             ),
-            SettingsRowId::DeviceControlAccess => self.render_computer_use_access(
+            SettingsRowId::AccessibilityAccess => self.render_computer_use_access(
                 ComputerUsePermission::Accessibility,
                 appearance,
                 cx,
@@ -1462,7 +1466,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         settings_selector(
             selector,
-            row.descriptor().label,
+            row.descriptor().label(self.computer_use_access.naming()),
             Some(current),
             "Choose a weight",
             items,
@@ -1697,6 +1701,11 @@ impl SettingsWindow {
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let accessibility = self
+            .computer_use_access
+            .row(ComputerUsePermission::Accessibility)
+            .copy()
+            .name;
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
@@ -1723,11 +1732,11 @@ impl SettingsWindow {
         .intent(AlertIntent::Critical)
         // Installed themes are the one thing here the reset cannot give back, so the alert says
         // so rather than leaving that to be discovered.
-        .detail(
+        .detail(format!(
             "This cannot be undone. Themes can be installed again from their Zed extension or file. \
-             Microphone, Screen Recording, and Device Control access are system permissions and \
-             are not affected.",
-        )
+             Microphone, Screen Recording, and {accessibility} access are system permissions and \
+             are not affected."
+        ))
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

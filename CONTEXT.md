@@ -239,8 +239,9 @@ A Local Pane's offer to start a Permission Setup after its output carries `OSC 7
 Pane shows can carry one, including output a remote shell or a file relays, so it names no program.
 It names the permissions SpaceTerm lacks, withdraws them once granted, and starts nothing until the
 person chooses Set Up. A Remote Pane ignores Permission Requests. A request names `screen-recording`
-for Screen Recording and `accessibility` for the Accessibility permission, which SpaceTerm calls
-Device Control after System Settings' Device Control and Data Access list.
+for Screen Recording and `accessibility` for the Accessibility permission. SpaceTerm names that
+permission as System Settings does: Accessibility before macOS 27, and Device Control from macOS 27,
+after its Device Control and Data Access list.
 
 **Permission Setup**:
 One guided pass through System Settings that adds SpaceTerm to the computer-use privacy lists,

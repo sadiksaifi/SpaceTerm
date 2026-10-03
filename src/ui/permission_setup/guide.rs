@@ -399,7 +399,7 @@ impl SetupGuide {
         let appearance = crate::ui::appearance::chrome(cx);
         let colors = &appearance.floating_colors;
         let presentation = self.presentation;
-        let name = permission_copy(presentation.permission).name;
+        let name = permission_copy(presentation.permission, presentation.naming).name;
         let application =
             crate::application_identity::ApplicationIdentity::current().display_name();
         let glyph = appearance.icons.metrics(IconRole::Status).glyph_size;
@@ -519,7 +519,7 @@ impl SetupGuide {
                     .children(presentation.next.map(|next| {
                         Button::new(
                             "setup-guide-continue",
-                            format!("Allow {}", permission_copy(next).name),
+                            format!("Allow {}", permission_copy(next, presentation.naming).name),
                         )
                         .variant(ButtonVariant::Primary)
                         .size(ButtonSize::Small)

@@ -513,7 +513,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     const GROUP_SELECTOR: &str = "settings-section-privacy-group-permissions-card";
     const LABEL_SELECTOR: &str = "settings-row-microphone-access-label";
     const DESCRIPTION_SELECTOR: &str = "settings-row-microphone-access-description";
-    const LAST_ROW_SELECTOR: &str = "settings-row-device-control-access";
+    const LAST_ROW_SELECTOR: &str = "settings-row-accessibility-access";
 
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);

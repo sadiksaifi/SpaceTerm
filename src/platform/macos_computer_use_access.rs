@@ -7,11 +7,11 @@ use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_foundation::{
     NSBundle, NSDistributedNotificationCenter, NSNotification, NSNotificationSuspensionBehavior,
-    NSObject, NSObjectProtocol, NSString,
+    NSObject, NSObjectProtocol, NSProcessInfo, NSString,
 };
 
 use super::computer_use_access::{
-    ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
+    AccessibilityNaming, ComputerUseAccess, ComputerUseAccessError, ComputerUseAccessObservation,
     ComputerUseAccessSubscription, ComputerUseAuthorization, ComputerUsePermission,
     ComputerUseResetCompletion, ComputerUseSetupCompletion, ComputerUseSetupReadiness,
 };
@@ -177,6 +177,14 @@ impl ComputerUseAccess for MacosComputerUseAccess {
             ComputerUsePermission::Accessibility => self.accessibility_settings.open(),
         }
         .map_err(ComputerUseAccessError::from)
+    }
+
+    fn accessibility_naming(&self) -> AccessibilityNaming {
+        accessibility_naming(
+            NSProcessInfo::processInfo()
+                .operatingSystemVersion()
+                .majorVersion,
+        )
     }
 
     fn can_reset(&self) -> bool {
@@ -409,11 +417,27 @@ impl From<PermissionRecoveryError> for ComputerUseAccessError {
     }
 }
 
+/// macOS 27 renamed System Settings' Accessibility list to Device Control and Data Access.
+fn accessibility_naming(major_version: isize) -> AccessibilityNaming {
+    if major_version >= 27 {
+        AccessibilityNaming::DeviceControl
+    } else {
+        AccessibilityNaming::Accessibility
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
 
     use super::*;
+
+    #[test]
+    fn macos_27_names_the_accessibility_list_device_control() {
+        assert_eq!(accessibility_naming(26), AccessibilityNaming::Accessibility);
+        assert_eq!(accessibility_naming(27), AccessibilityNaming::DeviceControl);
+        assert_eq!(accessibility_naming(28), AccessibilityNaming::DeviceControl);
+    }
 
     #[test]
     fn a_reset_names_only_the_running_bundle_of_this_identity() {

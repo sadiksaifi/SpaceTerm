@@ -46,7 +46,8 @@ OSC 52. Their paste behavior also depends on the program and multiplexer configu
 ## Computer-use permissions
 
 Computer-use tools that take screenshots or control other apps inherit macOS Screen & System Audio
-Recording and Device Control and Data Access from SpaceTerm. SpaceTerm never asks for them on its
+Recording and Accessibility from SpaceTerm. macOS 27 renamed the Accessibility list Device Control
+and Data Access, and SpaceTerm uses the name your macOS shows. SpaceTerm never asks for them on its
 own. To grant them, choose Set Up next to a permission in Settings > Privacy. SpaceTerm opens the
 privacy list in System Settings and docks a guide at the bottom of its window. Drag SpaceTerm's row
 from the guide into the list. When the permission is missing, Set Up first removes any earlier
@@ -60,13 +61,13 @@ printf '\033]7701;permissions=screen-recording,accessibility\033\\'
 ```
 
 The list names `screen-recording`, `accessibility`, or both. SpaceTerm ignores unknown names, shows
-a notice in the Pane only for permissions it lacks, and starts the setup only when you choose
-Set Up. Not Now silences later requests for those permissions in that Pane. While the notice shows,
+a notice in the Pane only for permissions it lacks, and starts the setup only when you choose Set
+Up. Not Now silences later requests for those permissions in that Pane. While the notice shows,
 Command-Return chooses Set Up and Command-Period chooses Not Now. The notice docks at the top of the
-Pane when the cursor is in its lower half. Any output a Local Pane
-shows can carry a request, including output from `ssh` or a file you print, so the notice never
-claims which program asked. Remote Panes ignore Permission Requests. Inside tmux, wrap the request in tmux passthrough and enable
-`set -g allow-passthrough on`.
+Pane when the cursor is in its lower half. Any output a Local Pane shows can carry a request,
+including output from `ssh` or a file you print, so the notice never claims which program asked.
+Remote Panes ignore Permission Requests. Inside tmux, wrap the request in tmux passthrough and
+enable `set -g allow-passthrough on`.
 
 ## Built with
 

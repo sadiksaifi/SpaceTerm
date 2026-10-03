@@ -8,9 +8,19 @@
 pub(crate) enum ComputerUsePermission {
     /// Capturing the screen, which a tool needs to take screenshots.
     ScreenRecording,
-    /// Controlling other applications, which a tool needs to click and type. macOS presents it as
-    /// Device Control and Data Access.
+    /// Controlling other applications, which a tool needs to click and type. System Settings names
+    /// it as [`AccessibilityNaming`] describes.
     Accessibility,
+}
+
+/// What System Settings calls the Accessibility permission on the running system.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AccessibilityNaming {
+    /// The Accessibility list, before macOS 27.
+    Accessibility,
+    /// The Device Control and Data Access list, from macOS 27.
+    #[default]
+    DeviceControl,
 }
 
 /// The authorization a computer-use tool started now in a Terminal Session receives for one
@@ -104,6 +114,10 @@ pub(crate) trait ComputerUseAccess {
         permission: ComputerUsePermission,
     ) -> Result<(), ComputerUseAccessError>;
 
+    /// What System Settings calls the Accessibility permission, so SpaceTerm sends a person to a
+    /// list they can find.
+    fn accessibility_naming(&self) -> AccessibilityNaming;
+
     /// Whether [`Self::reset`] can act on exactly the running application's identity.
     fn can_reset(&self) -> bool;
 
@@ -143,6 +157,7 @@ pub(crate) mod testing {
         changes: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
         observers: Rc<Cell<usize>>,
         reads: Cell<usize>,
+        pub(crate) naming: Cell<AccessibilityNaming>,
     }
 
     /// Counts an observation until its owner drops it.
@@ -175,6 +190,7 @@ pub(crate) mod testing {
                 changes: Rc::default(),
                 observers: Rc::default(),
                 reads: Cell::new(0),
+                naming: Cell::new(AccessibilityNaming::default()),
             })
         }
 
@@ -263,6 +279,10 @@ pub(crate) mod testing {
         ) -> Result<(), ComputerUseAccessError> {
             self.opened.borrow_mut().push(permission);
             self.open_failure.get().map_or(Ok(()), Err)
+        }
+
+        fn accessibility_naming(&self) -> AccessibilityNaming {
+            self.naming.get()
         }
 
         fn can_reset(&self) -> bool {

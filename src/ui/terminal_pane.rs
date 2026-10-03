@@ -4066,10 +4066,22 @@ impl Render for TerminalPane {
         let floating_control_colors = &appearance.floating_control_colors;
         let status = self.authoritative_status();
         // A Permission Request waits behind a paste confirmation and any Terminal Failure.
-        let permission_request = (!self.permission_request.is_empty()
-            && paste_confirmation.is_none()
-            && status.is_none())
-        .then(|| self.permission_request.clone());
+        let permission_request = self
+            .lifecycle_dependencies
+            .permission_setup
+            .as_ref()
+            .filter(|_| {
+                !self.permission_request.is_empty()
+                    && paste_confirmation.is_none()
+                    && status.is_none()
+            })
+            .map(|setup| {
+                let setup = setup.read(cx);
+                self.permission_request
+                    .iter()
+                    .map(|permission| setup.copy(*permission))
+                    .collect::<Vec<_>>()
+            });
         // The notice docks on the half of the Pane away from the cursor, so it never hides the
         // line a person types on.
         let permission_request_edge = match self.screen.cursor.position {
@@ -4328,9 +4340,9 @@ impl Render for TerminalPane {
                     notice_shell,
                 ))
             })
-            .when_some(permission_request, |root, permissions| {
+            .when_some(permission_request, |root, copies| {
                 root.child(render_permission_request(
-                    permissions,
+                    copies,
                     permission_request_edge,
                     cx.entity().downgrade(),
                     appearance.clone(),
@@ -4588,7 +4600,7 @@ enum NoticeEdge {
 /// are clicks or shortcuts terminal input never sends, so a program cannot answer it by writing to
 /// the terminal or by timing a request before a keystroke.
 fn render_permission_request(
-    permissions: Vec<ComputerUsePermission>,
+    copies: Vec<&'static super::permission_setup::PermissionCopy>,
     edge: NoticeEdge,
     pane: gpui::WeakEntity<TerminalPane>,
     appearance: Arc<super::appearance::ChromeAppearance>,
@@ -4596,10 +4608,6 @@ fn render_permission_request(
 ) -> impl IntoElement {
     let floating_colors = &appearance.floating_colors;
     let decline_pane = pane.clone();
-    let copies: Vec<_> = permissions
-        .iter()
-        .map(|permission| super::permission_setup::permission_copy(*permission))
-        .collect();
     let names = copies
         .iter()
         .map(|copy| copy.name)

@@ -18,4 +18,4 @@ The `packaging/` directory owns everything that builds, identifies, signs, verif
 
 SpaceTerm Development has no microphone access because every build re-signs it ad hoc, and macOS would not keep the privacy grant across builds.
 
-Every identity offers Screen Recording and Device Control setup and recovery for computer-use tools. macOS keys those grants to the bundle identifier and code signature, so each identity holds its own grants. SpaceTerm Development loses them on each build, which makes it the identity where stale-grant recovery is exercised. A permission reset names only the bundle identifier of the running identity, and only when the running bundle matches it.
+Every identity offers Screen Recording and Accessibility setup and recovery for computer-use tools. macOS keys those grants to the bundle identifier and code signature, so each identity holds its own grants. SpaceTerm Development loses them on each build, which makes it the identity where stale-grant recovery is exercised. A permission reset names only the bundle identifier of the running identity, and only when the running bundle matches it.
