@@ -1229,6 +1229,24 @@ impl IconButton {
         self
     }
 
+    /// Paints an icon button inside its larger pointer target, as desktop window controls do.
+    pub fn visual_inset(mut self, inset: Pixels) -> Self {
+        self.core.visual_inset = inset.max(px(0.0));
+        self
+    }
+
+    /// Overrides the border independently from the pointer target and visual fill.
+    pub fn border_width(mut self, width: Pixels) -> Self {
+        self.core.border_width = Some(width.max(px(0.0)));
+        self
+    }
+
+    /// Uses a desktop outline instead of the application's AppKit focus band.
+    pub fn focus_outline(mut self, width: Pixels, outset: Pixels, radius: Pixels) -> Self {
+        self.core.focus_outline = Some((width.max(px(0.0)), outset, radius.max(px(0.0))));
+        self
+    }
+
     /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
@@ -1335,6 +1353,9 @@ struct ButtonCore {
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     icon_button_size: Option<Pixels>,
     corner_radius: Option<Pixels>,
+    visual_inset: Pixels,
+    border_width: Option<Pixels>,
+    focus_outline: Option<(Pixels, Pixels, Pixels)>,
     joined_edge: JoinedEdge,
     even_spacing: bool,
     #[cfg(feature = "control-preview")]
@@ -1364,6 +1385,9 @@ impl ButtonCore {
             contextual_style: None,
             icon_button_size: None,
             corner_radius: None,
+            visual_inset: px(0.0),
+            border_width: None,
+            focus_outline: None,
             joined_edge: JoinedEdge::None,
             even_spacing: false,
             #[cfg(feature = "control-preview")]
@@ -1389,6 +1413,9 @@ impl ButtonCore {
         }
         if let Some(corner_radius) = self.corner_radius {
             style.corner_radius = corner_radius;
+        }
+        if let Some(border_width) = self.border_width {
+            style.border_width = border_width;
         }
         style
     }
@@ -1552,6 +1579,7 @@ impl ButtonCore {
 
         let ring_id = crate::focus_ring::ring_id(&self.id);
         let corner_radii = self.joined_edge.corner_radii(style.corner_radius);
+        let visual_inset = self.visual_inset;
         let button = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1589,7 +1617,18 @@ impl ButtonCore {
                 button.border_l(px(0.0))
             })
             .border_color(border_color)
-            .bg(paint.background)
+            .when(visual_inset == px(0.0), |button| {
+                button.bg(paint.background)
+            })
+            .when(visual_inset > px(0.0), |button| {
+                button.child(
+                    div()
+                        .absolute()
+                        .inset(visual_inset)
+                        .rounded(style.corner_radius)
+                        .bg(paint.background),
+                )
+            })
             .shadow(paint.shadow.layers())
             .shadow_outside_only()
             .text_color(paint.foreground)
@@ -1649,9 +1688,14 @@ impl ButtonCore {
         let button = crate::Ringed::new(
             button,
             focus_ring.map(|ring_color| {
-                crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
-                    .corner_radii(corner_radii)
-                    .debug_selector(focus_selector)
+                let mut ring =
+                    crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
+                        .corner_radii(corner_radii)
+                        .debug_selector(focus_selector);
+                if let Some((width, outset, radius)) = self.focus_outline {
+                    ring = ring.outline(width, outset, radius);
+                }
+                ring
             }),
         );
 
