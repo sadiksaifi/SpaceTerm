@@ -146,6 +146,7 @@ pub(crate) enum RecordedSessionCommand {
     EndFind(FindQueryGeneration),
     RequestPaste(String),
     ResolvePaste(PasteConfirmationId, PasteDecision),
+    CopyOrForward(super::InputModifiers),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
     SetPresentable(bool),
@@ -583,6 +584,14 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
             .borrow_mut()
             .pop_front()
             .map_or_else(|| self.selection_response.clone(), Ok)
+    }
+
+    fn copy_or_forward(
+        &self,
+        modifiers: super::InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.record(RecordedSessionCommand::CopyOrForward(modifiers));
+        self.copy_selection()
     }
 
     fn copy_selection_at(

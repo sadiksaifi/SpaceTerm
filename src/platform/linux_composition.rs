@@ -335,4 +335,144 @@ mod tests {
         };
         assert_eq!(actual, expected);
     }
+
+    fn linux_terminal_pane(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<crate::ui::TerminalPane>,
+        &mut gpui::VisualTestContext,
+        crate::terminal::testing::TestTerminalSessionRecords,
+    ) {
+        cx.update(|cx| {
+            crate::ui::init(cx).unwrap();
+            cx.clear_key_bindings();
+            let profile = desktop_profile(
+                Rc::new(crate::platform::locale::FixedLocaleDirection(
+                    spaceterm_ui::TextDirection::LeftToRight,
+                )),
+                crate::platform::keyboard_layout::testing::us(),
+            )
+            .unwrap()
+            .install(cx);
+            crate::keybindings::runtime::install(profile, cx);
+        });
+        let records = crate::terminal::testing::TestTerminalSessionRecords::default();
+        let factory = crate::terminal::WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+                records.clone(),
+            )),
+            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/linux-keymap-test")),
+        );
+        use crate::terminal::TerminalKeyInputAdapterFactory;
+        let prepared = factory.prepare_child_launch().unwrap();
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            crate::ui::TerminalPane::new_with_prepared_launch(
+                factory, prepared,
+                super::super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new().create(),
+                &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                crate::terminal::native_services::testing::adapters(),
+                crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (pane, cx, records)
+    }
+
+    #[gpui::test]
+    fn linux_installed_copy_binding_forwards_host_modifiers(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::testing::RecordedSessionCommand;
+        let (_pane, cx, records) = linux_terminal_pane(cx);
+        cx.simulate_keystrokes("ctrl-shift-c");
+        cx.run_until_parked();
+        let copies = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| {
+                if let RecordedSessionCommand::CopyOrForward(modifiers) = call.command {
+                    Some(modifiers)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copies,
+            [crate::terminal::InputModifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[gpui::test]
+    fn linux_installed_keymap_preserves_unshifted_xterm_control_forms(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{RecordedSessionCommand, TerminalEmulator};
+        let (_pane, cx, records) = linux_terminal_pane(cx);
+        let geometry = crate::terminal::geometry::TerminalGeometry::from_grid(
+            crate::terminal::geometry::CellGridSize::new(80, 30),
+            crate::terminal::geometry::LogicalCellSize::new(10.0, 20.0),
+            crate::terminal::geometry::BackingScale::ONE,
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        for (chord, scancode, character, expected) in [
+            ("ctrl-2", 3, '2', b"\x00".as_slice()),
+            ("ctrl-6", 7, '6', b"\x1e".as_slice()),
+            ("ctrl-/", 53, '/', b"\x1f".as_slice()),
+            ("ctrl-[", 26, '[', b"\x1b".as_slice()),
+            ("ctrl-]", 27, ']', b"\x1d".as_slice()),
+        ] {
+            for native in [false, true] {
+                let before = records.commands().len();
+                if native {
+                    let keystroke = gpui::Keystroke::parse(chord).unwrap();
+                    let facts = gpui::NativeKeyEvent {
+                        scancode,
+                        unshifted: Some(character),
+                        modifiers: gpui::Modifiers::control(),
+                        ..Default::default()
+                    };
+                    cx.simulate_native_key_event(
+                        gpui::KeyDownEvent {
+                            keystroke: keystroke.clone(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        facts,
+                    );
+                    cx.simulate_native_key_event(gpui::KeyUpEvent { keystroke }, facts);
+                } else {
+                    cx.simulate_keystrokes(chord);
+                }
+                cx.run_until_parked();
+                let inputs = records
+                    .commands()
+                    .into_iter()
+                    .skip(before)
+                    .filter_map(|call| {
+                        if let RecordedSessionCommand::Key(input) = call.command {
+                            Some(input)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !inputs.is_empty(),
+                    "{chord} must reach the Terminal Session"
+                );
+                let bytes = inputs
+                    .into_iter()
+                    .flat_map(|input| emulator.key(input).unwrap().bytes)
+                    .collect::<Vec<_>>();
+                assert_eq!(bytes, expected, "{chord}, native={native}");
+            }
+        }
+    }
 }
