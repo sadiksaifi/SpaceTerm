@@ -318,6 +318,42 @@ mod tests {
     }
 
     #[test]
+    fn askpass_endpoint_avoids_a_pre_created_shared_runtime_name() {
+        let directory = TestDirectory::new();
+        let temporary = directory.0.join("temporary");
+        let elsewhere = directory.0.join("elsewhere");
+        fs::create_dir_all(&temporary).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, temporary.join("spaceterm")).unwrap();
+        let paths = AppPaths::resolve(
+            &AppDirectoryEnvironment {
+                home: Some(directory.0.join("home").into_os_string()),
+                ..Default::default()
+            },
+            &AppPathHostFacts::new(temporary.clone(), 104).unwrap(),
+            Arc::new(UnixSecureFilesystem),
+        )
+        .unwrap();
+
+        let attempt = start_attempt_with_presenter(
+            &paths,
+            PathBuf::from("/opt/spaceterm/bin/spaceterm"),
+            &UnixAskPassLocalIpc,
+            Arc::new(FakePresenter::new([])),
+        )
+        .unwrap();
+
+        let endpoint = lease_value(&attempt.lease, ENDPOINT_ENV);
+        let (_, socket_path) = parse_authenticated_endpoint(&endpoint).unwrap();
+        let runtime = socket_path.parent().unwrap().parent().unwrap();
+        assert_eq!(runtime.parent(), Some(temporary.as_path()));
+        assert_ne!(runtime, temporary.join("spaceterm"));
+        assert!(socket_path.exists());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        attempt.lease.cancel();
+    }
+
+    #[test]
     fn helper_rejects_an_unexpected_peer_process_before_writing() {
         let directory = TestDirectory::new();
         let socket_path = directory.0.join("wrong-broker.sock");
