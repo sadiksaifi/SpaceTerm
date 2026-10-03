@@ -613,6 +613,13 @@ export SPACETERM_DEVELOPER_WORKBENCH="${usage_section}"
 exec bash scripts/run-development-app-linux.sh
 '''
 
+[tasks."test:compose:linux"]
+description = "Test native Compose key lifecycles and Kitty encoding on a private display"
+usage = '''
+arg "<backend>" help="Display backend: x11 or wayland"
+'''
+run = './scripts/cargo-artifacts.sh run -- python3 scripts/test-compose-input-linux.py "${usage_backend?}"'
+
 [tasks."test:linux"]
 description = "Run native Linux and shared Unix Adapter tests"
 run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
