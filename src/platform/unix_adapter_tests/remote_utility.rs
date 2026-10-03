@@ -1,5 +1,6 @@
 //! Native Adapter integration evidence.
 use super::*;
+use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_ssh_process::UnixSshProcessAdapter;
 use crate::ssh::command::SshCommandSpec;
 use crate::ssh::control_connection::SshCancellationToken;
@@ -18,17 +19,15 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[test]
 fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
-    let pid_file = PathBuf::from(format!(
-        "/tmp/spaceterm-utility-drop-{}.pid",
-        std::process::id()
-    ));
+    let pid_file =
+        short_temporary_root().join(format!("spaceterm-utility-drop-{}.pid", std::process::id()));
     let script = format!("echo $$ > '{}'; sleep 30", pid_file.display());
     let command = Arc::new(SshCommandSpec::for_test(
         PathBuf::from("/bin/sh"),
         vec!["-c".into(), script.into()],
     ));
     let environment = SshProcessEnvironment::new_without_authentication_from_startup(
-        PathBuf::from("/tmp"),
+        short_temporary_root().to_path_buf(),
         &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
             |_| None,
             "/usr/bin:/bin".into(),
@@ -86,7 +85,7 @@ fn completed_native_utility_should_not_cancel_the_reusable_client_token() {
         vec!["-s".into()],
     ));
     let environment = SshProcessEnvironment::new_without_authentication_from_startup(
-        PathBuf::from("/tmp"),
+        short_temporary_root().to_path_buf(),
         &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
             |_| None,
             "/usr/bin:/bin".into(),
@@ -138,8 +137,8 @@ fn generated_remote_scripts_should_be_valid_posix_shell_syntax() {
 
 #[test]
 fn account_script_should_reject_a_conforming_sh_without_a_login_option() {
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-account-sh-reject-{}",
+    let test_root = short_temporary_root().join(format!(
+        "spaceterm-account-sh-reject-{}",
         std::process::id()
     ));
     let home = test_root.join("home");
@@ -176,8 +175,8 @@ fn account_script_should_reject_a_conforming_sh_without_a_login_option() {
 
 #[test]
 fn account_script_should_reject_relative_sh_without_executing_it() {
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-account-relative-sh-{}",
+    let test_root = short_temporary_root().join(format!(
+        "spaceterm-account-relative-sh-{}",
         std::process::id()
     ));
     let home = test_root.join("home");
@@ -219,8 +218,8 @@ fn account_script_should_reject_relative_sh_without_executing_it() {
 
 #[test]
 fn account_script_should_record_a_supported_posix_sh_login_option() {
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-account-sh-accept-{}",
+    let test_root = short_temporary_root().join(format!(
+        "spaceterm-account-sh-accept-{}",
         std::process::id()
     ));
     let home = test_root.join("home");
@@ -262,7 +261,8 @@ fn account_script_should_record_a_supported_posix_sh_login_option() {
 
 #[test]
 fn injected_million_entry_enumerator_should_stop_at_the_examination_bound() {
-    let test_root = PathBuf::from(format!("/tmp/spaceterm-list-bound-{}", std::process::id()));
+    let test_root =
+        short_temporary_root().join(format!("spaceterm-list-bound-{}", std::process::id()));
     let fake_bin = test_root.join("bin");
     let fake_find = fake_bin.join("find");
     let count_file = test_root.join("count");
@@ -286,7 +286,7 @@ done
     let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
     let mut child = Command::new("/bin/sh")
         .env_clear()
-        .env("HOME", "/tmp")
+        .env("HOME", short_temporary_root())
         .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
         .env("TMPDIR", &test_root)
         .env("SPACETERM_FAKE_FIND_COUNT", &count_file)
@@ -333,10 +333,8 @@ fn listing_enumerator_should_be_terminated_and_waited_when_remote_shell_is_cance
         }
     }
 
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-list-cancel-{}",
-        std::process::id()
-    ));
+    let test_root =
+        short_temporary_root().join(format!("spaceterm-list-cancel-{}", std::process::id()));
     let fake_bin = test_root.join("bin");
     let fake_find = fake_bin.join("find");
     let pid_file = test_root.join("enumerator-pid");
@@ -369,7 +367,7 @@ while :; do /bin/sleep 1; done
     let child = Command::new("/bin/sh")
         .process_group(0)
         .env_clear()
-        .env("HOME", "/tmp")
+        .env("HOME", short_temporary_root())
         .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
         .env("TMPDIR", &test_root)
         .env("SPACETERM_ENUMERATOR_PID", &pid_file)
@@ -419,7 +417,8 @@ while :; do /bin/sleep 1; done
 
 #[test]
 fn generated_listing_should_preserve_argv_safe_directory_names() {
-    let test_root = PathBuf::from(format!("/tmp/spaceterm-list-names-{}", std::process::id()));
+    let test_root =
+        short_temporary_root().join(format!("spaceterm-list-names-{}", std::process::id()));
     let expected = ["Space Term", "-'quoted", ".hidden"];
     fs::create_dir_all(&test_root).unwrap();
     for name in expected {
@@ -430,9 +429,9 @@ fn generated_listing_should_preserve_argv_safe_directory_names() {
     let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
     let mut child = Command::new("/bin/sh")
         .env_clear()
-        .env("HOME", "/tmp")
+        .env("HOME", short_temporary_root())
         .env("PATH", "/usr/bin:/bin")
-        .env("TMPDIR", "/tmp")
+        .env("TMPDIR", short_temporary_root())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -457,10 +456,8 @@ fn generated_listing_should_preserve_argv_safe_directory_names() {
 
 #[test]
 fn ambiguous_mkdir_failure_should_not_claim_permission_denied() {
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-mkdir-failed-{}",
-        std::process::id()
-    ));
+    let test_root =
+        short_temporary_root().join(format!("spaceterm-mkdir-failed-{}", std::process::id()));
     let fake_bin = test_root.join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
     let fake_mkdir = fake_bin.join("mkdir");
@@ -470,7 +467,7 @@ fn ambiguous_mkdir_failure_should_not_claim_permission_denied() {
     let script = build_path_script("mkdir", target.to_str().unwrap()).unwrap();
     let mut child = Command::new("/bin/sh")
         .env_clear()
-        .env("HOME", "/tmp")
+        .env("HOME", short_temporary_root())
         .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -489,10 +486,8 @@ fn ambiguous_mkdir_failure_should_not_claim_permission_denied() {
 
 #[test]
 fn generated_probe_should_report_an_inaccessible_ancestor_without_claiming_missing() {
-    let test_root = PathBuf::from(format!(
-        "/tmp/spaceterm-probe-status-{}",
-        std::process::id()
-    ));
+    let test_root =
+        short_temporary_root().join(format!("spaceterm-probe-status-{}", std::process::id()));
     let private = test_root.join("private");
     let ordinary_file = test_root.join("ordinary-file");
     fs::create_dir_all(&private).unwrap();
@@ -503,7 +498,7 @@ fn generated_probe_should_report_an_inaccessible_ancestor_without_claiming_missi
         let script = build_path_script("probe", path.to_str().unwrap()).unwrap();
         let mut child = Command::new("/bin/sh")
             .env_clear()
-            .env("HOME", "/tmp")
+            .env("HOME", short_temporary_root())
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -541,7 +536,7 @@ fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
         vec!["-c".into(), "sleep 30".into()],
     ));
     let environment = SshProcessEnvironment::new_without_authentication_from_startup(
-        PathBuf::from("/tmp"),
+        short_temporary_root().to_path_buf(),
         &crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
             |_| None,
             "/usr/bin:/bin".into(),
