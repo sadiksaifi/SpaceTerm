@@ -2596,8 +2596,20 @@ impl TerminalPane {
             return;
         };
 
-        if button == PointerButton::Middle && !self.screen.mouse_tracking && self.primary_selection.is_some() {
-            if let Some(text) = self.primary_selection.as_ref().and_then(|primary| primary.read(cx))
+        // Shift overrides application mouse tracking for PRIMARY paste as it does for selection,
+        // so a Selection made with Shift-drag can be pasted the same way.
+        if button == PointerButton::Middle
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            )
+            && self.primary_selection.is_some()
+        {
+            if let Some(text) = self
+                .primary_selection
+                .as_ref()
+                .and_then(|primary| primary.read(cx))
                 && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
                 && !payload.text().is_empty() { self.request_paste_text(payload, cx); }
             cx.stop_propagation();
