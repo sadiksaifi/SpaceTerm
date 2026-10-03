@@ -2,6 +2,13 @@ use gpui::{Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersCh
 
 use super::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native key Adapter reports modifier transitions"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalKeyInputEventKind {
     KeyDown,
@@ -26,9 +33,35 @@ pub(crate) enum KeyTranslation {
 pub(crate) trait TerminalKeyInputAdapter {
     fn key_down(&mut self, event: &KeyDownEvent) -> KeyTranslation;
 
+    /// Native facts exist only during the window's platform input callback. Synthetic input
+    /// follows the ordinary adapter contract, and hosts with their own bridge keep that bridge.
+    fn key_down_with_native(
+        &mut self,
+        event: &KeyDownEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> KeyTranslation {
+        self.key_down(event)
+    }
+
     fn key_up(&mut self, event: &KeyUpEvent) -> KeyTranslation;
 
+    fn key_up_with_native(
+        &mut self,
+        event: &KeyUpEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> KeyTranslation {
+        self.key_up(event)
+    }
+
     fn modifiers_changed(&mut self, event: &ModifiersChangedEvent) -> Option<KeyTranslation>;
+
+    fn modifiers_changed_with_native(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> Option<KeyTranslation> {
+        self.modifiers_changed(event)
+    }
 
     fn input_method_commit(&mut self, text: String) -> KeyTranslation;
 

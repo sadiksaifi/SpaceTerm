@@ -208,7 +208,21 @@ impl State {
         })
     }
 
-    /// Observe dirty state and copy one bounded semantic delta.
+    /// Retain dirty row identities and topology before visual rendering clears
+    /// Ghostty's dirty flags or scrollback compression discards dirty headers.
+    /// This does not extract text or decode compressed pages. Capture before
+    /// and after resize so newly active history rows retain mutation coverage.
+    pub fn capture(&mut self, terminal: &Terminal<'_, '_>) -> Result<()> {
+        // SAFETY: Both handles stay alive throughout this synchronous call, and
+        // the mutable borrow exclusively owns the incremental observer state.
+        let result = unsafe {
+            ffi::ghostty_accessibility_state_capture(self.inner.as_ptr(), terminal.inner.as_raw())
+        };
+        from_result(result)
+    }
+
+    /// Observe dirty state and copy one bounded semantic delta. Use [`Self::capture`]
+    /// before rendering or compression if extraction is deferred until later.
     pub fn update(
         &mut self,
         terminal: &Terminal<'_, '_>,

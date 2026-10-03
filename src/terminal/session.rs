@@ -275,11 +275,25 @@ pub(crate) enum SelectionCopyError {
     WorkerStopped,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct AccessibilitySelectionSender {
     commands: CommandSender<Command>,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
+)]
 impl AccessibilitySelectionSender {
     #[cfg(test)]
     pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
@@ -303,6 +317,13 @@ impl AccessibilitySelectionSender {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
+)]
 #[derive(Clone)]
 pub(crate) struct AccessibilityDemandSender {
     commands: CommandSender<Command>,
@@ -315,6 +336,13 @@ impl fmt::Debug for AccessibilityDemandSender {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
+)]
 impl AccessibilityDemandSender {
     pub(crate) fn request(&self) {
         self.request_at(Instant::now());
@@ -423,7 +451,11 @@ pub(crate) trait TerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>>;
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
-    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+    /// Copy the Selection, or forward the host Copy chord to enhanced keyboard applications.
+    fn copy_or_forward(
+        &self,
+        _: InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.copy_selection()
     }
     fn copy_selection_at(
@@ -690,14 +722,17 @@ impl TerminalSessionHandle for TerminalSession {
         self.copy_selection_query(None)
     }
 
-    fn copy_or_forward(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+    fn copy_or_forward(
+        &self,
+        modifiers: InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         let commands = self
             .commands
             .as_ref()
             .ok_or(SelectionCopyError::WorkerStopped)?;
         let (reply, receiver) = mpsc::sync_channel(1);
         commands
-            .send(Command::CopyOrForward(reply))
+            .send(Command::CopyOrForward(modifiers, reply))
             .map_err(|_| SelectionCopyError::WorkerStopped)?;
         receiver
             .recv()
@@ -826,7 +861,21 @@ enum Command {
         Option<PresentationGeneration>,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
     ),
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
+    )]
     AccessibilitySelection(AccessibilitySelectionRequest),
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
+    )]
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
@@ -841,7 +890,10 @@ enum Command {
     CompressScrollback,
     Shutdown,
     PollHiddenInput,
-    CopyOrForward(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    CopyOrForward(
+        InputModifiers,
+        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
+    ),
     CompleteClipboard(u64, ClipboardCompletion),
     ClipboardExpired,
     ResumeOutput(Option<u64>),
@@ -1439,7 +1491,7 @@ impl TerminalWorker {
                 self.process_paste_resolution(id, decision, reply)
             }
             Command::PasteConfirmationExpired => true,
-            Command::CopyOrForward(reply) => {
+            Command::CopyOrForward(modifiers, reply) => {
                 let selection = self
                     .emulator
                     .selection_copy(SelectionCopyOptions::default())
@@ -1455,10 +1507,7 @@ impl TerminalWorker {
                         logical_key: "c".into(),
                         text: None,
                         unshifted_codepoint: Some('c'),
-                        modifiers: InputModifiers {
-                            platform: true,
-                            ..InputModifiers::default()
-                        },
+                        modifiers,
                         consumed_modifiers: InputModifiers::default(),
                         option_as_alt: crate::terminal::key::OptionAsAltPolicy::None,
                     });
@@ -2288,6 +2337,10 @@ fn join_worker(worker: JoinHandle<()>) {
 #[path = "session/tests.rs"]
 mod tests;
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
-#[path = "../platform/macos_adapter_tests/session.rs"]
-mod macos_adapter_tests;
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+#[path = "../platform/unix_adapter_tests/session.rs"]
+mod unix_adapter_tests;

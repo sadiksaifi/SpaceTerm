@@ -1,0 +1,675 @@
+//! Linux terminal keys preserve the XKB facts available during window input dispatch.
+use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, NativeKeyEvent};
+
+use crate::terminal::key_input::UnhandledKeyEvent;
+use crate::terminal::{
+    GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, InputModifiers, KeyAction,
+    KeyInput, KeyTranslation, OptionAsAltPolicy, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
+};
+
+pub(super) struct LinuxTerminalKeyInputAdapterFactory {
+    gpui: GpuiTerminalKeyInputAdapterFactory,
+}
+
+impl LinuxTerminalKeyInputAdapterFactory {
+    /// Alt is always Alt on Linux: AltGr text arrives already composed by xkbcommon.
+    pub(super) const fn new() -> Self {
+        Self {
+            gpui: GpuiTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::Both),
+        }
+    }
+}
+
+impl TerminalKeyInputAdapterFactory for LinuxTerminalKeyInputAdapterFactory {
+    fn create(&self) -> Box<dyn TerminalKeyInputAdapter> {
+        Box::new(LinuxTerminalKeyInputAdapter {
+            gpui: self.gpui.adapter(),
+            pressed_modifiers: Vec::new(),
+        })
+    }
+}
+
+struct LinuxTerminalKeyInputAdapter {
+    gpui: GpuiTerminalKeyInputAdapter,
+    pressed_modifiers: Vec<(u16, Modifiers)>,
+}
+
+impl LinuxTerminalKeyInputAdapter {
+    fn translate(
+        &self,
+        keystroke: &Keystroke,
+        native: NativeKeyEvent,
+        action: KeyAction,
+        kind: TerminalKeyInputEventKind,
+    ) -> KeyTranslation {
+        let mut input = KeyInput {
+            action,
+            physical_key: super::linux_keycodes::physical_key(native.scancode),
+            native_key_code: Some(native.scancode),
+            logical_key: keystroke.key.clone(),
+            text: keystroke
+                .key_char
+                .clone()
+                .filter(|text| !text.is_empty() && !text.chars().any(char::is_control)),
+            unshifted_codepoint: native.unshifted,
+            modifiers: modifiers(native.modifiers),
+            consumed_modifiers: modifiers(native.consumed),
+            // AltGr is an XKB level shift, not the Alt modifier. Option-as-Alt is a Darwin
+            // encoder option and must never reinterpret the text selected by the Linux keymap.
+            option_as_alt: OptionAsAltPolicy::None,
+        };
+        input.modifiers.caps_lock = native.caps_lock;
+        input.modifiers.num_lock = native.num_lock;
+        let held = |scancode| {
+            self.pressed_modifiers
+                .iter()
+                .any(|(key, _)| *key == scancode)
+        };
+        input.modifiers.shift_right = native.modifiers.shift && held(54);
+        input.modifiers.control_right = native.modifiers.control && held(97);
+        input.modifiers.alt_right = native.modifiers.alt && held(100);
+        input.modifiers.platform_right = native.modifiers.platform && held(126);
+        if input.validate().is_ok() {
+            return KeyTranslation::Encoded(input);
+        }
+        if action != KeyAction::Release
+            && !native.modifiers.control
+            && !native.modifiers.alt
+            && !native.modifiers.platform
+            && let Some(text) = input.text
+        {
+            return KeyTranslation::TextInput(text);
+        }
+        KeyTranslation::Unhandled(UnhandledKeyEvent {
+            kind,
+            action,
+            native_key_code: Some(native.scancode),
+        })
+    }
+}
+
+fn modifiers(modifiers: Modifiers) -> InputModifiers {
+    InputModifiers {
+        shift: modifiers.shift,
+        control: modifiers.control,
+        alt: modifiers.alt,
+        platform: modifiers.platform,
+        ..InputModifiers::default()
+    }
+}
+
+impl TerminalKeyInputAdapter for LinuxTerminalKeyInputAdapter {
+    fn key_down(&mut self, event: &KeyDownEvent) -> KeyTranslation {
+        consume_text_shift(self.gpui.key_down(event))
+    }
+
+    fn key_up(&mut self, event: &KeyUpEvent) -> KeyTranslation {
+        consume_text_shift(self.gpui.key_up(event))
+    }
+
+    fn key_down_with_native(
+        &mut self,
+        event: &KeyDownEvent,
+        native: Option<NativeKeyEvent>,
+    ) -> KeyTranslation {
+        match native {
+            Some(native) => self.translate(
+                &event.keystroke,
+                native,
+                if event.is_held {
+                    KeyAction::Repeat
+                } else {
+                    KeyAction::Press
+                },
+                TerminalKeyInputEventKind::KeyDown,
+            ),
+            None => self.key_down(event),
+        }
+    }
+
+    fn key_up_with_native(
+        &mut self,
+        event: &KeyUpEvent,
+        native: Option<NativeKeyEvent>,
+    ) -> KeyTranslation {
+        match native {
+            Some(native) => self.translate(
+                &event.keystroke,
+                native,
+                KeyAction::Release,
+                TerminalKeyInputEventKind::KeyUp,
+            ),
+            None => self.key_up(event),
+        }
+    }
+
+    fn modifiers_changed(&mut self, event: &ModifiersChangedEvent) -> Option<KeyTranslation> {
+        self.pressed_modifiers.retain(|(_, active)| {
+            (active.shift && event.modifiers.shift)
+                || (active.control && event.modifiers.control)
+                || (active.alt && event.modifiers.alt)
+                || (active.platform && event.modifiers.platform)
+        });
+        self.gpui.modifiers_changed(event)
+    }
+
+    fn modifiers_changed_with_native(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        native: Option<NativeKeyEvent>,
+    ) -> Option<KeyTranslation> {
+        let Some(mut native) = native else {
+            return self.modifiers_changed(event);
+        };
+        let Some((scancode, pressed)) = native.modifier_key else {
+            return self.modifiers_changed(event);
+        };
+        self.gpui.modifiers_changed(event);
+        let previous = self
+            .pressed_modifiers
+            .iter()
+            .position(|(key, _)| *key == scancode);
+        if pressed {
+            if previous.is_some() {
+                return None;
+            }
+            // Keep only the physical key's ordinary modifier when XKB actually reported it.
+            // This also handles remapped modifier keys without inventing an aggregate flag.
+            let active = Modifiers {
+                shift: matches!(scancode, 42 | 54) && native.modifiers.shift,
+                control: matches!(scancode, 29 | 97) && native.modifiers.control,
+                alt: matches!(scancode, 56 | 100) && native.modifiers.alt,
+                platform: matches!(scancode, 125 | 126) && native.modifiers.platform,
+                ..Modifiers::none()
+            };
+            self.pressed_modifiers.push((scancode, active));
+        } else if let Some(previous) = previous {
+            self.pressed_modifiers.remove(previous);
+        }
+        // XKB's predicted release clears the whole modifier bit. Another physical key may
+        // still hold it until the following aggregate state arrives.
+        for (_, active) in &self.pressed_modifiers {
+            native.modifiers.shift |= active.shift;
+            native.modifiers.control |= active.control;
+            native.modifiers.alt |= active.alt;
+            native.modifiers.platform |= active.platform;
+        }
+        Some(self.translate(
+            &Keystroke {
+                key: "modifier".into(),
+                key_char: None,
+                modifiers: native.modifiers,
+            },
+            native,
+            if pressed {
+                KeyAction::Press
+            } else {
+                KeyAction::Release
+            },
+            TerminalKeyInputEventKind::ModifiersChanged,
+        ))
+    }
+
+    fn input_method_commit(&mut self, text: String) -> KeyTranslation {
+        self.gpui.input_method_commit(text)
+    }
+
+    fn reset(&mut self) {
+        self.pressed_modifiers.clear();
+        self.gpui.reset();
+    }
+}
+
+/// xkbcommon consumes Shift when it selects a key's shifted text, as GTK reports it.
+fn consume_text_shift(translation: KeyTranslation) -> KeyTranslation {
+    match translation {
+        KeyTranslation::Encoded(mut input) => {
+            input.consumed_modifiers.shift = input.modifiers.shift && input.text.is_some();
+            KeyTranslation::Encoded(input)
+        }
+        translation => translation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::PhysicalKey;
+    use gpui::Keystroke;
+
+    #[test]
+    fn modifier_sides_transitions_aggregate_updates_and_reset_stay_distinct() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let transition =
+            |adapter: &mut dyn TerminalKeyInputAdapter, scancode, pressed, modifiers| {
+                let event = ModifiersChangedEvent {
+                    modifiers,
+                    capslock: gpui::Capslock::default(),
+                };
+                let native = NativeKeyEvent {
+                    scancode,
+                    modifiers,
+                    modifier_key: Some((scancode, pressed)),
+                    ..Default::default()
+                };
+                let Some(KeyTranslation::Encoded(input)) =
+                    adapter.modifiers_changed_with_native(&event, Some(native))
+                else {
+                    panic!("expected physical modifier")
+                };
+                input
+            };
+        let left = transition(adapter.as_mut(), 42, true, Modifiers::shift());
+        assert_eq!(left.physical_key, PhysicalKey::ShiftLeft);
+        assert_eq!(left.action, KeyAction::Press);
+        let right = transition(adapter.as_mut(), 54, true, Modifiers::shift());
+        assert_eq!(right.physical_key, PhysicalKey::ShiftRight);
+        assert!(right.modifiers.shift_right);
+        assert_eq!(
+            adapter.modifiers_changed_with_native(
+                &ModifiersChangedEvent {
+                    modifiers: Modifiers::shift(),
+                    capslock: gpui::Capslock::default()
+                },
+                None
+            ),
+            None
+        );
+        let released = transition(adapter.as_mut(), 54, false, Modifiers::none());
+        assert_eq!(released.action, KeyAction::Release);
+        assert!(released.modifiers.shift);
+        assert!(!released.modifiers.shift_right);
+        let released = transition(adapter.as_mut(), 42, false, Modifiers::none());
+        assert!(!released.modifiers.shift);
+        transition(adapter.as_mut(), 54, true, Modifiers::shift());
+        adapter.reset();
+        let reset = transition(adapter.as_mut(), 42, true, Modifiers::shift());
+        assert!(!reset.modifiers.shift_right);
+    }
+
+    #[gpui::test]
+    fn native_window_facts_reach_the_pane_owned_terminal_session(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::testing::{
+            RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+            test_local_directory,
+        };
+        use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
+        use std::{path::PathBuf, rc::Rc};
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let factory = WorkspaceTerminalSessionFactory::new_local(
+            factory,
+            test_local_directory(PathBuf::from("/keyboard-test")),
+        );
+        let prepared = factory.prepare_child_launch().unwrap();
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            crate::ui::TerminalPane::new_with_prepared_launch(
+                factory, prepared, LinuxTerminalKeyInputAdapterFactory::new().create(),
+                &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                crate::terminal::native_services::testing::adapters(),
+                crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_native_key_event(
+            KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers: gpui::Modifiers::none(),
+                    key: "z".into(),
+                    key_char: Some("z".into()),
+                },
+                is_held: false,
+                prefer_character_input: false,
+            },
+            gpui::NativeKeyEvent {
+                scancode: 21,
+                unshifted: Some('z'),
+                ..Default::default()
+            },
+        );
+        let keys = records
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command.command {
+                RecordedSessionCommand::Key(input) => Some(input),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].physical_key, PhysicalKey::Y);
+        assert_eq!(keys[0].text.as_deref(), Some("z"));
+        assert_eq!(keys[0].native_key_code, Some(21));
+    }
+
+    #[test]
+    fn native_layout_preserves_physical_key_consumed_shift_and_repeat() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let native = gpui::NativeKeyEvent {
+            scancode: 21, // The physical Y key produces Z on German keyboards.
+            modifiers: gpui::Modifiers::shift(),
+            consumed: gpui::Modifiers::shift(),
+            unshifted: Some('z'),
+            ..Default::default()
+        };
+        let event = KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers::shift(),
+                key: "z".into(),
+                key_char: Some("Z".into()),
+            },
+            is_held: true,
+            prefer_character_input: false,
+        };
+        let KeyTranslation::Encoded(input) = adapter.key_down_with_native(&event, Some(native))
+        else {
+            panic!("expected encoded key")
+        };
+        assert_eq!(input.physical_key, PhysicalKey::Y);
+        assert_eq!(input.native_key_code, Some(21));
+        assert_eq!(input.unshifted_codepoint, Some('z'));
+        assert_eq!(input.action, crate::terminal::KeyAction::Repeat);
+        assert_eq!(input.text.as_deref(), Some("Z"));
+        assert!(input.modifiers.shift && input.consumed_modifiers.shift);
+        let KeyTranslation::Encoded(release) = adapter.key_up_with_native(
+            &KeyUpEvent {
+                keystroke: event.keystroke,
+            },
+            Some(native),
+        ) else {
+            panic!("expected release")
+        };
+        assert_eq!(release.physical_key, PhysicalKey::Y);
+        assert_eq!(release.action, crate::terminal::KeyAction::Release);
+    }
+
+    #[test]
+    fn altgr_text_is_a_level_shift_without_terminal_meta() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let KeyTranslation::Encoded(input) = adapter.key_down_with_native(
+            &KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers: gpui::Modifiers::none(),
+                    key: "@".into(),
+                    key_char: Some("@".into()),
+                },
+                is_held: false,
+                prefer_character_input: false,
+            },
+            Some(gpui::NativeKeyEvent {
+                scancode: 16,
+                unshifted: Some('q'),
+                ..Default::default()
+            }),
+        ) else {
+            panic!("expected encoded key")
+        };
+        assert_eq!(input.physical_key, PhysicalKey::Q);
+        assert_eq!(input.text.as_deref(), Some("@"));
+        assert!(!input.modifiers.alt && !input.consumed_modifiers.alt);
+    }
+
+    fn press(
+        adapter: &mut dyn TerminalKeyInputAdapter,
+        keystroke: &str,
+        text: Option<&str>,
+    ) -> KeyTranslation {
+        let mut keystroke = Keystroke::parse(keystroke).unwrap();
+        keystroke.key_char = text.map(ToOwned::to_owned);
+        adapter.key_down(&KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        })
+    }
+
+    #[test]
+    fn linux_key_input_consumes_shift_only_for_shifted_text() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let KeyTranslation::Encoded(upper) = press(adapter.as_mut(), "shift-a", Some("A")) else {
+            panic!("expected an encoded key");
+        };
+        assert_eq!(upper.physical_key, PhysicalKey::A);
+        assert!(upper.modifiers.shift && upper.consumed_modifiers.shift);
+
+        let KeyTranslation::Encoded(control) = press(adapter.as_mut(), "ctrl-c", None) else {
+            panic!("expected an encoded key");
+        };
+        assert!(control.modifiers.control && !control.consumed_modifiers.shift);
+
+        let KeyTranslation::Encoded(navigation) = press(adapter.as_mut(), "shift-left", None)
+        else {
+            panic!("expected an encoded key");
+        };
+        assert!(navigation.modifiers.shift && !navigation.consumed_modifiers.shift);
+    }
+
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn linux_key_input_meets_the_common_adapter_contract() {
+        crate::terminal::assert_common_adapter_contract(
+            LinuxTerminalKeyInputAdapterFactory::new().create(),
+        );
+    }
+}
+
+#[cfg(all(test, feature = "native-tests"))]
+mod native_compose_tests {
+    use super::*;
+    use crate::terminal::WorkspaceTerminalSessionFactory;
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TerminalEmulator, TestTerminalSessionFactory,
+        TestTerminalSessionRecords, test_local_directory,
+    };
+    use gpui::AppContext as _;
+    use std::{path::PathBuf, rc::Rc, time::Duration};
+
+    enum DriverRequest {
+        Begin,
+        MoveFocus,
+        Finished,
+    }
+
+    fn focus_x11_window(title: &str) {
+        assert!(
+            std::process::Command::new("xdotool")
+                .args(["search", "--onlyvisible", "--name", title, "windowfocus"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn drive_keys(
+        requests: async_channel::Sender<DriverRequest>,
+        ready: async_channel::Receiver<()>,
+    ) {
+        ready.recv_blocking().unwrap();
+        let backend = std::env::var("SPACETERM_COMPOSE_BACKEND").unwrap();
+        if backend == "x11" {
+            focus_x11_window("^SpaceTerm Compose Primary$");
+        }
+        let connection = zbus::blocking::Connection::session().unwrap();
+        let session = if backend == "wayland" {
+            let manager = zbus::blocking::Proxy::new(
+                &connection,
+                "org.gnome.Mutter.RemoteDesktop",
+                "/org/gnome/Mutter/RemoteDesktop",
+                "org.gnome.Mutter.RemoteDesktop",
+            )
+            .unwrap();
+            let path: zbus::zvariant::OwnedObjectPath = manager.call("CreateSession", &()).unwrap();
+            let remote = zbus::blocking::Proxy::new(
+                &connection,
+                "org.gnome.Mutter.RemoteDesktop",
+                path,
+                "org.gnome.Mutter.RemoteDesktop.Session",
+            )
+            .unwrap();
+            remote.call::<_, _, ()>("Start", &()).unwrap();
+            Some(remote)
+        } else {
+            None
+        };
+        let key = |name: &str, keycode: u32, pressed: bool| {
+            if let Some(remote) = &session {
+                remote
+                    .call::<_, _, ()>("NotifyKeyboardKeycode", &(keycode, pressed))
+                    .unwrap();
+            } else {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args([if pressed { "keydown" } else { "keyup" }, name])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        };
+        if backend == "wayland" {
+            // A newly created Mutter virtual keyboard consumes its first key.
+            key("Shift_L", 42, true);
+            key("Shift_L", 42, false);
+            key("Escape", 1, true);
+            key("Escape", 1, false);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        requests.send_blocking(DriverRequest::Begin).unwrap();
+        ready.recv_blocking().unwrap();
+        for move_focus in [false, true] {
+            key("dead_acute", 40, true);
+            key("dead_acute", 40, false);
+            key("e", 18, true);
+            if move_focus {
+                requests.send_blocking(DriverRequest::MoveFocus).unwrap();
+                ready.recv_blocking().unwrap();
+            }
+            key("e", 18, false);
+        }
+        key("x", 45, true);
+        key("x", 45, false);
+        requests.send_blocking(DriverRequest::Finished).unwrap();
+        if let Some(remote) = session {
+            remote.call::<_, _, ()>("Stop", &()).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "run mise run test:compose:linux on a private display"]
+    fn linux_compose_input_native_press_commit_release_reaches_kitty_encoder() {
+        let backend =
+            std::env::var("SPACETERM_COMPOSE_BACKEND").expect("private display runner required");
+        match backend.as_str() {
+            "x11" => assert_eq!(std::env::var("DISPLAY").unwrap(), ":96"),
+            "wayland" => assert_eq!(
+                std::env::var("WAYLAND_DISPLAY").unwrap(),
+                "spaceterm-compose-test"
+            ),
+            _ => panic!("unsupported test backend"),
+        }
+        let records = TestTerminalSessionRecords::default();
+        let (requests, receiver) = async_channel::unbounded();
+        let (ready, ready_receiver) = async_channel::bounded(1);
+        let driver = std::thread::spawn(move || drive_keys(requests, ready_receiver));
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let first_command = Rc::new(std::cell::Cell::new(0));
+        gpui_platform::application().run({
+            let records = records.clone();
+            let completed = completed.clone();
+            let first_command = first_command.clone();
+            move |cx| {
+                crate::ui::init(cx).unwrap();
+                let factory = WorkspaceTerminalSessionFactory::new_local(
+                    Rc::new(TestTerminalSessionFactory::new(records.clone())),
+                    test_local_directory(PathBuf::from("/compose-test")),
+                );
+                let prepared = factory.prepare_child_launch().unwrap();
+                let primary = cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let pane = cx.new(|cx| crate::ui::TerminalPane::new_with_prepared_launch(
+                        factory, prepared, LinuxTerminalKeyInputAdapterFactory::new().create(),
+                        &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                        crate::terminal::native_services::testing::adapters(),
+                        crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,
+                    ));
+                    window.set_window_title("SpaceTerm Compose Primary");
+                    window.activate_window();
+                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                    pane
+                }).unwrap();
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    ready.send(()).await.unwrap();
+                    while let Ok(request) = receiver.recv().await {
+                        match request {
+                            DriverRequest::Begin => {
+                                first_command.set(records.commands().len());
+                                ready.send(()).await.unwrap();
+                            }
+                            DriverRequest::MoveFocus => {
+                                let secondary = cx.update(|cx| cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                                    window.set_window_title("SpaceTerm Compose Secondary");
+                                    window.activate_window();
+                                    cx.new(|_| gpui::EmptyView)
+                                }).unwrap());
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                if backend == "x11" {
+                                    focus_x11_window("^SpaceTerm Compose Secondary$");
+                                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                                }
+                                cx.update(|cx| primary.update(cx, |pane, window, cx| {
+                                    window.activate_window();
+                                    pane.focus(window, cx);
+                                }).unwrap());
+                                if backend == "x11" {
+                                    focus_x11_window("^SpaceTerm Compose Primary$");
+                                }
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                cx.update(|cx| secondary.update(cx, |_, window, _| window.remove_window()).unwrap());
+                                ready.send(()).await.unwrap();
+                            }
+                            DriverRequest::Finished => {
+                                // Paint without a text responder so the native input handler releases its Pane.
+                                let empty = cx.update(|cx| primary.update(cx, |_, window, cx| {
+                                    window.replace_root(cx, |_, _| gpui::EmptyView);
+                                    window.window_handle()
+                                }).unwrap());
+                                cx.background_executor().timer(Duration::from_millis(200)).await;
+                                completed.set(true);
+                                cx.update(|cx| empty.update(cx, |_, window, _| window.remove_window()).unwrap());
+                                cx.update(|cx| cx.quit());
+                                break;
+                            }
+                        }
+                    }
+                }).detach();
+                cx.spawn(async |cx| {
+                    cx.background_executor().timer(Duration::from_secs(15)).await;
+                    cx.update(|cx| cx.quit());
+                }).detach();
+            }
+        });
+        assert!(completed.get(), "native input driver timed out");
+        driver.join().unwrap();
+        let geometry = crate::terminal::geometry::TerminalGeometry::from_grid(
+            crate::terminal::geometry::CellGridSize::new(80, 24),
+            crate::terminal::geometry::LogicalCellSize::new(10.0, 20.0),
+            crate::terminal::geometry::BackingScale::ONE,
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"\x1b[>11u");
+        let mut bytes = Vec::new();
+        for command in records.commands().into_iter().skip(first_command.get()) {
+            if let RecordedSessionCommand::Key(input) = command.command {
+                bytes.extend(emulator.key(input).unwrap().bytes);
+            }
+        }
+        assert_eq!(bytes, "éé\x1b[120u\x1b[120;1:3u".as_bytes());
+    }
+}

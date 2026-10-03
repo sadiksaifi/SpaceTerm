@@ -1,5 +1,6 @@
 pub(crate) mod appearance;
 pub(crate) mod appearance_runtime;
+pub(crate) mod application_prompt;
 mod button_theme;
 pub(crate) mod chrome_geometry;
 pub(crate) mod chrome_icons;
@@ -56,6 +57,7 @@ mod text_input_theme;
 mod toggle_theme;
 mod tooltip_theme;
 pub(crate) mod updates;
+mod window_shell;
 mod workspace_chrome;
 mod workspace_creation;
 mod workspace_frame;
@@ -208,6 +210,7 @@ fn init_with_text_direction(
         crate::platform::window_frame::WindowFrameGeometry::new(Some(16.0))
             .with_outer_edge_width(1.0),
     );
+    cx.set_global(crate::platform::window_chrome::WindowChrome::native(None));
     initialize_controls(cx)?;
     let keymap = crate::desktop_profile::testing_profile(direction).install(cx);
     crate::keybindings::runtime::install(keymap, cx);

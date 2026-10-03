@@ -431,21 +431,18 @@ impl NativePtyAdapter for ScriptedPty {
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
         self.records.update(|state| state.resizes.push(size));
         match &self.resize_error {
-            Some(message) => Err(NativePtyOperationFailure::new(message.clone())),
+            Some(_) => Err(NativePtyOperationFailure::new(ErrorKind::Other)),
             None => Ok(()),
         }
     }
 
-    fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
+    fn wait_for_exit(&mut self, _timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
         self.records.update(|state| state.waits += 1);
         if self.wait_times_out {
-            return Err(NativePtyWaitFailure::new(format!(
-                "timed out after {} ms waiting for the scripted shell process to exit",
-                timeout.as_millis()
-            )));
+            return Err(NativePtyWaitFailure::new(ErrorKind::TimedOut));
         }
         match &self.wait_error {
-            Some(message) => Err(NativePtyWaitFailure::new(message.clone())),
+            Some(_) => Err(NativePtyWaitFailure::new(ErrorKind::Other)),
             None if self.exit_code == 0 => Ok(NativePtyExit::Success),
             None => Ok(NativePtyExit::ExitCode(self.exit_code)),
         }
@@ -1164,7 +1161,7 @@ fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
 #[test]
 fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
-        reader_error: Some("reader unavailable".to_owned()),
+        reader_error: Some("native detail: /private/terminal token=secret".to_owned()),
         ..ScriptedPtyOptions::default()
     });
 
@@ -1176,7 +1173,7 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
 
     assert!(matches!(
         error,
-        SessionError::EmulatorStartup(message) if message == "reader unavailable"
+        SessionError::EmulatorStartup(message) if message == "Native PTY reader acquisition failed (Other)"
     ));
     assert_eq!(
         (
@@ -3430,7 +3427,9 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
     let (mut session, events, _accessibility) = result.unwrap();
 
     reader_steps
-        .send(ReaderStep::Error("read unavailable".to_owned()))
+        .send(ReaderStep::Error(
+            "native detail: /private/terminal token=secret".to_owned(),
+        ))
         .unwrap();
     let event = receive_event(&events, "the PTY read failure", |event| {
         matches!(event, SessionEvent::Failed(_))
@@ -3443,7 +3442,7 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
     else {
         panic!("a read error followed by a successful wait must be classified as PtyRead")
     };
-    assert_eq!(read_error, "read unavailable");
+    assert_eq!(read_error, "Native PTY read failed (Other)");
     assert_eq!(exit_status, "Shell exited with code 7");
     assert_eq!(records.snapshot().waits, 1);
 
@@ -3459,7 +3458,9 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
     let (mut session, events, _accessibility) = result.unwrap();
 
     reader_steps
-        .send(ReaderStep::Error("read unavailable".to_owned()))
+        .send(ReaderStep::Error(
+            "native detail: /private/terminal token=secret".to_owned(),
+        ))
         .unwrap();
     let event = receive_event(&events, "the PTY read and wait failure", |event| {
         matches!(event, SessionEvent::Failed(_))
@@ -3471,8 +3472,8 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
     assert_eq!(
         failure,
         SessionFailure::ShellWait {
-            read_error: Some("read unavailable".to_owned()),
-            wait_error: "wait unavailable".to_owned(),
+            read_error: Some("Native PTY read failed (Other)".to_owned()),
+            wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
     assert_eq!(records.snapshot().waits, 1);
@@ -3500,7 +3501,7 @@ fn reader_eof_with_wait_failure_should_emit_a_shell_wait_failure() {
         failure,
         SessionFailure::ShellWait {
             read_error: None,
-            wait_error: "wait unavailable".to_owned(),
+            wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
     assert_eq!(records.snapshot().waits, 1);
@@ -3529,10 +3530,7 @@ fn child_wait_timeout_should_emit_a_shell_wait_failure() {
         panic!("a child wait timeout must be classified as ShellWait")
     };
     assert_eq!(read_error, None);
-    assert_eq!(
-        wait_error,
-        "timed out after 2000 ms waiting for the scripted shell process to exit"
-    );
+    assert_eq!(wait_error, "Native PTY wait failed (TimedOut)");
     let state = records.wait_for("the timed-out PTY worker to release ownership", |state| {
         state.pty_drops == 1 && state.reader_drops == 1
     });
@@ -4332,12 +4330,24 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events;
     let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert!(worker.process_command(Command::CopyOrForward(
+        InputModifiers {
+            platform: true,
+            ..InputModifiers::default()
+        },
+        reply
+    )));
     assert_eq!(result.recv().unwrap().unwrap(), None);
     assert!(records.snapshot().written.is_empty());
     worker.emulator.feed(b"\x1b[?1049h\x1b[>11u");
     let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
+    assert!(worker.process_command(Command::CopyOrForward(
+        InputModifiers {
+            platform: true,
+            ..InputModifiers::default()
+        },
+        reply
+    )));
     assert_eq!(result.recv().unwrap().unwrap(), None);
     assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
     let mut release = KeyInput::text_input("c");
@@ -4348,6 +4358,91 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     release.text = None;
     assert!(worker.process_command(Command::Key(release)));
     assert_eq!(records.snapshot().written, b"\x1b[99;9u\x1b[99;9:3u");
+    worker.finish();
+}
+
+#[test]
+fn copy_or_forward_preserves_a_control_shift_chord_and_completes_one_gesture() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let modifiers = InputModifiers {
+        control: true,
+        shift: true,
+        ..Default::default()
+    };
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert!(records.snapshot().written.is_empty());
+    worker.emulator.feed(b"\x1b[?1049h\x1b[>11u");
+    let (reply, result) = mpsc::sync_channel(1);
+    assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+    assert_eq!(result.recv().unwrap().unwrap(), None);
+    assert_eq!(records.snapshot().written, b"\x1b[99;6u\x1b[99;6:3u");
+    let mut release = KeyInput::text_input("c");
+    release.action = KeyAction::Release;
+    release.physical_key = PhysicalKey::C;
+    release.unshifted_codepoint = Some('c');
+    release.modifiers = modifiers;
+    release.text = None;
+    assert!(worker.process_command(Command::Key(release)));
+    assert_eq!(records.snapshot().written, b"\x1b[99;6u\x1b[99;6:3u");
+    worker.finish();
+}
+
+#[test]
+fn unshifted_xterm_control_forms_write_exact_pty_bytes() {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events;
+    let mut adapter = crate::terminal::testing::test_terminal_key_input_adapter();
+    for (chord, expected) in [
+        ("ctrl-2", b"\x00".as_slice()),
+        ("ctrl-6", b"\x1e".as_slice()),
+        ("ctrl-/", b"\x1f".as_slice()),
+        ("ctrl-[", b"\x1b".as_slice()),
+        ("ctrl-]", b"\x1d".as_slice()),
+    ] {
+        let before = records.snapshot().written.len();
+        let keystroke = gpui::Keystroke::parse(chord).unwrap();
+        let press = gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            prefer_character_input: false,
+            is_held: false,
+        };
+        let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_down(&press) else {
+            panic!("{chord} must be encoded");
+        };
+        assert!(worker.process_command(Command::Key(input)));
+        let release = gpui::KeyUpEvent { keystroke };
+        let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_up(&release) else {
+            panic!("{chord} must release its key");
+        };
+        assert!(worker.process_command(Command::Key(input)));
+        assert_eq!(&records.snapshot().written[before..], expected, "{chord}");
+    }
+    let before = records.snapshot().written.len();
+    worker.emulator.feed(b"\x1b[>11u");
+    let keystroke = gpui::Keystroke::parse("ctrl-[").unwrap();
+    let crate::terminal::KeyTranslation::Encoded(input) = adapter.key_down(&gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    }) else {
+        panic!("enhanced Ctrl+[ must be encoded");
+    };
+    assert!(worker.process_command(Command::Key(input)));
+    let crate::terminal::KeyTranslation::Encoded(input) =
+        adapter.key_up(&gpui::KeyUpEvent { keystroke })
+    else {
+        panic!("enhanced Ctrl+[ must release its key");
+    };
+    assert!(worker.process_command(Command::Key(input)));
+    assert_eq!(
+        &records.snapshot().written[before..],
+        b"\x1b[91;5u\x1b[91;5:3u"
+    );
     worker.finish();
 }
 
@@ -4393,13 +4488,25 @@ fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority()
         let generation = worker.emulator.presentation_generation();
         assert!(worker.process_command(Command::Pointer(pointer(generation, phase, x, true))));
     }
-    let (reply, result) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::CopyOrForward(reply)));
-    assert_eq!(
-        result.recv().unwrap().unwrap().unwrap().plain_text,
-        "selected"
-    );
-    assert_eq!(records.snapshot().written, mouse_bytes);
+    for modifiers in [
+        InputModifiers {
+            platform: true,
+            ..Default::default()
+        },
+        InputModifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        },
+    ] {
+        let (reply, result) = mpsc::sync_channel(1);
+        assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
+        assert_eq!(
+            result.recv().unwrap().unwrap().unwrap().plain_text,
+            "selected"
+        );
+        assert_eq!(records.snapshot().written, mouse_bytes);
+    }
     worker.finish();
 }
 

@@ -11,7 +11,7 @@ fn native_link(
         directory,
         hostname,
         local,
-        &crate::platform::macos_adapter_tests::local_filesystem(),
+        &crate::platform::unix_adapter_tests::local_filesystem(),
     )
 }
 

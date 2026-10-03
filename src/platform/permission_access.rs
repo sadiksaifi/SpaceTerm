@@ -22,6 +22,13 @@ pub(crate) enum SystemPermission {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AccessibilityNaming {
     /// The Accessibility list, before macOS 27.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the macOS permission adapter produces the earlier System Settings name in production"
+        )
+    )]
     Accessibility,
     /// The Device Control and Data Access list, from macOS 27.
     #[default]
@@ -41,6 +48,13 @@ pub(crate) enum PermissionAuthorization {
 
 /// Content-free failures from native permission authorization and recovery operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only macOS permission adapters produce native permission failures in production"
+    )
+)]
 pub(crate) enum PermissionAccessError {
     #[error("permission access is unavailable off the main thread")]
     OffMainThread,
@@ -55,6 +69,13 @@ pub(crate) type PermissionResetCompletion =
 
 /// What preparing a Permission Setup found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only the macOS permission adapter produces preparation results in production"
+    )
+)]
 pub(crate) enum PermissionSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
@@ -75,6 +96,13 @@ pub(crate) struct PermissionSetupPreparation {
 
 impl PermissionSetupPreparation {
     /// A preparation and the signal its native work reads to learn of the cancellation.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the macOS permission adapter starts native setup preparations in production"
+        )
+    )]
     pub(crate) fn new() -> (Self, PermissionSetupCancellation) {
         let cancelled = Arc::default();
         (
@@ -94,11 +122,25 @@ impl Drop for PermissionSetupPreparation {
 
 /// Whether the owner of a [`PermissionSetupPreparation`] cancelled it.
 #[derive(Clone)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only the macOS permission worker retains setup cancellation signals in production"
+    )
+)]
 pub(crate) struct PermissionSetupCancellation {
     cancelled: Arc<AtomicBool>,
 }
 
 impl PermissionSetupCancellation {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the macOS permission worker checks setup cancellation in production"
+        )
+    )]
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }

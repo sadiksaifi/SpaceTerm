@@ -73,10 +73,15 @@ pub(crate) enum AppPathHostFactsError {
     InvalidLocalIpcPathMaximum,
 }
 
+const PRIVATE_RUNTIME_ATTEMPTS: usize = 8;
+const PRIVATE_RUNTIME_SUFFIX_BYTES: usize = 8;
+
 pub(crate) struct AppPaths {
     directories: AppDirectories,
     local_ipc_path_maximum: NonZeroUsize,
     filesystem: Arc<dyn SecureFilesystem>,
+    /// The unpredictable runtime root this process uses after refusing a shared fallback name.
+    private_runtime: Mutex<Option<(PathBuf, SecureDirectory)>>,
 }
 
 impl AppPaths {
@@ -95,6 +100,7 @@ impl AppPaths {
             directories,
             local_ipc_path_maximum: host.local_ipc_path_maximum,
             filesystem,
+            private_runtime: Mutex::new(None),
         })
     }
 
@@ -109,6 +115,7 @@ impl AppPaths {
             directories,
             local_ipc_path_maximum,
             filesystem,
+            private_runtime: Mutex::new(None),
         })
     }
 
@@ -155,15 +162,66 @@ impl AppPaths {
         &self.filesystem
     }
 
-    pub(crate) fn create_runtime_owner(&self, kind: &str) -> Result<RuntimeOwner, AppPathsError> {
-        validate_child_name(kind)?;
+    /// Opens the private runtime root. When `XDG_RUNTIME_DIR` is unset, another account can
+    /// pre-create the predictable name in the shared temporary root; this process then uses an
+    /// unpredictable private sibling instead of losing AskPass and Control Connections.
+    fn runtime_directory(&self) -> Result<(PathBuf, SecureDirectory), AppPathsError> {
         let runtime_path = self
             .directories
             .runtime
             .as_ref()
-            .ok_or(AppPathsError::RuntimeRootUnavailable)?
-            .clone();
-        let runtime = self.filesystem.ensure_private_directory(&runtime_path)?;
+            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
+        match self.filesystem.ensure_private_directory(runtime_path) {
+            Ok(runtime) => Ok((runtime_path.clone(), runtime)),
+            Err(SecureFilesystemError::Unsafe)
+                if self.directories.runtime_in_shared_temporary() =>
+            {
+                self.private_runtime_directory(runtime_path)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn private_runtime_directory(
+        &self,
+        predictable: &Path,
+    ) -> Result<(PathBuf, SecureDirectory), AppPathsError> {
+        let mut retained = self
+            .private_runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((path, runtime)) = retained.as_ref()
+            && self.filesystem.verify_directory(runtime).is_ok()
+        {
+            return Ok((path.clone(), runtime.clone()));
+        }
+        let name = predictable
+            .file_name()
+            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
+        for _ in 0..PRIVATE_RUNTIME_ATTEMPTS {
+            let mut suffix = [0_u8; PRIVATE_RUNTIME_SUFFIX_BYTES];
+            getrandom::fill(&mut suffix).map_err(|_| AppPathsError::FilesystemUnavailable)?;
+            let mut candidate = name.to_os_string();
+            candidate.push("-");
+            for byte in suffix {
+                candidate.push(format!("{byte:02x}"));
+            }
+            let path = predictable.with_file_name(candidate);
+            match self.filesystem.ensure_private_directory(&path) {
+                Ok(runtime) => {
+                    *retained = Some((path.clone(), runtime.clone()));
+                    return Ok((path, runtime));
+                }
+                Err(SecureFilesystemError::Unsafe) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(AppPathsError::UnsafePath)
+    }
+
+    pub(crate) fn create_runtime_owner(&self, kind: &str) -> Result<RuntimeOwner, AppPathsError> {
+        validate_child_name(kind)?;
+        let (runtime_path, runtime) = self.runtime_directory()?;
         for _ in 0..RUNTIME_OWNER_CREATION_ATTEMPTS {
             let sequence = NEXT_RUNTIME_OWNER.fetch_add(1, Ordering::Relaxed);
             let name = runtime_owner_name(kind, std::process::id(), sequence);
@@ -189,17 +247,12 @@ impl AppPaths {
         sequence: u64,
     ) -> Result<RuntimeOwner, AppPathsError> {
         validate_child_name(kind)?;
-        let runtime_path = self
-            .directories
-            .runtime
-            .as_ref()
-            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
-        let runtime = self.filesystem.ensure_private_directory(runtime_path)?;
+        let (runtime_path, runtime) = self.runtime_directory()?;
         let name = runtime_owner_name(kind, process_id, sequence);
         let directory = self
             .filesystem
             .create_private_child(&runtime, OsStr::new(&name))?;
-        Ok(self.runtime_owner(runtime_path.clone(), runtime, name, directory))
+        Ok(self.runtime_owner(runtime_path, runtime, name, directory))
     }
 
     fn runtime_owner(
@@ -533,6 +586,48 @@ mod tests {
         assert!(matches!(
             paths.create_runtime_owner("a"),
             Err(AppPathsError::RuntimeRootUnavailable)
+        ));
+    }
+
+    #[test]
+    fn runtime_owner_should_avoid_a_shared_fallback_name_another_account_created() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem
+            .foreign_directories
+            .lock()
+            .unwrap()
+            .insert(PathBuf::from("/runtime/spaceterm"));
+        let paths = AppPaths::resolve(&environment(), &host(200), filesystem.clone()).unwrap();
+
+        let first = paths.create_runtime_owner("a").unwrap();
+        let second = paths.create_runtime_owner("c").unwrap();
+
+        let private = first.path().parent().unwrap().to_path_buf();
+        assert_eq!(second.path().parent(), Some(private.as_path()));
+        assert_eq!(private.parent(), Some(Path::new("/runtime")));
+        let name = private.file_name().unwrap().to_str().unwrap();
+        let suffix = name.strip_prefix("spaceterm-").unwrap();
+        assert_eq!(suffix.len(), PRIVATE_RUNTIME_SUFFIX_BYTES * 2);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn runtime_owner_should_refuse_a_foreign_configured_runtime_directory() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem
+            .foreign_directories
+            .lock()
+            .unwrap()
+            .insert(PathBuf::from("/run/user/1000/spaceterm"));
+        let environment = AppDirectoryEnvironment {
+            xdg_runtime_dir: Some("/run/user/1000".into()),
+            ..environment()
+        };
+        let paths = AppPaths::resolve(&environment, &host(200), filesystem).unwrap();
+
+        assert!(matches!(
+            paths.create_runtime_owner("a"),
+            Err(AppPathsError::UnsafePath)
         ));
     }
 

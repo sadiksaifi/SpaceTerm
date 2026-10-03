@@ -44,14 +44,14 @@ use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
-#[cfg(test)]
-use crate::terminal::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
 };
+#[cfg(test)]
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
 use crate::terminal::native_services::file_preview::{FilePreviewPanel, FilePreviewPresenter};
 use crate::terminal::native_services::{
@@ -579,6 +579,8 @@ pub(crate) struct TerminalPane {
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
+    primary_selection:
+        Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -606,7 +608,10 @@ pub(crate) struct TerminalPane {
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
     )>,
+    file_preview_available: bool,
     file_preview: FilePreviewPresenter<Box<dyn FilePreviewPanel>>,
+    /// Awaits the latest deferred preview request so its failure reaches this Pane.
+    _file_preview_task: Option<Task<()>>,
     context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
     blink_generation: u64,
@@ -871,6 +876,7 @@ impl TerminalPane {
             ),
             file_insertion: native_service_adapters.file_insertion,
             file_clipboard: native_service_adapters.file_clipboard,
+            primary_selection: native_service_adapters.primary_selection,
             key_input_adapter,
             ime: TerminalIme::default(),
             preedit_layout: None,
@@ -887,7 +893,9 @@ impl TerminalPane {
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
+            file_preview_available: native_service_adapters.file_preview.is_available(),
             file_preview: FilePreviewPresenter::new(native_service_adapters.file_preview.create()),
+            _file_preview_task: None,
             context_menu: None,
             blink_phase_visible: true,
             blink_generation: 0,
@@ -2311,7 +2319,9 @@ impl TerminalPane {
         } else {
             self.fullscreen_escape.reset();
         }
-        let input = self.key_input_adapter.key_down(event);
+        let input = self
+            .key_input_adapter
+            .key_down_with_native(event, window.native_key_event());
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -2333,7 +2343,9 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let input = self.key_input_adapter.key_up(event);
+        let input = self
+            .key_input_adapter
+            .key_up_with_native(event, window.native_key_event());
         if let KeyTranslation::Encoded(input) = &input
             && let Some(index) = self
                 .ime_suppressed_keys
@@ -2369,7 +2381,10 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        if let Some(translation) = self.key_input_adapter.modifiers_changed(event) {
+        if let Some(translation) = self
+            .key_input_adapter
+            .modifiers_changed_with_native(event, window.native_key_event())
+        {
             self.send_key_translation(translation, cx);
         }
     }
@@ -2582,8 +2597,31 @@ impl TerminalPane {
             return;
         };
 
+        // Shift overrides application mouse tracking for PRIMARY paste as it does for selection,
+        // so a Selection made with Shift-drag can be pasted the same way.
+        if button == PointerButton::Middle
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            )
+            && self.primary_selection.is_some()
+        {
+            if let Some(text) = self
+                .primary_selection
+                .as_ref()
+                .and_then(|primary| primary.read(cx))
+                && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
+                && !payload.text().is_empty()
+            {
+                self.request_paste_text(payload, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         if button == PointerButton::Left
-            && event.modifiers.platform
+            && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
         {
             self.pressed_link = Some((self.screen.generation, link));
@@ -2708,7 +2746,7 @@ impl TerminalPane {
                 &pressed,
                 self.screen.generation,
                 current.as_ref(),
-                event.modifiers.platform,
+                spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers),
             ) {
                 cx.open_url(&url);
             }
@@ -2741,6 +2779,11 @@ impl TerminalPane {
             }
         });
         if let Some(copy) = copy {
+            if let Some(primary) = &self.primary_selection
+                && let Ok(Some(copy)) = &copy
+            {
+                primary.publish(copy, cx);
+            }
             self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
@@ -2815,7 +2858,10 @@ impl TerminalPane {
         if self.synchronize_terminal_input_focus(window, cx)
             && let Some(session) = self.terminal_session.session.as_ref()
         {
-            let result = session.copy_or_forward();
+            let modifiers = crate::keybindings::runtime::KeymapRuntime::profile(cx)
+                .terminal_conventions()
+                .shortcut_modifiers();
+            let result = session.copy_or_forward(input_modifiers(modifiers));
             self.publish_selection_copy(result, None, cx);
         }
     }
@@ -2853,6 +2899,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.terminal_session.session.as_ref()?;
         self.selection_copy_from_result(session.copy_selection(), cx)
@@ -2887,6 +2940,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_selection(
         &mut self,
         origin: NativeServiceOrigin,
@@ -2909,7 +2969,7 @@ impl TerminalPane {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let Ok(Some(insertion)) = PastePayload::clipboard(
             self.file_insertion,
-            self.file_clipboard.as_ref(),
+            || self.file_clipboard.read_files(cx),
             || cx.read_from_clipboard().and_then(|item| item.text()),
             terminal_input_focused,
             self.terminal_session.local_file_capabilities,
@@ -2921,6 +2981,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn insert_native_service_text(
         &mut self,
         origin: NativeServiceOrigin,
@@ -2999,11 +3066,13 @@ impl TerminalPane {
     }
 
     fn native_context_actions(&self) -> NativeContextActions {
-        NativeContextActions::from_presence(
+        let mut actions = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
             self.screen.selection_present,
             self.current_hovered_link(),
-        )
+        );
+        actions.file_preview &= self.file_preview_available;
+        actions
     }
 
     fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
@@ -3048,7 +3117,8 @@ impl TerminalPane {
             false,
             link.as_ref(),
         )
-        .file_preview;
+        .file_preview
+            && self.file_preview_available;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -3121,7 +3191,7 @@ impl TerminalPane {
             }
             TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
-                    self.preview_context_link(&link, cx);
+                    self.preview_context_link(&link, window, cx);
                 }
             }
             _ => {}
@@ -3132,6 +3202,7 @@ impl TerminalPane {
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(target) =
@@ -3140,10 +3211,27 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        if self.file_preview.preview(&target).is_err() {
-            self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
-            cx.notify();
+        match self.file_preview.preview_in_window(&target, window, cx) {
+            Ok(None) => {}
+            Ok(Some(completion)) => {
+                self._file_preview_task = Some(cx.spawn(async move |this, cx| {
+                    let Some(failure) = completion.failure().await else {
+                        return;
+                    };
+                    let _ = this.update(cx, |pane, cx| {
+                        if pane.file_preview.settle(failure).is_some() {
+                            pane.present_file_preview_failure(cx);
+                        }
+                    });
+                }));
+            }
+            Err(_) => self.present_file_preview_failure(cx),
         }
+    }
+
+    fn present_file_preview_failure(&mut self, cx: &mut Context<Self>) {
+        self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
+        cx.notify();
     }
 
     fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
@@ -3151,6 +3239,13 @@ impl TerminalPane {
             .map(|hovered| &hovered.target)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_status(
         &mut self,
         workspace_id: WorkspaceId,
@@ -3238,6 +3333,13 @@ impl TerminalPane {
             && self.native_service_hierarchy_generation == guard.hierarchy_generation
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_session.native_service_session_identity == origin.session_identity()
@@ -4110,7 +4212,11 @@ impl Render for TerminalPane {
                 active_hovered_link(
                     self.hovered_link.as_ref(),
                     self.screen.generation,
-                    self.pointer_modifiers.platform,
+                    spaceterm_ui::PointerConventions::get(cx).activates_link(gpui::Modifiers {
+                        control: self.pointer_modifiers.control,
+                        platform: self.pointer_modifiers.platform,
+                        ..Default::default()
+                    }),
                 )
                 .cloned()
             })
@@ -4335,7 +4441,7 @@ impl Render for TerminalPane {
             }
         });
 
-        div()
+        let pane_root = div()
             .debug_selector(move || native_context_selector.clone())
             .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
@@ -4358,7 +4464,9 @@ impl Render for TerminalPane {
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.focus_handle);
+        self.accessibility_element
+            .decorate(pane_root)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))
@@ -4786,23 +4894,6 @@ fn render_permission_request(
                     ),
             ),
     )
-}
-
-#[cfg(test)]
-fn select_terminal_font(font_names: &[String]) -> &'static str {
-    [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ]
-    .into_iter()
-    .find(|candidate| {
-        font_names
-            .iter()
-            .any(|available| available.eq_ignore_ascii_case(candidate))
-    })
-    .unwrap_or("Menlo")
 }
 
 fn measure_prepared_cell_width(

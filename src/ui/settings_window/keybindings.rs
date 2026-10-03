@@ -243,23 +243,17 @@ fn validate(keystroke: &Keystroke, cx: &App) -> Result<(), SharedString> {
 fn assignable(keystroke: &Keystroke, cx: &App) -> Result<Shortcut, SharedString> {
     let presentation = DesktopPresentation::get(cx);
     let chord = presentation.format_keystroke(keystroke);
-    let shortcut = Shortcut::from_keystroke(keystroke)
-        .map_err(|rejection| rejection_message(rejection, &chord, presentation))?;
-    KeymapRuntime::profile(cx)
-        .check(&shortcut)
-        .map_err(|reservation| reservation_message(reservation, &chord, presentation))?;
+    let profile = KeymapRuntime::profile(cx);
+    let shortcut_modifiers = profile.terminal_conventions().shortcut_modifiers();
+    let shortcut = Shortcut::from_keystroke(keystroke).map_err(rejection_message)?;
+    profile.check(&shortcut).map_err(|reservation| {
+        reservation_message(reservation, &chord, shortcut_modifiers, presentation)
+    })?;
     Ok(shortcut)
 }
 
-fn rejection_message(
-    rejection: ShortcutRejection,
-    chord: &str,
-    presentation: &DesktopPresentation,
-) -> SharedString {
+fn rejection_message(rejection: ShortcutRejection) -> SharedString {
     match rejection {
-        ShortcutRejection::TerminalReserved(convention) => {
-            reservation_message(Reservation::Terminal(convention), chord, presentation)
-        }
         ShortcutRejection::FunctionModifier => "Shortcuts can't use the Fn key.".into(),
         ShortcutRejection::Malformed
         | ShortcutRejection::Chord
@@ -271,11 +265,12 @@ fn rejection_message(
 fn reservation_message(
     reservation: Reservation,
     chord: &str,
+    shortcut_modifiers: Modifiers,
     presentation: &DesktopPresentation,
 ) -> SharedString {
     match reservation {
         Reservation::Terminal(TerminalConvention::TextInput) => {
-            let primary = presentation.format_modifiers(Modifiers::command());
+            let primary = presentation.format_modifiers(shortcut_modifiers);
             format!("{chord} is sent to the terminal. Add {primary} to use it as a shortcut.")
         }
         Reservation::Terminal(
@@ -341,6 +336,12 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
         SystemReservation::Contrast => "adjusting contrast",
         SystemReservation::VoiceOver => "VoiceOver",
         SystemReservation::AccessibilityShortcuts => "Accessibility Shortcuts",
+        SystemReservation::DesktopShortcut => "desktop shortcuts",
+        SystemReservation::MoveWindowToWorkspace => "moving windows between workspaces",
+        SystemReservation::ScreenRecording => "screen recording",
+        SystemReservation::InputMethod => "the input method",
+        SystemReservation::Restart => "Restart",
+        SystemReservation::ShutDown => "Shut Down",
         #[cfg(feature = "developer-tools")]
         SystemReservation::DeveloperWorkbench => "the Developer Workbench",
         #[cfg(feature = "developer-tools")]
@@ -663,6 +664,7 @@ impl SettingsWindow {
             Some(Err(reservation)) => Some(ShortcutNotice::Refused(reservation_message(
                 reservation,
                 "This shortcut",
+                profile.terminal_conventions().shortcut_modifiers(),
                 DesktopPresentation::get(cx),
             ))),
             None => None,

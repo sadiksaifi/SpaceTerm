@@ -420,6 +420,7 @@ pub(crate) struct TabManager {
     sidebar_width: Pixels,
     top_chrome_width: Pixels,
     trailing_accessory: Option<gpui::AnyView>,
+    window_close_handler: Option<spaceterm_ui::WindowCloseHandler>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
@@ -505,6 +506,7 @@ impl TabManager {
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             trailing_accessory: None,
+            window_close_handler: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
@@ -581,6 +583,13 @@ impl TabManager {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_status(
         &self,
         workspace_id: WorkspaceId,
@@ -597,6 +606,13 @@ impl TabManager {
         })
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_target(
         &self,
         origin: NativeServiceOrigin,
@@ -900,6 +916,10 @@ impl TabManager {
     /// Places the Operating-System Window's own control at the trailing end of the Tab bar.
     ///
     /// The Workspace manager owns one per window and hands it to whichever Tab manager is active.
+    pub(crate) fn set_window_close_handler(&mut self, handler: spaceterm_ui::WindowCloseHandler) {
+        self.window_close_handler = Some(handler);
+    }
+
     pub(crate) fn set_trailing_accessory(
         &mut self,
         accessory: Option<gpui::AnyView>,
@@ -975,6 +995,11 @@ impl TabManager {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -1829,11 +1854,12 @@ impl TabManager {
                         }),
                     ),
             )
+            .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
                 // The Tabs give up room to the accessory rather than scrolling beneath it, and the
                 // space between them stays draggable. The accessory owns its own edge spacing, so
                 // an empty accessory reserves nothing.
-                content.child(div().flex_1().min_w_0()).child(
+                content.child(
                     div()
                         .debug_selector(|| "tab-bar-trailing-accessory".to_owned())
                         .flex_none()
@@ -1842,7 +1868,29 @@ impl TabManager {
                         .items_center()
                         .child(accessory),
                 )
-            });
+            })
+            .when_some(
+                self.window_close_handler.clone().filter(|_| {
+                    matches!(
+                        window.window_decorations(),
+                        gpui::Decorations::Client { .. }
+                    ) && !window.is_fullscreen()
+                }),
+                |content, close| {
+                    content.child(
+                        div()
+                            .flex_none()
+                            .pr(super::workspace_frame::WorkspaceFrame::for_appearance(
+                                appearance, cx,
+                            )
+                            .space())
+                            .child(
+                                spaceterm_ui::ControlHost::TitleBar
+                                    .mount(spaceterm_ui::ClientWindowControls::new(close)),
+                            ),
+                    )
+                },
+            );
 
         let drag_region = WindowDragRegion::new(
             "tab-bar-drag-region",

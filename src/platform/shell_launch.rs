@@ -57,21 +57,26 @@ pub(crate) struct ShellLaunchPlanner {
     resources: PathBuf,
     environment: (ShellIntegrationMode, ShellEnvironment),
     policy: ShellIntegrationPolicy,
+    host_runtime_environment: &'static [&'static str],
 }
 
 impl ShellLaunchPlanner {
+    /// `host_runtime_environment` names launch and terminal variables that only the host
+    /// desktop exports, removed in addition to the shared foreign terminal variables.
     pub(crate) fn new(
         shell: PathBuf,
         resources: PathBuf,
         mode: ShellIntegrationMode,
         inherited: ShellEnvironment,
         policy: ShellIntegrationPolicy,
+        host_runtime_environment: &'static [&'static str],
     ) -> Self {
         Self {
             shell,
             resources,
             environment: (mode, inherited),
             policy,
+            host_runtime_environment,
         }
     }
 
@@ -83,6 +88,7 @@ impl ShellLaunchPlanner {
             ShellIntegrationMode::Automatic,
             ShellEnvironment::default(),
             ShellIntegrationPolicy::fixture(),
+            &[],
         )
     }
 
@@ -147,6 +153,7 @@ impl ShellLaunchPlanner {
             inherit_environment: true,
             environment_removals: FOREIGN_RUNTIME_ENVIRONMENT
                 .iter()
+                .chain(self.host_runtime_environment)
                 .copied()
                 .chain(["TERMINFO"])
                 .map(OsString::from)
@@ -319,6 +326,7 @@ mod tests {
                 ShellIntegrationMode::Automatic,
                 inherited.clone(),
                 ShellIntegrationPolicy::fixture(),
+                &[],
             )
             .local(&directory)
             .unwrap();
@@ -394,6 +402,7 @@ mod tests {
                 mode,
                 ShellEnvironment::default(),
                 ShellIntegrationPolicy::fixture(),
+                &["HOST_LAUNCH_MARKER"],
             )
             .local(&std::env::temp_dir())
             .unwrap();
@@ -429,6 +438,11 @@ mod tests {
                 launch
                     .environment_removals()
                     .contains(&OsString::from("TERMINFO"))
+            );
+            assert!(
+                launch
+                    .environment_removals()
+                    .contains(&OsString::from("HOST_LAUNCH_MARKER"))
             );
         }
     }

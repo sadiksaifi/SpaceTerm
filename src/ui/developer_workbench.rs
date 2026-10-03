@@ -393,7 +393,10 @@ impl DeveloperWorkbench {
         })
         .detach();
         let settings = cx.global::<AppearanceRuntime>().settings.clone();
-        let preview = AppearancePreview::new(settings);
+        let preview = AppearancePreview::new(
+            settings,
+            crate::host_fonts::HostFonts::get(cx).system_monospace_family,
+        );
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let navigation = SidebarNavigation::new(focus_handle.clone(), window, cx);
@@ -717,7 +720,9 @@ impl Render for DeveloperWorkbench {
         } else {
             super::appearance::window_activity(window)
         };
-        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
+        let content =
+            super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -861,6 +866,12 @@ impl DeveloperWorkbench {
             WorkbenchSection::Document => self.document.render(surface, window, cx),
         };
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
+        let closing = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = closing.update(cx, |workbench, cx| {
+                workbench.close(&CloseDeveloperWorkbench, window, cx);
+            });
+        });
         let heading = DetailHeading::new(
             PREFIX,
             section_heading(
@@ -870,10 +881,11 @@ impl DeveloperWorkbench {
                 appearance,
             ),
             &self.window_movement,
+            close,
         )
         .toolbar(self.render_toolbar(cx))
         .scrolled(scrolled)
-        .render(surface);
+        .render(surface, window);
         let revealing = cx.weak_entity();
         div()
             .debug_selector(|| "workbench-canvas".to_owned())

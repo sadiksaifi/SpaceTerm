@@ -5,6 +5,7 @@ use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, po
 use crate::appearance::{
     Appearance, AppearanceMode, ChromeDensity, SettingsDocument, builtin_fallback_theme,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
@@ -24,6 +25,31 @@ struct Harness {
     storage: Arc<MemoryStorage>,
     settings: crate::settings::UserSettings,
     platform: RecordingAppearancePlatform,
+}
+
+#[gpui::test]
+fn unsupported_blur_explains_how_to_use_available_desktop_transparency(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    harness
+        .platform
+        .set_native_window_transparency_supported(true);
+    harness.platform.set_native_window_blur_supported(false);
+    cx.run_until_parked();
+    let guidance = window.read_with(cx, |settings, cx| {
+        settings.row_description(SettingsRowId::Transparency, cx)
+    });
+    assert_eq!(
+        guidance,
+        Some(
+            "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+        )
+    );
+    click("settings-blur", cx);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
+        crate::appearance::WindowBackgroundAppearance::Transparent
+    );
 }
 
 fn open_settings(
@@ -2535,6 +2561,10 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     cx: &mut TestAppContext,
 ) {
     let (window, harness, cx) = open_settings(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.run_until_parked();
     click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
@@ -2549,8 +2579,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     });
     let handle = cx.update(|native, _| native.window_handle());
 
-    request_window_close(&window, cx);
-    request_window_close(&window, cx);
+    click("window-close", cx);
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 
@@ -3622,6 +3651,109 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
     set_query(&window, "osc52", cx);
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+}
+
+#[gpui::test]
+fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_privacy(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        appearance_runtime::install(
+            crate::settings::UserSettings::load(MemoryStorage::with_document(
+                &SettingsDocument::default(),
+            )),
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx)
+            .clone()
+            .without_features(&[
+                HostFeature::Updates,
+                HostFeature::MicrophoneAccess,
+                HostFeature::SystemPermissions,
+            ]);
+        cx.set_global(presentation);
+    });
+    let (window, cx) = cx.add_window_view(SettingsWindow::new);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    window.read_with(cx, |settings, _| {
+        assert!(
+            settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Privacy)
+        );
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Updates)
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-privacy")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_none()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    for omitted in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(cx.debug_bounds(omitted).is_none(), "{omitted} rendered");
+    }
+    assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
+    assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+    for query in [
+        "microphone",
+        "updates",
+        "screen recording",
+        "device control",
+        "accessibility",
+    ] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(settings.matching_rows().is_empty(), "{query} matched");
+            assert!(settings.navigable_sections().is_empty());
+            assert_eq!(settings.revealed, None);
+        });
+    }
+}
+
+#[gpui::test]
+fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_some()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    for unavailable in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(
+            cx.debug_bounds(unavailable).is_some(),
+            "{unavailable} omitted"
+        );
+    }
+    for query in ["microphone", "updates", "screen recording", "accessibility"] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(
+                !settings.matching_rows().is_empty(),
+                "{query} matched nothing"
+            );
+        });
+    }
 }
 
 struct RecordingMovement;

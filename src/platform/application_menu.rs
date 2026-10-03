@@ -10,10 +10,10 @@ pub(crate) enum ApplicationMenuCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[cfg_attr(
-    test,
+    any(test, not(target_os = "macos")),
     expect(
         dead_code,
-        reason = "ordinary tests replace native AppKit effects with the recording adapter"
+        reason = "ordinary tests and desktops without a native menu construct only some failures"
     )
 )]
 pub(crate) enum ApplicationMenuError {
@@ -31,7 +31,9 @@ pub(crate) enum ApplicationMenuError {
 pub(crate) trait ApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError>;
 
-    fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError>;
+    fn perform(&self, _: ApplicationMenuCommand, _: &mut App) -> Result<(), ApplicationMenuError> {
+        Err(ApplicationMenuError::Unavailable)
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +65,11 @@ pub(crate) mod testing {
             Ok(())
         }
 
-        fn perform(&self, command: ApplicationMenuCommand) -> Result<(), ApplicationMenuError> {
+        fn perform(
+            &self,
+            command: ApplicationMenuCommand,
+            _: &mut App,
+        ) -> Result<(), ApplicationMenuError> {
             self.commands.borrow_mut().push(command);
             Ok(())
         }

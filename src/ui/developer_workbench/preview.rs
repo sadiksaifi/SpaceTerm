@@ -12,7 +12,6 @@ use crate::appearance::{
 use crate::settings::{CommitOutcome, PreviewToken, ThemeImport, UserSettings};
 
 /// The terminal typography the alternate-typography switch previews.
-const ALTERNATE_FONT_FAMILY: &str = "Menlo";
 const ALTERNATE_BASE_SIZE: f32 = 22.0;
 const ALTERNATE_LINE_HEIGHT: f32 = 1.35;
 
@@ -55,13 +54,15 @@ impl PreviewError {
 
 pub(super) struct AppearancePreview {
     settings: UserSettings,
+    alternate_font_family: String,
     token: Option<PreviewToken>,
 }
 
 impl AppearancePreview {
-    pub(super) fn new(settings: UserSettings) -> Self {
+    pub(super) fn new(settings: UserSettings, alternate_font_family: String) -> Self {
         Self {
             settings,
+            alternate_font_family,
             token: None,
         }
     }
@@ -134,10 +135,10 @@ impl AppearancePreview {
     }
 
     /// Whether the terminal typography is the alternate one this preview offers.
-    pub(super) fn alternate_typography(document: &SettingsDocument) -> bool {
+    pub(super) fn alternate_typography(&self, document: &SettingsDocument) -> bool {
         matches!(
             &document.preferences.terminal.typography.family,
-            TerminalFontFamily::Named { family } if family == ALTERNATE_FONT_FAMILY
+            TerminalFontFamily::Named { family } if family == &self.alternate_font_family
         )
     }
 
@@ -145,11 +146,12 @@ impl AppearancePreview {
     /// a capture shows metrics changing without a font install.
     pub(super) fn set_alternate_typography(&mut self, alternate: bool) -> Result<(), PreviewError> {
         let defaults = SettingsDocument::default().preferences.terminal.typography;
+        let alternate_font_family = self.alternate_font_family.clone();
         self.edit(|document| {
             let typography = &mut document.preferences.terminal.typography;
             if alternate {
                 typography.family = TerminalFontFamily::Named {
-                    family: ALTERNATE_FONT_FAMILY.to_owned(),
+                    family: alternate_font_family,
                 };
                 typography.base_size = ALTERNATE_BASE_SIZE;
                 typography.line_height = ALTERNATE_LINE_HEIGHT;
@@ -242,9 +244,10 @@ mod tests {
     use crate::ui::settings_window::test_support::MemoryStorage;
 
     fn preview() -> AppearancePreview {
-        AppearancePreview::new(UserSettings::load(Arc::new(
-            super::super::tests::ReadOnlyStorage,
-        )))
+        AppearancePreview::new(
+            UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage)),
+            "Fixture Mono".into(),
+        )
     }
 
     #[test]
@@ -283,12 +286,16 @@ mod tests {
         let defaults = SettingsDocument::default().preferences.terminal.typography;
 
         preview.set_alternate_typography(true).unwrap();
-        assert!(AppearancePreview::alternate_typography(&preview.document()));
+        assert!(preview.alternate_typography(&preview.document()));
+        assert_eq!(
+            preview.document().preferences.terminal.typography.family,
+            TerminalFontFamily::Named {
+                family: "Fixture Mono".into()
+            },
+        );
         preview.set_alternate_typography(false).unwrap();
 
-        assert!(!AppearancePreview::alternate_typography(
-            &preview.document()
-        ));
+        assert!(!preview.alternate_typography(&preview.document()));
         assert_eq!(preview.document().preferences.terminal.typography, defaults);
     }
 
@@ -307,7 +314,8 @@ mod tests {
     #[test]
     fn commit_saves_the_preview_and_closes_it() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
 
         assert!(preview.commit().is_ok());
@@ -323,7 +331,8 @@ mod tests {
     #[test]
     fn a_failed_commit_keeps_the_preview_open() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
         storage.fail_writes(Some(StorageError::Unavailable));
 
@@ -359,7 +368,7 @@ mod tests {
     #[test]
     fn dropping_the_preview_releases_the_settings_document() {
         let settings = UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage));
-        let mut preview = AppearancePreview::new(settings.clone());
+        let mut preview = AppearancePreview::new(settings.clone(), "Fixture Mono".into());
         preview.set_blur(false).unwrap();
         drop(preview);
 

@@ -86,7 +86,11 @@ fn macos_shortcut_key_glyphs_paint_on_the_command_glyph_center() {
         "pagedown",
         "k",
     ] {
-        let shortcut = MacosShortcutFormatter.format_chord(Modifiers::command(), key);
+        let shortcut = MacosShortcutFormatter.format_chord(
+            Modifiers::command(),
+            key,
+            &crate::platform::keyboard_layout::KeyboardLayout::default(),
+        );
         let ink = painted_ink(shortcut.clone());
         assert_eq!(ink.len(), 2, "`{shortcut}` did not paint two glyphs");
         let miss = vertical_center(ink[1]) - vertical_center(ink[0]);
@@ -99,7 +103,11 @@ fn macos_shortcut_key_glyphs_paint_on_the_command_glyph_center() {
 
 #[test]
 fn macos_shortcut_control_caret_keeps_its_raised_design() {
-    let shortcut = MacosShortcutFormatter.format_chord(Modifiers::control(), "k");
+    let shortcut = MacosShortcutFormatter.format_chord(
+        Modifiers::control(),
+        "k",
+        &crate::platform::keyboard_layout::KeyboardLayout::default(),
+    );
     let ink = painted_ink(shortcut);
     assert_eq!(ink.len(), 2);
     assert!(vertical_center(ink[0]) < vertical_center(ink[1]) - 4.0);
@@ -108,7 +116,11 @@ fn macos_shortcut_control_caret_keeps_its_raised_design() {
 #[test]
 fn macos_shortcut_key_glyphs_keep_their_shaped_advance() {
     for key in ["enter", "pageup", "tab"] {
-        let shortcut = MacosShortcutFormatter.format_chord(Modifiers::command(), key);
+        let shortcut = MacosShortcutFormatter.format_chord(
+            Modifiers::command(),
+            key,
+            &crate::platform::keyboard_layout::KeyboardLayout::default(),
+        );
         let moved = painted_ink(shortcut.clone());
         let plain = painted_plain_ink(shortcut.clone());
         let advance = |ink: &[Bounds<ScaledPixels>]| ink[1].origin.x - ink[0].origin.x;
@@ -123,7 +135,11 @@ fn macos_shortcut_key_glyphs_keep_their_shaped_advance() {
 #[test]
 fn macos_shortcut_label_box_should_span_its_ink() {
     for key in ["enter", "k"] {
-        let shortcut = MacosShortcutFormatter.format_chord(Modifiers::command(), key);
+        let shortcut = MacosShortcutFormatter.format_chord(
+            Modifiers::command(),
+            key,
+            &crate::platform::keyboard_layout::KeyboardLayout::default(),
+        );
         let (ink, label) = painted_label(shortcut.clone());
         let ink_left = ink[0].left().0;
         let ink_right = ink[ink.len() - 1].right().0;
@@ -140,7 +156,11 @@ fn macos_shortcut_label_box_should_span_its_ink() {
 fn macos_shortcut_label_box_should_not_overreach_a_decomposed_glyph() {
     // Thai Sara Am shapes into two glyphs, so its whole-character bounds describe neither. The
     // label then keeps the plain text box at that edge.
-    let shortcut = MacosShortcutFormatter.format_chord(Modifiers::command(), "\u{e33}");
+    let shortcut = MacosShortcutFormatter.format_chord(
+        Modifiers::command(),
+        "\u{e33}",
+        &crate::platform::keyboard_layout::KeyboardLayout::default(),
+    );
     let (ink, label) = painted_label(shortcut.clone());
     let plain = painted({
         let shortcut = shortcut.clone();

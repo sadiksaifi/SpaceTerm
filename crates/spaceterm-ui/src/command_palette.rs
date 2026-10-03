@@ -54,6 +54,8 @@ actions!(
 pub enum CommandPaletteKeybindingProfile {
     /// The shipped macOS navigation, confirmation, dismissal, and focus bindings.
     MacOs,
+    /// The Linux set: the macOS set without Command chords, confirming with Control-Return.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
@@ -70,6 +72,20 @@ pub fn install_command_palette_keybindings(cx: &mut App, profile: CommandPalette
             KeyBinding::new("cmd-enter", Confirm, Some(KEY_CONTEXT)),
             KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
+            KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
+        ]),
+        CommandPaletteKeybindingProfile::Linux => cx.bind_keys([
+            KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
+            KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-enter", Confirm, Some(KEY_CONTEXT)),
+            KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
             KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
             KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
@@ -3194,7 +3210,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 let _ = palette.update(cx, |_, cx| cx.notify());
             });
         }
-        let viewport = window.viewport_size();
+        let content_viewport = crate::content_viewport(window);
+        let viewport = content_viewport.size;
         let available_width = (viewport.width - metrics.viewport_margin * 2.0).max(px(0.0));
         let panel_width = metrics.panel_width.min(available_width);
         let left = ((viewport.width - panel_width) / 2.0).max(px(0.0));
@@ -3253,7 +3270,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         let panel_height = chrome_height + list_height;
 
         let panel_bounds = gpui::Bounds::new(
-            gpui::point(left, top),
+            gpui::point(left, top) + content_viewport.origin,
             gpui::size(panel_width, panel_height),
         );
         let outside = self.render_outside_tracker(panel_bounds, cx);
@@ -3278,8 +3295,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         );
         let overlay = div()
             .relative()
-            .w(viewport.width)
-            .h(viewport.height)
+            .w(window.viewport_size().width)
+            .h(window.viewport_size().height)
             .key_context(KEY_CONTEXT)
             .font(font)
             .line_height(metrics.body_line_height)
@@ -3289,8 +3306,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .child(
                 div()
                     .absolute()
-                    .left(left)
-                    .top(top)
+                    .left(panel_bounds.origin.x)
+                    .top(panel_bounds.origin.y)
                     // A hidden panel keeps its focus and key handling, so typing is not lost.
                     .when(!panel_visible, |panel| panel.opacity(0.0))
                     .child(panel),

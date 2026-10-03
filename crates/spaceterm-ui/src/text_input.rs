@@ -98,6 +98,9 @@ pub enum TextInputKeybindingProfile {
     /// Conventional macOS editing aliases. Selecting this profile is explicit and performs no
     /// operating-system detection.
     MacOs,
+    /// Conventional GTK editing bindings for Linux desktops. Selecting this profile is explicit and
+    /// performs no operating-system detection.
+    Linux,
 }
 
 /// Installs the current bindings for `profile`.
@@ -164,6 +167,40 @@ pub fn install_text_input_keybindings(cx: &mut App, profile: TextInputKeybinding
             KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
             KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
+        ]),
+        TextInputKeybindingProfile::Linux => cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
+            KeyBinding::new("delete", DeleteForward, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-backspace", DeletePreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-delete", DeleteNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-backspace", DeleteToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-delete", DeleteToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("left", MoveLeft, Some(KEY_CONTEXT)),
+            KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-left", MoveToPreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-right", MoveToNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("home", MoveToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-home", SelectToBeginning, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-end", SelectToEnd, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-left", SelectToPreviousWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-right", SelectToNextWord, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-c", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-insert", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-x", Cut, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-delete", Cut, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-v", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-insert", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-z", Undo, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-z", Redo, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-y", Redo, Some(KEY_CONTEXT)),
+            KeyBinding::new("enter", Submit, Some(KEY_CONTEXT)),
+            KeyBinding::new("escape", Cancel, Some(KEY_CONTEXT)),
+            KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
         ]),
     }
 }
@@ -540,6 +577,13 @@ struct GeometryCache {
     selected_line: ShapedLine,
 }
 
+#[derive(Clone)]
+struct GeometryStyle {
+    font: Font,
+    font_size: Pixels,
+    theme: TextInputTheme,
+}
+
 #[derive(Clone, Copy)]
 enum TextInputMenuAction {
     Undo,
@@ -576,6 +620,7 @@ pub struct TextInput {
     revision: u64,
     composition: Option<CompositionState>,
     geometry: Option<GeometryCache>,
+    rendered_geometry_style: Option<GeometryStyle>,
     last_bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
     pointer_generation: u64,
@@ -652,6 +697,7 @@ impl TextInput {
             revision: 0,
             composition: None,
             geometry: None,
+            rendered_geometry_style: None,
             last_bounds: None,
             scroll: px(0.0),
             pointer_generation: 0,
@@ -1738,13 +1784,29 @@ impl TextInput {
         )
     }
 
+    fn geometry_style(&self, window: &Window, cx: &App) -> GeometryStyle {
+        self.rendered_geometry_style
+            .clone()
+            .unwrap_or_else(|| GeometryStyle {
+                font: crate::control_typography(cx).regular().clone(),
+                font_size: window.text_style().font_size.to_pixels(window.rem_size()),
+                theme: *crate::floating_surface::hosted_text_input_theme(cx),
+            })
+    }
+
     fn rebuild_geometry(
         &mut self,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) -> ShapedLine {
-        let theme = *crate::floating_surface::hosted_text_input_theme(cx);
+        // Native input and IME geometry callbacks run outside the element's render scope.
+        // Use the last rendered font and host theme until prepaint publishes their replacement.
+        let GeometryStyle {
+            font,
+            font_size,
+            theme,
+        } = self.geometry_style(window, cx);
         let paint = theme.variants.paint(self.variant);
         let empty = self.buffer.text.is_empty();
         let color: gpui::Hsla = if self.enabled {
@@ -1755,9 +1817,6 @@ impl TextInput {
             paint.disabled_text
         }
         .into();
-        let text_style = window.text_style();
-        let font = text_style.font();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
         let marked_range = (!empty && self.is_visually_active(window))
             .then(|| {
                 self.composition
@@ -2005,11 +2064,8 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(
-            &line,
-            bounds,
-            crate::floating_surface::hosted_text_input_theme(cx).metrics,
-        );
+        let scroll =
+            self.reconcile_scroll(&line, bounds, self.geometry_style(window, cx).theme.metrics);
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
         let display_range =
             self.display_offset_for_source(range.start)..self.display_offset_for_source(range.end);
@@ -2032,11 +2088,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.rebuild_geometry(bounds, window, cx);
-        let scroll = self.reconcile_scroll(
-            &line,
-            bounds,
-            crate::floating_surface::hosted_text_input_theme(cx).metrics,
-        );
+        let scroll =
+            self.reconcile_scroll(&line, bounds, self.geometry_style(window, cx).theme.metrics);
         let index = self
             .source_offset_for_display(line.closest_index_for_x(point.x - bounds.left() + scroll));
         Some(byte_offset_to_utf16(&self.buffer.text, index))
@@ -2250,6 +2303,12 @@ impl Element for TextElement {
         self.input.update(cx, |input, cx| {
             let theme = *crate::floating_surface::hosted_text_input_theme(cx);
             let paint = theme.variants.paint(input.variant);
+            let text_style = window.text_style();
+            input.rendered_geometry_style = Some(GeometryStyle {
+                font: text_style.font(),
+                font_size: text_style.font_size.to_pixels(window.rem_size()),
+                theme,
+            });
             let line = input.rebuild_geometry(bounds, window, cx);
             let empty = input.buffer.text.is_empty();
             let caret_x = if empty {

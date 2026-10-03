@@ -279,7 +279,7 @@ impl Drop for MacosAppearanceSubscription {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 #[allow(dead_code)]
 pub(in crate::platform) mod tests {
     use super::*;

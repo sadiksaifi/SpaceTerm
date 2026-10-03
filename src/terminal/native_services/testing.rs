@@ -29,7 +29,7 @@ impl SelectionClipboard for TestSelectionClipboard {
 
 struct EmptyFileClipboard;
 impl FileClipboard for EmptyFileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
+    fn read_files(&self, _: &gpui::App) -> Result<Vec<PathBuf>, ClipboardError> {
         Ok(Vec::new())
     }
 }
@@ -50,6 +50,7 @@ impl FilePreviewFactory for UnavailablePreview {
 pub(crate) fn adapters() -> NativeServiceAdapters {
     NativeServiceAdapters {
         text_clipboard: Rc::new(TestTextClipboard),
+        primary_selection: None,
         selection_clipboard: Rc::new(TestSelectionClipboard),
         file_insertion:
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),

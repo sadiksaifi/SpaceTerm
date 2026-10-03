@@ -24,17 +24,17 @@ pub(crate) fn main() {
 fn capture_startup_dependencies(
     identity: ApplicationIdentity,
 ) -> Result<
-    StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     StartupDependenciesError,
 > {
     let path_environment = super::app_directories::AppDirectoryEnvironment::capture();
     let directories = super::app_directories::AppDirectories::resolve(identity.directory_name())
         .map_err(|_| StartupDependenciesError::Paths)?;
     let secure_filesystem: Arc<dyn super::secure_filesystem::SecureFilesystem> =
-        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem);
+        Arc::new(super::unix_secure_filesystem::UnixSecureFilesystem);
     let paths = super::app_paths::AppPaths::from_directories(
         directories,
-        103,
+        super::unix_local_socket::LOCAL_IPC_PATH_MAXIMUM,
         Arc::clone(&secure_filesystem),
     )
     .map_err(|_| StartupDependenciesError::Paths)?;
@@ -49,9 +49,9 @@ fn capture_startup_dependencies(
         .map_err(|_| StartupDependenciesError::Paths)?,
         paths,
         executable,
-        super::macos_ssh_process::MacOsSshProcessAdapter,
-        Arc::new(super::macos_control_socket::MacosControlSocketProbe),
-        Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
+        super::unix_ssh_process::UnixSshProcessAdapter,
+        Arc::new(super::unix_local_socket::UnixControlSocketProbe),
+        Arc::new(super::unix_host_config_filesystem::UnixHostConfigFilesystem),
     )
 }
 
@@ -79,13 +79,27 @@ fn desktop_profile(
                 system_directory_selection: "Choose in Finder…",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
+            crate::desktop_profile::ShortcutSelection::NativeMenu,
+            &[],
         ),
         locale,
-    ))
+    )
+    .with_fonts(crate::host_fonts::HostFonts {
+        ui_family: ".SystemUIFont".into(),
+        system_monospace_family: "Menlo".into(),
+        terminal_families: &[
+            crate::bundled_font::FAMILY,
+            "JetBrainsMono Nerd Font",
+            "JetBrainsMono Nerd Font Mono",
+            "JetBrains Mono",
+        ],
+        emoji_family: "Apple Color Emoji".into(),
+        bundled_ui_faces: &[],
+    }))
 }
 
 fn compose(
-    startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    startup: StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
     let settings_storage = startup.settings_storage();
@@ -114,10 +128,12 @@ fn compose(
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
         paths,
-        Arc::new(super::macos_local_identity::MacosLocalIdentity),
+        Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
-        Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
+        Arc::new(super::unix_pty::UnixNativePtyAdapterFactory::new(Arc::new(
+            super::macos_pty_host::MacosPtyHost,
+        ))),
         super::launch_host::shell_launch_planner(),
         local_filesystem.clone(),
         crate::terminal::metadata::LocalMachine::new(
@@ -127,7 +143,9 @@ fn compose(
         ),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::macos_askpass_transport::AskPassWindowFactory,
+        super::unix_askpass_transport::AskPassWindowFactory::new(
+            super::launch_host::running_executable(),
+        ),
     ));
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(Rc::new(super::macos_locale::ApplicationLocale))?,
@@ -135,7 +153,7 @@ fn compose(
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
-            selected_files: Some(Arc::new(super::macos_selected_file::MacosSelectedFileOpener)),
+            selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
@@ -154,6 +172,7 @@ fn compose(
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 text_clipboard: Rc::new(super::macos_pasteboard::MacosTextClipboard),
+        primary_selection: None,
                 selection_clipboard: Rc::new(super::macos_pasteboard::MacosSelectionClipboard),
                 file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
                     paths,
@@ -178,17 +197,17 @@ fn compose(
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },
-        services: Rc::new(super::macos_services::NativeServicesRegistration),
+        services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
         window_frame: super::macos_window_frame::window_frame_geometry(),
-        titlebar: Some(TitlebarOptions {
+        window_chrome: super::window_chrome::WindowChrome::native(Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
             traffic_light_position: None,
-        }),
+        })),
     })
     .map(|host| {
-        host.with_appearance(
+        host.with_modal_prompts(false).with_appearance(
             settings_storage,
             Rc::new(super::macos_appearance::MacosAppearancePlatform),
         )
@@ -230,7 +249,7 @@ fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(crate::updates::UnavailableUpdates)
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
 
@@ -374,6 +393,20 @@ mod tests {
             )))
             .unwrap()
             .install(cx);
+            let fonts = crate::host_fonts::HostFonts::get(cx);
+            assert_eq!(fonts.ui_family, ".SystemUIFont");
+            assert_eq!(fonts.system_monospace_family, "Menlo");
+            assert_eq!(
+                fonts.terminal_families,
+                [
+                    crate::bundled_font::FAMILY,
+                    "JetBrainsMono Nerd Font",
+                    "JetBrainsMono Nerd Font Mono",
+                    "JetBrains Mono",
+                ]
+            );
+            assert_eq!(fonts.emoji_family, "Apple Color Emoji");
+            assert!(fonts.bundled_ui_faces.is_empty());
             gpui::BorrowAppContext::update_global::<DesktopPresentation, _>(
                 cx,
                 |presentation, cx| presentation.refresh(cx),

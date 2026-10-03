@@ -4,11 +4,12 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSEventType};
 use objc2_foundation::NSString;
 
+use crate::terminal::key::KeyInputError;
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, InputModifiers, KeyAction,
-    KeyInput, KeyInputError, KeyTranslation, OptionAsAltPolicy, PhysicalKey,
-    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
-    UnhandledKeyEvent,
+    KeyInput, KeyTranslation, OptionAsAltPolicy, PhysicalKey, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -498,7 +499,7 @@ fn physical_key(native_key_code: u16) -> PhysicalKey {
     }
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
 

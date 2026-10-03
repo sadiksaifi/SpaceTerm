@@ -58,6 +58,7 @@ use crate::appearance::{
     FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
     ThemeId,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
@@ -264,6 +265,10 @@ pub(crate) struct SettingsWindow {
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
+    /// The sections and rows this desktop presents. A desktop omits only the surfaces of features
+    /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
+    available_sections: Vec<SettingsSectionId>,
+    omitted_rows: Vec<SettingsRowId>,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
     theme_gallery: ThemeGallery,
@@ -288,7 +293,7 @@ impl SidebarOwner for SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query, self.permission_access.naming());
+        let matching = self.matching_rows();
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -304,6 +309,22 @@ impl SidebarOwner for SettingsWindow {
         self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
+    }
+}
+
+/// The host feature a whole section presents, if any.
+fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
+    (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
+}
+
+/// The host feature one row presents, if any.
+fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
+    if let Some(feature) = section_feature(row.descriptor().section) {
+        Some(feature)
+    } else if row == SettingsRowId::MicrophoneAccess {
+        Some(HostFeature::MicrophoneAccess)
+    } else {
+        permission_access::row_permission(row).map(|_| HostFeature::SystemPermissions)
     }
 }
 
@@ -483,6 +504,19 @@ impl SettingsWindow {
             })
             .detach();
         }
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let available_sections = SettingsSectionId::ALL
+            .into_iter()
+            .filter(|section| {
+                section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
+            })
+            .collect();
+        let omitted_rows = catalog::rows()
+            .map(|row| row.id)
+            .filter(|row| {
+                row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
+            })
+            .collect();
         Self {
             window_appearance,
             window_traffic_lights,
@@ -498,6 +532,8 @@ impl SettingsWindow {
             focus_handle,
             navigation,
             window_movement,
+            available_sections,
+            omitted_rows,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
@@ -608,15 +644,25 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+    fn matching_rows(&self) -> Vec<SettingsRowId> {
         catalog::matching_rows(&self.query, self.permission_access.naming())
+            .into_iter()
+            .filter(|row| {
+                self.available_sections.contains(&row.descriptor().section)
+                    && !self.omitted_rows.contains(row)
+            })
+            .collect()
+    }
+
+    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+        self.matching_rows()
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = catalog::matching_rows(&self.query, self.permission_access.naming());
+        let matching = self.matching_rows();
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -736,7 +782,9 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = super::appearance::window_activity(window);
-        super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
+        let content =
+            super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx));
+        super::window_shell::render(content, window, cx)
     }
 }
 
@@ -777,8 +825,20 @@ impl SettingsWindow {
 
 impl SettingsWindow {
     /// The active section's large title and description at the head of the content surface.
-    fn render_detail_heading(&self, settings: &SettingsAppearance) -> AnyElement {
+    fn render_detail_heading(
+        &self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let section = self.active_section;
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         DetailHeading::new(
             "settings",
@@ -789,9 +849,10 @@ impl SettingsWindow {
                 &settings.chrome,
             ),
             &self.window_movement,
+            close,
         )
         .scrolled(scrolled)
-        .render(settings)
+        .render(settings, window)
     }
 
     fn render_sidebar(
@@ -801,8 +862,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let available = self.navigable_sections();
-        let entries = SettingsSectionId::ALL
-            .into_iter()
+        let entries = self
+            .available_sections
+            .iter()
+            .copied()
             .map(|section| NavigationEntry {
                 section,
                 title: section.title(),
@@ -850,7 +913,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings))
+            .child(self.render_detail_heading(settings, window, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1930,10 +1993,8 @@ impl SettingsWindow {
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable = !zero_transparency
-                    && composition.effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque
-                    && !composition.floating_materials.is_opaque();
+                let native_unavailable =
+                    !zero_transparency && !composition.capabilities.native_window_transparency;
                 Some(match row {
                     SettingsRowId::Transparency if zero_transparency => {
                         "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
@@ -1944,6 +2005,12 @@ impl SettingsWindow {
                     SettingsRowId::Transparency if native_unavailable => {
                         "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
                     }
+                    SettingsRowId::Transparency
+                        if !composition.capabilities.native_window_blur
+                            && self.editor.document().preferences.window.blur =>
+                    {
+                        "Desktop blur is unavailable on this system. Turn off Blur to show the desktop through the window."
+                    }
                     SettingsRowId::Transparency => {
                         "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
                     }
@@ -1953,7 +2020,7 @@ impl SettingsWindow {
                     _ if accessibility_forced_opaque => {
                         "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
                     }
-                    _ if native_unavailable => {
+                    _ if native_unavailable || !composition.capabilities.native_window_blur => {
                         "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
                     }
                     _ => {
