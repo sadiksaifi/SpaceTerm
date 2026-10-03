@@ -254,7 +254,10 @@ impl ComputerUseAccessRow {
     fn can_reset(&self) -> bool {
         self.readable()
             && self.notice != Some(RecoveryNotice::Resetting)
-            && self.access.as_ref().is_some_and(|access| access.can_reset())
+            && self
+                .access
+                .as_ref()
+                .is_some_and(|access| access.can_reset())
     }
 
     fn finish_reset(&mut self, result: Option<Result<(), ComputerUseAccessError>>) {
@@ -289,13 +292,13 @@ impl ComputerUseAccessRow {
                  Privacy & Security > {pane}, then add it again."
             ),
         });
-        let troubleshoot = self.readable().then_some(
-            if self.notice == Some(RecoveryNotice::Resetting) {
-                TroubleshootAvailability::Busy
-            } else {
-                TroubleshootAvailability::Enabled
-            },
-        );
+        let troubleshoot =
+            self.readable()
+                .then_some(if self.notice == Some(RecoveryNotice::Resetting) {
+                    TroubleshootAvailability::Busy
+                } else {
+                    TroubleshootAvailability::Enabled
+                });
 
         let (state, state_selector, explanation, action) = match self.status {
             ComputerUseAccessStatus::Unsupported => (
@@ -363,7 +366,12 @@ impl ComputerUseAccessRow {
                         Action::OpenSettings,
                     ),
                 };
-                ("Not Allowed", text.state_not_allowed, explanation, Some(action))
+                (
+                    "Not Allowed",
+                    text.state_not_allowed,
+                    explanation,
+                    Some(action),
+                )
             }
             ComputerUseAccessStatus::Failed(error) => (
                 "Unavailable",
@@ -405,7 +413,11 @@ impl ComputerUseAccessRow {
         );
         let reopen =
             format!("3. If the tool still reports missing access, quit and reopen {application}.");
-        let reset = if self.access.as_ref().is_some_and(|access| access.can_reset()) {
+        let reset = if self
+            .access
+            .as_ref()
+            .is_some_and(|access| access.can_reset())
+        {
             " Alternatively, choose Reset Permission to clear the entry, then choose Set Up."
         } else {
             ""
@@ -552,7 +564,8 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         let row = self.computer_use_access.row_mut(permission);
-        if row.status != ComputerUseAccessStatus::Authorization(ComputerUseAuthorization::NotGranted)
+        if row.status
+            != ComputerUseAccessStatus::Authorization(ComputerUseAuthorization::NotGranted)
         {
             return;
         }

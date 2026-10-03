@@ -7355,7 +7355,10 @@ mod permission_requests {
             cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)),
             "the notice must leave keyboard focus with the terminal"
         );
-        assert!(access.prepared.borrow().is_empty(), "a request starts nothing by itself");
+        assert!(
+            access.prepared.borrow().is_empty(),
+            "a request starts nothing by itself"
+        );
 
         let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
         cx.simulate_click(set_up.center(), Modifiers::none());
@@ -7499,11 +7502,17 @@ mod permission_requests {
 
         cursor_on_row(&pane, 2, cx);
         let notice = cx.debug_bounds("permission-request").unwrap();
-        assert!(notice.top() > middle, "a cursor near the top leaves the notice at the bottom");
+        assert!(
+            notice.top() > middle,
+            "a cursor near the top leaves the notice at the bottom"
+        );
 
         cursor_on_row(&pane, 8, cx);
         let notice = cx.debug_bounds("permission-request").unwrap();
-        assert!(notice.bottom() < middle, "a cursor near the bottom moves the notice to the top");
+        assert!(
+            notice.bottom() < middle,
+            "a cursor near the bottom moves the notice to the top"
+        );
     }
 
     #[gpui::test]
@@ -7559,7 +7568,10 @@ mod permission_requests {
         assert!(cx.debug_bounds("permission-request").is_none());
     }
 
-    fn offered(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) -> Vec<ComputerUsePermission> {
+    fn offered(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<ComputerUsePermission> {
         pane.read_with(cx, |pane, _| pane.permission_request.clone())
     }
 

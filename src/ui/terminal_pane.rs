@@ -39,10 +39,10 @@ use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
 use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
+use crate::platform::computer_use_access::ComputerUsePermission;
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
-use crate::platform::computer_use_access::ComputerUsePermission;
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
 #[cfg(test)]
 use crate::terminal::UnhandledKeyEvent;
@@ -3365,12 +3365,17 @@ impl TerminalPane {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_permission_setup(&mut self, setup: Entity<super::permission_setup::PermissionSetup>) {
+    pub(crate) fn set_permission_setup(
+        &mut self,
+        setup: Entity<super::permission_setup::PermissionSetup>,
+    ) {
         self.lifecycle_dependencies.permission_setup = Some(setup);
     }
 
     #[cfg(test)]
-    pub(crate) fn permission_setup(&self) -> Option<Entity<super::permission_setup::PermissionSetup>> {
+    pub(crate) fn permission_setup(
+        &self,
+    ) -> Option<Entity<super::permission_setup::PermissionSetup>> {
         self.lifecycle_dependencies.permission_setup.clone()
     }
 
@@ -4068,7 +4073,9 @@ impl Render for TerminalPane {
         // The notice docks on the half of the Pane away from the cursor, so it never hides the
         // line a person types on.
         let permission_request_edge = match self.screen.cursor.position {
-            Some(cursor) if usize::from(cursor.row) * 2 >= self.screen.rows.len() => NoticeEdge::Top,
+            Some(cursor) if usize::from(cursor.row) * 2 >= self.screen.rows.len() => {
+                NoticeEdge::Top
+            }
             _ => NoticeEdge::Bottom,
         };
         // The notice's shortcuts apply only while the notice shows.

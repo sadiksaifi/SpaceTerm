@@ -48,9 +48,13 @@ enum FilterState {
     Prefix,
     /// `candidate` holds the body read so far. `escape_pending` follows an ESC that either ends
     /// the request as part of ST or abandons it.
-    Body { escape_pending: bool },
+    Body {
+        escape_pending: bool,
+    },
     /// The body outgrew `MAX_BODY_BYTES`; the rest of the request is dropped.
-    Discard { escape_pending: bool },
+    Discard {
+        escape_pending: bool,
+    },
 }
 
 /// Removes Permission Requests from terminal output that may arrive split across reads.
@@ -272,7 +276,10 @@ mod tests {
     fn a_request_may_end_with_string_terminator() {
         assert_eq!(
             filter(&[b"\x1b]7701;permissions=accessibility\x1b\\"]),
-            [terminal(REMOVED_REQUEST), Output::Request(vec![Accessibility])]
+            [
+                terminal(REMOVED_REQUEST),
+                Output::Request(vec![Accessibility])
+            ]
         );
     }
 
@@ -311,7 +318,10 @@ mod tests {
     fn unsupported_names_are_ignored_and_duplicates_collapse() {
         assert_eq!(
             filter(&[b"\x1b]7701;permissions=camera,accessibility,accessibility\x07"]),
-            [terminal(REMOVED_REQUEST), Output::Request(vec![Accessibility])]
+            [
+                terminal(REMOVED_REQUEST),
+                Output::Request(vec![Accessibility])
+            ]
         );
     }
 
@@ -348,7 +358,10 @@ mod tests {
         raw.push(0x07);
         assert_eq!(
             filter(&[&raw]),
-            [terminal(REMOVED_REQUEST), Output::Request(vec![Accessibility])]
+            [
+                terminal(REMOVED_REQUEST),
+                Output::Request(vec![Accessibility])
+            ]
         );
     }
 
@@ -392,7 +405,10 @@ mod tests {
     fn an_escape_that_abandons_a_request_may_begin_another() {
         assert_eq!(
             filter(&[b"\x1b]7701;x\x1b]7701;permissions=accessibility\x07"]),
-            [terminal(REMOVED_REQUEST), Output::Request(vec![Accessibility])]
+            [
+                terminal(REMOVED_REQUEST),
+                Output::Request(vec![Accessibility])
+            ]
         );
     }
 
@@ -401,7 +417,10 @@ mod tests {
     #[test]
     fn a_removed_request_ends_an_open_string() {
         assert_eq!(
-            filter(&[b"\x1b]0;title", b"\x1b]7701;permissions=accessibility\x07 hello"]),
+            filter(&[
+                b"\x1b]0;title",
+                b"\x1b]7701;permissions=accessibility\x07 hello"
+            ]),
             [
                 terminal(b"\x1b]0;title\x1b\\"),
                 Output::Request(vec![Accessibility]),

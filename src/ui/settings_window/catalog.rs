@@ -927,7 +927,10 @@ mod tests {
             SettingsRowId::ScreenRecordingAccess,
             SettingsRowId::DeviceControlAccess,
         ] {
-            assert!(computer_use.contains(&row), "computer use should reach {row:?}");
+            assert!(
+                computer_use.contains(&row),
+                "computer use should reach {row:?}"
+            );
         }
     }
 

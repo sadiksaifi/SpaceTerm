@@ -16,14 +16,13 @@ use objc2_app_kit::{
     NSFontAttributeName, NSFontWeight, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSGlassEffectView,
     NSGlassEffectViewStyle, NSGraphicsContext, NSImage, NSLineBreakMode, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSRunningApplication, NSView, NSWindowOrderingMode,
-    NSWorkspace,
+    NSParagraphStyleAttributeName, NSRunningApplication, NSView, NSWindowOrderingMode, NSWorkspace,
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSBundle, NSDictionary, NSNumber, NSPoint, NSRect, NSSize,
     NSString,
 };
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::setup_guide_host::{
     ApplicationBundle, ApplicationRowImage, SetupGuideHost, SystemSettingsWindow,
@@ -156,9 +155,9 @@ fn on_screen_windows() -> Vec<ListedWindow> {
         CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP_ELEMENTS, NULL_WINDOW)
     };
     // SAFETY: See above; a null result yields `None`.
-    let Some(list) = (unsafe {
-        Retained::from_raw(list.cast::<NSArray<NSDictionary<NSString, AnyObject>>>())
-    }) else {
+    let Some(list) =
+        (unsafe { Retained::from_raw(list.cast::<NSArray<NSDictionary<NSString, AnyObject>>>()) })
+    else {
         return Vec::new();
     };
     list.iter()
@@ -227,7 +226,10 @@ fn active_displays() -> Vec<(u32, NSRect)> {
 }
 
 /// The display showing most of `frame`, and `frame` relative to that display's top-left corner.
-fn display_relative(frame: NSRect, displays: &[(u32, NSRect)]) -> Option<(DisplayId, Bounds<Pixels>)> {
+fn display_relative(
+    frame: NSRect,
+    displays: &[(u32, NSRect)],
+) -> Option<(DisplayId, Bounds<Pixels>)> {
     let (display, display_frame) = displays
         .iter()
         .map(|(display, bounds)| (*display, *bounds, overlap(frame, *bounds)))
@@ -287,10 +289,7 @@ fn row_png(row: &ApplicationRowImage, icon: &NSImage) -> Option<Vec<u8>> {
     let height = points(row.size.height);
     let icon_size = points(row.icon_size);
     let name_left = points(row.padding) + icon_size + points(row.gap);
-    let font = NSFont::systemFontOfSize_weight(
-        points(row.font_size),
-        font_weight(row.font_weight),
-    );
+    let font = NSFont::systemFontOfSize_weight(points(row.font_size), font_weight(row.font_weight));
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     let color = ns_color(row.name_color);
@@ -317,7 +316,10 @@ fn row_png(row: &ApplicationRowImage, icon: &NSImage) -> Option<Vec<u8>> {
     draw_png(width.ceil() as isize, height.ceil() as isize, || {
         // Half a pixel in, so the hairline edge lands on whole pixels.
         let surface = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-            NSRect::new(NSPoint::new(0.5, 0.5), NSSize::new(width - 1.0, height - 1.0)),
+            NSRect::new(
+                NSPoint::new(0.5, 0.5),
+                NSSize::new(width - 1.0, height - 1.0),
+            ),
             points(row.corner_radius),
             points(row.corner_radius),
         );
@@ -332,7 +334,10 @@ fn row_png(row: &ApplicationRowImage, icon: &NSImage) -> Option<Vec<u8>> {
         ));
         name.drawInRect(NSRect::new(
             NSPoint::new(name_left, (height - name_height) / 2.0),
-            NSSize::new((width - name_left - points(row.padding)).max(0.0), name_height),
+            NSSize::new(
+                (width - name_left - points(row.padding)).max(0.0),
+                name_height,
+            ),
         ));
     })
 }
@@ -420,7 +425,10 @@ mod tests {
             frontmost_window(&[menu_bar, settings, other], &[SETTINGS]),
             Some(settings.frame)
         );
-        assert_eq!(frontmost_window(&[menu_bar, other, settings], &[SETTINGS]), None);
+        assert_eq!(
+            frontmost_window(&[menu_bar, other, settings], &[SETTINGS]),
+            None
+        );
         assert_eq!(frontmost_window(&[menu_bar], &[SETTINGS]), None);
     }
 
@@ -454,7 +462,10 @@ mod tests {
         let column = content_column(window);
         assert_eq!(column.left(), px(532.0));
         assert_eq!(column.right(), window.right());
-        assert_eq!((column.top(), column.bottom()), (window.top(), window.bottom()));
+        assert_eq!(
+            (column.top(), column.bottom()),
+            (window.top(), window.bottom())
+        );
 
         let narrow = Bounds::new(point(px(0.0), px(0.0)), size(px(450.0), px(300.0)));
         assert_eq!(content_column(narrow).size.width, px(300.0));
@@ -462,8 +473,14 @@ mod tests {
 
     #[test]
     fn a_frame_is_placed_on_the_display_showing_most_of_it() {
-        let primary = (1, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0)));
-        let right = (2, NSRect::new(NSPoint::new(1440.0, -100.0), NSSize::new(1920.0, 1080.0)));
+        let primary = (
+            1,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0)),
+        );
+        let right = (
+            2,
+            NSRect::new(NSPoint::new(1440.0, -100.0), NSSize::new(1920.0, 1080.0)),
+        );
         let frame = NSRect::new(NSPoint::new(1300.0, 50.0), NSSize::new(700.0, 600.0));
 
         assert_eq!(

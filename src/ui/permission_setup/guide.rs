@@ -400,7 +400,8 @@ impl SetupGuide {
         let colors = &appearance.floating_colors;
         let presentation = self.presentation;
         let name = permission_copy(presentation.permission).name;
-        let application = crate::application_identity::ApplicationIdentity::current().display_name();
+        let application =
+            crate::application_identity::ApplicationIdentity::current().display_name();
         let glyph = appearance.icons.metrics(IconRole::Status).glyph_size;
         // Lines below the header start under its text, past the symbol.
         let indent = glyph + appearance.spacing(6.0);
@@ -411,7 +412,11 @@ impl SetupGuide {
                 emphasized(&[(name, true), (" is allowed.", false)]),
             )
         } else {
-            let verb = if self.bundle.is_some() { "Drag " } else { "Add " };
+            let verb = if self.bundle.is_some() {
+                "Drag "
+            } else {
+                "Add "
+            };
             (
                 self.render_arrow(glyph, appearance, cx),
                 emphasized(&[
@@ -538,7 +543,9 @@ impl SetupGuide {
             // otherwise show through.
             .when(!self.glass, |panel| {
                 let base = colors.elevated_surface_background;
-                let surface = appearance.floating_surface(base).source_over(base.with_alpha(255));
+                let surface = appearance
+                    .floating_surface(base)
+                    .source_over(base.with_alpha(255));
                 panel
                     .border_1()
                     .border_color(gpui_color(colors.border_variant))

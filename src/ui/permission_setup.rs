@@ -42,7 +42,6 @@ const AUTHORIZATION_INTERVALS: u32 = 30;
 /// How long System Settings may take to come forward before the setup reports it did not.
 const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
 
-
 /// How SpaceTerm names one permission and the System Settings list that holds it.
 pub(crate) struct PermissionCopy {
     /// The permission's name in running text.
@@ -202,9 +201,11 @@ impl PermissionSetup {
     }
 
     pub(crate) fn status(&self, permission: ComputerUsePermission) -> PermissionSetupStatus {
-        if self.run.as_ref().is_some_and(|run| {
-            run.permission == permission || run.queued.contains(&permission)
-        }) {
+        if self
+            .run
+            .as_ref()
+            .is_some_and(|run| run.permission == permission || run.queued.contains(&permission))
+        {
             return PermissionSetupStatus::Running;
         }
         self.failures
@@ -323,7 +324,10 @@ impl PermissionSetup {
 
     /// Ends a setup whose grant arrived and returns the person to SpaceTerm.
     pub(crate) fn done(&mut self, cx: &mut Context<Self>) {
-        if self.current().is_some_and(|(_, step)| step == SetupStep::Granted) {
+        if self
+            .current()
+            .is_some_and(|(_, step)| step == SetupStep::Granted)
+        {
             self.finish(cx);
             cx.activate(true);
         }
@@ -331,7 +335,10 @@ impl PermissionSetup {
 
     /// Moves from a granted permission to the next one.
     pub(crate) fn continue_setup(&mut self, cx: &mut Context<Self>) {
-        if self.current().is_some_and(|(_, step)| step == SetupStep::Granted) {
+        if self
+            .current()
+            .is_some_and(|(_, step)| step == SetupStep::Granted)
+        {
             self.advance(cx);
         }
     }
@@ -573,13 +580,14 @@ impl PermissionSetup {
         }
         let setup = cx.weak_entity();
         let host = Arc::clone(&self.host);
-        run.guide = guide::open(display, bounds, presentation, bundle, host, setup, cx).map(|handle| {
-            GuideWindow {
-                handle,
-                display,
-                bounds,
-            }
-        });
+        run.guide =
+            guide::open(display, bounds, presentation, bundle, host, setup, cx).map(|handle| {
+                GuideWindow {
+                    handle,
+                    display,
+                    bounds,
+                }
+            });
     }
 
     /// Closes the guide. A guide busy with an event closes once the event ends, so no guide

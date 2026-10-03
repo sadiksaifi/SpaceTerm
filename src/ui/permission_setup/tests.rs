@@ -4,14 +4,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon,
-    Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, WindowHandle, bounds, point,
-    px, size,
+    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon, Modifiers,
+    MouseButton, Pixels, TestAppContext, VisualTestContext, WindowHandle, bounds, point, px, size,
 };
 
 use super::{
-    AUTHORIZATION_INTERVALS, OPENING_TIMEOUT, PermissionSetup, PermissionSetupFailure,
-    PermissionSetupStatus, SetupGuide, SetupStep, COVERED_TRACKING_INTERVAL, OPENING_SETTLE,
+    AUTHORIZATION_INTERVALS, COVERED_TRACKING_INTERVAL, OPENING_SETTLE, OPENING_TIMEOUT,
+    PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, SetupGuide, SetupStep,
     TRACKING_INTERVAL,
 };
 use crate::appearance::{Appearance, SettingsDocument};
@@ -21,8 +20,8 @@ use crate::platform::computer_use_access::testing::ScriptedComputerUseAccess;
 use crate::platform::computer_use_access::{
     ComputerUseAccessError, ComputerUseAuthorization, ComputerUsePermission,
 };
-use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
+use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::test_support::MemoryStorage;
 
@@ -80,7 +79,8 @@ impl Fixture {
         permission: ComputerUsePermission,
         cx: &mut TestAppContext,
     ) -> PermissionSetupStatus {
-        self.setup.read_with(cx, |setup, _| setup.status(permission))
+        self.setup
+            .read_with(cx, |setup, _| setup.status(permission))
     }
 
     /// Shows System Settings in front at `frame` and lets the setup follow it once.
@@ -151,7 +151,10 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
         fixture.status(ScreenRecording, cx),
         PermissionSetupStatus::Running
     );
-    assert_eq!(fixture.status(Accessibility, cx), PermissionSetupStatus::Idle);
+    assert_eq!(
+        fixture.status(Accessibility, cx),
+        PermissionSetupStatus::Idle
+    );
     // System Settings is still launching, so nothing is presented yet.
     tick(cx);
     assert!(guide(cx).is_none());
@@ -207,7 +210,10 @@ fn the_guide_follows_system_settings_and_hides_while_it_is_covered(cx: &mut Test
     fixture.set_window(SystemSettingsWindow::Closed, cx);
     assert!(guide(cx).is_none());
     assert_eq!(fixture.current(cx), None);
-    assert_eq!(fixture.status(Accessibility, cx), PermissionSetupStatus::Idle);
+    assert_eq!(
+        fixture.status(Accessibility, cx),
+        PermissionSetupStatus::Idle
+    );
 }
 
 #[gpui::test]
@@ -439,7 +445,11 @@ fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppC
             MouseButton::Left,
             Modifiers::none(),
         );
-        guide.simulate_mouse_move(point(px(-1.0), start.y), MouseButton::Left, Modifiers::none());
+        guide.simulate_mouse_move(
+            point(px(-1.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         row
     };
 
@@ -451,7 +461,10 @@ fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppC
     let [ExternalDragPayload::Files(files)] = payloads.as_slice() else {
         panic!("one file drag");
     };
-    assert_eq!(files.entries(), [("/Applications/SpaceTerm.app".into(), true)]);
+    assert_eq!(
+        files.entries(),
+        [("/Applications/SpaceTerm.app".into(), true)]
+    );
     let FileDragIcon::Image {
         size,
         cursor_offset,
@@ -477,7 +490,9 @@ fn a_guide_busy_with_an_event_closes_after_it(cx: &mut TestAppContext) {
 
     let setup = fixture.setup.clone();
     handle
-        .update(cx, |_, _, cx| setup.update(cx, |setup, cx| setup.cancel(cx)))
+        .update(cx, |_, _, cx| {
+            setup.update(cx, |setup, cx| setup.cancel(cx))
+        })
         .expect("the guide handles the event");
     cx.run_until_parked();
 
@@ -521,9 +536,9 @@ fn the_guide_reports_whether_the_setup_cleared_an_entry(cx: &mut TestAppContext)
         fixture.start(&[ScreenRecording], cx);
         fixture.show_settings(settings_frame(), cx);
 
-        let cleared = fixture
-            .setup
-            .read_with(cx, |setup, _| setup.presentation().map(|shown| shown.cleared));
+        let cleared = fixture.setup.read_with(cx, |setup, _| {
+            setup.presentation().map(|shown| shown.cleared)
+        });
         assert_eq!(cleared, Some(resettable));
         fixture.setup.update(cx, |setup, cx| setup.cancel(cx));
         cx.run_until_parked();

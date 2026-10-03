@@ -99,8 +99,10 @@ pub(crate) trait ComputerUseAccess {
         completion: ComputerUseSetupCompletion,
     ) -> Result<(), ComputerUseAccessError>;
 
-    fn open_settings(&self, permission: ComputerUsePermission)
-    -> Result<(), ComputerUseAccessError>;
+    fn open_settings(
+        &self,
+        permission: ComputerUsePermission,
+    ) -> Result<(), ComputerUseAccessError>;
 
     /// Whether [`Self::reset`] can act on exactly the running application's identity.
     fn can_reset(&self) -> bool;
@@ -155,7 +157,10 @@ pub(crate) mod testing {
     }
 
     impl ScriptedComputerUseAccess {
-        pub(crate) fn new(screen_recording: Authorization, accessibility: Authorization) -> Rc<Self> {
+        pub(crate) fn new(
+            screen_recording: Authorization,
+            accessibility: Authorization,
+        ) -> Rc<Self> {
             Rc::new(Self {
                 screen_recording: Cell::new(screen_recording),
                 accessibility: Cell::new(accessibility),
@@ -238,14 +243,17 @@ pub(crate) mod testing {
             if let Some(error) = self.setup_failure.get() {
                 return Err(error);
             }
-            completion(self.authorization(permission).map(|authorization| {
-                match authorization {
-                    ComputerUseAuthorization::Granted => ComputerUseSetupReadiness::AlreadyGranted,
-                    ComputerUseAuthorization::NotGranted => ComputerUseSetupReadiness::Ready {
-                        cleared: self.resettable.get(),
-                    },
-                }
-            }));
+            completion(
+                self.authorization(permission)
+                    .map(|authorization| match authorization {
+                        ComputerUseAuthorization::Granted => {
+                            ComputerUseSetupReadiness::AlreadyGranted
+                        }
+                        ComputerUseAuthorization::NotGranted => ComputerUseSetupReadiness::Ready {
+                            cleared: self.resettable.get(),
+                        },
+                    }),
+            );
             Ok(())
         }
 

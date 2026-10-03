@@ -97,10 +97,7 @@ pub(crate) mod testing {
                 window: Mutex::new(SystemSettingsWindow::Closed),
                 bundle: Some(ApplicationBundle {
                     path: PathBuf::from("/Applications/SpaceTerm.app"),
-                    icon: Arc::new(gpui::Image::from_bytes(
-                        gpui::ImageFormat::Png,
-                        Vec::new(),
-                    )),
+                    icon: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
                 }),
                 glass: AtomicUsize::new(0),
                 rows: Mutex::new(Vec::new()),

@@ -29,7 +29,8 @@ use ComputerUsePermission::{Accessibility, ScreenRecording};
 
 const SCREEN_RECORDING_ROW: &str = "settings-row-screen-recording-access";
 const DEVICE_CONTROL_ROW: &str = "settings-row-device-control-access";
-const APPLICATION: &str = crate::application_identity::ApplicationIdentity::current().display_name();
+const APPLICATION: &str =
+    crate::application_identity::ApplicationIdentity::current().display_name();
 
 /// Opens Settings beside `access`. A `host` also installs the Permission Setup the rows start.
 fn open_settings(
@@ -48,7 +49,9 @@ fn open_settings(
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
         match (&access, host) {
-            (Some(access), Some(host)) => Some(crate::ui::permission_setup::PermissionSetup::create(access.clone(), host, cx)),
+            (Some(access), Some(host)) => Some(
+                crate::ui::permission_setup::PermissionSetup::create(access.clone(), host, cx),
+            ),
             _ => None,
         }
     });
@@ -204,7 +207,10 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
         .expect("group bounds");
     for row in [SCREEN_RECORDING_ROW, DEVICE_CONTROL_ROW] {
         let bounds = cx.debug_bounds(row).expect("row bounds");
-        assert!(group.contains(&bounds.origin), "{row} should share the group");
+        assert!(
+            group.contains(&bounds.origin),
+            "{row} should share the group"
+        );
     }
     // The guidance names the application the person turns on in System Settings.
     assert!(explanation(&window, ScreenRecording, cx).contains(APPLICATION));
@@ -269,7 +275,8 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
             gpui::size(gpui::px(715.0), gpui::px(560.0)),
         ),
     });
-    cx.executor().advance_clock(std::time::Duration::from_millis(33));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(33));
     cx.run_until_parked();
     access.set(ScreenRecording, Ok(Granted));
     access.report_change();
@@ -300,7 +307,11 @@ fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
         Some(ComputerUseAccessAction::SetUp)
     );
     assert!(!explanation(&window, Accessibility, cx).contains("Follow the guide"));
-    assert_eq!(access.observers(), 1, "only the window still observes changes");
+    assert_eq!(
+        access.observers(),
+        1,
+        "only the window still observes changes"
+    );
 }
 
 /// A host without a Permission Setup still leads to the permission's list in System Settings.
@@ -327,9 +338,7 @@ fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppConte
 
 /// Revocation and reauthorization both arrive through reads on return.
 #[gpui::test]
-fn a_revoked_grant_is_read_on_return_and_offers_a_setup(
-    cx: &mut TestAppContext,
-) {
+fn a_revoked_grant_is_read_on_return_and_offers_a_setup(cx: &mut TestAppContext) {
     let access = ScriptedComputerUseAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
@@ -392,7 +401,11 @@ fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     let (_window, cx) = open_settings(Some(access), None, cx);
 
     let options = cx.update(|_, cx| {
-        crate::ui::sidebar_window::window_options("Settings", gpui::size(gpui::px(1.), gpui::px(1.)), cx)
+        crate::ui::sidebar_window::window_options(
+            "Settings",
+            gpui::size(gpui::px(1.), gpui::px(1.)),
+            cx,
+        )
     });
     assert!(options.kind == gpui::WindowKind::Normal);
 }
@@ -404,10 +417,13 @@ fn troubleshooting_an_allowed_grant_opens_system_settings(cx: &mut TestAppContex
     let (window, cx) = open_privacy(&access, cx);
 
     click(SCREEN_RECORDING.troubleshoot, cx);
-    assert!(cx.debug_bounds(SCREEN_RECORDING.troubleshoot_reset).is_none());
+    assert!(
+        cx.debug_bounds(SCREEN_RECORDING.troubleshoot_reset)
+            .is_none()
+    );
     assert!(
         cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_reset))
-        .is_some(),
+            .is_some(),
         "the guide should offer a reset when the capability supports one"
     );
     click_modal_action(SCREEN_RECORDING.troubleshoot_open_settings, cx);
@@ -556,11 +572,11 @@ fn the_guide_omits_reset_when_the_identity_cannot_be_reset(cx: &mut TestAppConte
 
     assert!(
         cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_done))
-        .is_some()
+            .is_some()
     );
     assert!(
         cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_reset))
-        .is_none()
+            .is_none()
     );
     click_modal_action(SCREEN_RECORDING.troubleshoot_done, cx);
     cx.update(|_, cx| {
@@ -614,7 +630,10 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
         status(&window, ScreenRecording, cx),
         ComputerUseAccessStatus::Failed(ComputerUseAccessError::PlatformUnavailable)
     );
-    assert!(cx.debug_bounds(SCREEN_RECORDING.state_unavailable).is_some());
+    assert!(
+        cx.debug_bounds(SCREEN_RECORDING.state_unavailable)
+            .is_some()
+    );
     assert_eq!(
         action(&window, ScreenRecording, cx),
         Some(ComputerUseAccessAction::CheckAgain)
@@ -657,9 +676,7 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_host_without_the_capability_presents_both_permissions_as_unavailable(
-    cx: &mut TestAppContext,
-) {
+fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &mut TestAppContext) {
     let (window, cx) = open_settings(None, Some(ScriptedSetupGuideHost::new()), cx);
     click("settings-navigation-settings-section-privacy", cx);
 

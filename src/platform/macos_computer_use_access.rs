@@ -267,7 +267,9 @@ impl Verification {
 
     fn subscribe(&self, sender: async_channel::Sender<()>) {
         let mut state = self.lock();
-        state.subscribers.retain(|subscriber| !subscriber.is_closed());
+        state
+            .subscribers
+            .retain(|subscriber| !subscriber.is_closed());
         state.subscribers.push(sender);
     }
 
@@ -275,7 +277,9 @@ impl Verification {
     fn record(&self, report: ProbeReport) {
         let mut state = self.lock();
         if state.latest.replace(report) != Some(report) {
-            state.subscribers.retain(|subscriber| !subscriber.is_closed());
+            state
+                .subscribers
+                .retain(|subscriber| !subscriber.is_closed());
             for subscriber in &state.subscribers {
                 let _ = subscriber.try_send(());
             }
@@ -449,7 +453,10 @@ mod tests {
     fn prepare_with(
         probe: Result<ProbeReport, ComputerUseAccessError>,
         reset_bundle_identifier: Option<&'static str>,
-    ) -> (ComputerUseSetupReadiness, Vec<(ComputerUsePermission, &'static str)>) {
+    ) -> (
+        ComputerUseSetupReadiness,
+        Vec<(ComputerUsePermission, &'static str)>,
+    ) {
         let mut resets = Vec::new();
         let readiness = prepare(
             ComputerUsePermission::ScreenRecording,
@@ -491,7 +498,10 @@ mod tests {
             |_| {},
         );
 
-        assert_eq!(readiness, ComputerUseSetupReadiness::Ready { cleared: false });
+        assert_eq!(
+            readiness,
+            ComputerUseSetupReadiness::Ready { cleared: false }
+        );
     }
 
     #[test]
@@ -505,8 +515,14 @@ mod tests {
     #[test]
     fn a_failed_read_resets_nothing() {
         assert_eq!(
-            prepare_with(Err(ComputerUseAccessError::PlatformUnavailable), Some(BUNDLE)),
-            (ComputerUseSetupReadiness::Ready { cleared: false }, Vec::new())
+            prepare_with(
+                Err(ComputerUseAccessError::PlatformUnavailable),
+                Some(BUNDLE)
+            ),
+            (
+                ComputerUseSetupReadiness::Ready { cleared: false },
+                Vec::new()
+            )
         );
     }
 
@@ -514,7 +530,10 @@ mod tests {
     fn another_identity_resets_nothing() {
         assert_eq!(
             prepare_with(Ok(report(false)), None),
-            (ComputerUseSetupReadiness::Ready { cleared: false }, Vec::new())
+            (
+                ComputerUseSetupReadiness::Ready { cleared: false },
+                Vec::new()
+            )
         );
     }
 

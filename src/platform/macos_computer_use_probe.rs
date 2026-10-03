@@ -35,7 +35,10 @@ impl ProbeReport {
         }
     }
 
-    pub(super) fn authorization(self, permission: ComputerUsePermission) -> ComputerUseAuthorization {
+    pub(super) fn authorization(
+        self,
+        permission: ComputerUsePermission,
+    ) -> ComputerUseAuthorization {
         let granted = match permission {
             ComputerUsePermission::ScreenRecording => self.screen_recording,
             ComputerUsePermission::Accessibility => self.accessibility,
@@ -132,7 +135,10 @@ mod tests {
                     screen_recording,
                     accessibility,
                 };
-                assert_eq!(ProbeReport::decode(report.encode().as_bytes()), Some(report));
+                assert_eq!(
+                    ProbeReport::decode(report.encode().as_bytes()),
+                    Some(report)
+                );
             }
         }
         assert_eq!(
@@ -160,7 +166,8 @@ mod tests {
 
     #[test]
     fn a_report_answers_each_permission_from_its_own_read() {
-        let report = ProbeReport::read(|permission| permission == ComputerUsePermission::Accessibility);
+        let report =
+            ProbeReport::read(|permission| permission == ComputerUsePermission::Accessibility);
 
         assert_eq!(
             [
