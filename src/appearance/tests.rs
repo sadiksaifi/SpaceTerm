@@ -1576,7 +1576,10 @@ fn keybinding_overrides_round_trip_as_a_sparse_map() {
     assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"preferences\"").unwrap());
 
     let mut without_overrides = value;
-    without_overrides.as_object_mut().unwrap().remove("keybindings");
+    without_overrides
+        .as_object_mut()
+        .unwrap()
+        .remove("keybindings");
     assert_eq!(
         parse_settings(&serde_json::to_vec(&without_overrides).unwrap())
             .unwrap()

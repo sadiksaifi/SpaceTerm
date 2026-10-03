@@ -8,9 +8,8 @@ use gpui::{AnyElement, App, Div, Entity, SharedString, Window, div, px};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Checkbox, CheckboxState, ComboBox, ComboBoxItem,
     CommandPalette, ControlPreviewState, DeterminateProgress, FieldState, FrameSpinner, Icon,
-    IconButton, IconName, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize,
-    ProgressState, ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption,
-    Switch, TextInput,
+    IconButton, IconName, OverlayScrollbar, ProgressBar, ProgressRing, ProgressSize, ProgressState,
+    ResizeAxis, ResizeHandle, ScrollMetrics, SegmentedControl, SegmentedOption, Switch, TextInput,
 };
 
 use super::single_line_field;
@@ -116,28 +115,28 @@ impl ControlStates {
             groups.push(diagnostics.into_any_element());
         }
         let buttons = [
-                ("Primary", ButtonVariant::Primary),
-                ("Destructive", ButtonVariant::Destructive),
-                ("Secondary", ButtonVariant::Secondary),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(row, (label, variant))| {
-                state_row(label, appearance, |column, state| {
-                    Button::new(("workbench-button", row * STATES.len() + column), "Action")
-                        .variant(variant)
-                        .size(ButtonSize::Regular)
-                        .debug_selector(format!("workbench-button-{row}-{column}"))
-                        .disabled(column == DISABLED_COLUMN)
-                        .preview_state(state)
-                        .leading(move |color| {
-                            Icon::new(IconName::Plus, icon_size, color).into_any_element()
-                        })
-                        .on_activate(|_, _, _| {})
-                        .into_any_element()
-                })
+            ("Primary", ButtonVariant::Primary),
+            ("Destructive", ButtonVariant::Destructive),
+            ("Secondary", ButtonVariant::Secondary),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(row, (label, variant))| {
+            state_row(label, appearance, |column, state| {
+                Button::new(("workbench-button", row * STATES.len() + column), "Action")
+                    .variant(variant)
+                    .size(ButtonSize::Regular)
+                    .debug_selector(format!("workbench-button-{row}-{column}"))
+                    .disabled(column == DISABLED_COLUMN)
+                    .preview_state(state)
+                    .leading(move |color| {
+                        Icon::new(IconName::Plus, icon_size, color).into_any_element()
+                    })
+                    .on_activate(|_, _, _| {})
+                    .into_any_element()
             })
-            .collect();
+        })
+        .collect();
         groups.push(
             StateMatrix::new(
                 "workbench-group-buttons",
@@ -222,31 +221,31 @@ impl ControlStates {
                 .into_any_element()
         });
         let fields = vec![
-                cells("Text field", appearance, text_fields),
-                state_row("Resize, scroll", appearance, |column, state| {
-                    div()
-                        .relative()
-                        .w_full()
-                        .h(px(70.0))
-                        .child(
-                            div().h(px(60.0)).child(
-                                ResizeHandle::new(
-                                    ("workbench-resize", column),
-                                    "Resize fixture",
-                                    ResizeAxis::Horizontal,
-                                    0.0,
-                                )
-                                .disabled(column == DISABLED_COLUMN)
-                                .preview_state(state)
-                                .on_event(|_, _, _| {}),
-                            ),
-                        )
-                        .when(column != DISABLED_COLUMN, |cell| {
-                            cell.child(self.scrollbars[column].clone())
-                        })
-                        .into_any_element()
-                }),
-            ];
+            cells("Text field", appearance, text_fields),
+            state_row("Resize, scroll", appearance, |column, state| {
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(70.0))
+                    .child(
+                        div().h(px(60.0)).child(
+                            ResizeHandle::new(
+                                ("workbench-resize", column),
+                                "Resize fixture",
+                                ResizeAxis::Horizontal,
+                                0.0,
+                            )
+                            .disabled(column == DISABLED_COLUMN)
+                            .preview_state(state)
+                            .on_event(|_, _, _| {}),
+                        ),
+                    )
+                    .when(column != DISABLED_COLUMN, |cell| {
+                        cell.child(self.scrollbars[column].clone())
+                    })
+                    .into_any_element()
+            }),
+        ];
         groups.push(
             StateMatrix::new(
                 "workbench-group-fields",
@@ -530,19 +529,22 @@ fn status_group(surface: &SettingsAppearance, window: &Window, cx: &App) -> AnyE
             label,
         )
     });
-    let notices = StatusIntent::ALL.into_iter().enumerate().map(|(index, intent)| {
-        caption(
-            div()
-                .debug_selector(move || format!("workbench-status-notice-{index}"))
-                .child(Icon::new(
-                    intent.glyph(differentiate_without_color),
-                    glyph_size,
-                    gpui_color(intent.color(&appearance.colors)),
-                ))
-                .into_any_element(),
-            intent.label(),
-        )
-    });
+    let notices = StatusIntent::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, intent)| {
+            caption(
+                div()
+                    .debug_selector(move || format!("workbench-status-notice-{index}"))
+                    .child(Icon::new(
+                        intent.glyph(differentiate_without_color),
+                        glyph_size,
+                        gpui_color(intent.color(&appearance.colors)),
+                    ))
+                    .into_any_element(),
+                intent.label(),
+            )
+        });
     StateMatrix::new(
         "workbench-group-status",
         "workbench-row-status",
@@ -616,9 +618,13 @@ fn lists_group(
         .render(appearance, window, cx)
         .into_any_element(),
     ];
-    FormGroup::new("workbench-group-controls-lists".to_owned(), "Lists and actions", rows)
-        .render(surface)
-        .into_any_element()
+    FormGroup::new(
+        "workbench-group-controls-lists".to_owned(),
+        "Lists and actions",
+        rows,
+    )
+    .render(surface)
+    .into_any_element()
 }
 
 fn family_label(family: FloatingControlFamily) -> &'static str {
@@ -729,11 +735,13 @@ pub(super) fn control_diagnostics(appearance: &ChromeAppearance) -> Option<Div> 
             .debug_selector(|| "workbench-control-diagnostics".to_owned())
             .flex()
             .flex_col()
-            .px(crate::ui::sidebar_window::form::row_horizontal_inset(appearance))
+            .px(crate::ui::sidebar_window::form::row_horizontal_inset(
+                appearance,
+            ))
             .children(lines.into_iter().map(|(message, severe)| {
                 // Under Differentiate Without Color a severe line also leads with the error glyph.
-                let glyph = (severe && appearance.capabilities.differentiate_without_color)
-                    .then(|| {
+                let glyph =
+                    (severe && appearance.capabilities.differentiate_without_color).then(|| {
                         div().flex_none().child(Icon::inherited(
                             IconName::CircleAlert,
                             appearance.icons.metrics(IconRole::Status).glyph_size,
@@ -851,7 +859,9 @@ mod tests {
         assert!(cx.debug_bounds("workbench-control-diagnostics").is_some());
 
         cx.update(|window, cx| {
-            cx.set_global(InstalledChrome::single(Arc::new(ChromeAppearance::default())));
+            cx.set_global(InstalledChrome::single(Arc::new(
+                ChromeAppearance::default(),
+            )));
             window.refresh();
         });
         cx.run_until_parked();

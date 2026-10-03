@@ -140,7 +140,6 @@ fn metrics(width: f32, typography: &ChromeTypography, icons: &ChromeIcons) -> Me
         )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,7 +151,10 @@ mod tests {
     fn menu_trigger_focus_follows_the_chrome_focus_ring() {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
-            assert!(colors.focus_ring.a > 0, "menu triggers must draw a focus ring");
+            assert!(
+                colors.focus_ring.a > 0,
+                "menu triggers must draw a focus ring"
+            );
             let different_focus = ChromeColors {
                 focus_ring: Color::rgb(0xff00ff),
                 ..colors.clone()

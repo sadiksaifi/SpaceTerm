@@ -21,9 +21,9 @@ use std::{
 };
 
 use crate::appearance::{
-    CatalogError, ImportError, ResetTarget, SettingsDocument, SettingsDocumentError,
-    TerminalTheme, ThemeCatalog, ThemeId, ZedExtension, export_settings, parse_settings,
-    translate_zed_extension, translate_zed_family,
+    CatalogError, ImportError, ResetTarget, SettingsDocument, SettingsDocumentError, TerminalTheme,
+    ThemeCatalog, ThemeId, ZedExtension, export_settings, parse_settings, translate_zed_extension,
+    translate_zed_family,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
 use storage::{Durability, SettingsStorage, StorageError};
@@ -775,9 +775,9 @@ fn install_themes(
     let mut catalog = ThemeCatalog::from_terminal_themes(&document.terminal_themes)?;
     let installed = catalog.install_batch(&themes, catalog.revision(), &retired)?;
     let mut candidate = document.clone();
-    candidate.terminal_themes.retain(|theme| {
-        !retired.contains(&theme.id) && !installed.contains(&theme.id)
-    });
+    candidate
+        .terminal_themes
+        .retain(|theme| !retired.contains(&theme.id) && !installed.contains(&theme.id));
     candidate.terminal_themes.extend(themes);
     candidate.select_builtin_for_missing_themes();
     Ok((validate_candidate(candidate, document.revision)?, installed))
@@ -795,7 +795,9 @@ fn remove_themes(
         return Err(CatalogError::UnknownTheme.into());
     }
     let mut candidate = document.clone();
-    candidate.terminal_themes.retain(|theme| !ids.contains(&theme.id));
+    candidate
+        .terminal_themes
+        .retain(|theme| !ids.contains(&theme.id));
     candidate.select_builtin_for_missing_themes();
     validate_candidate(candidate, document.revision)
 }

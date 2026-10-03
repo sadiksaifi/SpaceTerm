@@ -484,7 +484,6 @@ impl Render for AskPassSecretBody {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

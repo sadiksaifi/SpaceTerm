@@ -95,8 +95,8 @@ pub(super) fn prepare(
         .shell(spaceterm_ui::FloatingRole::Popover);
     let tone = Color::rgba(u32::from(shell.backdrop_tone()));
     let wash = Color::rgba(u32::from(shell.material()));
-    let hosts = [Color::BLACK, Color::WHITE]
-        .map(|underlay| wash.source_over(tone.source_over(underlay)));
+    let hosts =
+        [Color::BLACK, Color::WHITE].map(|underlay| wash.source_over(tone.source_over(underlay)));
     prepare_colors(
         &mut result.floating,
         &inactive.floating_colors,

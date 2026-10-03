@@ -345,7 +345,10 @@ impl Mark {
             selector,
         } = self;
         let (tint, opacity) = treatment(progress, blinked);
-        let mark = match (status_shape(progress, differentiate_without_color), reported) {
+        let mark = match (
+            status_shape(progress, differentiate_without_color),
+            reported,
+        ) {
             (StatusShape::Spinner, _) => FrameSpinner::new(id, PROGRESS_NAME)
                 .size(ProgressSize::Compact)
                 .debug_selector(selector)
@@ -739,7 +742,11 @@ mod tests {
             TerminalProgress::Error(30),
             TerminalProgress::Paused(70),
         ] {
-            assert_ne!(treatment(progress, false).0, Tint::Inherited, "{progress:?}");
+            assert_ne!(
+                treatment(progress, false).0,
+                Tint::Inherited,
+                "{progress:?}"
+            );
             assert_ne!(status_shape(progress, true), idle, "{progress:?}");
         }
     }
@@ -757,7 +764,11 @@ mod tests {
             TerminalProgress::Indeterminate,
             TerminalProgress::TitleActivity,
         ] {
-            assert_eq!(status_shape(progress, false), StatusShape::Spinner, "{progress:?}");
+            assert_eq!(
+                status_shape(progress, false),
+                StatusShape::Spinner,
+                "{progress:?}"
+            );
         }
     }
 

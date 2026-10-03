@@ -714,7 +714,9 @@ impl TerminalPaintBatch {
         _cx: &mut App,
     ) -> Result<(), PaintBatchFailure> {
         #[cfg(test)]
-        let counter = count_quads.then_some(self.quad_paint_calls.as_deref()).flatten();
+        let counter = count_quads
+            .then_some(self.quad_paint_calls.as_deref())
+            .flatten();
         #[cfg(not(test))]
         let _ = count_quads;
         if let Some(surface) = &self.surface {
@@ -1290,11 +1292,7 @@ impl TerminalGridCache {
                         origin: point(
                             underline_x,
                             origin.y
-                                + gpui::underline_y_offset(
-                                    line_height,
-                                    line.ascent,
-                                    line.descent,
-                                ),
+                                + gpui::underline_y_offset(line_height, line.ascent, line.descent),
                         ),
                         width,
                         style: underline,
@@ -1875,7 +1873,9 @@ impl Element for TerminalGridElement {
             && !candidate_submission_started
             && let Some(fallback) = &prepaint.fallback
             && fallback.preflight(None, window, cx).is_ok()
-            && fallback.submit(fallback.grid_bounds, true, window, cx).is_ok()
+            && fallback
+                .submit(fallback.grid_bounds, true, window, cx)
+                .is_ok()
         {
             submitted_generation = self.fallback_generation;
         }
@@ -3111,19 +3111,21 @@ fn frame_cursor_paint_plan(
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::{
         borrow::Cow,
         cell::{Cell, RefCell},
         rc::Rc,
-        sync::{Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     use super::*;
-    use gpui::Styled as _;
     use crate::ui::terminal_ime::layout_preedit;
+    use gpui::Styled as _;
 
     #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
     mod macos_adapter_tests {
@@ -3299,9 +3301,7 @@ mod tests {
         )
     }
 
-    fn recording_test_app(
-        observation: Arc<RasterObservation>,
-    ) -> gpui::TestAppContext {
+    fn recording_test_app(observation: Arc<RasterObservation>) -> gpui::TestAppContext {
         gpui::TestAppContext::build_with_text_system(
             gpui::TestDispatcher::new(0),
             None,
@@ -3326,8 +3326,9 @@ mod tests {
         fn get_or_insert_with<'a>(
             &self,
             key: gpui::AtlasKey,
-            build: &mut dyn FnMut() ->
-                anyhow::Result<Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>>,
+            build: &mut dyn FnMut() -> anyhow::Result<
+                Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>,
+            >,
         ) -> anyhow::Result<Option<gpui::AtlasTile>> {
             self.requested.lock().unwrap().push(key.clone());
             self.inner.get_or_insert_with(key, build)
@@ -3369,7 +3370,11 @@ mod tests {
     }
 
     impl gpui::Render for GlyphKeyPaint {
-        fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
             let atlas = Arc::clone(&self.atlas);
             let comparisons = Arc::clone(&self.comparisons);
             let matching_dilation = self.matching_dilation;
@@ -3377,7 +3382,8 @@ mod tests {
                 move |_, window, _| {
                     let mut batch = cursor_render_batches(window, false).remove(0);
                     if matching_dilation {
-                        batch.cursor_text_overlay.as_mut().unwrap().color = rgba(0x00_00_00_ff).into();
+                        batch.cursor_text_overlay.as_mut().unwrap().color =
+                            rgba(0x00_00_00_ff).into();
                     }
                     let baseline = matching_dilation.then(|| {
                         let mut baseline = cursor_render_batches(window, false).remove(0);
@@ -3408,11 +3414,19 @@ mod tests {
                     };
                     let prepared = glyph_keys(prepared);
                     let submitted = glyph_keys(submitted);
-                    assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 0));
+                    assert!(
+                        prepared
+                            .iter()
+                            .any(|key| !key.is_emoji && key.dilation == 0)
+                    );
                     if let Some(baseline) = baseline {
                         assert_eq!(prepared, glyph_keys(baseline));
                     } else {
-                        assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 4));
+                        assert!(
+                            prepared
+                                .iter()
+                                .any(|key| !key.is_emoji && key.dilation == 4)
+                        );
                     }
                     assert_eq!(prepared, submitted);
                     comparisons.fetch_add(1, Ordering::Relaxed);
@@ -3624,8 +3638,16 @@ mod tests {
                         prepared_dilations.sort_unstable();
                         submitted_dilations.sort_unstable();
                         assert_eq!(prepared_dilations, submitted_dilations);
-                        assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 0));
-                        assert!(prepared.iter().any(|key| !key.is_emoji && key.dilation == 4));
+                        assert!(
+                            prepared
+                                .iter()
+                                .any(|key| !key.is_emoji && key.dilation == 0)
+                        );
+                        assert!(
+                            prepared
+                                .iter()
+                                .any(|key| !key.is_emoji && key.dilation == 4)
+                        );
                         assert_eq!(*observation.rasterized.lock().unwrap(), prepared);
                     },
                 )
@@ -3669,7 +3691,13 @@ mod tests {
             .open_window(size(px(80.0), px(28.0)), {
                 let atlas = Arc::clone(&atlas);
                 let comparisons = Arc::clone(&comparisons);
-                move |_, cx| cx.new(|_| GlyphKeyPaint { atlas, comparisons, matching_dilation })
+                move |_, cx| {
+                    cx.new(|_| GlyphKeyPaint {
+                        atlas,
+                        comparisons,
+                        matching_dilation,
+                    })
+                }
             })
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
@@ -3682,14 +3710,18 @@ mod tests {
         let observation = Arc::new(RasterObservation::default());
         let mut cx = recording_test_app(observation);
         let cx = cx.add_empty_window();
-        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-            let batch = cursor_render_batches(window, false).remove(0);
-            gpui::canvas(
-                move |_, _, _| batch,
-                move |_, batch, window, cx| batch.preflight(None, window, cx).unwrap(),
-            )
-            .size_full()
-        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| {
+                let batch = cursor_render_batches(window, false).remove(0);
+                gpui::canvas(
+                    move |_, _, _| batch,
+                    move |_, batch, window, cx| batch.preflight(None, window, cx).unwrap(),
+                )
+                .size_full()
+            },
+        );
         cx.update(|window, _| {
             assert!(painted_glyphs(window).is_empty());
             assert!(window.painted_quads().is_empty());
@@ -3701,29 +3733,31 @@ mod tests {
         let observation = Arc::new(RasterObservation::default());
         let mut cx = recording_test_app(observation);
         let cx = cx.add_empty_window();
-        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-            let mut batch = cursor_render_batches(window, false).remove(0);
-            batch.cursor_text_overlay.as_mut().unwrap().bounds = Bounds::new(
-                point(px(8.125), px(14.125)),
-                size(px(8.375), px(14.)),
-            );
-            gpui::canvas(
-                move |_, _, _| batch,
-                move |_, batch, window, cx| {
-                    assert_eq!(window.scale_factor(), 2.);
-                    window.with_content_mask(
-                        Some(ContentMask {
-                            bounds: Bounds::new(
-                                point(px(8.125), px(14.125)),
-                                size(px(71.875), px(13.875)),
-                            ),
-                        }),
-                        |window| batch.preflight(None, window, cx).unwrap(),
-                    );
-                },
-            )
-            .size_full()
-        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| {
+                let mut batch = cursor_render_batches(window, false).remove(0);
+                batch.cursor_text_overlay.as_mut().unwrap().bounds =
+                    Bounds::new(point(px(8.125), px(14.125)), size(px(8.375), px(14.)));
+                gpui::canvas(
+                    move |_, _, _| batch,
+                    move |_, batch, window, cx| {
+                        assert_eq!(window.scale_factor(), 2.);
+                        window.with_content_mask(
+                            Some(ContentMask {
+                                bounds: Bounds::new(
+                                    point(px(8.125), px(14.125)),
+                                    size(px(71.875), px(13.875)),
+                                ),
+                            }),
+                            |window| batch.preflight(None, window, cx).unwrap(),
+                        );
+                    },
+                )
+                .size_full()
+            },
+        );
         cx.update(|window, _| {
             assert!(painted_glyphs(window).is_empty());
             assert!(window.painted_quads().is_empty());
@@ -3763,8 +3797,16 @@ mod tests {
                         batch.preflight(None, window, cx).unwrap();
                         let prepared = observation.rasterized.lock().unwrap().clone();
                         let preedit_glyph = gpui::GlyphId('界' as u32);
-                        assert!(prepared.iter().any(|params| params.glyph_id == preedit_glyph));
-                        assert!(prepared.iter().any(|params| params.glyph_id != preedit_glyph));
+                        assert!(
+                            prepared
+                                .iter()
+                                .any(|params| params.glyph_id == preedit_glyph)
+                        );
+                        assert!(
+                            prepared
+                                .iter()
+                                .any(|params| params.glyph_id != preedit_glyph)
+                        );
                         batch.submit(batch.grid_bounds, true, window, cx).unwrap();
                         assert_eq!(*observation.rasterized.lock().unwrap(), prepared);
                     },
@@ -3779,49 +3821,53 @@ mod tests {
         let paint = |reference: bool| {
             let mut cx = recording_test_app(Arc::new(RasterObservation::default()));
             let cx = cx.add_empty_window();
-            cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-                let layout = layout_preedit("e\u{0301}", 0, 0, 10, 1);
-                let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
-                let rows = TerminalGridCache::new()
-                    .prepare_preedit(
-                        Some(&layout),
-                        2,
-                        bounds,
-                        &terminal_cell_font(&"Menlo".into(), false, false),
-                        px(18.0),
-                        px(8.375),
-                        px(14.0),
-                        Color::rgb(0xff_ff_ff),
-                        Color::BLACK,
-                        Color::rgb(0xff_ff_ff),
-                        window.scale_factor(),
-                        window,
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(80.0), px(28.0)),
+                move |window, _| {
+                    let layout = layout_preedit("e\u{0301}", 0, 0, 10, 1);
+                    let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+                    let rows = TerminalGridCache::new()
+                        .prepare_preedit(
+                            Some(&layout),
+                            2,
+                            bounds,
+                            &terminal_cell_font(&"Menlo".into(), false, false),
+                            px(18.0),
+                            px(8.375),
+                            px(14.0),
+                            Color::rgb(0xff_ff_ff),
+                            Color::BLACK,
+                            Color::rgb(0xff_ff_ff),
+                            window.scale_factor(),
+                            window,
+                        )
+                        .unwrap();
+                    let preedit = rows[0].text[0].clone();
+                    gpui::canvas(
+                        move |_, _, _| preedit,
+                        move |_, preedit, window, cx| {
+                            if reference {
+                                preedit
+                                    .text
+                                    .line
+                                    .paint(
+                                        preedit.text.origin,
+                                        px(14.0),
+                                        gpui::TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    )
+                                    .unwrap();
+                            } else {
+                                paint_preedit_text(&preedit, px(14.0), window).unwrap();
+                            }
+                        },
                     )
-                    .unwrap();
-                let preedit = rows[0].text[0].clone();
-                gpui::canvas(
-                    move |_, _, _| preedit,
-                    move |_, preedit, window, cx| {
-                        if reference {
-                            preedit
-                                .text
-                                .line
-                                .paint(
-                                    preedit.text.origin,
-                                    px(14.0),
-                                    gpui::TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                )
-                                .unwrap();
-                        } else {
-                            paint_preedit_text(&preedit, px(14.0), window).unwrap();
-                        }
-                    },
-                )
-                .size_full()
-            });
+                    .size_full()
+                },
+            );
             cx.update(|window, _| {
                 (
                     painted_glyphs(window),
@@ -3840,51 +3886,55 @@ mod tests {
         let paint = |reference: bool| {
             let mut cx = recording_test_app(Arc::new(RasterObservation::default()));
             let cx = cx.add_empty_window();
-            cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-                let layout = layout_preedit("\u{200b}", 0, 3, 10, 1);
-                let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
-                let rows = TerminalGridCache::new()
-                    .prepare_preedit(
-                        Some(&layout),
-                        2,
-                        bounds,
-                        &terminal_cell_font(&"Menlo".into(), false, false),
-                        px(18.0),
-                        px(8.375),
-                        px(14.0),
-                        Color::rgb(0xff_ff_ff),
-                        Color::BLACK,
-                        Color::rgb(0xff_ff_ff),
-                        window.scale_factor(),
-                        window,
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(80.0), px(28.0)),
+                move |window, _| {
+                    let layout = layout_preedit("\u{200b}", 0, 3, 10, 1);
+                    let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+                    let rows = TerminalGridCache::new()
+                        .prepare_preedit(
+                            Some(&layout),
+                            2,
+                            bounds,
+                            &terminal_cell_font(&"Menlo".into(), false, false),
+                            px(18.0),
+                            px(8.375),
+                            px(14.0),
+                            Color::rgb(0xff_ff_ff),
+                            Color::BLACK,
+                            Color::rgb(0xff_ff_ff),
+                            window.scale_factor(),
+                            window,
+                        )
+                        .unwrap();
+                    let preedit = rows[0].text[0].clone();
+                    assert_eq!(preedit.text.line.width, px(0.0));
+                    assert!(preedit.text.origin.x > px(0.0));
+                    gpui::canvas(
+                        move |_, _, _| preedit,
+                        move |_, preedit, window, cx| {
+                            if reference {
+                                preedit
+                                    .text
+                                    .line
+                                    .paint(
+                                        preedit.text.origin,
+                                        px(14.0),
+                                        gpui::TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    )
+                                    .unwrap();
+                            } else {
+                                paint_preedit_text(&preedit, px(14.0), window).unwrap();
+                            }
+                        },
                     )
-                    .unwrap();
-                let preedit = rows[0].text[0].clone();
-                assert_eq!(preedit.text.line.width, px(0.0));
-                assert!(preedit.text.origin.x > px(0.0));
-                gpui::canvas(
-                    move |_, _, _| preedit,
-                    move |_, preedit, window, cx| {
-                        if reference {
-                            preedit
-                                .text
-                                .line
-                                .paint(
-                                    preedit.text.origin,
-                                    px(14.0),
-                                    gpui::TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                )
-                                .unwrap();
-                        } else {
-                            paint_preedit_text(&preedit, px(14.0), window).unwrap();
-                        }
-                    },
-                )
-                .size_full()
-            });
+                    .size_full()
+                },
+            );
             cx.update(|window, _| format!("{:?}", window.painted_underlines()))
         };
         let expected = paint(true);
@@ -3898,51 +3948,61 @@ mod tests {
         *observation.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('界' as u32));
         let mut cx = recording_test_app(Arc::clone(&observation));
         let cx = cx.add_empty_window();
-        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-            let mut candidate = cursor_render_batches(window, false).remove(0);
-            let layout = layout_preedit("界", 0, 0, 10, 1);
-            let preedit = TerminalGridCache::new()
-                .prepare_preedit(
-                    Some(&layout),
-                    2,
-                    candidate.grid_bounds,
-                    &terminal_cell_font(&"Menlo".into(), false, false),
-                    px(18.0),
-                    px(8.375),
-                    candidate.line_height,
-                    Color::rgb(0xff_ff_ff),
-                    Color::BLACK,
-                    Color::rgb(0xff_ff_ff),
-                    window.scale_factor(),
-                    window,
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| {
+                let mut candidate = cursor_render_batches(window, false).remove(0);
+                let layout = layout_preedit("界", 0, 0, 10, 1);
+                let preedit = TerminalGridCache::new()
+                    .prepare_preedit(
+                        Some(&layout),
+                        2,
+                        candidate.grid_bounds,
+                        &terminal_cell_font(&"Menlo".into(), false, false),
+                        px(18.0),
+                        px(8.375),
+                        candidate.line_height,
+                        Color::rgb(0xff_ff_ff),
+                        Color::BLACK,
+                        Color::rgb(0xff_ff_ff),
+                        window.scale_factor(),
+                        window,
+                    )
+                    .unwrap();
+                candidate.rows[0].preedit = Some(preedit[0].clone());
+                let retained = TerminalPaintBatch {
+                    surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
+                    grid_bounds: candidate.grid_bounds,
+                    line_height: candidate.line_height,
+                    rows: Vec::new(),
+                    cursor_text_overlay: None,
+                    graphics: GraphicsPaintPlan::default(),
+                    blink_phase_visible: true,
+                    quad_paint_calls: None,
+                };
+                gpui::canvas(
+                    move |_, _, _| (candidate, retained),
+                    move |_, (candidate, retained), window, cx| {
+                        assert_eq!(
+                            candidate.preflight(None, window, cx),
+                            Err(PaintBatchFailure::Presentation)
+                        );
+                        retained.preflight(None, window, cx).unwrap();
+                        retained
+                            .submit(retained.grid_bounds, true, window, cx)
+                            .unwrap();
+                    },
                 )
-                .unwrap();
-            candidate.rows[0].preedit = Some(preedit[0].clone());
-            let retained = TerminalPaintBatch {
-                surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
-                grid_bounds: candidate.grid_bounds,
-                line_height: candidate.line_height,
-                rows: Vec::new(),
-                cursor_text_overlay: None,
-                graphics: GraphicsPaintPlan::default(),
-                blink_phase_visible: true,
-                quad_paint_calls: None,
-            };
-            gpui::canvas(
-                move |_, _, _| (candidate, retained),
-                move |_, (candidate, retained), window, cx| {
-                    assert_eq!(
-                        candidate.preflight(None, window, cx),
-                        Err(PaintBatchFailure::Presentation)
-                    );
-                    retained.preflight(None, window, cx).unwrap();
-                    retained.submit(retained.grid_bounds, true, window, cx).unwrap();
-                },
-            )
-            .size_full()
-        });
+                .size_full()
+            },
+        );
         let rasterized = observation.rasterized.lock().unwrap();
-        assert!(rasterized.iter().any(|params| params.glyph_id == gpui::GlyphId('界' as u32)));
+        assert!(
+            rasterized
+                .iter()
+                .any(|params| params.glyph_id == gpui::GlyphId('界' as u32))
+        );
         cx.update(|window, _| {
             assert_eq!(window.painted_quads().len(), 1);
             assert!(painted_glyphs(window).is_empty());
@@ -3956,31 +4016,37 @@ mod tests {
         observation.fail_next_raster.store(true, Ordering::Relaxed);
         let mut cx = recording_test_app(Arc::clone(&observation));
         let cx = cx.add_empty_window();
-        cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)), move |window, _| {
-            let candidate = cursor_render_batches(window, false).remove(0);
-            let retained = TerminalPaintBatch {
-                surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
-                grid_bounds: candidate.grid_bounds,
-                line_height: candidate.line_height,
-                rows: Vec::new(),
-                cursor_text_overlay: None,
-                graphics: GraphicsPaintPlan::default(),
-                blink_phase_visible: true,
-                quad_paint_calls: None,
-            };
-            gpui::canvas(
-                move |_, _, _| (candidate, retained),
-                move |_, (candidate, retained), window, cx| {
-                    assert_eq!(
-                        candidate.preflight(None, window, cx),
-                        Err(PaintBatchFailure::Presentation)
-                    );
-                    retained.preflight(None, window, cx).unwrap();
-                    retained.submit(retained.grid_bounds, true, window, cx).unwrap();
-                },
-            )
-            .size_full()
-        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| {
+                let candidate = cursor_render_batches(window, false).remove(0);
+                let retained = TerminalPaintBatch {
+                    surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
+                    grid_bounds: candidate.grid_bounds,
+                    line_height: candidate.line_height,
+                    rows: Vec::new(),
+                    cursor_text_overlay: None,
+                    graphics: GraphicsPaintPlan::default(),
+                    blink_phase_visible: true,
+                    quad_paint_calls: None,
+                };
+                gpui::canvas(
+                    move |_, _, _| (candidate, retained),
+                    move |_, (candidate, retained), window, cx| {
+                        assert_eq!(
+                            candidate.preflight(None, window, cx),
+                            Err(PaintBatchFailure::Presentation)
+                        );
+                        retained.preflight(None, window, cx).unwrap();
+                        retained
+                            .submit(retained.grid_bounds, true, window, cx)
+                            .unwrap();
+                    },
+                )
+                .size_full()
+            },
+        );
         assert_eq!(observation.rasterized.lock().unwrap().len(), 1);
         cx.update(|window, _| {
             assert_eq!(window.painted_quads().len(), 1);

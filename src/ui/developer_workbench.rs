@@ -24,8 +24,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, Global, ScrollHandle, SharedString, Window,
-    WindowHandle, actions, div, px, size,
+    AnyElement, App, Entity, FocusHandle, Global, ScrollHandle, SharedString, Window, WindowHandle,
+    actions, div, px, size,
 };
 use spaceterm_ui::{
     CommandPalette, CommandPaletteItem, ControlWindowActivity, Icon, IconName, Menu, MenuEntry,
@@ -34,11 +34,9 @@ use spaceterm_ui::{
 };
 
 use crate::appearance::AppearanceMode;
-use crate::platform::window_movement::{
-    OperatingSystemWindowDragPlatform, WindowMovementFactory,
-};
-use crate::ui::appearance::{ChromeAppearance, gpui_color};
+use crate::platform::window_movement::{OperatingSystemWindowDragPlatform, WindowMovementFactory};
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::appearance_runtime::{self, AccessibilityPreviewFact, AppearanceRuntime};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::form::{action_button, section_heading};
@@ -53,9 +51,9 @@ use modals::ModalFixtures;
 use preview::{AppearancePreview, PreviewError};
 use surfaces::FloatingSurfaces;
 
-pub(crate) use terminal::{caption_fixture, link_preview_fixture};
 #[cfg(test)]
 pub(crate) use terminal::set_link_preview_fixture;
+pub(crate) use terminal::{caption_fixture, link_preview_fixture};
 
 actions!(
     spaceterm,
@@ -179,8 +177,14 @@ enum Simulation {
 }
 
 const ACCESSIBILITY_SIMULATIONS: [(AccessibilityPreviewFact, &str); 5] = [
-    (AccessibilityPreviewFact::ReduceTransparency, "Reduce Transparency"),
-    (AccessibilityPreviewFact::IncreaseContrast, "Increase Contrast"),
+    (
+        AccessibilityPreviewFact::ReduceTransparency,
+        "Reduce Transparency",
+    ),
+    (
+        AccessibilityPreviewFact::IncreaseContrast,
+        "Increase Contrast",
+    ),
     (AccessibilityPreviewFact::ShowBorders, "Show Borders"),
     (AccessibilityPreviewFact::ReduceMotion, "Reduce Motion"),
     (
@@ -412,9 +416,8 @@ impl DeveloperWorkbench {
             },
         )
         .detach();
-        let palette = cx.new(|cx| {
-            CommandPalette::new("Search fixture commands", palette_items(), window, cx)
-        });
+        let palette = cx
+            .new(|cx| CommandPalette::new("Search fixture commands", palette_items(), window, cx));
         let initial_document = preview.export().unwrap_or_else(|| String::from("{}"));
         Self {
             window_appearance,
@@ -580,9 +583,9 @@ impl DeveloperWorkbench {
     fn install_theme_family(&mut self, cx: &mut Context<Self>) {
         let text = self.document.text(cx);
         let status = match self.preview.install_theme_family(&text) {
-            Ok(installed) => format!(
-                "Installed {installed} themes into the preview. No theme was selected."
-            ),
+            Ok(installed) => {
+                format!("Installed {installed} themes into the preview. No theme was selected.")
+            }
             Err(error) => error.message().to_owned(),
         };
         self.report(status, cx);
@@ -672,9 +675,7 @@ fn accessibility_enabled(fact: AccessibilityPreviewFact, cx: &App) -> bool {
 
 /// Results with icons, secondary text, and a disabled row, so every row state has a fixture.
 fn palette_items() -> Vec<CommandPaletteItem<u8>> {
-    let icon = |name: IconName| {
-        move |color, size| Icon::new(name, size, color).into_any_element()
-    };
+    let icon = |name: IconName| move |color, size| Icon::new(name, size, color).into_any_element();
     vec![
         CommandPaletteItem::new(PALETTE_OPEN_WORKSPACE, "Open Workspace")
             .description("Selected rows keep their secondary text legible")
@@ -881,7 +882,9 @@ impl DeveloperWorkbench {
             .flex_1()
             .min_h_0()
             .w_full()
-            .bg(gpui_color(surface.surface(SettingsSurfaceRole::Canvas).paint))
+            .bg(gpui_color(
+                surface.surface(SettingsSurfaceRole::Canvas).paint,
+            ))
             .child(heading)
             .child(
                 div()

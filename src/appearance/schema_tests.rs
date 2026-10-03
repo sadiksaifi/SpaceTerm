@@ -176,7 +176,10 @@ fn published_schema_lists_keybinding_commands_in_settings_order() {
     assert!(validator.is_valid(&settings));
     settings["keybindings"]["unknown_command"] = serde_json::json!(null);
     assert!(!validator.is_valid(&settings));
-    settings["keybindings"].as_object_mut().unwrap().remove("unknown_command");
+    settings["keybindings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("unknown_command");
     settings["keybindings"]["close_tab"] = serde_json::json!(true);
     assert!(!validator.is_valid(&settings));
 }

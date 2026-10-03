@@ -1,7 +1,7 @@
 use super::appearance::ChromeAppearance;
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts, Color,
-    CompositionCapabilities, ThemeCatalog, SystemAppearance,
+    CompositionCapabilities, SystemAppearance, ThemeCatalog,
 };
 
 fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {

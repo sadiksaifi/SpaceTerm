@@ -321,14 +321,17 @@ impl WorkspaceSidebar {
             normal: paint.normal.fade(paint.hovered, level),
             ..paint
         };
-        let detail_paint = detail_color
-            .map(|color| under_pointer(workspace_row_status_paint(color, active, 4.5, &row_colors)));
+        let detail_paint = detail_color.map(|color| {
+            under_pointer(workspace_row_status_paint(color, active, 4.5, &row_colors))
+        });
         // The row icon carries one status in the same precedence as the collapsed identity: an
         // unavailable directory first, then the Remote connection.
         let icon_paint = (!available)
             .then_some(row_colors.warning)
             .or(remote_color)
-            .map(|color| under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors)));
+            .map(|color| {
+                under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors))
+            });
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -454,7 +457,7 @@ impl WorkspaceSidebar {
                                     IconName::Terminal
                                 },
                                 appearance.icons.metrics(IconRole::Row).glyph_size,
-                            ))
+                            )),
                     ),
             )
             .child(
@@ -558,7 +561,8 @@ impl WorkspaceSidebar {
         self.rows
             .iter()
             .map(|row| {
-                let fade = HoverFade::new(("workspace-row-hover", row.workspace_id.get()), window, cx);
+                let fade =
+                    HoverFade::new(("workspace-row-hover", row.workspace_id.get()), window, cx);
                 RowFade {
                     level: fade.level(window, cx),
                     fade,

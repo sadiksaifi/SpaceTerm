@@ -310,7 +310,6 @@ fn paint(background: Color, foreground: Color, icon: Color, border: Color) -> Bu
     .icon_foreground(gpui_color(icon))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

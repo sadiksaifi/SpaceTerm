@@ -67,7 +67,10 @@ impl SettingsDocument {
             return;
         };
         for slot in [Appearance::Light, Appearance::Dark] {
-            if catalog.get(self.preferences.terminal.themes.get(slot)).is_none() {
+            if catalog
+                .get(self.preferences.terminal.themes.get(slot))
+                .is_none()
+            {
                 self.preferences.reset(ResetTarget::TerminalTheme(slot));
             }
         }

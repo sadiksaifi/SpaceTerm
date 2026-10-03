@@ -449,7 +449,11 @@ fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppC
             ]
         );
         for slot in ["settings-theme-slot-light", "settings-theme-slot-dark"] {
-            assert_eq!(cx.debug_bounds(slot).is_some(), automatic, "{mode:?} {slot}");
+            assert_eq!(
+                cx.debug_bounds(slot).is_some(),
+                automatic,
+                "{mode:?} {slot}"
+            );
         }
         assert_eq!(
             cx.debug_bounds("settings-current-theme-name").is_some(),
@@ -924,8 +928,8 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
 ) {
     let mut document = SettingsDocument::default();
     document.preferences.window.density = ChromeDensity::Comfortable;
-    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
-        .expect("fixture Zed family");
+    document.terminal_themes =
+        crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     assert!(
         installed_count(&window, cx) > 0,
@@ -1598,9 +1602,7 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
             settings
                 .row_description(SettingsRowId::Transparency, cx)
                 .unwrap(),
-            settings
-                .row_description(SettingsRowId::Blur, cx)
-                .unwrap(),
+            settings.row_description(SettingsRowId::Blur, cx).unwrap(),
         )
     });
     assert!(transparency.contains("window and floating surfaces opaque"));
@@ -1653,9 +1655,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
                 settings
                     .row_description(SettingsRowId::Transparency, cx)
                     .unwrap(),
-                settings
-                    .row_description(SettingsRowId::Blur, cx)
-                    .unwrap(),
+                settings.row_description(SettingsRowId::Blur, cx).unwrap(),
             )
         });
         assert!(transparency.contains("opaque at 0"));
@@ -3146,7 +3146,10 @@ fn a_loading_registry_listing_shows_a_bar_above_its_caption(cx: &mut TestAppCont
     let caption = cx
         .debug_bounds("settings-theme-store-loading-caption")
         .expect("the loading listing shows its caption");
-    assert!(caption.top() >= bar.bottom(), "the caption sits below the bar");
+    assert!(
+        caption.top() >= bar.bottom(),
+        "the caption sits below the bar"
+    );
 
     cx.run_until_parked();
     assert!(
@@ -3231,7 +3234,10 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
         text,
         crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
     );
-    assert!(text.contains("comfortable"), "the text should follow the change");
+    assert!(
+        text.contains("comfortable"),
+        "the text should follow the change"
+    );
 }
 
 /// A compact settings file within the storage limit can print past the text view's limit.
@@ -3311,7 +3317,11 @@ fn edit_json_opens_the_settings_file_and_shows_where_it_lives(cx: &mut TestAppCo
     click("settings-file-edit", cx);
 
     assert_eq!(file.opened.get(), 1);
-    assert_eq!(harness.storage.writes(), writes, "an existing file is opened as it is");
+    assert_eq!(
+        harness.storage.writes(),
+        writes,
+        "an existing file is opened as it is"
+    );
 }
 
 #[gpui::test]
@@ -3323,7 +3333,10 @@ fn edit_json_writes_a_missing_settings_file_before_opening_it(cx: &mut TestAppCo
     click("settings-file-edit", cx);
 
     assert_eq!(
-        harness.storage.document().map(|document| document.preferences),
+        harness
+            .storage
+            .document()
+            .map(|document| document.preferences),
         Some(SettingsDocument::default().preferences)
     );
     assert_eq!(file.opened.get(), 1);
@@ -3347,7 +3360,13 @@ fn edit_json_saves_pending_changes_before_opening_the_file(cx: &mut TestAppConte
     click("settings-file-edit", cx);
 
     assert_eq!(
-        harness.storage.document().unwrap().preferences.window.density,
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .window
+            .density,
         ChromeDensity::Comfortable,
         "the editor opens what the window shows"
     );
@@ -3390,10 +3409,16 @@ fn a_malformed_save_pauses_editing_until_a_valid_save(cx: &mut TestAppContext) {
     let file = install_settings_file(&harness, cx);
     let before = document_of(&window, cx);
 
-    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    harness
+        .storage
+        .save_bytes_elsewhere(b"{ half typed".to_vec());
     follow_outside_save(&file, cx);
 
-    assert_eq!(document_of(&window, cx), before, "the last valid settings stay in effect");
+    assert_eq!(
+        document_of(&window, cx),
+        before,
+        "the last valid settings stay in effect"
+    );
     assert!(matches!(status(&window, cx), SaveStatus::Unavailable(_)));
     assert!(!window.read_with(cx, |window, _| window.editor.editable()));
 
@@ -3444,7 +3469,13 @@ fn reload_writes_a_pending_change_before_reading_the_file(cx: &mut TestAppContex
     click("settings-file-reload", cx);
 
     assert_eq!(
-        harness.storage.document().unwrap().preferences.window.density,
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .window
+            .density,
         ChromeDensity::Comfortable
     );
     assert_eq!(
@@ -3460,7 +3491,9 @@ fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAp
     select_section(SettingsSectionId::Advanced, cx);
     let before = document_of(&window, cx);
 
-    harness.storage.save_bytes_elsewhere(b"{ half typed".to_vec());
+    harness
+        .storage
+        .save_bytes_elsewhere(b"{ half typed".to_vec());
     click("settings-file-reload", cx);
 
     assert_eq!(document_of(&window, cx), before);
@@ -3481,8 +3514,8 @@ fn reload_reports_a_malformed_file_and_recovers_from_a_fixed_one(cx: &mut TestAp
 fn exported_document_with_a_theme() -> Vec<u8> {
     let mut document = SettingsDocument::default();
     document.preferences.window.density = ChromeDensity::Comfortable;
-    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
-        .expect("fixture Zed family");
+    document.terminal_themes =
+        crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
     crate::appearance::export_settings(&document)
         .unwrap()
         .into_bytes()
@@ -3515,7 +3548,10 @@ fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext
     settle(cx);
 
     let retained = harness.storage.document().unwrap();
-    assert_eq!(retained.preferences.window.density, ChromeDensity::Comfortable);
+    assert_eq!(
+        retained.preferences.window.density,
+        ChromeDensity::Comfortable
+    );
     assert_eq!(retained.terminal_themes.len(), 1);
 }
 
@@ -3548,8 +3584,14 @@ fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppCont
         Err(super::import::ImportError::Unreadable),
     ] {
         finish_import(&window, read, cx);
-        assert!(cx.debug_bounds("modal-action-settings-import-failed-ok").is_some());
-        assert!(cx.debug_bounds("modal-action-settings-import-confirm").is_none());
+        assert!(
+            cx.debug_bounds("modal-action-settings-import-failed-ok")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-settings-import-confirm")
+                .is_none()
+        );
         click("modal-action-settings-import-failed-ok", cx);
     }
     settle(cx);

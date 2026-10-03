@@ -30,14 +30,12 @@ pub(super) fn themed(standard: &ChromeColors, bare: &ChromeColors) -> TextInputT
         TextInputVariants::new(paint(standard), paint(bare)),
         TextInputMetrics::new(px(HAIRLINE), px(2.0), Duration::from_millis(16), px(24.0)),
     )
-    .field_frame(
-        FieldFrameTheme::new(
-            gpui_color(standard.input_background),
-            gpui_color(standard.input_border),
-            gpui_color(standard.input_invalid_border),
-            gpui_color(standard.input_disabled_background),
-            gpui_color(standard.input_disabled_border),
-            gpui_color(standard.focus_ring),
-        ),
-    )
+    .field_frame(FieldFrameTheme::new(
+        gpui_color(standard.input_background),
+        gpui_color(standard.input_border),
+        gpui_color(standard.input_invalid_border),
+        gpui_color(standard.input_disabled_background),
+        gpui_color(standard.input_disabled_border),
+        gpui_color(standard.focus_ring),
+    ))
 }

@@ -286,7 +286,9 @@ mod tests {
         assert!(AppearancePreview::alternate_typography(&preview.document()));
         preview.set_alternate_typography(false).unwrap();
 
-        assert!(!AppearancePreview::alternate_typography(&preview.document()));
+        assert!(!AppearancePreview::alternate_typography(
+            &preview.document()
+        ));
         assert_eq!(preview.document().preferences.terminal.typography, defaults);
     }
 
@@ -337,7 +339,8 @@ mod tests {
     #[test]
     fn a_theme_family_installs_without_an_open_preview() {
         let mut preview = preview();
-        let family = r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;
+        let family =
+            r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;
 
         assert_eq!(preview.install_theme_family(family), Ok(1));
 

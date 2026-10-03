@@ -627,7 +627,6 @@ impl GraphicsPaintPlan {
             Ok(())
         }
     }
-
 }
 
 const fn layer_for_z(z: i32) -> GraphicsLayer {
@@ -657,7 +656,9 @@ mod tests {
         fn get_or_insert_with<'a>(
             &self,
             key: gpui::AtlasKey,
-            build: &mut dyn FnMut() -> anyhow::Result<Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>>,
+            build: &mut dyn FnMut() -> anyhow::Result<
+                Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>,
+            >,
         ) -> anyhow::Result<Option<gpui::AtlasTile>> {
             if let gpui::AtlasKey::Image(params) = &key {
                 self.image_lookups.fetch_add(1, Ordering::Relaxed);
@@ -707,7 +708,11 @@ mod tests {
     }
 
     impl gpui::Render for FailingImagePaint {
-        fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
             let plan = self.plan.clone();
             let result = Arc::clone(&self.result);
             gpui::canvas(
@@ -811,33 +816,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn image_preflight_fills_atlas_without_adding_a_scene_primitive(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn image_preflight_fills_atlas_without_adding_a_scene_primitive(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
         let plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
         let image = Arc::clone(&plan.paints[0].image);
-        cx.draw(point(px(0.0), px(0.0)), size(px(800.0), px(400.0)), move |_, _| {
-            gpui::canvas(
-                |_, _, _| (),
-                move |_, (), window, _| {
-                    window.with_content_mask(
-                        Some(ContentMask {
-                            bounds: Bounds::new(
-                                point(px(0.0), px(0.0)),
-                                size(px(0.0), px(0.0)),
-                            ),
-                        }),
-                        |window| {
-                            plan.paint_layer(GraphicsLayer::AboveText, window)
-                                .expect("image preparation should reach the atlas");
-                        },
-                    );
-                },
-            )
-        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(800.0), px(400.0)),
+            move |_, _| {
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _| {
+                        window.with_content_mask(
+                            Some(ContentMask {
+                                bounds: Bounds::new(
+                                    point(px(0.0), px(0.0)),
+                                    size(px(0.0), px(0.0)),
+                                ),
+                            }),
+                            |window| {
+                                plan.paint_layer(GraphicsLayer::AboveText, window)
+                                    .expect("image preparation should reach the atlas");
+                            },
+                        );
+                    },
+                )
+            },
+        );
         cx.update(|window, _| {
             assert!(window.has_image_atlas_entry(&image));
             assert!(window.painted_polychrome_sprites().is_empty());
@@ -851,7 +858,9 @@ mod tests {
         let first_plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
         let first = first_plan.paints[0].clone();
         let mut second = first.clone();
-        second.image = Arc::new(RenderImage::new(smallvec![Frame::new(RgbaImage::new(1, 1))]));
+        second.image = Arc::new(RenderImage::new(smallvec![Frame::new(RgbaImage::new(
+            1, 1
+        ))]));
         let failed_image = second.image.id;
         let plan = GraphicsPaintPlan {
             paints: Arc::from([first.clone(), second]),
@@ -880,7 +889,10 @@ mod tests {
             .unwrap();
 
         assert!(atlas.image_lookups.load(Ordering::Relaxed) >= 2);
-        assert!(matches!(*result.lock().unwrap(), Some(Err(GraphicsResourceError::Paint))));
+        assert!(matches!(
+            *result.lock().unwrap(),
+            Some(Err(GraphicsResourceError::Paint))
+        ));
         cx.update_window(handle.into(), |_, window, _| {
             assert!(window.has_image_atlas_entry(&first.image));
             assert!(window.painted_polychrome_sprites().is_empty());

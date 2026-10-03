@@ -9,10 +9,10 @@ pub(crate) mod chrome_typography;
 mod combo_box_theme;
 mod command_palette_theme;
 mod control_theme_catalog;
-mod drag_and_drop;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
 pub(crate) mod directory_picker;
+mod drag_and_drop;
 #[cfg(test)]
 mod floating_surface_tests;
 #[cfg(test)]
@@ -88,7 +88,6 @@ pub(crate) use terminal_pane::{
 };
 pub(crate) use workspace_frame::WorkspaceFrame;
 pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
-
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

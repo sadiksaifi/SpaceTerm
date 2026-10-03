@@ -148,9 +148,13 @@ impl ModalFixtures {
             .into_any_element(),
         ];
         vec![
-            FormGroup::new("workbench-group-modals-families".to_owned(), "Modals", modals)
-                .render(surface)
-                .into_any_element(),
+            FormGroup::new(
+                "workbench-group-modals-families".to_owned(),
+                "Modals",
+                modals,
+            )
+            .render(surface)
+            .into_any_element(),
             FormGroup::new(
                 "workbench-group-modals-obscured".to_owned(),
                 "Obscured controls",

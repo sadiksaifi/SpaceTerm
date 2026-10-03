@@ -66,8 +66,14 @@ fn reset_entries(cx: &gpui::App) -> Vec<MenuEntry<ResetTarget>> {
         MenuEntry::action("Appearance Mode", ResetTarget::AppearanceMode),
         MenuEntry::action("Transparency", ResetTarget::Transparency),
         MenuEntry::action("Blur", ResetTarget::Blur),
-        MenuEntry::action("Light Terminal Theme", ResetTarget::TerminalTheme(Appearance::Light)),
-        MenuEntry::action("Dark Terminal Theme", ResetTarget::TerminalTheme(Appearance::Dark)),
+        MenuEntry::action(
+            "Light Terminal Theme",
+            ResetTarget::TerminalTheme(Appearance::Light),
+        ),
+        MenuEntry::action(
+            "Dark Terminal Theme",
+            ResetTarget::TerminalTheme(Appearance::Dark),
+        ),
         MenuEntry::action("Font Family", ResetTarget::TerminalFontFamily),
         MenuEntry::action("Font Size", ResetTarget::TerminalBaseSize),
         MenuEntry::action("Regular Weight", ResetTarget::TerminalRegularWeight),
@@ -123,7 +129,11 @@ pub(super) fn render(
     .on_change(move |change, _, cx| {
         let density = *change.requested();
         let _ = owner.update(cx, |workbench, cx| {
-            workbench.apply(|preview| preview.set_density(density), "Density changed", cx);
+            workbench.apply(
+                |preview| preview.set_density(density),
+                "Density changed",
+                cx,
+            );
         });
     });
     let owner = cx.weak_entity();
@@ -215,9 +225,13 @@ pub(super) fn render(
         FormRow::new("workbench-row-appearance-density", "Density", density)
             .render(appearance, window, cx)
             .into_any_element(),
-        FormRow::new("workbench-row-appearance-transparency", "Transparency", transparency)
-            .render(appearance, window, cx)
-            .into_any_element(),
+        FormRow::new(
+            "workbench-row-appearance-transparency",
+            "Transparency",
+            transparency,
+        )
+        .render(appearance, window, cx)
+        .into_any_element(),
         FormRow::new("workbench-row-appearance-blur", "Blur", blur)
             .render(appearance, window, cx)
             .into_any_element(),
@@ -259,7 +273,11 @@ pub(super) fn render(
         ("workbench-group-window", "Window", window_rows),
         ("workbench-group-terminal", "Terminal", terminal_rows),
         ("workbench-group-reset", "Reset", reset_rows),
-        ("workbench-group-diagnostics", "Diagnostics", diagnostics_rows),
+        (
+            "workbench-group-diagnostics",
+            "Diagnostics",
+            diagnostics_rows,
+        ),
     ]
     .into_iter()
     .map(|(selector, title, rows)| {

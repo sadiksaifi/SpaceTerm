@@ -735,13 +735,17 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
 
     for (role, owner, compact_height) in [
         ("workspace", WindowTrafficLightOwner::workspace(), px(41.0)),
-        ("settings", WindowTrafficLightOwner::sidebar_window(), px(36.0)),
+        (
+            "settings",
+            WindowTrafficLightOwner::sidebar_window(),
+            px(36.0),
+        ),
     ] {
         // Compact density rests exactly on the host anchor.
         cx.update(|cx| {
             cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
-                                        spacing_scale: 1.0,
+                    spacing_scale: 1.0,
                     ..crate::ui::appearance::ChromeAppearance::default()
                 },
             )));
@@ -761,7 +765,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
         cx.update(|cx| {
             cx.set_global(InstalledChrome::single(std::sync::Arc::new(
                 crate::ui::appearance::ChromeAppearance {
-                                        spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                    spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
                         crate::appearance::ChromeDensity::Comfortable,
                     ),
                     ..crate::ui::appearance::ChromeAppearance::default()
@@ -824,7 +828,7 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
         );
         cx.set_global(InstalledChrome::single(std::sync::Arc::new(
             crate::ui::appearance::ChromeAppearance {
-                                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
+                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
                     crate::appearance::ChromeDensity::Comfortable,
                 ),
                 ..crate::ui::appearance::ChromeAppearance::default()

@@ -300,13 +300,14 @@ fn prepare_surfaces(
     };
     let card_semantic = elevated;
     let sidebar_materials = chrome.materials;
-    let card_materials = chrome.materials.with_transmission_share(
-        if chrome.appearance == Appearance::Light {
-            BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE
-        } else {
-            CARD_TRANSMISSION_SHARE
-        },
-    );
+    let card_materials =
+        chrome
+            .materials
+            .with_transmission_share(if chrome.appearance == Appearance::Light {
+                BUILT_IN_LIGHT_CARD_TRANSMISSION_SHARE
+            } else {
+                CARD_TRANSMISSION_SHARE
+            });
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
     let canvas_paint = if light_content_hierarchy {
         // A bright canvas sits one rung above the navigation beside it and one below the groups
@@ -358,7 +359,7 @@ mod tests {
     use crate::appearance::Appearance;
     use crate::appearance::{
         AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, ThemeCatalog, SystemAppearance,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog,
     };
 
     #[test]

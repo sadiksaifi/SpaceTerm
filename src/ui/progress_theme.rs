@@ -29,7 +29,6 @@ fn paint(colors: &ChromeColors) -> ProgressPaint {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

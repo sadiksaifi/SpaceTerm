@@ -1,5 +1,5 @@
-use crate::ui::appearance::gpui_color;
 use crate::directory_selection::SystemFileSelection;
+use crate::ui::appearance::gpui_color;
 use std::fmt;
 use std::num::NonZeroU16;
 use std::rc::Rc;
@@ -923,7 +923,6 @@ fn managed_validation_message(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -1381,9 +1380,11 @@ mod tests {
         cx.run_until_parked();
 
         assert!(form.read_with(cx, |form, _| form.is_open()));
-        assert!(!events.borrow().iter().any(|event| matches!(
-            event,
-            SshHostFormEvent::SavedAndConnect(_)
-        )));
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, SshHostFormEvent::SavedAndConnect(_)))
+        );
     }
 }

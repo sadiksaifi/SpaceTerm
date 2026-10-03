@@ -50,8 +50,7 @@ impl FloatingSurfaces {
             interaction_probe: cx.new(|cx| DialogBody::new(window, cx)),
             photograph: Arc::new(Image::from_bytes(
                 ImageFormat::Jpeg,
-                include_bytes!("../../../assets/developer-workbench/blue-marble-2012.jpg")
-                    .to_vec(),
+                include_bytes!("../../../assets/developer-workbench/blue-marble-2012.jpg").to_vec(),
             )),
         }
     }
@@ -194,9 +193,13 @@ impl FloatingSurfaces {
             .into_any_element(),
         ];
         vec![
-            FormGroup::new("workbench-group-surfaces-controls".to_owned(), "Controls", rows)
-                .render(surface)
-                .into_any_element(),
+            FormGroup::new(
+                "workbench-group-surfaces-controls".to_owned(),
+                "Controls",
+                rows,
+            )
+            .render(surface)
+            .into_any_element(),
             FormGroup::new(
                 "workbench-group-surfaces-stage".to_owned(),
                 "Stage",
@@ -206,9 +209,9 @@ impl FloatingSurfaces {
                         "Stage",
                         self.render_stage(surface),
                     )
-                        .layout(FormRowLayout::Full)
-                        .render(appearance, window, cx)
-                        .into_any_element(),
+                    .layout(FormRowLayout::Full)
+                    .render(appearance, window, cx)
+                    .into_any_element(),
                 ],
             )
             .render(surface)

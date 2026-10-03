@@ -274,7 +274,8 @@ fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
     let shapes = |cx: &mut VisualTestContext| {
         (
             cx.debug_bounds("workspace-switcher-status-glyph").is_some(),
-            cx.debug_bounds("workbench-status-terminal-1-progress-track").is_some(),
+            cx.debug_bounds("workbench-status-terminal-1-progress-track")
+                .is_some(),
         )
     };
     assert!(cx.debug_bounds("workbench-status-workspace-0").is_some());
@@ -291,7 +292,10 @@ fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
     // Every Workspace mark shares the glyph selector; the last one rendered is Failed's.
     let glyph = cx.debug_bounds("workspace-switcher-status-glyph").unwrap();
     let mark = cx.debug_bounds("workbench-status-workspace-5").unwrap();
-    assert!(mark.contains(&glyph.center()), "{glyph:?} must sit in {mark:?}");
+    assert!(
+        mark.contains(&glyph.center()),
+        "{glyph:?} must sit in {mark:?}"
+    );
 
     workbench.update(cx, |workbench, cx| {
         workbench.simulate(Simulation::SystemSettings, cx);
@@ -432,7 +436,10 @@ fn floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
             });
             cx.run_until_parked();
 
-            for activity in [ControlWindowActivity::Active, ControlWindowActivity::Inactive] {
+            for activity in [
+                ControlWindowActivity::Active,
+                ControlWindowActivity::Inactive,
+            ] {
                 let prepared = cx.update(|_, cx| {
                     activity.with_scope(|| crate::ui::appearance::shared_chrome(cx))
                 });
@@ -451,8 +458,7 @@ fn floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
                         crate::appearance::Color::BLACK,
                         crate::appearance::Color::WHITE,
                     ] {
-                        let lightness =
-                            cie_lightness(wash.source_over(tone.source_over(endpoint)));
+                        let lightness = cie_lightness(wash.source_over(tone.source_over(endpoint)));
                         match appearance {
                             Appearance::Light => assert!(
                                 lightness >= 50.0,
@@ -513,7 +519,8 @@ fn inactive_window_simulation_selects_inactive_control_states_without_editing_pr
     };
     // Test windows have no frame loop, so the ring's entrance is finished by hand.
     let settle_focus_rings = |cx: &mut VisualTestContext| {
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
     };
@@ -606,7 +613,11 @@ fn state_matrices_and_their_text_fit_the_default_window_at_every_density(cx: &mu
 
     for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
         workbench.update(cx, |workbench, cx| {
-            workbench.apply(|preview| preview.set_density(density), "Density changed", cx);
+            workbench.apply(
+                |preview| preview.set_density(density),
+                "Density changed",
+                cx,
+            );
         });
         cx.run_until_parked();
 

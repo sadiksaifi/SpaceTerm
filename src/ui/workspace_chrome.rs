@@ -415,13 +415,12 @@ impl WorkspaceChromeIdentity {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::appearance::{
         Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-        CompositionCapabilities, ThemeCatalog, SystemAppearance, builtin_chrome_base,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog, builtin_chrome_base,
     };
 
     #[test]

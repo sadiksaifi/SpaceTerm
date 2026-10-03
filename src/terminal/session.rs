@@ -54,11 +54,11 @@ use crate::terminal::metadata::{
     LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
-use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
     PreparedPaste,
 };
+use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration};
 

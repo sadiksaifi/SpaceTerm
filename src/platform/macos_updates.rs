@@ -129,8 +129,7 @@ mod native {
 
     impl UpdateAdapter for MacosUpdates {
         fn start(&self, sender: async_channel::Sender<UpdateEvent>) -> Result<(), UpdateError> {
-            if objc2::MainThreadMarker::new().is_none() || self.session.borrow().is_some()
-            {
+            if objc2::MainThreadMarker::new().is_none() || self.session.borrow().is_some() {
                 return Err(UpdateError::Unavailable);
             }
             let mut events = Box::new(sender);

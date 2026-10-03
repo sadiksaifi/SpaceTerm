@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary, SettingsDocument};
+use crate::appearance::{ResetTarget, SettingsDocument, ThemeCatalog, ThemeId, ThemeSummary};
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
 use crate::settings::{
-    CommitOutcome, ImportReceipt, PreviewToken, ThemeImport, SettingsError, UserSettings,
+    CommitOutcome, ImportReceipt, PreviewToken, SettingsError, ThemeImport, UserSettings,
 };
 
 /// What the Settings Window reports about the retained document.
@@ -66,7 +66,9 @@ impl SettingsDraft {
     }
 
     /// The write that creates the settings file, when no file holds the document yet.
-    pub(super) fn prepare_file(&mut self) -> Result<Option<crate::settings::CommitJob>, SettingsError> {
+    pub(super) fn prepare_file(
+        &mut self,
+    ) -> Result<Option<crate::settings::CommitJob>, SettingsError> {
         self.settings.ensure_file()
     }
 
@@ -117,7 +119,10 @@ impl SettingsDraft {
     }
 
     /// Installs translated themes without selecting any of them.
-    pub(super) fn import(&mut self, source: ThemeImport<'_>) -> Result<ImportReceipt, SettingsError> {
+    pub(super) fn import(
+        &mut self,
+        source: ThemeImport<'_>,
+    ) -> Result<ImportReceipt, SettingsError> {
         self.edit_catalog(|settings, token, revision| {
             settings.import_preview(token, revision, source)
         })

@@ -79,11 +79,15 @@ pub(super) fn render(
         FormRow::new(
             "workbench-row-terminal-caption",
             "Pane Caption fixture",
-            Switch::new("workbench-terminal-caption", "Pane Caption fixture", caption)
-                .size(ToggleSize::Regular)
-                .label_hidden(true)
-                .debug_selector("workbench-terminal-caption")
-                .on_change(|change, _, cx| set_caption_fixture(change.requested(), cx)),
+            Switch::new(
+                "workbench-terminal-caption",
+                "Pane Caption fixture",
+                caption,
+            )
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
+            .debug_selector("workbench-terminal-caption")
+            .on_change(|change, _, cx| set_caption_fixture(change.requested(), cx)),
         )
         .description("Captions show a synthetic user, host, and directory.")
         .render(appearance, window, cx)
@@ -134,12 +138,20 @@ pub(super) fn render(
             .into_any_element(),
     ];
     vec![
-        FormGroup::new("workbench-group-terminal-fixtures".to_owned(), "Fixtures", fixtures)
-            .render(surface)
-            .into_any_element(),
-        FormGroup::new("workbench-group-terminal-actions".to_owned(), "Actions", actions)
-            .render(surface)
-            .into_any_element(),
+        FormGroup::new(
+            "workbench-group-terminal-fixtures".to_owned(),
+            "Fixtures",
+            fixtures,
+        )
+        .render(surface)
+        .into_any_element(),
+        FormGroup::new(
+            "workbench-group-terminal-actions".to_owned(),
+            "Actions",
+            actions,
+        )
+        .render(surface)
+        .into_any_element(),
     ]
 }
 

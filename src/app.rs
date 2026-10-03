@@ -59,7 +59,9 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         ))
     }
     /// The same file the settings storage reads and writes, as other programs open it.
-    pub(crate) fn settings_file(&self) -> Rc<dyn crate::platform::settings_file::SettingsFileAccess> {
+    pub(crate) fn settings_file(
+        &self,
+    ) -> Rc<dyn crate::platform::settings_file::SettingsFileAccess> {
         Rc::new(crate::platform::settings_file::SystemSettingsFile::new(
             self.paths.directories().settings_file(),
             &self.home_directory,
@@ -512,40 +514,37 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
-    let result = cx.open_window(
-        workspace_window_options(host, cx),
-        |window, cx| {
-            let workspace_manager = cx.new(|cx| {
-                WorkspaceManager::new_with_adapters(
-                    session_factory,
-                    home_directory,
-                    adapters,
-                    window,
-                    cx,
-                )
-            });
-            workspace_manager.update(cx, |workspace_manager, cx| {
-                workspace_manager.focus(window, cx);
-            });
-            let close_manager = workspace_manager.downgrade();
-            window.on_window_should_close(cx, move |window, cx| {
-                close_manager
-                    .update(cx, |manager, cx| manager.should_close_window(window, cx))
-                    .unwrap_or(true)
-            });
-            if let Err(error) = host.services.install(
+    let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+        let workspace_manager = cx.new(|cx| {
+            WorkspaceManager::new_with_adapters(
+                session_factory,
+                home_directory,
+                adapters,
                 window,
-                Rc::new(WorkspaceServicesEndpoint {
-                    app: cx.to_async(),
-                    window: window.window_handle(),
-                    owner: workspace_manager.downgrade(),
-                }),
-            ) {
-                eprintln!("failed to install the Services responder: {error}");
-            }
-            workspace_manager
-        },
-    );
+                cx,
+            )
+        });
+        workspace_manager.update(cx, |workspace_manager, cx| {
+            workspace_manager.focus(window, cx);
+        });
+        let close_manager = workspace_manager.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_manager
+                .update(cx, |manager, cx| manager.should_close_window(window, cx))
+                .unwrap_or(true)
+        });
+        if let Err(error) = host.services.install(
+            window,
+            Rc::new(WorkspaceServicesEndpoint {
+                app: cx.to_async(),
+                window: window.window_handle(),
+                owner: workspace_manager.downgrade(),
+            }),
+        ) {
+            eprintln!("failed to install the Services responder: {error}");
+        }
+        workspace_manager
+    });
 
     let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
@@ -856,7 +855,8 @@ pub(crate) struct HostComposition {
     )>,
     /// The application's one Permission Setup, created once the application runs when the host
     /// composes computer-use access and a Setup Guide.
-    permission_setup: std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
+    permission_setup:
+        std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
 }
 impl HostComposition {
     pub(crate) fn with_appearance(
@@ -1370,7 +1370,9 @@ mod runtime_tests {
             .unwrap()
             .with_appearance(
                 storage,
-                Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+                Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
             )
     }
 
@@ -1400,9 +1402,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn launch_offers_settings_recovery_once_for_malformed_settings(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn launch_offers_settings_recovery_once_for_malformed_settings(cx: &mut gpui::TestAppContext) {
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
@@ -1434,9 +1434,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn settings_recovery_can_be_declined_without_changing_the_file(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn settings_recovery_can_be_declined_without_changing_the_file(cx: &mut gpui::TestAppContext) {
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());

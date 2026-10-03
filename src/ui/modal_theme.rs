@@ -25,7 +25,6 @@ fn paint(colors: &ChromeColors) -> ModalPaint {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

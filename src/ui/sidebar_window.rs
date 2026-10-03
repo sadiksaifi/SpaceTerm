@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size,
-    TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
+    Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
     HoverFade, Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
@@ -238,12 +238,14 @@ fn navigate<T: SidebarOwner>(
 /// unhandled Tab to the window's registered focus order.
 pub(crate) fn tab_traversal<T: SidebarOwner>(surface: Div, cx: &mut Context<T>) -> Div {
     surface
-        .capture_key_down(cx.listener(|owner: &mut T, event: &gpui::KeyDownEvent, _, cx| {
-            if is_plain_tab(event) && !owner.navigation().focus_visible {
-                owner.navigation().show_focus();
-                cx.notify();
-            }
-        }))
+        .capture_key_down(
+            cx.listener(|owner: &mut T, event: &gpui::KeyDownEvent, _, cx| {
+                if is_plain_tab(event) && !owner.navigation().focus_visible {
+                    owner.navigation().show_focus();
+                    cx.notify();
+                }
+            }),
+        )
         .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
             if !is_plain_tab(event) {
                 return;
@@ -499,10 +501,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                     .children(self.header.map(|header| {
                         // The header belongs to the window, not to the list under it, so the break
                         // between them is wider than the spacing inside the list.
-                        div()
-                            .w_full()
-                            .mb(appearance.spacing(12.0))
-                            .child(header)
+                        div().w_full().mb(appearance.spacing(12.0)).child(header)
                     }))
                     .child(list),
             );
@@ -577,7 +576,13 @@ fn render_navigation_list<T: SidebarOwner>(
             };
             // The same chip the Workspace sidebar rests its current row on, so the two navigation
             // surfaces read as one material rather than as two conventions.
-            let chip = navigation_chip(selected, available, emphasized, appearance, &selection_colors);
+            let chip = navigation_chip(
+                selected,
+                available,
+                emphasized,
+                appearance,
+                &selection_colors,
+            );
             // Text and icon follow the chip's hover paint.
             let foreground = foreground.fade(hover_foreground, f64::from(hover));
             let icon_color = icon_color.fade(hover_icon, f64::from(hover));
@@ -593,7 +598,10 @@ fn render_navigation_list<T: SidebarOwner>(
                 .items_center()
                 .gap(appearance.spacing(7.0))
                 .w_full()
-                .h(appearance.typography.style(TextRole::Navigation).line_height
+                .h(appearance
+                    .typography
+                    .style(TextRole::Navigation)
+                    .line_height
                     + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
                 .px(appearance.spacing(8.0))
                 .cursor_default()
@@ -601,13 +609,13 @@ fn render_navigation_list<T: SidebarOwner>(
                 .child(chip.render(chip_selector, hover))
                 .when(available, |row| {
                     row.child(fade.tracker()).on_click(move |_, window, cx| {
-                            let _ = selecting.update(cx, |owner, cx| {
-                                // A completed pointer selection is authoritative even if native
-                                // focus moved between the press and release.
-                                owner.navigation().release_to_window(window, cx);
-                                owner.select_section(section, cx);
-                            });
-                        })
+                        let _ = selecting.update(cx, |owner, cx| {
+                            // A completed pointer selection is authoritative even if native
+                            // focus moved between the press and release.
+                            owner.navigation().release_to_window(window, cx);
+                            owner.select_section(section, cx);
+                        });
+                    })
                 })
                 .when(!available, |row| {
                     row.text_color(gpui_color(panel_colors.text_disabled))
@@ -767,7 +775,9 @@ pub(crate) fn render_footer(
             + appearance.spacing(FOOTER_HEIGHT - 15.0))
         .border_t_1()
         .border_color(gpui_color(surface.separator(SettingsSurfaceRole::Canvas)))
-        .bg(gpui_color(surface.surface(SettingsSurfaceRole::Canvas).paint))
+        .bg(gpui_color(
+            surface.surface(SettingsSurfaceRole::Canvas).paint,
+        ))
         .items_center()
         .justify_end()
         .gap(appearance.spacing(8.0))

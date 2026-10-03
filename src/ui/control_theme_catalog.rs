@@ -736,7 +736,6 @@ pub(super) fn readable_on(
     super::appearance::readable_on_background(proposed, background, minimum_contrast)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,7 +853,7 @@ mod tests {
     fn control_surfaces_do_not_paint_detached_bottom_hairlines(cx: &mut gpui::TestAppContext) {
         use crate::appearance::{
             AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-            CompositionCapabilities, ThemeCatalog, SystemAppearance,
+            CompositionCapabilities, SystemAppearance, ThemeCatalog,
         };
         use crate::ui::appearance::ChromeAppearance;
         use spaceterm_ui::{ControlHost, ControlMotion, replace_control_theme_catalog};
@@ -1125,7 +1124,7 @@ mod tests {
     fn prepared_row_state_policy_keeps_disabled_selection_identical_across_activity() {
         use crate::appearance::{
             Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences,
-            AvailableFonts, CompositionCapabilities, ThemeCatalog, SystemAppearance,
+            AvailableFonts, CompositionCapabilities, SystemAppearance, ThemeCatalog,
         };
         use crate::ui::appearance::ChromeAppearance;
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -1357,8 +1356,7 @@ mod tests {
                 let [_, foreground, ..] = (states[0].2)(&reference);
                 let readable = readable_on(foreground, reference.elevated_surface_background, 4.5);
                 assert!(
-                    readable.contrast_ratio(Color::BLACK)
-                        < readable.contrast_ratio(Color::WHITE),
+                    readable.contrast_ratio(Color::BLACK) < readable.contrast_ratio(Color::WHITE),
                     "Light overlay text stays dark at every transparency"
                 );
             }
@@ -1369,7 +1367,7 @@ mod tests {
     fn built_in_floating_row_states_remain_distinct_translucent_and_readable_at_maximum_glass() {
         use crate::appearance::{
             Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences,
-            AvailableFonts, CompositionCapabilities, ThemeCatalog, SystemAppearance,
+            AvailableFonts, CompositionCapabilities, SystemAppearance, ThemeCatalog,
         };
         use crate::ui::appearance::ChromeAppearance;
 

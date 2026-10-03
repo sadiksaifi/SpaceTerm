@@ -55,16 +55,15 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ResetTarget, ThemeCatalog, ThemeId, SettingsDocument, SystemAppearance, TerminalFontFamily,
+    FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
+    ThemeId,
 };
 use crate::platform::computer_use_access::{ComputerUseAccess, ComputerUsePermission};
 use crate::platform::microphone_access::MicrophoneAccess;
-use crate::theme_registry::ZedThemeRegistry;
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::platform::window_movement::{
-    OperatingSystemWindowDragPlatform, WindowMovementFactory,
-};
+use crate::platform::window_movement::{OperatingSystemWindowDragPlatform, WindowMovementFactory};
+use crate::theme_registry::ZedThemeRegistry;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
@@ -75,14 +74,14 @@ use crate::ui::sidebar_window::{
     card_gutter, group_spacing,
 };
 
-use catalog::{SettingsRowId, SettingsSectionId};
 use crate::ui::sidebar_window::form::{
-    FormGroup, FormRow, FormRowLayout, Stepper, action_button,
-    reset_button, row_horizontal_inset, section_heading,
+    FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button, row_horizontal_inset,
+    section_heading,
 };
+use catalog::{SettingsRowId, SettingsSectionId};
+use computer_use::{ComputerUseAccessChanges, ComputerUseAccessRows};
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
-use computer_use::{ComputerUseAccessChanges, ComputerUseAccessRows};
 use microphone::MicrophoneAccessRow;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -593,8 +592,7 @@ impl SettingsWindow {
             return;
         };
         let viewport = self.scroll.bounds();
-        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height
-        {
+        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
             viewport.top() - bounds.top()
         } else if bounds.bottom() > viewport.bottom() {
             viewport.bottom() - bounds.bottom()
@@ -950,7 +948,9 @@ impl SettingsWindow {
                 let row_bounds = Rc::clone(&self.row_bounds);
                 FormGroup::new(group_selector(section, title), heading, members)
                     .on_rows_prepainted(move |bounds, _, _| {
-                        row_bounds.borrow_mut().extend(ids.iter().copied().zip(bounds));
+                        row_bounds
+                            .borrow_mut()
+                            .extend(ids.iter().copied().zip(bounds));
                     })
                     .render(settings)
                     .into_any_element()
@@ -972,7 +972,6 @@ impl SettingsWindow {
             .into_any_element()
     }
 }
-
 
 /// The weight choices a settings surface offers, rather than every value the document accepts.
 const WEIGHTS: [(u16, &str); 6] = [
@@ -1027,10 +1026,10 @@ impl SettingsWindow {
             descriptor.label(self.computer_use_access.naming()),
             control,
         )
-            .layout(row_layout(row))
-            .reset(self.row_reset(row, appearance, cx))
-            .matched_indices(matched_indices)
-            .highlighted(highlighted);
+        .layout(row_layout(row))
+        .reset(self.row_reset(row, appearance, cx))
+        .matched_indices(matched_indices)
+        .highlighted(highlighted);
         if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
         } else if let Some(permission) = computer_use::row_permission(row) {
@@ -1176,7 +1175,8 @@ impl SettingsWindow {
     /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
     fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
         let document = self.editor.document();
-        let catalog = ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
+        let catalog =
+            ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
         let pick = |appearance: Appearance| {
             let mut preferences = document.preferences.clone();
             preferences.mode = appearance.into();
