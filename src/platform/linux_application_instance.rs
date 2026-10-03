@@ -20,10 +20,33 @@ impl Application {
     }
 }
 
+/// How a launch treats an instance that already owns the application name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InstanceLaunch {
+    /// Desktop and command-line launches activate the running instance and exit.
+    Activate,
+    /// The development launcher runs a fresh build beside a running instance, like macOS
+    /// `open -n`, and takes over activation when the earlier instance exits.
+    New,
+}
+
+impl InstanceLaunch {
+    const NEW_INSTANCE_ARGUMENT: &str = "--new-instance";
+
+    /// `arguments` excludes the program name.
+    pub(super) fn from_arguments(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Self {
+        match (arguments.next(), arguments.next()) {
+            (Some(argument), None) if argument == Self::NEW_INSTANCE_ARGUMENT => Self::New,
+            _ => Self::Activate,
+        }
+    }
+}
+
 /// A bus outage leaves source builds usable. Only a confirmed forwarded activation exits.
 pub(super) fn forward_if_secondary(
     bus: &SessionBus,
     identity: ApplicationIdentity,
+    launch: InstanceLaunch,
     events: DesktopEventSender,
     token: Option<String>,
 ) -> Result<bool, SessionBusError> {
@@ -35,16 +58,21 @@ pub(super) fn forward_if_secondary(
             .object_server()
             .at(path.as_str(), Application { events })
             .map_err(SessionBusError::from)?;
-        let reply = match connection
-            .request_name_with_flags(name, zbus::fdo::RequestNameFlags::DoNotQueue.into())
-        {
+        let flags = match launch {
+            InstanceLaunch::Activate => zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+            InstanceLaunch::New => Default::default(),
+        };
+        let reply = match connection.request_name_with_flags(name, flags) {
             Ok(reply) => reply,
             Err(zbus::Error::NameTaken) => zbus::fdo::RequestNameReply::Exists,
             Err(error) => return Err(error.into()),
         };
+        // A queued new instance owns activation once every earlier instance exits.
         if matches!(
             reply,
-            zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner
+            zbus::fdo::RequestNameReply::PrimaryOwner
+                | zbus::fdo::RequestNameReply::AlreadyOwner
+                | zbus::fdo::RequestNameReply::InQueue
         ) {
             return Ok(false);
         }

@@ -53,7 +53,7 @@ executable = pathlib.Path(__file__).resolve().parent.parent / "target" / "debug"
 executable.parent.mkdir(parents=True, exist_ok=True)
 executable.write_text(
     "#!/bin/sh\\n"
-    f"printf '%s\\\\n' \\"$0\\" \\"${{SPACETERM_DEVELOPER_WORKBENCH:-}}\\" \\"$#\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
+    f"printf '%s\\\\n' \\"$0\\" \\"${{SPACETERM_DEVELOPER_WORKBENCH:-}}\\" \\"$#\\" \\"$@\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
 )
 executable.chmod(0o755)
 output.write_text(str(executable))
@@ -124,7 +124,8 @@ class LinuxPrefixTests(unittest.TestCase):
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
             self.record.read_text().splitlines(),
-            [str(prefix / "bin" / "spaceterm"), "", "0"],
+            [str(prefix / "bin" / "spaceterm"), "", "1", "--new-instance"],
+            "a source launch runs beside a running Development instance",
         )
         self.assertTrue((prefix / "share" / "spaceterm" / "shell-integration" / "zsh").is_dir())
         self.assertTrue((prefix / "share" / "spaceterm" / "terminfo" / "x" / "xterm-spaceterm").is_file())
@@ -245,7 +246,7 @@ assert app.launch([], None)
             time.sleep(0.01)
         self.assertEqual(self.record.read_text().splitlines(), [
             str(self.root / "target/development-apps/development/bin/spaceterm"), "", "0",
-        ])
+        ], "a desktop launch activates a running instance")
 
     def test_development_launch_preserves_the_workbench_request(self):
         result = self.run_profile(section="controls")
@@ -253,7 +254,7 @@ assert app.launch([], None)
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
             self.record.read_text().splitlines(),
-            [str(prefix / "bin" / "spaceterm"), "controls", "0"],
+            [str(prefix / "bin" / "spaceterm"), "controls", "1", "--new-instance"],
         )
 
     def test_unknown_profile_is_rejected_before_building(self):

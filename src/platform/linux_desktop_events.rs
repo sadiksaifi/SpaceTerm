@@ -305,6 +305,7 @@ mod tests {
             !crate::platform::linux_application_instance::forward_if_secondary(
                 &primary,
                 identity,
+                crate::platform::linux_application_instance::InstanceLaunch::Activate,
                 sender.clone(),
                 None
             )
@@ -314,6 +315,7 @@ mod tests {
             crate::platform::linux_application_instance::forward_if_secondary(
                 &secondary,
                 identity,
+                crate::platform::linux_application_instance::InstanceLaunch::Activate,
                 sender,
                 Some("launch-token".into())
             )
@@ -321,6 +323,48 @@ mod tests {
         );
         assert_eq!(wait_activation(&events).as_deref(), Some("launch-token"));
         assert!(events.pending.lock().unwrap().activation.is_none());
+    }
+
+    #[test]
+    fn linux_desktop_new_instance_runs_beside_the_owner_and_inherits_activation() {
+        use crate::platform::linux_application_instance::{InstanceLaunch, forward_if_secondary};
+        let private = PrivateBus::new();
+        let identity = crate::application_identity::ApplicationIdentity::current();
+        let name = identity.application_id();
+        let earlier = private.server().name(name).unwrap().build().unwrap();
+        let fresh = private.client();
+        let (sender, events) = super::LinuxDesktopEvents::new();
+
+        assert!(
+            !forward_if_secondary(&fresh, identity, InstanceLaunch::New, sender, None).unwrap(),
+            "a new instance runs even while another owns activation"
+        );
+
+        earlier.release_name(name).unwrap();
+        let (later, _) = super::LinuxDesktopEvents::new();
+        assert!(
+            forward_if_secondary(
+                &private.client(),
+                identity,
+                InstanceLaunch::Activate,
+                later,
+                Some("launch-token".into())
+            )
+            .unwrap()
+        );
+        assert_eq!(wait_activation(&events).as_deref(), Some("launch-token"));
+    }
+
+    #[test]
+    fn linux_desktop_only_the_new_instance_argument_selects_a_new_instance() {
+        use crate::platform::linux_application_instance::InstanceLaunch;
+        let launch = |arguments: &[&str]| {
+            InstanceLaunch::from_arguments(arguments.iter().map(std::ffi::OsString::from))
+        };
+        assert_eq!(launch(&["--new-instance"]), InstanceLaunch::New);
+        assert_eq!(launch(&[]), InstanceLaunch::Activate);
+        assert_eq!(launch(&["--new-instance", "x"]), InstanceLaunch::Activate);
+        assert_eq!(launch(&["--new"]), InstanceLaunch::Activate);
     }
 
     /// Dark, increased contrast, and reduced motion: every fact differs from the defaults.
