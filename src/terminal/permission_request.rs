@@ -138,8 +138,10 @@ impl PermissionRequestFilter {
                 FilterState::Body { escape_pending } | FilterState::Discard { escape_pending } => {
                     let discarding = matches!(self.state, FilterState::Discard { .. });
                     if escape_pending && byte != b'\\' {
-                        // The ESC begins another sequence, which abandons the request as it would
-                        // any string in the terminal. Read the ESC and this byte again as output.
+                        // The ESC begins another sequence and ends the request unterminated. A
+                        // terminal would dispatch the string it holds; the filter discards the
+                        // request so a truncated one starts nothing. Read the ESC and this byte
+                        // again as output.
                         self.candidate.clear();
                         self.candidate.push(0x1b);
                         self.state = FilterState::Prefix;

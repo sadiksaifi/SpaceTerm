@@ -39,8 +39,9 @@ A Permission Request is an OSC 7701 sequence that any terminal output can carry,
 programs and printed files. It can only offer the setup; the person decides. The notice never takes
 keyboard focus, and its shortcuts are Command-Return and Command-Period rather than Return and
 Escape. An enhanced keyboard mode can still send any key to a program, so the notice accepts no
-click or shortcut until it has shown its offer for half a second, and a permission added to the
-offer starts that delay again. A program therefore cannot redirect a click or keystroke meant for
-itself by timing a request just before it. The filter
-abandons a request on any escape, as Ghostty's parser does, so a truncated request cannot hide later
-output.
+click or shortcut until it has shown its offer for half a second. A permission added to the offer
+starts that delay again, and so does a move to the other edge of the Pane, because the program moves
+the cursor that picks the edge. A program therefore cannot redirect a click or keystroke meant for
+itself by timing a request just before it or by moving the notice under the pointer. The filter
+discards a request that any escape interrupts, where Ghostty's parser would dispatch the string it
+holds, so a truncated request starts nothing and cannot hide later output.
