@@ -1473,11 +1473,16 @@ impl ButtonCore {
                 let down_hitbox = hitbox.clone();
                 let move_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || !down_hitbox.is_hovered(window)
-                        || (event.first_mouse && !accept_first_mouse)
-                    {
+                    if !phase.capture() || !down_hitbox.is_hovered(window) {
+                        return;
+                    }
+                    // A Button owns presses on its surface even when it leaves ancestors hovered.
+                    // Secondary presses must not reach an enclosing window drag region.
+                    if event.button != MouseButton::Left {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if event.first_mouse && !accept_first_mouse {
                         return;
                     }
                     window.prevent_default();
@@ -2703,5 +2708,43 @@ mod tests {
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
 
         assert_eq!(activations.get(), 0);
+    }
+    #[gpui::test]
+    fn chrome_button_preserving_ancestor_hover_consumes_secondary_activation(
+        cx: &mut TestAppContext,
+    ) {
+        struct ChromeRoot(Rc<RefCell<Vec<crate::WindowDragRegionEvent>>>);
+        impl Render for ChromeRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let events = self.0.clone();
+                crate::WindowDragRegion::new(
+                    "chrome-drag-region",
+                    "Move window",
+                    div().size_full().child(
+                        crate::IconButton::new("sidebar-toggle", "Toggle sidebar", |_| {
+                            div().into_any_element()
+                        })
+                        .preserve_ancestor_hover()
+                        .debug_selector("sidebar-toggle")
+                        .on_activate(|_, _, _| {}),
+                    ),
+                )
+                .on_event(move |event, _, _| events.borrow_mut().push(*event))
+            }
+        }
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, _| ChromeRoot(events.clone()));
+        cx.run_until_parked();
+        let button = cx.debug_bounds("sidebar-toggle").unwrap().center();
+        cx.simulate_mouse_down(button, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(button, MouseButton::Right, Modifiers::none());
+        assert!(events.borrow().is_empty());
+        let empty = button + gpui::point(px(100.0), px(0.0));
+        cx.simulate_mouse_down(empty, MouseButton::Right, Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[crate::WindowDragRegionEvent::SecondaryActivationRequested { position: empty }]
+        );
     }
 }
