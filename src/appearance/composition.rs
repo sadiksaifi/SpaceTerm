@@ -495,16 +495,19 @@ impl ResolvedWindowComposition {
         // effect behind a fully painted window costs a backdrop for nothing.
         let native_enabled = capabilities.native_window_transparency
             && accessibility_allows_transparency
-            && (requested != WindowBackgroundAppearance::Blurred
-                || capabilities.native_window_blur)
             && !requested_materials.is_opaque();
         Self {
             capabilities,
             requested,
-            effective: if native_enabled {
-                requested
-            } else {
+            // A desktop without a blur effect still shows itself through the window, unsoftened.
+            effective: if !native_enabled {
                 WindowBackgroundAppearance::Opaque
+            } else if requested == WindowBackgroundAppearance::Blurred
+                && !capabilities.native_window_blur
+            {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                requested
             },
             materials: if native_enabled {
                 requested_materials
@@ -705,11 +708,11 @@ mod tests {
     use crate::appearance::{ChromeColors, Color};
 
     #[test]
-    fn unsupported_desktop_blur_keeps_an_opaque_backing_until_blur_is_disabled() {
+    fn unsupported_desktop_blur_keeps_unblurred_desktop_transparency() {
         use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
         for (transparency, blur, requested_blur, expected) in [
             (true, true, true, Blurred),
-            (true, false, true, Opaque),
+            (true, false, true, Transparent),
             (true, false, false, Transparent),
             (false, false, false, Opaque),
             (false, false, true, Opaque),
