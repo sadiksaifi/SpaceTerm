@@ -323,6 +323,22 @@ mod tests {
         assert!(events.pending.lock().unwrap().activation.is_none());
     }
 
+    /// Dark, increased contrast, and reduced motion: every fact differs from the defaults.
+    fn non_default_settings() -> HashMap<String, HashMap<String, OwnedValue>> {
+        HashMap::from([
+            (
+                "org.freedesktop.appearance".into(),
+                HashMap::from([
+                    ("color-scheme".into(), 1u32.into()),
+                    ("contrast".into(), 1u32.into()),
+                ]),
+            ),
+            (
+                "org.gnome.desktop.interface".into(),
+                HashMap::from([("enable-animations".into(), false.into())]),
+            ),
+        ])
+    }
     struct Settings;
     #[zbus::interface(name = "org.freedesktop.portal.Settings")]
     impl Settings {
@@ -330,19 +346,7 @@ mod tests {
             &self,
             _namespaces: Vec<String>,
         ) -> HashMap<String, HashMap<String, OwnedValue>> {
-            HashMap::from([
-                (
-                    "org.freedesktop.appearance".into(),
-                    HashMap::from([
-                        ("color-scheme".into(), 1u32.into()),
-                        ("contrast".into(), 1u32.into()),
-                    ]),
-                ),
-                (
-                    "org.gnome.desktop.interface".into(),
-                    HashMap::from([("enable-animations".into(), false.into())]),
-                ),
-            ])
+            non_default_settings()
         }
     }
     #[test]
@@ -386,8 +390,9 @@ mod tests {
         );
         let changed = observation.changed.clone();
         drop(observation);
-        assert!(
-            receive(&changed).is_err(),
+        assert_eq!(
+            receive(&changed),
+            Err(async_channel::TryRecvError::Closed),
             "dropping observation stops and closes the watcher"
         );
     }
@@ -422,8 +427,10 @@ mod tests {
             &self,
             _namespaces: Vec<String>,
         ) -> HashMap<String, HashMap<String, OwnedValue>> {
+            // Later than the method timeout but within the caller's wait, so only the
+            // method timeout keeps these late facts out.
             std::thread::sleep(Duration::from_millis(750));
-            HashMap::new()
+            non_default_settings()
         }
     }
     #[test]
