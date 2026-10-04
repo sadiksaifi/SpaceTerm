@@ -1797,12 +1797,39 @@ impl SettingsWindow {
         }
     }
 
+    fn reset_all_detail(&self) -> String {
+        let mut detail = String::from(
+            "This cannot be undone. Themes can be installed again from their Zed extension or file.",
+        );
+        let mut permissions = Vec::new();
+        if !self.omitted_rows.contains(&SettingsRowId::MicrophoneAccess) {
+            permissions.push("Microphone");
+        }
+        for (row, permission) in [
+            (
+                SettingsRowId::ScreenRecordingAccess,
+                SystemPermission::ScreenRecording,
+            ),
+            (
+                SettingsRowId::AccessibilityAccess,
+                SystemPermission::Accessibility,
+            ),
+        ] {
+            if !self.omitted_rows.contains(&row) {
+                permissions.push(self.permission_access.row(permission).copy().name);
+            }
+        }
+        match permissions.as_slice() {
+            [] => {}
+            [permission] => detail.push_str(&format!(" {permission} access is a system permission and is not affected.")),
+            [first, second] => detail.push_str(&format!(" {first} and {second} access are system permissions and are not affected.")),
+            [first, second, third] => detail.push_str(&format!(" {first}, {second}, and {third} access are system permissions and are not affected.")),
+            _ => unreachable!("Settings presents at most three system permission rows"),
+        }
+        detail
+    }
+
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let accessibility = self
-            .permission_access
-            .row(SystemPermission::Accessibility)
-            .copy()
-            .name;
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
@@ -1829,11 +1856,7 @@ impl SettingsWindow {
         .intent(AlertIntent::Critical)
         // Installed themes are the one thing here the reset cannot give back, so the alert says
         // so rather than leaving that to be discovered.
-        .detail(format!(
-            "This cannot be undone. Themes can be installed again from their Zed extension or file. \
-             Microphone, Screen Recording, and {accessibility} access are system permissions and \
-             are not affected."
-        ))
+        .detail(self.reset_all_detail())
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

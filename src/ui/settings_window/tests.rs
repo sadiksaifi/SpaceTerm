@@ -4020,6 +4020,10 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
     cx.run_until_parked();
 
     window.read_with(cx, |settings, _| {
+        assert_eq!(
+            settings.reset_all_detail(),
+            "This cannot be undone. Themes can be installed again from their Zed extension or file."
+        );
         assert!(
             settings
                 .navigable_sections()
@@ -4068,6 +4072,11 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
 #[gpui::test]
 fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
+
+    window.read_with(cx, |settings, _| {
+        let accessibility = settings.permission_access.row(crate::platform::permission_access::SystemPermission::Accessibility).copy().name;
+        assert_eq!(settings.reset_all_detail(), format!("This cannot be undone. Themes can be installed again from their Zed extension or file. Microphone, Screen Recording, and {accessibility} access are system permissions and are not affected."));
+    });
 
     assert!(
         cx.debug_bounds("settings-navigation-settings-section-updates")
