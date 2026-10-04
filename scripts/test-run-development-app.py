@@ -24,6 +24,10 @@ ROOT = SCRIPTS.parent
 SPEC = importlib.util.spec_from_file_location("run_platform_task", SCRIPTS / "run-platform-task.py")
 DISPATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DISPATCH)
+PLATFORM_TASKS = {
+    "darwin": {"development", "development:updates", "development:workbench"},
+    "linux": {"development", "development:workbench"},
+}
 PLATFORM_SEGMENT = {"darwin": "macos", "linux": "linux"}
 APPLICATION_ID = "io.github.sadiksaifi.spaceterm-development"
 ICON_DOCUMENT = ROOT / "packaging" / "macos" / "development" / "SpaceTerm Development.icon"
@@ -38,8 +42,10 @@ class DispatchTests(unittest.TestCase):
             if isinstance(definition.get("run"), str)
             and "scripts/run-platform-task.py" in definition["run"]
         }
-        self.assertTrue(generic, "the dispatcher coverage must include generic tasks")
+        self.assertEqual(set(generic), set.union(*PLATFORM_TASKS.values()))
         for platform, segment in PLATFORM_SEGMENT.items():
+            available = {name for name in generic if f"{name}:{segment}" in tasks}
+            self.assertEqual(available, PLATFORM_TASKS[platform], platform)
             for name, profile in generic.items():
                 with self.subTest(platform=platform, task=name):
                     self.assertEqual(profile, name)
@@ -49,7 +55,7 @@ class DispatchTests(unittest.TestCase):
                             patch.object(DISPATCH.os, "execvp") as execute, \
                             contextlib.redirect_stderr(error):
                         status = DISPATCH.main([profile, "preview argument"])
-                    if implementation in tasks:
+                    if name in PLATFORM_TASKS[platform]:
                         execute.assert_called_once_with(
                             "mise", ["mise", "run", implementation, "preview argument"])
                     else:
