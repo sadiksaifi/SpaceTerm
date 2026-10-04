@@ -112,7 +112,8 @@ Wayland and X11 are supported. On Debian or Ubuntu, install:
 ```sh
 sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
   libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
-  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils zsh python3-gi gir1.2-glib-2.0
+  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils zsh \
+  python3-gi gir1.2-glib-2.0
 
 mise run setup:linux
 mise run doctor:linux
@@ -122,21 +123,21 @@ mise run development
 `setup:linux` installs pinned tools, initializes submodules, and runs the environment checks.
 `doctor:linux` repeats those checks. Development uses Wayland when available;
 `mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
-for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview; its preview window is shared, so closing
-a Pane leaves it open for dismissal in Sushi.
-Linux application Shortcuts mostly use Ctrl+Shift. Alt+1 to Alt+9 choose a Tab and Ctrl+Alt+1 to
+for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview;
+its preview window is shared, so closing a Pane leaves it open for dismissal in Sushi. Linux
+application Shortcuts mostly use Ctrl+Shift. Alt+1 to Alt+9 choose a Tab and Ctrl+Alt+1 to
 Ctrl+Alt+9 a Workspace; Ctrl+Page Down and Ctrl+Page Up, or Ctrl+Tab and Ctrl+Shift+Tab, change
 Tabs, and Ctrl+Shift+Page Down and Ctrl+Shift+Page Up move them. Ctrl+=, Ctrl+- and Ctrl+0 change
 the font size; Shift+Page Up, Shift+Page Down, Shift+Home and Shift+End scroll the Scrollback; F3
 and Shift+F3 repeat Terminal Find while it is open and otherwise reach terminal programs, as F9
-does; Ctrl+Shift+B toggles the sidebar; Ctrl+, opens Settings and Ctrl+?
-(Ctrl+Shift+/) its Keybindings. Unshifted Ctrl+2, Ctrl+6, Ctrl+slash, Ctrl+[ and Ctrl+] retain
-their xterm control characters. Super belongs to the desktop. Ctrl+click opens Terminal Hyperlinks
-and is not a secondary click; middle-click and Shift+Insert paste PRIMARY Selection. Right-click empty titlebar space for the
-desktop window menu. Application Chrome uses bundled Inter, closing the last window quits, and
-quit confirmation uses an in-app Alert. Linux has no application Command Palette or About entry
-point. Hide, Hide Others, Show All, Bring All to Front, the character palette, Services, Secure Input,
-System Permissions, and microphone controls are absent.
+does; Ctrl+Shift+B toggles the sidebar; Ctrl+, opens Settings and Ctrl+? (Ctrl+Shift+/) its
+Keybindings. Unshifted Ctrl+2, Ctrl+6, Ctrl+slash, Ctrl+[ and Ctrl+] retain their xterm control
+characters. Super belongs to the desktop. Ctrl+click opens Terminal Hyperlinks and is not a
+secondary click; middle-click and Shift+Insert paste PRIMARY Selection. Right-click empty titlebar
+space for the desktop window menu. Application Chrome uses bundled Inter, closing the last window
+quits, and quit confirmation uses an in-app Alert. Linux has no application Command Palette or About
+entry point. Hide, Hide Others, Show All, Bring All to Front, the character palette, Services,
+Secure Input, System Permissions, and microphone controls are absent.
 Linux currently supports source builds only, with no packaging, distribution, or updates.
 
 `mise run validate:linux` includes the native adapters and SpaceTerm accessibility tests.
