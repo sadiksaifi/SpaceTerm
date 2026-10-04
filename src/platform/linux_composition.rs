@@ -209,7 +209,7 @@ fn compose(
             ),
             desktop_events: Some(Rc::new(desktop_events)),
             application_quit: Rc::new(
-                super::linux_application_quit::LinuxApplicationQuitAdapter::default(),
+                super::linux_application_quit::LinuxApplicationQuitAdapter::new(|cx| cx.quit()),
             ),
             local_filesystem,
             key_input: Rc::new(super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new()),

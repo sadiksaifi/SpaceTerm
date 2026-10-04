@@ -7,9 +7,18 @@ use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
 };
 
-#[derive(Default)]
 pub(super) struct LinuxApplicationQuitAdapter {
     handler: RefCell<Option<ApplicationQuitHandler>>,
+    quit: Box<dyn Fn(&mut App)>,
+}
+
+impl LinuxApplicationQuitAdapter {
+    pub(super) fn new(quit: impl Fn(&mut App) + 'static) -> Self {
+        Self {
+            handler: RefCell::new(None),
+            quit: Box::new(quit),
+        }
+    }
 }
 
 impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
@@ -32,12 +41,12 @@ impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
             handler.handle(cx)
         });
         if decision == ApplicationQuitDecision::Proceed {
-            cx.quit();
+            (self.quit)(cx);
         }
     }
 
     fn confirm_quit(&self, cx: &mut App) {
-        cx.quit();
+        (self.quit)(cx);
     }
 }
 
@@ -48,9 +57,18 @@ mod tests {
 
     use super::*;
 
+    fn recording_adapter() -> (LinuxApplicationQuitAdapter, Rc<Cell<bool>>) {
+        let quit = Rc::new(Cell::new(false));
+        let recorded = Rc::clone(&quit);
+        (
+            LinuxApplicationQuitAdapter::new(move |_| recorded.set(true)),
+            quit,
+        )
+    }
+
     #[gpui::test]
-    fn linux_quit_consults_the_installed_handler_once(cx: &mut gpui::TestAppContext) {
-        let adapter = LinuxApplicationQuitAdapter::default();
+    fn linux_quit_cancel_keeps_the_application_running(cx: &mut gpui::TestAppContext) {
+        let (adapter, quit) = recording_adapter();
         let requests = Rc::new(Cell::new(0));
         cx.update(|cx| {
             let counted = Rc::clone(&requests);
@@ -73,5 +91,55 @@ mod tests {
             );
         });
         assert_eq!(requests.get(), 1);
+        assert!(!quit.get());
+    }
+
+    #[gpui::test]
+    fn linux_quit_proceed_quits_the_application(cx: &mut gpui::TestAppContext) {
+        let (adapter, quit) = recording_adapter();
+        let requests = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let counted = Rc::clone(&requests);
+            adapter
+                .install(ApplicationQuitHandler::new(
+                    cx,
+                    Rc::new(move |_| {
+                        counted.set(counted.get() + 1);
+                        ApplicationQuitDecision::Proceed
+                    }),
+                ))
+                .unwrap();
+            adapter.request_quit(cx);
+        });
+        assert_eq!(requests.get(), 1);
+        assert!(quit.get());
+    }
+
+    #[gpui::test]
+    fn linux_quit_confirmation_quits_without_consulting_the_handler(cx: &mut gpui::TestAppContext) {
+        let (adapter, quit) = recording_adapter();
+        let requests = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let counted = Rc::clone(&requests);
+            adapter
+                .install(ApplicationQuitHandler::new(
+                    cx,
+                    Rc::new(move |_| {
+                        counted.set(counted.get() + 1);
+                        ApplicationQuitDecision::Cancel
+                    }),
+                ))
+                .unwrap();
+            adapter.confirm_quit(cx);
+        });
+        assert_eq!(requests.get(), 0);
+        assert!(quit.get());
+    }
+
+    #[gpui::test]
+    fn linux_quit_without_a_handler_quits_the_application(cx: &mut gpui::TestAppContext) {
+        let (adapter, quit) = recording_adapter();
+        cx.update(|cx| adapter.request_quit(cx));
+        assert!(quit.get());
     }
 }
