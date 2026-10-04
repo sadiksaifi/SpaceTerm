@@ -16,10 +16,20 @@ use crate::keybindings::{
 };
 use crate::ui::*;
 
+#[cfg(feature = "developer-tools")]
+const OPEN_DEVELOPER_WORKBENCH: &str = "ctrl-shift-alt-a";
+#[cfg(feature = "developer-tools")]
+const TOGGLE_APPEARANCE_PREVIEW: &str = "ctrl-shift-alt-c";
+
 pub(super) fn profile(
     layout: Rc<dyn KeyboardLayoutAdapter>,
     system_reserved: Vec<SystemReserved>,
 ) -> Result<KeymapProfile, KeymapProfileError> {
+    #[cfg(feature = "developer-tools")]
+    let system_reserved = system_reserved
+        .into_iter()
+        .chain(developer_reservations())
+        .collect();
     let defaults = [
         (
             Command::SwitchWorkspace,
@@ -265,18 +275,37 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         .into_iter()
         .chain([
             KeyBinding::new(
-                "ctrl-shift-alt-a",
+                OPEN_DEVELOPER_WORKBENCH,
                 crate::ui::developer_workbench::OpenDeveloperWorkbench,
                 None,
             ),
             KeyBinding::new(
-                "ctrl-shift-alt-c",
+                TOGGLE_APPEARANCE_PREVIEW,
                 crate::ui::developer_workbench::ToggleAppearancePreview,
                 None,
             ),
         ])
         .collect();
     bindings
+}
+
+#[cfg(feature = "developer-tools")]
+fn developer_reservations() -> [SystemReserved; 2] {
+    use crate::keybindings::{Shortcut, SystemReservation};
+    [
+        (
+            OPEN_DEVELOPER_WORKBENCH,
+            SystemReservation::DeveloperWorkbench,
+        ),
+        (
+            TOGGLE_APPEARANCE_PREVIEW,
+            SystemReservation::AppearancePreview,
+        ),
+    ]
+    .map(|(source, reason)| SystemReserved {
+        shortcut: Shortcut::parse(source).expect("valid static developer shortcut"),
+        reason,
+    })
 }
 
 fn control_bindings() -> Vec<KeyBinding> {

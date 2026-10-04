@@ -49,6 +49,57 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn developer_chords_follow_the_installed_bindings_and_retain_inactive_overrides() {
+        use crate::keybindings::KeybindingState;
+        let profile = profile();
+        for (source, reason) in [
+            ("ctrl-shift-alt-a", SystemReservation::DeveloperWorkbench),
+            ("ctrl-shift-alt-c", SystemReservation::AppearancePreview),
+        ] {
+            let shortcut = Shortcut::parse(source).unwrap();
+            let preferences: KeybindingPreferences =
+                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+            let resolved = profile.resolve(&preferences);
+            assert_eq!(profile.check(&shortcut), Err(Reservation::System(reason)));
+            assert_eq!(
+                resolved.inactive_override(Command::NewWorkspace),
+                Some(Reservation::System(reason))
+            );
+            assert_eq!(
+                resolved.state(Command::NewWorkspace),
+                KeybindingState::Default
+            );
+            assert_eq!(
+                resolved.shortcut(Command::NewWorkspace),
+                Some(&Shortcut::parse("ctrl-shift-n").unwrap())
+            );
+            assert_eq!(
+                preferences.get(Command::NewWorkspace),
+                Some(&Some(shortcut))
+            );
+        }
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn chords_without_developer_bindings_remain_assignable() {
+        let profile = profile();
+        for source in ["ctrl-shift-alt-a", "ctrl-shift-alt-c"] {
+            let shortcut = Shortcut::parse(source).unwrap();
+            let preferences: KeybindingPreferences =
+                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+            assert_eq!(profile.check(&shortcut), Ok(()));
+            assert_eq!(
+                profile
+                    .resolve(&preferences)
+                    .shortcut(Command::NewWorkspace),
+                Some(&shortcut)
+            );
+        }
+    }
+
     #[test]
     fn linux_reserved_chords_block_assignment_in_their_dispatch_spelling() {
         let profile = profile();

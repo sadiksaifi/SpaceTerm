@@ -415,6 +415,99 @@ mod tests {
         (pane, cx, records)
     }
 
+    #[cfg(feature = "developer-tools")]
+    #[gpui::test]
+    fn developer_chords_are_refused_by_the_shortcut_recorder(cx: &mut gpui::TestAppContext) {
+        use crate::appearance::SettingsDocument;
+        use crate::keybindings::{Command, Shortcut};
+        use crate::ui::settings_window::{SettingsWindow, test_support::MemoryStorage};
+        let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+            &SettingsDocument::default(),
+        ));
+        struct RecordingMovement;
+        impl super::super::window_movement::WindowMovementFactory for RecordingMovement {
+            fn create(
+                &self,
+            ) -> Rc<dyn super::super::window_movement::OperatingSystemWindowDragPlatform>
+            {
+                Rc::new(super::super::window_movement::RecordingOperatingSystemWindowDragPlatform::default())
+            }
+        }
+        cx.update(|cx| {
+            crate::ui::appearance_runtime::install(
+                settings.clone(),
+                Rc::new(super::super::appearance::testing::RecordingAppearancePlatform::default()),
+                cx,
+            )
+            .unwrap();
+            crate::ui::init(cx).unwrap();
+            install_test_desktop_profile(cx);
+            crate::ui::settings_window::configure_window_chrome(
+                Rc::new(RecordingMovement),
+                Default::default(),
+                None,
+                cx,
+            );
+            crate::ui::settings_window::open_or_activate(None, cx);
+        });
+        cx.run_until_parked();
+        let opened = cx
+            .windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<SettingsWindow>())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(opened.into(), cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let click = |selector, cx: &mut gpui::VisualTestContext| {
+            let center = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(center, gpui::Modifiers::none());
+            cx.run_until_parked();
+        };
+        click("settings-navigation-settings-section-keybindings", cx);
+        for (chord, replacement) in [
+            ("ctrl-shift-alt-a", "ctrl-shift-alt-j"),
+            ("ctrl-shift-alt-c", "ctrl-shift-alt-l"),
+        ] {
+            let before = settings
+                .snapshot()
+                .committed
+                .keybindings
+                .get(Command::NewWorkspace)
+                .cloned();
+            click("settings-row-shortcut-new-workspace-control", cx);
+            cx.simulate_keystrokes(chord);
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            assert_eq!(
+                settings
+                    .snapshot()
+                    .committed
+                    .keybindings
+                    .get(Command::NewWorkspace)
+                    .cloned(),
+                before
+            );
+            // A refused chord keeps recording, so a later valid chord is accepted without a click.
+            cx.simulate_keystrokes(replacement);
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            assert_eq!(
+                settings
+                    .snapshot()
+                    .committed
+                    .keybindings
+                    .get(Command::NewWorkspace),
+                Some(&Some(Shortcut::parse(replacement).unwrap()))
+            );
+            cx.simulate_keystrokes("escape");
+        }
+    }
+
     #[gpui::test]
     fn linux_installed_copy_binding_forwards_host_modifiers(cx: &mut gpui::TestAppContext) {
         use crate::terminal::testing::RecordedSessionCommand;
