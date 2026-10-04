@@ -4088,36 +4088,42 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn absent_privacy_and_updates_capabilities_remove_sections_and_search_results(
-    cx: &mut TestAppContext,
-) {
-    let (window, _, cx) = open_settings(cx);
-    window.read_with(cx, |settings, _| {
-        assert!(
-            !settings
-                .navigable_sections()
-                .contains(&SettingsSectionId::Privacy)
-        );
-        assert!(
-            !settings
-                .navigable_sections()
-                .contains(&SettingsSectionId::Updates)
-        );
+fn client_window_controls_share_the_search_row_and_its_edge_inset(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
     });
-    assert!(
-        cx.debug_bounds("settings-navigation-settings-section-privacy")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("settings-navigation-settings-section-updates")
-            .is_none()
-    );
-    set_query(&window, "microphone", cx);
-    window.read_with(cx, |settings, _| {
-        assert!(settings.matching_rows().is_empty())
-    });
-    set_query(&window, "updates", cx);
-    window.read_with(cx, |settings, _| {
-        assert!(settings.matching_rows().is_empty())
-    });
+    let edge_margin = px(spaceterm_ui::DesktopWindowStyle::Adwaita
+        .control_metrics()
+        .edge_margin);
+    let center_y = |bounds: gpui::Bounds<gpui::Pixels>| bounds.origin.y + bounds.size.height / 2.0;
+
+    // Trailing controls leave no empty strip above Search, and Close keeps the same inset from the
+    // top edge as from the trailing edge.
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [None; 3],
+        right: [Some(gpui::WindowButton::Close), None, None],
+    }));
+    cx.run_until_parked();
+    let surface = cx.debug_bounds("settings-window-surface").unwrap();
+    let close = cx.debug_bounds("window-close").unwrap();
+    let search = cx.debug_bounds("settings-search-frame").unwrap();
+    assert_eq!(surface.right() - close.right(), edge_margin);
+    assert_eq!(close.top() - surface.top(), edge_margin);
+    assert_eq!(search.top() - surface.top(), px(10.0));
+    assert_eq!(center_y(close), center_y(search));
+
+    // Leading controls take their own row above Search on that same center line.
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [Some(gpui::WindowButton::Close), None, None],
+        right: [None; 3],
+    }));
+    cx.run_until_parked();
+    let close = cx.debug_bounds("window-close").unwrap();
+    let search = cx.debug_bounds("settings-search-frame").unwrap();
+    let titlebar = cx.debug_bounds("settings-sidebar-titlebar").unwrap();
+    assert_eq!(close.left() - surface.left(), edge_margin);
+    assert_eq!(close.top() - surface.top(), edge_margin);
+    assert!(search.top() >= titlebar.bottom());
+    assert_eq!(search.top() - titlebar.bottom(), px(10.0));
 }

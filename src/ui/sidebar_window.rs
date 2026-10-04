@@ -50,6 +50,12 @@ pub(crate) const CONTENT_GUTTER: f32 = 26.0;
 /// The space between consecutive groups in the content column.
 const GROUP_SPACING: f32 = 26.0;
 
+/// The row client-drawn Window Controls center in: the sidebar's first row with its inset above and
+/// below, so the controls share a center line with Search, the way a desktop header bar holds both.
+fn client_control_row_height(appearance: &ChromeAppearance) -> Pixels {
+    appearance.spacing(SIDEBAR_INSET * 2.0 + NAVIGATION_ROW_HEIGHT)
+}
+
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
 ///
 /// The title's line box begins just under the controls' top edge, so the large title reads as the
@@ -474,11 +480,25 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
     ) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
+        // Traffic lights need their own strip. Client-drawn controls need one only when they lead;
+        // otherwise the strip shrinks to the inset above Search, which stays window-movement space.
+        let client = matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        );
+        let leading_controls = self.close.is_some()
+            && ClientWindowControls::width(spaceterm_ui::WindowControlSide::Left, window, cx)
+                > px(0.0);
+        let titlebar_height = match (client, leading_controls) {
+            (false, _) => appearance.top_height(),
+            (true, true) => client_control_row_height(appearance),
+            (true, false) => appearance.spacing(SIDEBAR_INSET),
+        };
         let titlebar = div()
             .debug_selector(move || format!("{prefix}-sidebar-titlebar"))
             .flex_none()
             .w_full()
-            .h(appearance.top_height())
+            .h(titlebar_height)
             .child(
                 self.movement.region(
                     format!("{prefix}-sidebar-drag-region"),
@@ -541,7 +561,9 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                     .flex_1()
                     .min_h_0()
                     .px(appearance.spacing(SIDEBAR_INSET))
-                    .pt(appearance.spacing(SIDEBAR_INSET))
+                    .when(!client || leading_controls, |column| {
+                        column.pt(appearance.spacing(SIDEBAR_INSET))
+                    })
                     .children(self.header.map(|header| {
                         // The header belongs to the window, not to the list under it, so the break
                         // between them is wider than the spacing inside the list.
@@ -801,7 +823,7 @@ impl<'a> DetailHeading<'a> {
                         .flex()
                         .flex_none()
                         .items_center()
-                        .h(appearance.top_height())
+                        .h(client_control_row_height(appearance))
                         .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
                             .control_metrics()
                             .edge_margin))
