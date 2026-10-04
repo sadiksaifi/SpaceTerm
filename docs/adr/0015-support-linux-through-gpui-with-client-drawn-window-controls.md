@@ -5,9 +5,12 @@ portable. The macOS design remains the visual baseline. Identical POSIX behavior
 `unix_*` adapters; host compositions select the narrow adapters and facts where the systems differ.
 macOS retains its existing native behavior.
 
-Linux uses client-drawn Window Controls and a rounded window frame. Controls follow the desktop
-button layout and available window capabilities, but always occupy the top right. The sidebar
-toggle sits at the far left because Linux has no traffic lights. The Settings Window uses the normal
+Linux always draws client-side decorations, on Wayland and X11, even where the compositor offers
+server-side ones. Like the macOS traffic lights, the Window Controls sit inside SpaceTerm's chrome
+but keep the desktop's own look: Adwaita on GNOME and unknown desktops, Breeze on KDE, with the
+desktop's symbolic icons, frame radius, outline, and shadow. SpaceTerm's theme does not restyle
+them. They follow the desktop button layout live, on either side; the sidebar toggle follows
+left-side controls and otherwise sits at the far left. The Settings Window uses the normal
 window kind on Linux and remains non-resizable. Background transparency and blur follow host
 capabilities. Without either, the window stays opaque and Settings shows both choices disabled at
 their defaults, which then also govern floating surfaces, while the stored choices are retained.
