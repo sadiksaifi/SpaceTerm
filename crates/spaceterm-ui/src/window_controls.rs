@@ -42,13 +42,42 @@ impl DesktopWindowStyle {
         }
     }
 
-    /// The native pointer target, visual diameter, spacing and outer margin, in logical pixels.
-    pub fn control_metrics(self) -> (f32, f32, f32, f32) {
+    /// The native control geometry.
+    pub fn control_metrics(self) -> DesktopControlMetrics {
         match self {
-            Self::Adwaita => (34.0, 24.0, 3.0, 7.0),
-            Self::Breeze => (20.0, 18.0, 4.0, 4.0),
+            Self::Adwaita => DesktopControlMetrics {
+                target: 34.0,
+                diameter: 24.0,
+                gap: 3.0,
+                edge_margin: 7.0,
+            },
+            Self::Breeze => DesktopControlMetrics {
+                target: 20.0,
+                diameter: 18.0,
+                gap: 4.0,
+                edge_margin: 4.0,
+            },
         }
     }
+
+    /// The running desktop's style, or the Adwaita fallback before the host publishes one.
+    pub fn current(cx: &App) -> Self {
+        cx.try_global::<DesktopWindowControls>()
+            .map_or(Self::default(), |facts| facts.style)
+    }
+}
+
+/// Native window control geometry, in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesktopControlMetrics {
+    /// The pointer target of each control.
+    pub target: f32,
+    /// The painted control's diameter, centered in its target.
+    pub diameter: f32,
+    /// The space between adjacent targets.
+    pub gap: f32,
+    /// The space between the outermost target and the window's titlebar edge.
+    pub edge_margin: f32,
 }
 
 /// Host-resolved symbolic icons. No filesystem or desktop discovery occurs in portable rendering.
@@ -115,11 +144,8 @@ impl ClientWindowControls {
         if count == 0 {
             return px(0.0);
         }
-        let style = cx
-            .try_global::<DesktopWindowControls>()
-            .map_or(DesktopWindowStyle::default(), |facts| facts.style);
-        let (target, _, gap, margin) = style.control_metrics();
-        px(count as f32 * target + (count - 1) as f32 * gap + margin)
+        let metrics = DesktopWindowStyle::current(cx).control_metrics();
+        px(count as f32 * metrics.target + (count - 1) as f32 * metrics.gap + metrics.edge_margin)
     }
 }
 
@@ -265,7 +291,12 @@ impl RenderOnce for ClientWindowControls {
             .try_global::<DesktopWindowControls>()
             .cloned()
             .unwrap_or_default();
-        let (target, diameter, gap, _) = facts.style.control_metrics();
+        let DesktopControlMetrics {
+            target,
+            diameter,
+            gap,
+            ..
+        } = facts.style.control_metrics();
         let mut controls = div()
             .id(match self.side {
                 WindowControlSide::Left => "client-window-controls-left",

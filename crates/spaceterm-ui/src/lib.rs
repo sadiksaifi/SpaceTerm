@@ -49,8 +49,8 @@ mod tooltip;
 mod window_controls;
 mod window_drag_region;
 pub use window_controls::{
-    ClientWindowControls, DesktopWindowControls, DesktopWindowStyle, WindowCloseHandler,
-    WindowControlSide, window_controls_dark,
+    ClientWindowControls, DesktopControlMetrics, DesktopWindowControls, DesktopWindowStyle,
+    WindowCloseHandler, WindowControlSide, window_controls_dark,
 };
 
 use gpui::App;

@@ -1878,13 +1878,9 @@ impl TabManager {
                     content.child(
                         div()
                             .flex_none()
-                            .pr(px(cx
-                                .try_global::<spaceterm_ui::DesktopWindowControls>()
-                                .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
-                                    facts.style
-                                })
+                            .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
                                 .control_metrics()
-                                .3))
+                                .edge_margin))
                             .child(spaceterm_ui::ControlHost::TitleBar.mount(
                                 spaceterm_ui::ClientWindowControls::new(close).surface_color(
                                     gpui_color(appearance.colors.title_bar_background),

@@ -166,13 +166,9 @@ impl WorkspaceChromeLayout {
             .top(window_edge)
             .bottom_0()
             .left(if self.client_controls_width > px(0.0) {
-                px(cx
-                    .try_global::<spaceterm_ui::DesktopWindowControls>()
-                    .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
-                        facts.style
-                    })
+                px(spaceterm_ui::DesktopWindowStyle::current(cx)
                     .control_metrics()
-                    .3)
+                    .edge_margin)
             } else {
                 leading_clearance(self.fullscreen, edge_reserve, cx)
             })

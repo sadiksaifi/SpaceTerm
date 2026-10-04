@@ -486,13 +486,9 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                         .size_full()
                         .flex()
                         .items_center()
-                        .pl(px(cx
-                            .try_global::<spaceterm_ui::DesktopWindowControls>()
-                            .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
-                                facts.style
-                            })
+                        .pl(px(spaceterm_ui::DesktopWindowStyle::current(cx)
                             .control_metrics()
-                            .3))
+                            .edge_margin))
                         .when_some(self.close, |titlebar, close| {
                             titlebar.child(
                                 ClientWindowControls::new(close)
@@ -806,13 +802,9 @@ impl<'a> DetailHeading<'a> {
                         .flex_none()
                         .items_center()
                         .h(appearance.top_height())
-                        .pr(px(cx
-                            .try_global::<spaceterm_ui::DesktopWindowControls>()
-                            .map_or(spaceterm_ui::DesktopWindowStyle::default(), |facts| {
-                                facts.style
-                            })
+                        .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
                             .control_metrics()
-                            .3))
+                            .edge_margin))
                         .child(
                             ClientWindowControls::new(self.close)
                                 .surface_color(gpui_color(appearance.colors.title_bar_background)),
