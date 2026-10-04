@@ -67,12 +67,17 @@ def main() -> None:
         manifest = checkout / directory / "Cargo.toml"
         if not manifest.is_file() or tomllib.loads(manifest.read_text()).get("package", {}).get("name") != name:
             parser.error(f"AccessKit crate missing from checkout: {name}")
-        lines.append(f"{name} = {{ path = {json.dumps(manifest.parent.as_posix())} }}")
-    CONFIG.parent.mkdir(exist_ok=True)
+        lines.append(f"{name} = {{ path = {json.dumps(manifest.parent.as_posix(), ensure_ascii=False)} }}")
     # Each block owns its leading newline, including beside another owned block.
     separator = "\n"
     marker = BLOCK_START_WITH_SEPARATOR
-    CONFIG.write_text(remaining + separator + marker + "\n".join(lines) + "\n" + BLOCK_END)
+    generated = remaining + separator + marker + "\n".join(lines) + "\n" + BLOCK_END
+    try:
+        tomllib.loads(generated)
+    except tomllib.TOMLDecodeError:
+        parser.error("generated local AccessKit configuration is invalid")
+    CONFIG.parent.mkdir(exist_ok=True)
+    CONFIG.write_text(generated)
 
 
 if __name__ == "__main__":

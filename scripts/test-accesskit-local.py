@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import tomllib
@@ -37,6 +38,16 @@ class AccessKitLocalTests(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode == 0, success, result.stderr)
+
+    def test_non_bmp_checkout_paths_produce_valid_toml(self):
+        checkout = self.root / 'accesskit-😀 "quote" \\slash'
+        shutil.copytree(self.root / "first", checkout)
+        self.run_script("on", str(checkout))
+        patches = tomllib.loads(self.config.read_text())["patch"]["crates-io"]
+        for name, directory in CRATES.items():
+            self.assertEqual(patches[name]["path"], str(checkout / directory))
+        self.run_script("off")
+        self.assertFalse(self.config.exists())
 
     def test_switching_checkout_replaces_all_three_patches(self):
         self.run_script("on")
