@@ -1,5 +1,7 @@
-//! The Linux application Shortcut policy: Commands take Ctrl+Shift, as in VTE terminals, so
-//! plain Control and Alt reach programs in the terminal and Super stays with the desktop.
+//! The Linux application Shortcut policy: Commands take Ctrl+Shift, as in VTE terminals, plus the
+//! few chords those terminals also give the application, such as Alt+digit for Tabs, Ctrl+Page Up
+//! and Ctrl+Page Down, and Shift with the paging keys. Plain Ctrl+letter and Alt+letter reach
+//! programs in the terminal, and Super stays with the desktop.
 use std::rc::Rc;
 
 use gpui::KeyBinding;
@@ -42,39 +44,39 @@ pub(super) fn profile(
         (Command::CloseWorkspace, None),
         (
             Command::ActivateWorkspace1,
-            Some(DefaultBinding::new("ctrl-shift-alt-1", &[])),
+            Some(DefaultBinding::new("ctrl-alt-1", &[])),
         ),
         (
             Command::ActivateWorkspace2,
-            Some(DefaultBinding::new("ctrl-shift-alt-2", &[])),
+            Some(DefaultBinding::new("ctrl-alt-2", &[])),
         ),
         (
             Command::ActivateWorkspace3,
-            Some(DefaultBinding::new("ctrl-shift-alt-3", &[])),
+            Some(DefaultBinding::new("ctrl-alt-3", &[])),
         ),
         (
             Command::ActivateWorkspace4,
-            Some(DefaultBinding::new("ctrl-shift-alt-4", &[])),
+            Some(DefaultBinding::new("ctrl-alt-4", &[])),
         ),
         (
             Command::ActivateWorkspace5,
-            Some(DefaultBinding::new("ctrl-shift-alt-5", &[])),
+            Some(DefaultBinding::new("ctrl-alt-5", &[])),
         ),
         (
             Command::ActivateWorkspace6,
-            Some(DefaultBinding::new("ctrl-shift-alt-6", &[])),
+            Some(DefaultBinding::new("ctrl-alt-6", &[])),
         ),
         (
             Command::ActivateWorkspace7,
-            Some(DefaultBinding::new("ctrl-shift-alt-7", &[])),
+            Some(DefaultBinding::new("ctrl-alt-7", &[])),
         ),
         (
             Command::ActivateWorkspace8,
-            Some(DefaultBinding::new("ctrl-shift-alt-8", &[])),
+            Some(DefaultBinding::new("ctrl-alt-8", &[])),
         ),
         (
             Command::ActivateWorkspace9,
-            Some(DefaultBinding::new("ctrl-shift-alt-9", &[])),
+            Some(DefaultBinding::new("ctrl-alt-9", &[])),
         ),
         (
             Command::CreateTab,
@@ -86,44 +88,56 @@ pub(super) fn profile(
         ),
         (
             Command::ActivateTab1,
-            Some(DefaultBinding::new("ctrl-shift-1", &[])),
+            Some(DefaultBinding::new("alt-1", &[])),
         ),
         (
             Command::ActivateTab2,
-            Some(DefaultBinding::new("ctrl-shift-2", &[])),
+            Some(DefaultBinding::new("alt-2", &[])),
         ),
         (
             Command::ActivateTab3,
-            Some(DefaultBinding::new("ctrl-shift-3", &[])),
+            Some(DefaultBinding::new("alt-3", &[])),
         ),
         (
             Command::ActivateTab4,
-            Some(DefaultBinding::new("ctrl-shift-4", &[])),
+            Some(DefaultBinding::new("alt-4", &[])),
         ),
         (
             Command::ActivateTab5,
-            Some(DefaultBinding::new("ctrl-shift-5", &[])),
+            Some(DefaultBinding::new("alt-5", &[])),
         ),
         (
             Command::ActivateTab6,
-            Some(DefaultBinding::new("ctrl-shift-6", &[])),
+            Some(DefaultBinding::new("alt-6", &[])),
         ),
         (
             Command::ActivateTab7,
-            Some(DefaultBinding::new("ctrl-shift-7", &[])),
+            Some(DefaultBinding::new("alt-7", &[])),
         ),
         (
             Command::ActivateTab8,
-            Some(DefaultBinding::new("ctrl-shift-8", &[])),
+            Some(DefaultBinding::new("alt-8", &[])),
         ),
         (
             Command::ActivateTab9,
-            Some(DefaultBinding::new("ctrl-shift-9", &[])),
+            Some(DefaultBinding::new("alt-9", &[])),
         ),
-        (Command::NextTab, None),
-        (Command::PreviousTab, None),
-        (Command::MoveTabRight, None),
-        (Command::MoveTabLeft, None),
+        (
+            Command::NextTab,
+            Some(DefaultBinding::new("ctrl-pagedown", &["ctrl-tab"])),
+        ),
+        (
+            Command::PreviousTab,
+            Some(DefaultBinding::new("ctrl-pageup", &["ctrl-shift-tab"])),
+        ),
+        (
+            Command::MoveTabRight,
+            Some(DefaultBinding::new("ctrl-shift-pagedown", &[])),
+        ),
+        (
+            Command::MoveTabLeft,
+            Some(DefaultBinding::new("ctrl-shift-pageup", &[])),
+        ),
         (
             Command::ClosePane,
             Some(DefaultBinding::new("ctrl-shift-w", &[])),
@@ -154,11 +168,11 @@ pub(super) fn profile(
         ),
         (
             Command::FocusPreviousPane,
-            Some(DefaultBinding::new("ctrl-shift-alt-f6", &["ctrl-shift-["])),
+            Some(DefaultBinding::new("ctrl-shift-[", &["ctrl-shift-alt-f6"])),
         ),
         (
             Command::FocusNextPane,
-            Some(DefaultBinding::new("ctrl-shift-f6", &["ctrl-shift-]"])),
+            Some(DefaultBinding::new("ctrl-shift-]", &["ctrl-shift-f6"])),
         ),
         (
             Command::TogglePaneZoom,
@@ -170,47 +184,56 @@ pub(super) fn profile(
         ),
         (
             Command::FindNext,
-            Some(DefaultBinding::new("ctrl-shift-g", &[])),
+            Some(DefaultBinding::new("ctrl-shift-g", &["f3"])),
         ),
         (
             Command::FindPrevious,
-            Some(DefaultBinding::new("ctrl-shift-alt-g", &[])),
+            Some(DefaultBinding::new("ctrl-shift-h", &["shift-f3"])),
         ),
         (
             Command::ClearTerminalScreenAndScrollback,
             Some(DefaultBinding::new("ctrl-shift-alt-k", &[])),
         ),
-        (Command::ScrollPageUp, None),
-        (Command::ScrollPageDown, None),
-        (Command::ScrollToTop, None),
-        (Command::ScrollToBottom, None),
+        (
+            Command::ScrollPageUp,
+            Some(DefaultBinding::new("shift-pageup", &[])),
+        ),
+        (
+            Command::ScrollPageDown,
+            Some(DefaultBinding::new("shift-pagedown", &[])),
+        ),
+        (
+            Command::ScrollToTop,
+            Some(DefaultBinding::new("shift-home", &[])),
+        ),
+        (
+            Command::ScrollToBottom,
+            Some(DefaultBinding::new("shift-end", &[])),
+        ),
         (
             Command::IncreaseTerminalFontSize,
-            Some(DefaultBinding::new(
-                "ctrl-shift-pageup",
-                &["ctrl-shift-+", "ctrl-shift-="],
-            )),
+            Some(DefaultBinding::new("ctrl-=", &["ctrl-+"])),
         ),
         (
             Command::DecreaseTerminalFontSize,
-            Some(DefaultBinding::new(
-                "ctrl-shift-pagedown",
-                &["ctrl-shift--"],
-            )),
+            Some(DefaultBinding::new("ctrl--", &[])),
         ),
         (
             Command::ResetTerminalFontSize,
-            Some(DefaultBinding::new("ctrl-shift-0", &[])),
+            Some(DefaultBinding::new("ctrl-0", &[])),
         ),
         (
             Command::ToggleSidebar,
-            Some(DefaultBinding::new("ctrl-shift-b", &[])),
+            Some(DefaultBinding::new("ctrl-shift-b", &["f9"])),
         ),
         (
             Command::ToggleSidebarFocus,
             Some(DefaultBinding::new("ctrl-shift-e", &[])),
         ),
-        (Command::KeyboardShortcuts, None),
+        (
+            Command::KeyboardShortcuts,
+            Some(DefaultBinding::new("ctrl-?", &[])),
+        ),
     ];
     KeymapProfile::new(
         layout,
@@ -225,17 +248,14 @@ pub(super) fn profile(
 fn fixed_bindings() -> Vec<KeyBinding> {
     let bindings = vec![
         KeyBinding::new("ctrl-shift-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-insert", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new(
             "shift-insert",
             crate::ui::PasteSelection,
             Some(TERMINAL_KEY_CONTEXT),
         ),
-        KeyBinding::new(
-            "ctrl-shift-,",
-            crate::ui::settings_window::OpenSettings,
-            None,
-        ),
+        KeyBinding::new("ctrl-,", crate::ui::settings_window::OpenSettings, None),
         KeyBinding::new("ctrl-shift-q", QuitApplication, None),
         KeyBinding::new("ctrl-shift-m", MinimizeWindow, None),
         KeyBinding::new("f11", ToggleFullScreen, None),
@@ -349,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_fixed_shortcuts_follow_the_active_layout() {
+    fn linux_settings_shortcut_keeps_its_unshifted_key_on_every_layout() {
         let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
             KeyboardLayout::us_english(),
         )));
@@ -371,7 +391,8 @@ mod tests {
                     .partial_eq(&crate::ui::settings_window::OpenSettings)
             })
             .unwrap();
-        assert_eq!(settings.keystrokes()[0].inner().key, ";");
+        // Ctrl+, has no Shift for a layout to consume, unlike the former Ctrl+Shift+,.
+        assert_eq!(settings.keystrokes()[0].inner().key, ",");
         assert_eq!(
             settings.keystrokes()[0].inner().modifiers,
             gpui::Modifiers::control()
@@ -382,10 +403,10 @@ mod tests {
     fn linux_default_commands_resolve_on_us_german_and_french_layouts() {
         use crate::keybindings::KeybindingState;
         use crate::platform::keyboard_layout::testing;
-        for (layout, reset) in [
-            (KeyboardLayout::us_english(), "ctrl-)"),
-            (testing::de(), "ctrl-="),
-            (testing::fr_azerty(), "ctrl-0"),
+        for (layout, focus_previous_pane) in [
+            (KeyboardLayout::us_english(), "ctrl-{"),
+            (testing::de(), "ctrl-shift-["),
+            (testing::fr_azerty(), "ctrl-shift-["),
         ] {
             let mut profile = super::profile(
                 Rc::new(layout),
@@ -395,46 +416,28 @@ mod tests {
             profile.refresh_layout(&testing::UnknownLayout).unwrap();
             let resolved = profile.resolve(&KeybindingPreferences::default());
             for command in Command::ALL {
-                let expected = if matches!(
-                    command,
-                    Command::CloseWorkspace
-                        | Command::NextTab
-                        | Command::PreviousTab
-                        | Command::MoveTabRight
-                        | Command::MoveTabLeft
-                        | Command::ScrollPageUp
-                        | Command::ScrollPageDown
-                        | Command::ScrollToTop
-                        | Command::ScrollToBottom
-                        | Command::KeyboardShortcuts
-                ) {
+                let expected = if command == Command::CloseWorkspace {
                     KeybindingState::Unassigned
                 } else {
                     KeybindingState::Default
                 };
                 assert_eq!(resolved.state(command), expected, "{command:?}");
             }
-            assert_eq!(
-                resolved
-                    .shortcut(Command::IncreaseTerminalFontSize)
-                    .unwrap()
-                    .to_string(),
-                "ctrl-shift-pageup"
-            );
-            assert_eq!(
-                resolved
-                    .shortcut(Command::DecreaseTerminalFontSize)
-                    .unwrap()
-                    .to_string(),
-                "ctrl-shift-pagedown"
-            );
-            assert_eq!(
-                resolved
-                    .shortcut(Command::ResetTerminalFontSize)
-                    .unwrap()
-                    .to_string(),
-                reset
-            );
+            // Unshifted digits and plain Ctrl symbols keep their spelling on every layout.
+            for (command, expected) in [
+                (Command::ActivateWorkspace1, "ctrl-alt-1"),
+                (Command::ActivateTab1, "alt-1"),
+                (Command::IncreaseTerminalFontSize, "ctrl-="),
+                (Command::DecreaseTerminalFontSize, "ctrl--"),
+                (Command::ResetTerminalFontSize, "ctrl-0"),
+                (Command::FocusPreviousPane, focus_previous_pane),
+            ] {
+                assert_eq!(
+                    resolved.shortcut(command).unwrap().to_string(),
+                    expected,
+                    "{command:?}"
+                );
+            }
         }
     }
 
@@ -450,33 +453,44 @@ mod tests {
     fn linux_defaults_resolve_to_the_chords_gpui_dispatches() {
         let resolved = profile().resolve(&KeybindingPreferences::default());
         for (command, dispatch) in [
-            (Command::CreateTab, "ctrl-shift-t"),
-            (Command::NewRemoteWorkspace, "ctrl-alt-shift-n"),
-            (Command::ActivateTab1, "ctrl-!"),
-            (Command::ActivateTab9, "ctrl-("),
-            (Command::ActivateWorkspace1, "ctrl-alt-!"),
-            (Command::FocusPreviousPane, "ctrl-alt-shift-f6"),
-            (Command::FocusNextPane, "ctrl-shift-f6"),
-            (Command::IncreaseTerminalFontSize, "ctrl-shift-pageup"),
-            (Command::DecreaseTerminalFontSize, "ctrl-shift-pagedown"),
-            (Command::ResetTerminalFontSize, "ctrl-)"),
-            (Command::FocusPaneLeft, "ctrl-shift-left"),
+            (Command::SwitchWorkspace, &["ctrl-shift-k"][..]),
+            (Command::NewRemoteWorkspace, &["ctrl-alt-shift-n"]),
+            (Command::CreateTab, &["ctrl-shift-t"]),
+            (Command::CloseTab, &["ctrl-alt-shift-w"]),
+            (Command::ActivateWorkspace1, &["ctrl-alt-1"]),
+            (Command::ActivateWorkspace9, &["ctrl-alt-9"]),
+            (Command::ActivateTab1, &["alt-1"]),
+            (Command::ActivateTab9, &["alt-9"]),
+            (Command::NextTab, &["ctrl-pagedown", "ctrl-tab"]),
+            (Command::PreviousTab, &["ctrl-pageup", "ctrl-shift-tab"]),
+            (Command::MoveTabRight, &["ctrl-shift-pagedown"]),
+            (Command::MoveTabLeft, &["ctrl-shift-pageup"]),
+            (Command::FocusPaneLeft, &["ctrl-shift-left"]),
+            (Command::FocusPreviousPane, &["ctrl-{", "ctrl-alt-shift-f6"]),
+            (Command::FocusNextPane, &["ctrl-}", "ctrl-shift-f6"]),
+            (Command::FindNext, &["ctrl-shift-g", "f3"]),
+            (Command::FindPrevious, &["ctrl-shift-h", "shift-f3"]),
+            (Command::ScrollPageUp, &["shift-pageup"]),
+            (Command::ScrollPageDown, &["shift-pagedown"]),
+            (Command::ScrollToTop, &["shift-home"]),
+            (Command::ScrollToBottom, &["shift-end"]),
+            (Command::IncreaseTerminalFontSize, &["ctrl-=", "ctrl-+"]),
+            (Command::DecreaseTerminalFontSize, &["ctrl--"]),
+            (Command::ResetTerminalFontSize, &["ctrl-0"]),
+            (Command::ToggleSidebar, &["ctrl-shift-b", "f9"]),
+            (Command::KeyboardShortcuts, &["ctrl-?"]),
         ] {
             assert_eq!(
                 resolved
-                    .shortcut(command)
+                    .shortcuts(command)
+                    .iter()
                     .map(ToString::to_string)
-                    .as_deref(),
-                Some(dispatch),
+                    .collect::<Vec<_>>(),
+                dispatch,
                 "{command:?}"
             );
         }
         assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
-        assert_eq!(
-            resolved.shortcuts(Command::IncreaseTerminalFontSize).len(),
-            2,
-            "aliases that resolve to the same chord are deduplicated"
-        );
     }
 
     #[test]
@@ -575,9 +589,10 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ctrl-shift-c",
+            "ctrl-insert",
             "ctrl-shift-v",
             "shift-insert",
-            "ctrl-<",
+            "ctrl-,",
             "ctrl-shift-q",
             "ctrl-shift-m",
             "f11",

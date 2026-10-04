@@ -15,8 +15,11 @@ window kind on Linux and remains non-resizable. Background transparency and blur
 capabilities. Without either, the window stays opaque and Settings shows both choices disabled at
 their defaults, which then also govern floating surfaces, while the stored choices are retained.
 
-The Linux Keymap assigns application Shortcuts to Ctrl+Shift, optionally with Alt, including digits
-for Tabs and minus for font size. Unshifted xterm Control forms remain available to the terminal;
+The Linux Keymap assigns application Shortcuts to Ctrl+Shift, optionally with Alt, and to the chords
+outside it that Linux terminals also leave to the application, as ADR 0010 lists: Alt+digit for Tabs,
+Ctrl+Alt+digit for Workspaces, Ctrl+Page Up and Ctrl+Page Down for Tab navigation, Ctrl+`=`, Ctrl+`-`,
+and Ctrl+0 for font size, and Shift with the paging keys for Scrollback. Unshifted xterm Control
+forms remain available to the terminal;
 Super belongs to the desktop. Shortcut labels use text. Linux has no application Command Palette
 or About entry point. Ctrl+click activates Terminal Hyperlinks and is not a secondary click.
 PRIMARY Selection and middle-click paste follow Linux conventions. Right-clicking empty titlebar

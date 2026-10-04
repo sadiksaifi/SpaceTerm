@@ -17,6 +17,10 @@ Settings edits apply to the keymap as they happen, through the same live preview
 
 Settings retain the written modifiers and key. Resolving Shift during parsing would permanently bind a hand-edited override to the layout active when the document was read. An injected host keyboard-layout adapter supplies the dispatch spellings used by defaults, overrides, and System Reserved checks. Input-source changes refresh the Keymap without rewriting Settings; recorded symbols remain literal. Overrides that collide only after layout resolution have one owner, and an override that becomes Reserved stays retained but inactive, with the default in its place, until the layout permits it again.
 
-On Linux, Commands use Ctrl+Shift, optionally with Alt. Plain Ctrl and Alt reach the terminal; Super
-belongs to the desktop. Shortcut labels use text such as `Ctrl+Shift+T`. The retained Settings format
+On Linux, Commands use Ctrl+Shift, optionally with Alt, and the chords outside it that Linux
+terminals also leave to the application: plain Ctrl with `=`, `+`, `-`, `0`, `,`, Page Up, Page Down,
+Tab, Insert, or a function key; Alt or Ctrl+Alt with an unshifted digit; Shift with Insert, Page Up,
+Page Down, Home, or End; and function keys alone or with Shift. Plain Ctrl+letter, Alt+letter, and
+the unshifted xterm Control forms reach the terminal; Super belongs to the desktop. Shortcut labels
+use text such as `Ctrl+Shift+T`. The retained Settings format
 and Keymap resolution are shared with macOS.

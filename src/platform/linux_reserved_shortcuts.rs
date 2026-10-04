@@ -8,11 +8,12 @@ pub(super) fn shortcuts() -> Vec<SystemReserved> {
     use SystemReservation::*;
     [
         ("ctrl-shift-c", Copy),
+        ("ctrl-insert", Copy),
         ("ctrl-shift-v", Paste),
         ("shift-insert", PasteSelection),
         ("ctrl-shift-q", Quit),
         ("ctrl-shift-m", Minimize),
-        ("ctrl-shift-,", Settings),
+        ("ctrl-,", Settings),
         ("f11", FullScreen),
         ("ctrl-shift-alt-left", MoveWindowToWorkspace),
         ("ctrl-shift-alt-right", MoveWindowToWorkspace),
@@ -52,8 +53,9 @@ mod tests {
     fn linux_reserved_chords_block_assignment_in_their_dispatch_spelling() {
         let profile = profile();
         for (source, reason) in [
-            ("ctrl-shift-,", SystemReservation::Settings),
-            ("ctrl-<", SystemReservation::Settings),
+            ("ctrl-,", SystemReservation::Settings),
+            ("ctrl-insert", SystemReservation::Copy),
+            ("shift-insert", SystemReservation::PasteSelection),
             ("ctrl-shift-c", SystemReservation::Copy),
             ("ctrl-shift-m", SystemReservation::Minimize),
             ("ctrl-shift-u", SystemReservation::InputMethod),

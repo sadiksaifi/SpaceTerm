@@ -8,8 +8,10 @@ reading separately. Copying is enabled by default. Reading is disabled by defaul
 lets the focused terminal program read your system clipboard. Requests are limited to 1 MiB of text.
 
 Cmd+C on macOS or Ctrl+Shift+C on Linux copies SpaceTerm's Selection. With no Selection,
-applications that enable the enhanced keyboard protocol receive the host's Copy chord. Cmd+V on macOS
-or Ctrl+Shift+V on Linux follows SpaceTerm's paste handling, including bracketed paste. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
+applications that enable the enhanced keyboard protocol receive the host's Copy chord. On Linux,
+Ctrl+Insert also copies the Selection. Cmd+V on macOS or Ctrl+Shift+V on Linux follows SpaceTerm's
+paste handling, including bracketed paste; on Linux, Shift+Insert pastes PRIMARY Selection the same
+way. When an application captures the mouse, Shift-drag creates a SpaceTerm Selection.
 
 For Neovim over SSH, select its OSC 52 provider before clipboard providers initialize:
 
@@ -121,10 +123,14 @@ mise run development
 `doctor:linux` repeats those checks. Development uses Wayland when available;
 `mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
 for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview.
-Linux application Shortcuts use Ctrl+Shift, including digits for Tabs, minus for font size, and M
-for Minimize. Unshifted Ctrl+2, Ctrl+6, Ctrl+slash, Ctrl+[ and Ctrl+] retain their xterm
-control characters. Super belongs to the desktop. Ctrl+click opens Terminal Hyperlinks and is not
-a secondary click; middle-click pastes PRIMARY Selection. Right-click empty titlebar space for the
+Linux application Shortcuts mostly use Ctrl+Shift. Alt+1 to Alt+9 choose a Tab and Ctrl+Alt+1 to
+Ctrl+Alt+9 a Workspace; Ctrl+Page Down and Ctrl+Page Up, or Ctrl+Tab and Ctrl+Shift+Tab, change
+Tabs, and Ctrl+Shift+Page Down and Ctrl+Shift+Page Up move them. Ctrl+=, Ctrl+- and Ctrl+0 change
+the font size; Shift+Page Up, Shift+Page Down, Shift+Home and Shift+End scroll the Scrollback; F3
+and Shift+F3 repeat Terminal Find; F9 toggles the sidebar; Ctrl+, opens Settings and Ctrl+?
+(Ctrl+Shift+/) its Keybindings. Unshifted Ctrl+2, Ctrl+6, Ctrl+slash, Ctrl+[ and Ctrl+] retain
+their xterm control characters. Super belongs to the desktop. Ctrl+click opens Terminal Hyperlinks
+and is not a secondary click; middle-click and Shift+Insert paste PRIMARY Selection. Right-click empty titlebar space for the
 desktop window menu. Application Chrome uses bundled Inter, closing the last window quits, and
 quit confirmation uses an in-app Alert. Linux has no application Command Palette or About entry
 point. Hide, Hide Others, Show All, Bring All to Front, the character palette, Services, Secure Input,

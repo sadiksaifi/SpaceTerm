@@ -73,6 +73,22 @@ fn capture_startup_dependencies(
     )
 }
 
+/// Replaces the key bindings with the Linux Desktop Profile's on US English, so a test drives the
+/// Shortcuts a Linux desktop installs.
+#[cfg(test)]
+fn install_test_desktop_profile(cx: &mut gpui::App) {
+    cx.clear_key_bindings();
+    let profile = desktop_profile(
+        Rc::new(crate::platform::locale::FixedLocaleDirection(
+            spaceterm_ui::TextDirection::LeftToRight,
+        )),
+        crate::platform::keyboard_layout::testing::us(),
+    )
+    .expect("the Linux Desktop Profile is valid")
+    .install(cx);
+    crate::keybindings::runtime::install(profile, cx);
+}
+
 fn desktop_profile(
     locale: Rc<dyn super::locale::LocaleDirection>,
     layout: Rc<dyn super::keyboard_layout::KeyboardLayoutAdapter>,
@@ -247,9 +263,23 @@ mod tests {
                 (presentation.shortcut(&CreateTab), "Ctrl+Shift+T"),
                 (presentation.shortcut(&ClosePane), "Ctrl+Shift+W"),
                 (presentation.shortcut(&CloseTab), "Ctrl+Shift+Alt+W"),
+                (presentation.shortcut(&crate::ui::ActivateTab1), "Alt+1"),
                 (
-                    presentation.shortcut(&crate::ui::ActivateTab1),
-                    "Ctrl+Shift+1",
+                    presentation.shortcut(&crate::ui::ActivateWorkspace1),
+                    "Ctrl+Alt+1",
+                ),
+                (presentation.shortcut(&crate::ui::NextTab), "Ctrl+Page Down"),
+                (
+                    presentation.shortcut(&crate::ui::ScrollPageUp),
+                    "Shift+Page Up",
+                ),
+                (
+                    presentation.shortcut(&crate::ui::IncreaseTerminalFontSize),
+                    "Ctrl+=",
+                ),
+                (
+                    presentation.shortcut(&crate::ui::settings_window::OpenKeyboardShortcuts),
+                    "Ctrl+Shift+/",
                 ),
                 (
                     presentation.shortcut(&spaceterm_ui::EditCopy),
@@ -257,7 +287,7 @@ mod tests {
                 ),
                 (
                     presentation.shortcut(&crate::ui::settings_window::OpenSettings),
-                    "Ctrl+Shift+,",
+                    "Ctrl+,",
                 ),
                 (presentation.shortcut(&crate::app::ToggleFullScreen), "F11"),
             ] {
@@ -301,7 +331,7 @@ mod tests {
                         .then_some(index)
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(customizable.len(), 51);
+            assert_eq!(customizable.len(), 66);
             assert!(customizable.windows(2).all(|pair| pair[1] == pair[0] + 1));
             keymap
                 .bindings()
@@ -354,16 +384,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             crate::ui::init(cx).unwrap();
-            cx.clear_key_bindings();
-            let profile = desktop_profile(
-                Rc::new(crate::platform::locale::FixedLocaleDirection(
-                    spaceterm_ui::TextDirection::LeftToRight,
-                )),
-                crate::platform::keyboard_layout::testing::us(),
-            )
-            .unwrap()
-            .install(cx);
-            crate::keybindings::runtime::install(profile, cx);
+            install_test_desktop_profile(cx);
         });
         let records = crate::terminal::testing::TestTerminalSessionRecords::default();
         let factory = crate::terminal::WorkspaceTerminalSessionFactory::new_local(
