@@ -2,7 +2,8 @@
 //!
 //! Sushi shows one window for every client. This process owns that window only from its own
 //! ShowFile reply until it closes the window, a newer request replaces it, or Sushi reports
-//! that the window closed or moved to another client's parent.
+//! that the window closed or moved to another client's parent. A request without a reply proves
+//! no ownership, so it keeps its parent exported but never closes the shared window.
 use super::linux_session_bus::{
     BusSubscription, RETAINED_REPLY_TIMEOUT, SessionBus, SessionBusError,
 };
@@ -16,7 +17,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use zbus::names::{BusName, OwnedUniqueName, WellKnownName};
+use zbus::names::{BusName, OwnedUniqueName};
 use zbus::zvariant::OwnedValue;
 const NAME: &str = "org.gnome.NautilusPreviewer";
 const PATH: &str = "/org/gnome/NautilusPreviewer";
@@ -47,14 +48,24 @@ struct Reply {
     serial: u32,
 }
 
+/// What this process can claim about Sushi's shared window after handing it a file.
+enum Ownership {
+    /// ShowFile answered. Only a later departure from that connection ends ownership, and Close
+    /// reaches only that connection.
+    Proven(Reply),
+    /// ShowFile timed out or its reply named no sender. Sushi may still show the file after a
+    /// slow start, so the parent stays exported, but property changes cannot be ordered against
+    /// the request and the window may belong to another client. Any observed departure ends the
+    /// claim, and retirement never closes the window.
+    Uncertain,
+}
+
 /// What this process last handed to Sushi's shared window.
 struct Presented {
     owner: u64,
     parent: Parent,
-    /// `None` when ShowFile timed out. Sushi may still show the file after a slow start, so the
-    /// parent stays owned until retirement, but property changes cannot be ordered against it.
-    reply: Option<Reply>,
-    /// Its Pane dismissed it. Close it unless a ready request replaces it first.
+    ownership: Ownership,
+    /// Its Pane dismissed it. Retire it unless a ready request replaces it first.
     retiring: bool,
 }
 
@@ -101,12 +112,9 @@ impl Preview {
         }
     }
 
-    /// Sushi closed the window or shows it for another client after this process's reply.
+    /// Sushi closed the window or shows it for another client after this process's request.
     fn relinquish_after(&mut self, change: &Change) {
         let Some(presented) = &self.presented else {
-            return;
-        };
-        let Some(reply) = &presented.reply else {
             return;
         };
         let departed = change.visible == Some(false)
@@ -114,7 +122,14 @@ impl Preview {
                 .parent
                 .as_deref()
                 .is_some_and(|parent| parent != &*presented.parent.handle);
-        if departed && change.service == reply.service && change.serial > reply.serial {
+        let relinquished = departed
+            && match &presented.ownership {
+                Ownership::Proven(reply) => {
+                    change.service == reply.service && change.serial > reply.serial
+                }
+                Ownership::Uncertain => true,
+            };
+        if relinquished {
             self.presented = None;
         }
     }
@@ -153,7 +168,8 @@ impl Service {
 
 enum Step {
     Show(Request),
-    Close(Option<OwnedUniqueName>),
+    /// Ends a dismissed presentation, closing the window only where ownership is proven.
+    Retire(Option<OwnedUniqueName>),
 }
 
 fn reconcile(connection: &zbus::blocking::Connection, state: &Mutex<Preview>) {
@@ -173,7 +189,10 @@ fn reconcile(connection: &zbus::blocking::Connection, state: &Mutex<Preview>) {
                 .as_ref()
                 .filter(|presented| presented.retiring)
             {
-                Step::Close(presented.reply.as_ref().map(|reply| reply.service.clone()))
+                Step::Retire(match &presented.ownership {
+                    Ownership::Proven(reply) => Some(reply.service.clone()),
+                    Ownership::Uncertain => None,
+                })
             } else {
                 state.reconciling = false;
                 return;
@@ -183,8 +202,10 @@ fn reconcile(connection: &zbus::blocking::Connection, state: &Mutex<Preview>) {
             Step::Show(request) => {
                 retained.extend(show(connection, state, request));
             }
-            Step::Close(service) => {
-                close(connection, service);
+            Step::Retire(service) => {
+                if let Some(service) = service {
+                    close(connection, service);
+                }
                 let mut state = lock(state);
                 if state
                     .presented
@@ -241,14 +262,16 @@ fn show(
     match result.map_err(SessionBusError::from) {
         Ok(reply) => {
             let header = reply.header();
-            let reply = header.sender().map(|service| Reply {
-                service: service.to_owned().into(),
-                serial: header.primary().serial_num().get(),
+            let ownership = header.sender().map_or(Ownership::Uncertain, |service| {
+                Ownership::Proven(Reply {
+                    service: service.to_owned().into(),
+                    serial: header.primary().serial_num().get(),
+                })
             });
             state.presented = Some(Presented {
                 owner,
                 parent,
-                reply,
+                ownership,
                 retiring: retire,
             });
             state.order_unordered();
@@ -257,9 +280,11 @@ fn show(
             state.presented = Some(Presented {
                 owner,
                 parent,
-                reply: None,
+                ownership: Ownership::Uncertain,
                 retiring: retire,
             });
+            // Changes from before the timeout cannot be ordered against a request whose reply
+            // never arrived, so only later departures end the claim.
             state.unordered.clear();
         }
         Err(error) => {
@@ -275,12 +300,9 @@ fn show(
 }
 
 /// Close targets the Sushi connection that answered, so a restarted service keeps another
-/// client's window. Without a reply, the well-known name is the only possible owner.
-fn close(connection: &zbus::blocking::Connection, service: Option<OwnedUniqueName>) {
-    let destination = match service {
-        Some(service) => BusName::Unique(service.into_inner()),
-        None => BusName::WellKnown(WellKnownName::from_static_str_unchecked(NAME)),
-    };
+/// client's window.
+fn close(connection: &zbus::blocking::Connection, service: OwnedUniqueName) {
+    let destination = BusName::Unique(service.into_inner());
     let result = connection.call_method(Some(destination), PATH, Some(INTERFACE), "Close", &());
     if let Err(error) = result {
         eprintln!("desktop preview failed: {}", SessionBusError::from(error));
@@ -853,7 +875,7 @@ mod linux_adapter_tests {
     }
 
     #[test]
-    fn linux_desktop_sushi_keeps_an_unanswered_request_until_retirement() {
+    fn linux_desktop_sushi_keeps_an_unanswered_request_until_retirement_without_closing() {
         let fixture = Fixture::new("unanswered", Answer::Gated, false);
         // A short reply wait stands in for the retained wait expiring.
         let factory = LinuxFilePreviewFactory::with_service_bus(Some(fixture.client()));
@@ -871,9 +893,43 @@ mod linux_adapter_tests {
             "an unanswered request is not a failure"
         );
         panel.dismiss();
-        fixture.closes.recv_timeout(WAIT).unwrap();
         settle(&service);
         assert_eq!(lease.try_recv(), Err(async_channel::TryRecvError::Closed));
+        assert!(
+            fixture.closes.try_recv().is_err(),
+            "an unanswered request never proved it owns Sushi's window"
+        );
+    }
+
+    #[test]
+    fn linux_desktop_sushi_unanswered_request_yields_to_another_clients_preview() {
+        let fixture = Fixture::new("unanswered-foreign", Answer::Gated, false);
+        // A short reply wait stands in for the retained wait expiring.
+        let factory = LinuxFilePreviewFactory::with_service_bus(Some(fixture.client()));
+        let mut panel = factory.panel();
+        let service = panel.service.clone().unwrap();
+        let (unanswered, lease) = parent("wayland:unanswered");
+        let _request = request(&service, panel.owner, fixture.target("slow"), unanswered);
+        fixture.shows.recv_timeout(WAIT).unwrap();
+        settle(&service);
+        // Sushi recovers, shows this request, then another client's preview takes the window.
+        fixture.release.send(()).unwrap();
+        fixture.emit(&[
+            ("ParentHandle", Value::from("wayland:unanswered")),
+            ("Visible", Value::from(true)),
+        ]);
+        fixture.emit(&[("ParentHandle", Value::from("x11:another-client"))]);
+        assert_eq!(
+            wait_released(&lease),
+            Err(async_channel::TryRecvError::Closed),
+            "another client's preview ends an unproven claim"
+        );
+        panel.dismiss();
+        settle(&service);
+        assert!(
+            fixture.closes.try_recv().is_err(),
+            "Close would end another client's preview"
+        );
     }
 
     #[test]
