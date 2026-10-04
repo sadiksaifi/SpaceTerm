@@ -194,6 +194,15 @@ pub(crate) mod macos_adapter_tests;
 #[path = "unix_adapter_tests/mod.rs"]
 pub(crate) mod unix_adapter_tests;
 
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "native-tests")
+    )
+))]
+mod unix_peer_credentials_tests;
+
 #[cfg(test)]
 pub(crate) mod testing;
 

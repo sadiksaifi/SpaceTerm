@@ -207,7 +207,6 @@ mod tests {
     use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
     use std::collections::VecDeque;
     use std::fs;
-    use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -355,33 +354,27 @@ mod tests {
 
     #[test]
     fn helper_rejects_an_unexpected_peer_process_before_writing() {
-        let directory = TestDirectory::new();
-        let socket_path = directory.0.join("wrong-broker.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        let current_process = std::process::id();
-        let wrong_process = if current_process == u32::MAX {
-            current_process - 1
-        } else {
-            current_process + 1
-        };
-        let endpoint = authenticated_endpoint(&socket_path, wrong_process);
+        let listener = super::super::unix_peer_credentials_tests::ChildListener::new();
+        let endpoint = authenticated_endpoint(listener.socket_path(), std::process::id());
 
         let connection = UnixHelperConnector.connect(&endpoint);
-        let (mut accepted, _) = listener.accept().unwrap();
-        let mut byte = [0_u8; 1];
 
         assert!(connection.is_err());
-        assert_eq!(accepted.read(&mut byte).unwrap(), 0);
+        listener.finish();
     }
 
     #[test]
     fn helper_accepts_the_exact_broker_process() {
-        let directory = TestDirectory::new();
-        let socket_path = directory.0.join("broker.sock");
-        let _listener = UnixListener::bind(&socket_path).unwrap();
-        let endpoint = authenticated_endpoint(&socket_path, std::process::id());
+        let listener = super::super::unix_peer_credentials_tests::ChildListener::new();
+        let endpoint = authenticated_endpoint(listener.socket_path(), listener.process());
 
-        assert!(UnixHelperConnector.connect(&endpoint).is_ok());
+        let stream = UnixHelperConnector.connect(&endpoint).unwrap();
+        assert_eq!(
+            peer_credentials::peer_process(&stream).unwrap(),
+            libc::pid_t::try_from(listener.process()).unwrap()
+        );
+        drop(stream);
+        listener.finish();
     }
 
     #[test]

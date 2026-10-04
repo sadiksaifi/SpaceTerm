@@ -52,11 +52,16 @@ mod tests {
 
     #[test]
     fn linux_peer_credentials_identify_the_connected_process_and_user() {
-        let (first, _second) = UnixStream::pair().unwrap();
-        // SAFETY: getpid and geteuid have no preconditions.
-        let (process, user) = unsafe { (libc::getpid(), libc::geteuid()) };
+        let listener = super::super::unix_peer_credentials_tests::ChildListener::new();
+        let stream = UnixStream::connect(listener.socket_path()).unwrap();
+        let process = libc::pid_t::try_from(listener.process()).unwrap();
+        // SAFETY: geteuid has no preconditions. The child inherits this effective user.
+        let user = unsafe { libc::geteuid() };
 
-        assert_eq!(peer_process(&first).unwrap(), process);
-        assert_eq!(peer_user(&first).unwrap(), user);
+        assert_ne!(listener.process(), std::process::id());
+        assert_eq!(peer_process(&stream).unwrap(), process);
+        assert_eq!(peer_user(&stream).unwrap(), user);
+        drop(stream);
+        listener.finish();
     }
 }
