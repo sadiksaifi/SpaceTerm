@@ -1,9 +1,8 @@
 //! GNOME Sushi preview with a retained exported parent and shared presentation ownership.
 //!
-//! Sushi shows one window for every client. This process owns that window only from its own
-//! ShowFile reply until it closes the window, a newer request replaces it, or Sushi reports
-//! that the window closed or moved to another client's parent. A request without a reply proves
-//! no ownership, so it keeps its parent exported but never closes the shared window.
+//! Sushi shares one window across clients and offers only an unconditional global Close.
+//! Retirement releases the exported parent without closing that window. ShowFile replies and
+//! property changes order parent retention until dismissal, replacement, or a reported departure.
 use super::linux_session_bus::{
     BusSubscription, RETAINED_REPLY_TIMEOUT, SessionBus, SessionBusError,
 };
@@ -164,8 +163,7 @@ struct Reply {
 
 /// What this process can claim about Sushi's shared window after handing it a file.
 enum Ownership {
-    /// ShowFile answered. Only a later departure from that connection ends ownership, and Close
-    /// reaches only that connection.
+    /// ShowFile answered. Only a later departure from that connection ends parent retention.
     Proven(Reply),
     /// ShowFile timed out or its reply named no sender. Sushi may still show the file after a
     /// slow start, so the parent stays exported, but property changes cannot be ordered against
@@ -289,8 +287,8 @@ impl Service {
 
 enum Step {
     Show(Request),
-    /// Ends a dismissed presentation, closing the window only where ownership is proven.
-    Retire(Option<OwnedUniqueName>),
+    /// Releases a dismissed presentation's parent. Sushi has no atomic parent-scoped close.
+    Retire,
 }
 
 fn reconcile(
@@ -309,15 +307,12 @@ fn reconcile(
                     retire: false,
                 });
                 Step::Show(request)
-            } else if let Some(presented) = state
+            } else if state
                 .presented
                 .as_ref()
-                .filter(|presented| presented.retiring)
+                .is_some_and(|presented| presented.retiring)
             {
-                Step::Retire(match &presented.ownership {
-                    Ownership::Proven(reply) => Some(reply.service.clone()),
-                    Ownership::Uncertain => None,
-                })
+                Step::Retire
             } else {
                 state.reconciling = false;
                 return;
@@ -327,10 +322,7 @@ fn reconcile(
             Step::Show(request) => {
                 retained.extend(show(connection, state, request, protocol));
             }
-            Step::Retire(service) => {
-                if let Some(service) = service {
-                    close(connection, service);
-                }
+            Step::Retire => {
                 let mut state = lock(state);
                 if state
                     .presented
@@ -345,7 +337,7 @@ fn reconcile(
     }
 }
 
-/// Returns the parent of a stale request, which must outlive the Close it caused.
+/// Retains a stale request's parent through retirement of its earlier presentation.
 fn show(
     connection: &zbus::blocking::Connection,
     state: &Mutex<Preview>,
@@ -440,16 +432,6 @@ fn show(
         }
     }
     None
-}
-
-/// Close targets the Sushi connection that answered, so a restarted service keeps another
-/// client's window.
-fn close(connection: &zbus::blocking::Connection, service: OwnedUniqueName) {
-    let destination = BusName::Unique(service.into_inner());
-    let result = connection.call_method(Some(destination), PATH, Some(INTERFACE), "Close", &());
-    if let Err(error) = result {
-        eprintln!("desktop preview failed: {}", SessionBusError::from(error));
-    }
 }
 
 fn change(message: &zbus::Message) -> Option<Change> {
@@ -620,7 +602,7 @@ impl Panel {
                     schedule_or_fail(&service, owner);
                 }
                 // Bus jobs only own a string and a lease sender. The native lease stays here on
-                // the foreground thread through replacement or Close acknowledgement.
+                // the foreground thread through replacement or retirement.
                 let _ = released.recv().await;
                 drop(native);
             })
@@ -663,7 +645,7 @@ impl FilePreviewPanel for Panel {
             return;
         };
         let owner = self.owner;
-        // Revoke before queuing Close so an in-flight export cannot show a retired Pane.
+        // Revoke before queuing retirement so an in-flight export cannot show a retired Pane.
         let retire = {
             let mut state = lock(&service.state);
             // Dropping the request ends its completion without a failure.
@@ -1002,7 +984,43 @@ mod linux_adapter_tests {
     }
 
     #[test]
-    fn linux_desktop_sushi_keeps_latest_request_and_parent_until_close_finishes() {
+    fn linux_desktop_sushi_teardown_releases_parent_without_closing_shared_preview() {
+        let fixture = Fixture::new("foreign-before-signal", Answer::Immediate, false);
+        let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
+        let mut panel = factory.panel();
+        let service = panel.service.clone().unwrap();
+        let (ours, lease) = parent("x11:ours");
+        let _request = request(&service, panel.owner, fixture.target("ours"), ours);
+        fixture.shows.recv_timeout(WAIT).unwrap();
+        settle(&service);
+        let foreign = fixture.client();
+        foreign
+            .query(|connection| {
+                connection
+                    .call_method(
+                        Some(NAME),
+                        PATH,
+                        Some(INTERFACE),
+                        "ShowFile",
+                        &("file:///foreign", "x11:foreign", false),
+                    )
+                    .map_err(SessionBusError::from)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fixture.shows.recv_timeout(WAIT).unwrap().1, "x11:foreign");
+        // The foreign request completed but its ParentHandle signal has not arrived.
+        panel.dismiss();
+        settle(&service);
+        assert_eq!(lease.try_recv(), Err(async_channel::TryRecvError::Closed));
+        assert!(
+            fixture.closes.try_recv().is_err(),
+            "Pane teardown must never send Sushi's global Close"
+        );
+    }
+
+    #[test]
+    fn linux_desktop_sushi_keeps_latest_request_and_parent_until_show_finishes() {
         let fixture = Fixture::new("lifetime", Answer::Gated, true);
         let shared = fixture.client();
         let factory = LinuxFilePreviewFactory::new(Some(shared.clone()));
@@ -1039,12 +1057,10 @@ mod linux_adapter_tests {
         let _third = request(&service, owner, fixture.target("third"), shared_parent);
         fixture.shows.recv_timeout(WAIT).unwrap();
         panel.dismiss();
-        fixture.release.send(()).unwrap();
-        fixture.closes.recv_timeout(WAIT).unwrap();
         assert_eq!(
             retained.try_recv(),
             Err(async_channel::TryRecvError::Empty),
-            "parent is exported until Sushi closes"
+            "the parent stays exported while ShowFile is outstanding"
         );
         fixture.release.send(()).unwrap();
         settle(&service);
@@ -1052,9 +1068,10 @@ mod linux_adapter_tests {
             retained.try_recv(),
             Err(async_channel::TryRecvError::Closed)
         );
+        assert!(fixture.closes.try_recv().is_err());
         assert!(fixture.shows.try_recv().is_err());
 
-        // Retirement must close an already-visible preview even when shared work is full.
+        // Retirement must release the parent even when shared work is full.
         let (queued_parent, retired_parent) = parent("wayland:queue-saturated");
         let _queued = request(
             &service,
@@ -1078,17 +1095,12 @@ mod linux_adapter_tests {
             shared.dispatch(|_| {}).unwrap();
         }
         panel.dismiss();
-        fixture.closes.recv_timeout(WAIT).unwrap();
-        assert_eq!(
-            retired_parent.try_recv(),
-            Err(async_channel::TryRecvError::Empty)
-        );
-        fixture.release.send(()).unwrap();
         settle(&service);
         assert_eq!(
             retired_parent.try_recv(),
             Err(async_channel::TryRecvError::Closed)
         );
+        assert!(fixture.closes.try_recv().is_err());
         release_bus.send(()).unwrap();
 
         // First service activation can answer after the shared method timeout. The dedicated
@@ -1108,9 +1120,8 @@ mod linux_adapter_tests {
         );
         assert_eq!(late.try_recv(), Err(async_channel::TryRecvError::Closed));
         panel.dismiss();
-        fixture.closes.recv_timeout(WAIT).unwrap();
-        fixture.release.send(()).unwrap();
         settle(&service);
+        assert!(fixture.closes.try_recv().is_err());
         assert_eq!(
             late_lease.try_recv(),
             Err(async_channel::TryRecvError::Closed)
@@ -1365,27 +1376,17 @@ mod linux_adapter_tests {
                 drop(parent);
                 release_bus.send(()).unwrap();
             }
-            // A stale pending request retires the previous presentation, with its
-            // parent still owned until the real service acknowledges Close.
-            let retired = fixture.closes.recv_timeout(WAIT);
+            // A stale pending request releases both parents without closing Sushi's shared window.
+            settle(&service);
+            cx.run_until_parked();
             assert!(
                 fixture.shows.try_recv().is_err(),
                 "replacement must never reach ShowFile"
             );
-            retired.expect("stale request must retire the visible preview");
-            assert_eq!(
-                old_lease.try_recv(),
-                Err(mpsc::TryRecvError::Empty),
-                "old parent released before Close acknowledgement"
+            assert!(
+                fixture.closes.try_recv().is_err(),
+                "retirement must not close the shared preview"
             );
-            assert_eq!(
-                new_lease.try_recv(),
-                Err(mpsc::TryRecvError::Empty),
-                "pending parent released before Close acknowledgement"
-            );
-            fixture.release.send(()).unwrap();
-            settle(&service);
-            cx.run_until_parked();
             old_lease.recv_timeout(WAIT).unwrap();
             new_lease.recv_timeout(WAIT).unwrap();
             assert!(!exporting.load(Ordering::Acquire));
