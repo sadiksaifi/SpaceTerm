@@ -309,6 +309,7 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
     match reason {
         SystemReservation::Copy => "Copy",
         SystemReservation::Paste => "Paste",
+        SystemReservation::PasteSelection => "Paste Selection",
         SystemReservation::Cut => "Cut",
         SystemReservation::Undo => "Undo",
         SystemReservation::Redo => "Redo",

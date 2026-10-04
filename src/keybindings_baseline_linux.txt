@@ -182,7 +182,7 @@ ctrl-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
 escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch
 ctrl-shift-c	Some(Identifier("TerminalPane"))	spaceterm_text_input::Copy
 ctrl-shift-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
-shift-insert	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
+shift-insert	Some(Identifier("TerminalPane"))	terminal::PasteSelection
 ctrl-<	None	spaceterm::OpenSettings
 ctrl-shift-q	None	spaceterm::QuitApplication
 ctrl-shift-m	None	spaceterm::MinimizeWindow

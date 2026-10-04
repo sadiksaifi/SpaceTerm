@@ -226,7 +226,11 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let bindings = vec![
         KeyBinding::new("ctrl-shift-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("shift-insert", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
+            "shift-insert",
+            crate::ui::PasteSelection,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
         KeyBinding::new(
             "ctrl-shift-,",
             crate::ui::settings_window::OpenSettings,
@@ -583,6 +587,31 @@ mod tests {
                 "{expected} missing from {keystrokes:?}"
             );
         }
+    }
+
+    #[test]
+    fn linux_shift_insert_pastes_the_primary_selection_in_the_terminal() {
+        let profile = profile();
+        let shift_insert = [gpui::Keystroke::parse("shift-insert").unwrap()];
+        let bindings = profile
+            .fixed_bindings()
+            .iter()
+            .filter(|binding| binding.match_keystrokes(&shift_insert) == Some(false))
+            .collect::<Vec<_>>();
+        let [binding] = bindings[..] else {
+            panic!("Shift+Insert should have one fixed binding");
+        };
+        assert!(binding.action().partial_eq(&crate::ui::PasteSelection));
+        assert_eq!(
+            binding.predicate().map(|predicate| predicate.to_string()),
+            Some(TERMINAL_KEY_CONTEXT.to_owned())
+        );
+        assert_eq!(
+            profile.check(&crate::keybindings::Shortcut::parse("shift-insert").unwrap()),
+            Err(crate::keybindings::Reservation::System(
+                crate::keybindings::SystemReservation::PasteSelection
+            ))
+        );
     }
 
     #[test]

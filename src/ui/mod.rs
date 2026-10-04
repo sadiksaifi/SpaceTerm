@@ -105,6 +105,7 @@ actions!(
     [
         CopySelection,
         PasteClipboard,
+        PasteSelection,
         ConfirmUnsafePaste,
         CancelUnsafePaste,
         SetUpPermissionRequest,

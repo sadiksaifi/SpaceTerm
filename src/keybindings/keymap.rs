@@ -43,6 +43,8 @@ impl DefaultBinding {
 pub enum SystemReservation {
     Copy,
     Paste,
+    /// Pasting the PRIMARY selection, which desktops that keep one give to Shift+Insert.
+    PasteSelection,
     Cut,
     Undo,
     Redo,

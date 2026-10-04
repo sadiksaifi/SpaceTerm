@@ -9,7 +9,7 @@ pub(super) fn shortcuts() -> Vec<SystemReserved> {
     [
         ("ctrl-shift-c", Copy),
         ("ctrl-shift-v", Paste),
-        ("shift-insert", Paste),
+        ("shift-insert", PasteSelection),
         ("ctrl-shift-q", Quit),
         ("ctrl-shift-m", Minimize),
         ("ctrl-shift-,", Settings),

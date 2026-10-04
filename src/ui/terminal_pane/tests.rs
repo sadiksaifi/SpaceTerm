@@ -7562,6 +7562,55 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
 }
 
 #[gpui::test]
+fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
+    cx: &mut TestAppContext,
+) {
+    struct Primary;
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, _: &SelectionCopy, _: &mut App) {}
+        fn read(&self, _: &App) -> Option<String> {
+            Some("primary selection".into())
+        }
+    }
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "unused".into(),
+            html: None,
+        },
+    );
+    let paste_selection = |cx: &mut VisualTestContext| {
+        let before = records.commands().len();
+        cx.dispatch_action(crate::ui::PasteSelection);
+        cx.run_until_parked();
+        records
+            .commands()
+            .into_iter()
+            .skip(before)
+            .map(|record| record.command)
+            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        paste_selection(cx),
+        [],
+        "a host without PRIMARY pastes nothing"
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary));
+        // Mouse tracking changes what middle-click means, but not Paste Selection.
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+    });
+    assert_eq!(
+        paste_selection(cx),
+        [RecordedSessionCommand::RequestPaste(
+            "primary selection".into()
+        )]
+    );
+}
+
+#[gpui::test]
 fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_it(
     cx: &mut TestAppContext,
 ) {

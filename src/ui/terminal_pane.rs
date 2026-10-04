@@ -31,8 +31,8 @@ use super::{
     CancelUnsafePaste, ClearTerminalScreenAndScrollback, CloseTerminalFind, ConfirmUnsafePaste,
     CopySelection, DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
-    OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, ScrollPageDown, ScrollPageUp,
-    ScrollToBottom, ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
+    OpenTerminalFind, PasteClipboard, PasteSelection, ResetTerminalFontSize, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
     TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT, TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
 use super::{DeclinePermissionRequest, SetUpPermissionRequest};
@@ -2634,12 +2634,7 @@ impl TerminalPane {
             )
             && self.primary_selection.is_some()
         {
-            if let Some(text) = self
-                .primary_selection
-                .as_ref()
-                .and_then(|primary| primary.read(cx))
-                && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
-                && !payload.text().is_empty() { self.request_paste_text(payload, cx); }
+            self.paste_primary_selection(cx);
             cx.stop_propagation();
             return;
         }
@@ -2977,6 +2972,27 @@ impl TerminalPane {
     fn edit_paste(&mut self, _: &EditPaste, window: &mut Window, cx: &mut Context<Self>) {
         if self.focus_handle.is_focused(window) {
             self.paste_clipboard(&PasteClipboard, window, cx);
+        }
+    }
+
+    fn paste_selection(&mut self, _: &PasteSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window) && self.synchronize_terminal_input_focus(window, cx)
+        {
+            self.paste_primary_selection(cx);
+        }
+    }
+
+    /// Pastes the PRIMARY selection through the same confirmation and bracketed paste as the
+    /// Clipboard, for both middle-click and Paste Selection.
+    fn paste_primary_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .primary_selection
+            .as_ref()
+            .and_then(|primary| primary.read(cx))
+            && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
+            && !payload.text().is_empty()
+        {
+            self.request_paste_text(payload, cx);
         }
     }
 
@@ -4480,6 +4496,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::paste_selection))
             .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
