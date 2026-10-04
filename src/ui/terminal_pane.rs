@@ -4436,7 +4436,7 @@ impl Render for TerminalPane {
                         super::appearance::chrome(cx),
                         cx,
                     );
-                    TERMINAL_PADDING.within_rim(frame.pane_rim_width(), frame.pane_inner_radius())
+                    TERMINAL_PADDING.within_pane(frame)
                 },
                 preedit,
                 focus_handle: self.focus_handle.clone(),

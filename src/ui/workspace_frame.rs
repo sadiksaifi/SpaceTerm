@@ -17,11 +17,11 @@
 //! belongs to the top chrome's height instead, so the Tab strip breathes with the same measurement
 //! and the Pane starts at the chrome's lower edge.
 //!
-//! These are layout metrics, not color roles. Every consumer reads one resolved [`WorkspaceFrame`]
+//! These are geometry metrics, not color roles. Every consumer reads one resolved [`WorkspaceFrame`]
 //! so the space, fixed selection radius, derived Pane radius, and chrome height cannot drift apart
 //! across WorkspaceManager, TabManager, WorkspaceSidebar, and PaneHost.
 
-use gpui::{App, Pixels, px};
+use gpui::{App, Bounds, Pixels, point, px};
 
 use crate::appearance::{ChromeColors, Color};
 use crate::platform::window_frame::WindowFrameGeometry;
@@ -60,6 +60,13 @@ pub(crate) struct WorkspaceFrame {
     top_chip_trim: Pixels,
     pane_radius: Pixels,
     chip_radius: Pixels,
+}
+
+/// Paint geometry inside a Pane's rim, with the terminal's top edge below the Pane Caption.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PanePaintInterior {
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) corner_radius: Pixels,
 }
 
 impl WorkspaceFrame {
@@ -210,9 +217,39 @@ impl WorkspaceFrame {
         px(PANE_RIM_WIDTH)
     }
 
-    /// Corner radius of a Pane's interior, inside the rim and concentric with the Pane.
-    pub(crate) fn pane_inner_radius(self) -> Pixels {
-        (self.pane_radius - px(PANE_RIM_WIDTH)).max(px(0.0))
+    /// Resolves the terminal's paint interior against the rim's painted edges and inner arc.
+    ///
+    /// `bounds` shares the Pane's side and bottom edges, but starts below its Caption. This only
+    /// resolves paint geometry; the terminal's logical grid insets stay independent of the rim.
+    pub(crate) fn pane_paint_interior(
+        self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> PanePaintInterior {
+        // Match GPUI Window::snap_bounds and snap_border_widths: round edges independently,
+        // halves toward zero, and keep a nonzero stroke at least one device pixel wide. Radii
+        // are scaled without snapping. WGPU's circular inner SDF subtracts the snapped border
+        // from that outer radius, so subtract in device space before returning logical lengths.
+        let snap = |logical: Pixels| {
+            let device = f32::from(logical) * scale_factor;
+            (device.abs() - 0.5).ceil().copysign(device)
+        };
+        let left = snap(bounds.left());
+        let top = snap(bounds.top());
+        let right = snap(bounds.right()).max(left);
+        let bottom = snap(bounds.bottom()).max(top);
+        let rim = snap(self.pane_rim_width()).max(1.0);
+        let inner_left = left + rim;
+        let inner_right = (right - rim).max(inner_left);
+        let inner_bottom = (bottom - rim).max(top);
+        let logical = |device: f32| px(device / scale_factor);
+        PanePaintInterior {
+            bounds: Bounds::from_corners(
+                point(logical(inner_left), logical(top)),
+                point(logical(inner_right), logical(inner_bottom)),
+            ),
+            corner_radius: logical((f32::from(self.pane_radius) * scale_factor - rim).max(0.0)),
+        }
     }
 
     /// Corner radius of every selection chip: selected sidebar rows and the Active Tab.
