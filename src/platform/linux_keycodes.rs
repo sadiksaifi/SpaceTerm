@@ -159,6 +159,215 @@ pub(super) fn physical_key(scancode: u16) -> PhysicalKey {
     }
 }
 
+/// The key Ghostty's GTK runtime reports for a key event, given GPUI's layout-resolved key name.
+///
+/// The key the layout produces replaces the physical key when either one is functional, so an
+/// XKB remap such as `caps:escape` encodes Escape. Writing-system keys keep their physical
+/// position, which Kitty reports as the base layout key. GPUI names keypad keysyms like their
+/// main-block counterparts, so keypad positions stay physical.
+pub(super) fn terminal_key(scancode: u16, logical_key: &str) -> PhysicalKey {
+    let physical = physical_key(scancode);
+    if is_keypad(physical) {
+        return physical;
+    }
+    match layout_key(logical_key) {
+        Some(layout) if !is_writing_system(physical) || !is_writing_system(layout) => layout,
+        _ => physical,
+    }
+}
+
+/// The keys Ghostty's GTK keyval table names, spelled as GPUI's XKB keystrokes name them.
+fn layout_key(logical_key: &str) -> Option<PhysicalKey> {
+    let mut characters = logical_key.chars();
+    if let (Some(character), None) = (characters.next(), characters.next()) {
+        return Some(match character {
+            'a' => PhysicalKey::A,
+            'b' => PhysicalKey::B,
+            'c' => PhysicalKey::C,
+            'd' => PhysicalKey::D,
+            'e' => PhysicalKey::E,
+            'f' => PhysicalKey::F,
+            'g' => PhysicalKey::G,
+            'h' => PhysicalKey::H,
+            'i' => PhysicalKey::I,
+            'j' => PhysicalKey::J,
+            'k' => PhysicalKey::K,
+            'l' => PhysicalKey::L,
+            'm' => PhysicalKey::M,
+            'n' => PhysicalKey::N,
+            'o' => PhysicalKey::O,
+            'p' => PhysicalKey::P,
+            'q' => PhysicalKey::Q,
+            'r' => PhysicalKey::R,
+            's' => PhysicalKey::S,
+            't' => PhysicalKey::T,
+            'u' => PhysicalKey::U,
+            'v' => PhysicalKey::V,
+            'w' => PhysicalKey::W,
+            'x' => PhysicalKey::X,
+            'y' => PhysicalKey::Y,
+            'z' => PhysicalKey::Z,
+            '0' => PhysicalKey::Digit0,
+            '1' => PhysicalKey::Digit1,
+            '2' => PhysicalKey::Digit2,
+            '3' => PhysicalKey::Digit3,
+            '4' => PhysicalKey::Digit4,
+            '5' => PhysicalKey::Digit5,
+            '6' => PhysicalKey::Digit6,
+            '7' => PhysicalKey::Digit7,
+            '8' => PhysicalKey::Digit8,
+            '9' => PhysicalKey::Digit9,
+            ';' => PhysicalKey::Semicolon,
+            '\'' => PhysicalKey::Quote,
+            ',' => PhysicalKey::Comma,
+            '`' => PhysicalKey::Backquote,
+            '.' => PhysicalKey::Period,
+            '/' => PhysicalKey::Slash,
+            '-' => PhysicalKey::Minus,
+            '=' => PhysicalKey::Equal,
+            '[' => PhysicalKey::BracketLeft,
+            ']' => PhysicalKey::BracketRight,
+            '\\' => PhysicalKey::Backslash,
+            _ => return None,
+        });
+    }
+    Some(match logical_key {
+        "space" => PhysicalKey::Space,
+        "up" => PhysicalKey::ArrowUp,
+        "down" => PhysicalKey::ArrowDown,
+        "right" => PhysicalKey::ArrowRight,
+        "left" => PhysicalKey::ArrowLeft,
+        "home" => PhysicalKey::Home,
+        "end" => PhysicalKey::End,
+        "insert" => PhysicalKey::Insert,
+        "delete" => PhysicalKey::Delete,
+        "caps_lock" => PhysicalKey::CapsLock,
+        "scroll_lock" => PhysicalKey::ScrollLock,
+        "num_lock" => PhysicalKey::NumLock,
+        "pageup" => PhysicalKey::PageUp,
+        "pagedown" => PhysicalKey::PageDown,
+        "escape" => PhysicalKey::Escape,
+        "enter" => PhysicalKey::Enter,
+        "tab" => PhysicalKey::Tab,
+        "backspace" => PhysicalKey::Backspace,
+        "print" => PhysicalKey::PrintScreen,
+        "pause" => PhysicalKey::Pause,
+        "f1" => PhysicalKey::F1,
+        "f2" => PhysicalKey::F2,
+        "f3" => PhysicalKey::F3,
+        "f4" => PhysicalKey::F4,
+        "f5" => PhysicalKey::F5,
+        "f6" => PhysicalKey::F6,
+        "f7" => PhysicalKey::F7,
+        "f8" => PhysicalKey::F8,
+        "f9" => PhysicalKey::F9,
+        "f10" => PhysicalKey::F10,
+        "f11" => PhysicalKey::F11,
+        "f12" => PhysicalKey::F12,
+        "f13" => PhysicalKey::F13,
+        "f14" => PhysicalKey::F14,
+        "f15" => PhysicalKey::F15,
+        "f16" => PhysicalKey::F16,
+        "f17" => PhysicalKey::F17,
+        "f18" => PhysicalKey::F18,
+        "f19" => PhysicalKey::F19,
+        "f20" => PhysicalKey::F20,
+        "f21" => PhysicalKey::F21,
+        "f22" => PhysicalKey::F22,
+        "f23" => PhysicalKey::F23,
+        "f24" => PhysicalKey::F24,
+        "f25" => PhysicalKey::F25,
+        "copy" => PhysicalKey::Copy,
+        "cut" => PhysicalKey::Cut,
+        "paste" => PhysicalKey::Paste,
+        _ => return None,
+    })
+}
+
+/// Ghostty's "Writing System Keys": the layout decides what these produce.
+fn is_writing_system(key: PhysicalKey) -> bool {
+    matches!(
+        key,
+        PhysicalKey::Backquote
+            | PhysicalKey::Backslash
+            | PhysicalKey::BracketLeft
+            | PhysicalKey::BracketRight
+            | PhysicalKey::Comma
+            | PhysicalKey::Digit0
+            | PhysicalKey::Digit1
+            | PhysicalKey::Digit2
+            | PhysicalKey::Digit3
+            | PhysicalKey::Digit4
+            | PhysicalKey::Digit5
+            | PhysicalKey::Digit6
+            | PhysicalKey::Digit7
+            | PhysicalKey::Digit8
+            | PhysicalKey::Digit9
+            | PhysicalKey::Equal
+            | PhysicalKey::IntlBackslash
+            | PhysicalKey::IntlRo
+            | PhysicalKey::IntlYen
+            | PhysicalKey::A
+            | PhysicalKey::B
+            | PhysicalKey::C
+            | PhysicalKey::D
+            | PhysicalKey::E
+            | PhysicalKey::F
+            | PhysicalKey::G
+            | PhysicalKey::H
+            | PhysicalKey::I
+            | PhysicalKey::J
+            | PhysicalKey::K
+            | PhysicalKey::L
+            | PhysicalKey::M
+            | PhysicalKey::N
+            | PhysicalKey::O
+            | PhysicalKey::P
+            | PhysicalKey::Q
+            | PhysicalKey::R
+            | PhysicalKey::S
+            | PhysicalKey::T
+            | PhysicalKey::U
+            | PhysicalKey::V
+            | PhysicalKey::W
+            | PhysicalKey::X
+            | PhysicalKey::Y
+            | PhysicalKey::Z
+            | PhysicalKey::Minus
+            | PhysicalKey::Period
+            | PhysicalKey::Quote
+            | PhysicalKey::Semicolon
+            | PhysicalKey::Slash
+    )
+}
+
+/// The keypad positions [`physical_key`] reports.
+fn is_keypad(key: PhysicalKey) -> bool {
+    matches!(
+        key,
+        PhysicalKey::Numpad0
+            | PhysicalKey::Numpad1
+            | PhysicalKey::Numpad2
+            | PhysicalKey::Numpad3
+            | PhysicalKey::Numpad4
+            | PhysicalKey::Numpad5
+            | PhysicalKey::Numpad6
+            | PhysicalKey::Numpad7
+            | PhysicalKey::Numpad8
+            | PhysicalKey::Numpad9
+            | PhysicalKey::NumpadAdd
+            | PhysicalKey::NumpadComma
+            | PhysicalKey::NumpadDecimal
+            | PhysicalKey::NumpadDivide
+            | PhysicalKey::NumpadEnter
+            | PhysicalKey::NumpadEqual
+            | PhysicalKey::NumpadMultiply
+            | PhysicalKey::NumpadParenLeft
+            | PhysicalKey::NumpadParenRight
+            | PhysicalKey::NumpadSubtract
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +411,23 @@ mod tests {
         for scancode in [0, u16::MAX] {
             assert_eq!(physical_key(scancode), PhysicalKey::Unidentified);
         }
+    }
+
+    #[test]
+    fn layout_keys_replace_only_functional_and_unknown_positions() {
+        // Writing-system keys keep their position whatever the layout produces.
+        assert_eq!(terminal_key(21, "z"), PhysicalKey::Y);
+        assert_eq!(terminal_key(16, "a"), PhysicalKey::Q);
+        assert_eq!(terminal_key(16, "@"), PhysicalKey::Q);
+        // A functional position or produced key follows the layout.
+        assert_eq!(terminal_key(58, "escape"), PhysicalKey::Escape);
+        assert_eq!(terminal_key(1, "caps_lock"), PhysicalKey::CapsLock);
+        assert_eq!(terminal_key(58, "a"), PhysicalKey::A);
+        assert_eq!(terminal_key(30, "backspace"), PhysicalKey::Backspace);
+        assert_eq!(terminal_key(0, "z"), PhysicalKey::Z);
+        assert_eq!(terminal_key(1, "escape"), PhysicalKey::Escape);
+        // GPUI names keypad keysyms like the main block, so keypad positions stay physical.
+        assert_eq!(terminal_key(75, "left"), PhysicalKey::Numpad4);
+        assert_eq!(terminal_key(96, "enter"), PhysicalKey::NumpadEnter);
     }
 }

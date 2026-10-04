@@ -2943,12 +2943,13 @@ fn fixterms_disambiguates_control_keys_that_overlap_legacy_bytes() {
     let cases = [
         (PhysicalKey::I, "i", 'i', false, b"\x1b[105;5u".as_slice()),
         (PhysicalKey::M, "m", 'm', false, b"\x1b[109;5u".as_slice()),
+        // Ctrl+[ keeps xterm's Escape even when the layout reports its text.
         (
             PhysicalKey::BracketLeft,
             "[",
             '[',
             false,
-            b"\x1b[91;5u".as_slice(),
+            b"\x1b".as_slice(),
         ),
         (PhysicalKey::M, "M", 'm', true, b"\x1b[109;6u".as_slice()),
     ];

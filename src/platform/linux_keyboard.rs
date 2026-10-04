@@ -45,13 +45,10 @@ impl LinuxTerminalKeyInputAdapter {
     ) -> KeyTranslation {
         let mut input = KeyInput {
             action,
-            physical_key: super::linux_keycodes::physical_key(native.scancode),
+            physical_key: super::linux_keycodes::terminal_key(native.scancode, &keystroke.key),
             native_key_code: Some(native.scancode),
             logical_key: keystroke.key.clone(),
-            text: keystroke
-                .key_char
-                .clone()
-                .filter(|text| !text.is_empty() && !text.chars().any(char::is_control)),
+            text: layout_text(keystroke, &native),
             unshifted_codepoint: native.unshifted,
             modifiers: modifiers(native.modifiers),
             consumed_modifiers: modifiers(native.consumed),
@@ -87,6 +84,34 @@ impl LinuxTerminalKeyInputAdapter {
             native_key_code: Some(native.scancode),
         })
     }
+}
+
+/// The text of the keysym the layout selected, as Ghostty's GTK runtime supplies it.
+///
+/// XKB turns an ASCII keysym into its control character while Ctrl is held and GPUI then
+/// drops it, but Ghostty derives Ctrl sequences and Kitty's shifted key from the keysym's text.
+/// GPUI's key name keeps that keysym, lowercasing only letters, so the keysym's level restores
+/// their case.
+fn layout_text(keystroke: &Keystroke, native: &NativeKeyEvent) -> Option<String> {
+    if let Some(text) = &keystroke.key_char {
+        return (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.clone());
+    }
+    if !native.modifiers.control {
+        return None;
+    }
+    let mut characters = keystroke.key.chars();
+    let character = match (characters.next(), characters.next()) {
+        (Some(character), None) if character.is_ascii_graphic() => character,
+        _ if keystroke.key == "space" => ' ',
+        _ => return None,
+    };
+    // Letters reach their second level through Shift or Caps Lock, but not both.
+    let character = if native.modifiers.shift != native.caps_lock {
+        character.to_ascii_uppercase()
+    } else {
+        character
+    };
+    Some(character.to_string())
 }
 
 fn modifiers(modifiers: Modifiers) -> InputModifiers {
@@ -387,6 +412,130 @@ mod tests {
         };
         assert_eq!(release.physical_key, PhysicalKey::Y);
         assert_eq!(release.action, crate::terminal::KeyAction::Release);
+    }
+
+    /// One native key gesture as GPUI's XKB dispatch reports it.
+    struct NativeGesture {
+        scancode: u16,
+        key: &'static str,
+        unshifted: Option<char>,
+        modifiers: Modifiers,
+    }
+
+    impl NativeGesture {
+        const fn new(
+            scancode: u16,
+            key: &'static str,
+            unshifted: Option<char>,
+            modifiers: Modifiers,
+        ) -> Self {
+            Self {
+                scancode,
+                key,
+                unshifted,
+                modifiers,
+            }
+        }
+    }
+
+    /// Carries a press and release without key text through the Linux adapter and Ghostty's
+    /// encoder. GPUI drops the control character XKB derives for Ctrl chords.
+    fn encode_gesture(enabled_modes: &[u8], gesture: &NativeGesture) -> (Vec<u8>, Vec<u8>) {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        let mut emulator =
+            crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(80, 24),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        emulator.feed(enabled_modes);
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let keystroke = Keystroke {
+            // GPUI keeps Shift in a keystroke only for letters.
+            modifiers: Modifiers {
+                shift: gesture.modifiers.shift
+                    && gesture.key.chars().count() == 1
+                    && gesture.key.to_uppercase() != gesture.key,
+                ..gesture.modifiers
+            },
+            key: gesture.key.into(),
+            key_char: None,
+        };
+        let native = NativeKeyEvent {
+            scancode: gesture.scancode,
+            modifiers: gesture.modifiers,
+            unshifted: gesture.unshifted,
+            ..Default::default()
+        };
+        let mut encode = |translation| {
+            let KeyTranslation::Encoded(input) = translation else {
+                panic!("expected an encoded key, got {translation:?}")
+            };
+            emulator.key(input).unwrap().bytes
+        };
+        let press = encode(adapter.key_down_with_native(
+            &KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            },
+            Some(native),
+        ));
+        let release = encode(adapter.key_up_with_native(&KeyUpEvent { keystroke }, Some(native)));
+        (press, release)
+    }
+
+    #[test]
+    fn native_control_chords_encode_the_layout_key_instead_of_its_us_position() {
+        let control = Modifiers::control();
+        let control_shift = Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::none()
+        };
+        // German QWERTZ: the physical Y key produces z.
+        let german_z = NativeGesture::new(21, "z", Some('z'), control);
+        assert_eq!(encode_gesture(&[], &german_z).0, b"\x1a");
+        // French AZERTY: the physical Q key produces a.
+        let azerty_a = NativeGesture::new(16, "a", Some('a'), control);
+        assert_eq!(encode_gesture(&[], &azerty_a).0, b"\x01");
+        // US layouts keep their encoding. Ctrl+Shift+Z stays distinct from Ctrl+Z, as Ghostty
+        // reports it with the shifted keysym's text.
+        let us_z = NativeGesture::new(44, "z", Some('z'), control);
+        assert_eq!(encode_gesture(&[], &us_z).0, b"\x1a");
+        let us_shift_z = NativeGesture::new(44, "z", Some('z'), control_shift);
+        assert_eq!(encode_gesture(&[], &us_shift_z).0, b"\x1b[122;6u");
+        let us_bracket = NativeGesture::new(26, "[", Some('['), control);
+        assert_eq!(encode_gesture(&[], &us_bracket).0, b"\x1b");
+        // XKB caps:escape turns the physical Caps Lock key into Escape.
+        let caps_escape = NativeGesture::new(58, "escape", Some('\u{1b}'), Modifiers::none());
+        assert_eq!(encode_gesture(&[], &caps_escape).0, b"\x1b");
+
+        // Kitty reports keep the layout key, the physical base layout key, and the event type.
+        let kitty = b"\x1b[>15u";
+        assert_eq!(
+            encode_gesture(kitty, &german_z),
+            (b"\x1b[122::121;5u".to_vec(), b"\x1b[122::121;5:3u".to_vec())
+        );
+        assert_eq!(
+            encode_gesture(kitty, &azerty_a),
+            (b"\x1b[97::113;5u".to_vec(), b"\x1b[97::113;5:3u".to_vec())
+        );
+        assert_eq!(
+            encode_gesture(kitty, &us_shift_z),
+            (b"\x1b[122:90;6u".to_vec(), b"\x1b[122:90;6:3u".to_vec())
+        );
+        assert_eq!(
+            encode_gesture(kitty, &us_bracket),
+            (b"\x1b[91;5u".to_vec(), b"\x1b[91;5:3u".to_vec())
+        );
+        assert_eq!(
+            encode_gesture(kitty, &caps_escape),
+            (b"\x1b[27u".to_vec(), b"\x1b[27;1:3u".to_vec())
+        );
     }
 
     #[test]
