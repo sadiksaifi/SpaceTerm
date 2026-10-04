@@ -6,10 +6,19 @@ consumes each clipboard sequence once. The worker preserves the request's order 
 terminal output and replies.
 
 Terminal Clipboard Access requires the originating Pane's Terminal Input Focus. Copying is
-allowed by default; reading requires an explicit Privacy Setting. Empty, `c`, `p`, and `s` selectors
-use the system text clipboard. Read replies preserve the selector and BEL or ST terminator.
+allowed by default; reading requires an explicit Privacy Setting. The injected host capability resolves
+selection targets after these checks. On Linux, empty and `c` use CLIPBOARD; `p` and `s` use PRIMARY.
+On macOS, all four retain their system clipboard alias. Unsupported selectors, including cut buffers
+`0` through `7`, are consumed without accessing any selection. An unavailable PRIMARY never falls
+back to CLIPBOARD. Read replies preserve the selector and BEL or ST terminator.
 Denied, expired, oversized, or unavailable reads return empty text. Plain text is bounded to 1 MiB.
-Remote programs receive no Local Filesystem Authority from clipboard access.
+Native text reads negotiate only text representations and preserve valid UTF-8 bytes, including
+line endings, without requesting images or files or synthesizing file paths. Remote programs
+receive no Local Filesystem Authority from clipboard access.
+
+Wayland writes require a native key or pointer press serial and the requested selection protocol.
+Missing prerequisites return a typed, content-free availability failure before retained contents
+change. Terminal Input Focus alone does not provide a selection serial.
 
 The Terminal Session retains a focus grant that changes on focus transitions and is revoked on
 retirement and shutdown. The UI checks the grant and current policy immediately before consulting

@@ -4264,6 +4264,19 @@ fn clipboard_reply_backpressure_keeps_selection_live_and_preserves_input_order()
 }
 
 #[test]
+fn unsupported_clipboard_cut_buffers_never_request_a_native_selection() {
+    for selector in ["0", "1", "2", "3", "4", "5", "6", "7", "q", "cp"] {
+        let (mut worker, records, requests, _reader, _commands) = clipboard_worker();
+        let output = format!("\x1b]52;{selector};?\x07\x1b]52;{selector};Y29waWVk\x1b\\\x1b[5n");
+        assert!(worker.feed_test_output(vec![output.into_bytes()]));
+        assert!(requests.try_recv().is_err());
+        assert!(!worker.clipboard.pending());
+        assert_eq!(records.snapshot().written, b"\x1b[0n");
+        worker.finish();
+    }
+}
+
+#[test]
 fn queued_clipboard_operations_never_acquire_a_later_focus_grant() {
     for queued_while_focused in [true, false] {
         let (mut worker, records, requests, _reader, _commands) = clipboard_worker();

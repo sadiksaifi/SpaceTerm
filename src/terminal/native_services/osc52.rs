@@ -11,7 +11,7 @@ pub(in crate::terminal) enum Osc52Access {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::terminal) enum Osc52Target {
+pub(crate) enum Osc52Target {
     Default,
     Standard,
     Selection,

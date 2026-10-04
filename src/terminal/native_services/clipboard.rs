@@ -22,10 +22,32 @@ impl Default for ClipboardPreferences {
     }
 }
 
-/// Plain text only. This Interface carries no local file authority.
+/// The independently owned text selection chosen by the host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TextClipboardTarget {
+    Clipboard,
+    #[allow(
+        dead_code,
+        reason = "not every host exposes an independent PRIMARY selection"
+    )]
+    Primary,
+}
+
+/// Plain text only. Target resolution follows the Session's focus and Settings checks.
+/// This Interface carries no local file authority and never falls back to another selection.
 pub(crate) trait TextClipboard {
-    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError>;
-    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError>;
+    fn resolve(&self, target: super::osc52::Osc52Target) -> TextClipboardTarget;
+    fn read(
+        &self,
+        target: TextClipboardTarget,
+        cx: &mut App,
+    ) -> Result<Option<String>, ClipboardError>;
+    fn write(
+        &self,
+        target: TextClipboardTarget,
+        text: &str,
+        cx: &mut App,
+    ) -> Result<(), ClipboardError>;
 }
 
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
