@@ -25,6 +25,120 @@ const INTERFACE: &str = "org.gnome.NautilusPreviewer2";
 /// Property changes kept while a ShowFile reply is outstanding. Sushi emits a few per request.
 const UNORDERED_CHANGE_LIMIT: usize = 8;
 
+/// The two published ShowFile input contracts. Cache discovery only for one service owner.
+#[derive(Clone, Copy)]
+enum ShowSignature {
+    Parent,
+    Activation,
+}
+impl ShowSignature {
+    fn from_xml(xml: &str) -> Result<Self, SessionBusError> {
+        let document = roxmltree::Document::parse_with_options(
+            xml,
+            roxmltree::ParsingOptions {
+                // D-Bus introspection includes an external DOCTYPE. No entity resolver is
+                // installed, so parsing cannot fetch that declaration or other resources.
+                allow_dtd: true,
+                nodes_limit: 1024,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| SessionBusError::Rejected)?;
+        let method = document
+            .root_element()
+            .children()
+            .find(|node| {
+                node.has_tag_name("interface") && node.attribute("name") == Some(INTERFACE)
+            })
+            .and_then(|interface| {
+                interface.children().find(|node| {
+                    node.has_tag_name("method") && node.attribute("name") == Some("ShowFile")
+                })
+            })
+            .ok_or(SessionBusError::Rejected)?;
+        let inputs: Vec<_> = method
+            .children()
+            .filter(|node| node.has_tag_name("arg") && node.attribute("direction") != Some("out"))
+            .map(|node| node.attribute("type"))
+            .collect();
+        match inputs.as_slice() {
+            [Some("s"), Some("s"), Some("b")] => Ok(Self::Parent),
+            [Some("s"), Some("s"), Some("b"), Some("s")] => Ok(Self::Activation),
+            _ => Err(SessionBusError::Rejected),
+        }
+    }
+}
+#[derive(Debug, thiserror::Error)]
+enum ShowError {
+    #[error("{0}")]
+    Discovery(SessionBusError),
+    #[error("{0}")]
+    Request(SessionBusError),
+    #[error("the preview target changed")]
+    StaleTarget,
+}
+struct Endpoint {
+    owner: OwnedUniqueName,
+    signature: Result<ShowSignature, SessionBusError>,
+}
+#[derive(Default)]
+struct Protocol {
+    endpoint: Option<Endpoint>,
+}
+impl Protocol {
+    fn endpoint(
+        &mut self,
+        connection: &zbus::blocking::Connection,
+    ) -> Result<(&OwnedUniqueName, ShowSignature), SessionBusError> {
+        let proxy =
+            zbus::blocking::fdo::DBusProxy::new(connection).map_err(SessionBusError::from)?;
+        let name = BusName::try_from(NAME).map_err(|_| SessionBusError::Rejected)?;
+        let owner = match proxy.get_name_owner(name.clone()) {
+            Ok(owner) => owner,
+            Err(zbus::fdo::Error::NameHasNoOwner(_)) => {
+                proxy
+                    .start_service_by_name(
+                        NAME.try_into().map_err(|_| SessionBusError::Rejected)?,
+                        0,
+                    )
+                    .map_err(|error| SessionBusError::from(zbus::Error::from(error)))?;
+                proxy
+                    .get_name_owner(name)
+                    .map_err(|error| SessionBusError::from(zbus::Error::from(error)))?
+            }
+            Err(error) => return Err(SessionBusError::from(zbus::Error::from(error))),
+        };
+        if !self
+            .endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.owner == owner)
+        {
+            // The connection's retained method deadline bounds activation and introspection.
+            // Bound the reply before decoding XML, then bound the parser's node allocation.
+            let signature = connection
+                .call_method(
+                    Some(owner.as_str()),
+                    PATH,
+                    Some("org.freedesktop.DBus.Introspectable"),
+                    "Introspect",
+                    &(),
+                )
+                .map_err(SessionBusError::from)
+                .and_then(|reply| {
+                    if reply.body().len() > 64 * 1024 {
+                        return Err(SessionBusError::Rejected);
+                    }
+                    let body = reply.body();
+                    let xml: &str = body.deserialize().map_err(SessionBusError::from)?;
+                    ShowSignature::from_xml(xml)
+                });
+            self.endpoint = Some(Endpoint { owner, signature });
+        }
+        let endpoint = self.endpoint.as_ref().expect("discovered endpoint");
+        Ok((&endpoint.owner, endpoint.signature?))
+    }
+}
+
 /// An exported parent window. The native lease stays on the foreground thread until every
 /// clone is dropped.
 #[derive(Clone)]
@@ -147,6 +261,7 @@ fn lock(state: &Mutex<Preview>) -> MutexGuard<'_, Preview> {
 struct Service {
     bus: SessionBus,
     state: Arc<Mutex<Preview>>,
+    protocol: Arc<Mutex<Protocol>>,
 }
 
 impl Service {
@@ -160,8 +275,14 @@ impl Service {
             state.reconciling = true;
         }
         let state = self.state.clone();
+        let protocol = self.protocol.clone();
         self.bus
-            .dispatch(move |connection| reconcile(connection, &state))
+            .dispatch(move |connection| {
+                let mut protocol = protocol
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                reconcile(connection, &state, &mut protocol);
+            })
             .inspect_err(|_| lock(&self.state).reconciling = false)
     }
 }
@@ -172,7 +293,11 @@ enum Step {
     Retire(Option<OwnedUniqueName>),
 }
 
-fn reconcile(connection: &zbus::blocking::Connection, state: &Mutex<Preview>) {
+fn reconcile(
+    connection: &zbus::blocking::Connection,
+    state: &Mutex<Preview>,
+    protocol: &mut Protocol,
+) {
     // A stale request's parent stays exported until the retirement it caused completes.
     let mut retained = Vec::new();
     loop {
@@ -200,7 +325,7 @@ fn reconcile(connection: &zbus::blocking::Connection, state: &Mutex<Preview>) {
         };
         match step {
             Step::Show(request) => {
-                retained.extend(show(connection, state, request));
+                retained.extend(show(connection, state, request, protocol));
             }
             Step::Retire(service) => {
                 if let Some(service) = service {
@@ -225,6 +350,7 @@ fn show(
     connection: &zbus::blocking::Connection,
     state: &Mutex<Preview>,
     request: Request,
+    protocol: &mut Protocol,
 ) -> Option<Parent> {
     let Request {
         owner,
@@ -233,33 +359,50 @@ fn show(
         failure,
     } = request;
     let parent = parent.expect("only a request with an exported parent is shown");
-    // Export and queue waits grant no new file authority. Revalidate immediately before
-    // constructing the URI and handing it to the external service.
-    let Some(path) = target.revalidated_path() else {
-        let _ = failure.try_send(FilePreviewError::StaleTarget);
-        let mut state = lock(state);
-        state.showing = None;
-        state.order_unordered();
-        if let Some(presented) = state
-            .presented
-            .as_mut()
-            .filter(|presented| presented.owner == owner)
-        {
-            presented.retiring = true;
-        }
-        return Some(parent);
-    };
-    let uri = file_uri(&path);
-    let result = connection.call_method(
-        Some(NAME),
-        PATH,
-        Some(INTERFACE),
-        "ShowFile",
-        &(uri.as_str(), &*parent.handle, false),
-    );
+    let result = (|| {
+        let (service, signature) = protocol
+            .endpoint(connection)
+            .map_err(ShowError::Discovery)?;
+        // Export, queue and protocol discovery waits grant no new file authority. Revalidate
+        // after all of them, immediately before handing the URI to the external service.
+        let path = target.revalidated_path().ok_or(ShowError::StaleTarget)?;
+        let uri = file_uri(&path);
+        let destination = Some(service.as_str());
+        let reply = match signature {
+            ShowSignature::Parent => connection.call_method(
+                destination,
+                PATH,
+                Some(INTERFACE),
+                "ShowFile",
+                &(uri.as_str(), &*parent.handle, false),
+            ),
+            // GPUI can consume activation tokens, but exposes no operation to request one
+            // for an external preview. Sushi accepts an empty token in that case.
+            ShowSignature::Activation => connection.call_method(
+                destination,
+                PATH,
+                Some(INTERFACE),
+                "ShowFile",
+                &(uri.as_str(), &*parent.handle, false, ""),
+            ),
+        };
+        reply.map_err(|error| ShowError::Request(error.into()))
+    })();
     let mut state = lock(state);
     let retire = state.showing.take().is_some_and(|showing| showing.retire);
-    match result.map_err(SessionBusError::from) {
+    match result {
+        Err(ShowError::StaleTarget) => {
+            let _ = failure.try_send(FilePreviewError::StaleTarget);
+            state.order_unordered();
+            if let Some(presented) = state
+                .presented
+                .as_mut()
+                .filter(|presented| presented.owner == owner)
+            {
+                presented.retiring = true;
+            }
+            return Some(parent);
+        }
         Ok(reply) => {
             let header = reply.header();
             let ownership = header.sender().map_or(Ownership::Uncertain, |service| {
@@ -276,7 +419,7 @@ fn show(
             });
             state.order_unordered();
         }
-        Err(SessionBusError::TimedOut) => {
+        Err(ShowError::Request(SessionBusError::TimedOut)) => {
             state.presented = Some(Presented {
                 owner,
                 parent,
@@ -361,6 +504,7 @@ impl LinuxFilePreviewFactory {
         let service = bus.map(|bus| Service {
             bus,
             state: Arc::default(),
+            protocol: Arc::default(),
         });
         let changes = service.as_ref().and_then(|service| {
             let rule = zbus::MatchRule::builder()
@@ -618,12 +762,34 @@ mod linux_adapter_tests {
         }
     }
 
+    struct SushiWithActivation {
+        inner: Sushi,
+        tokens: mpsc::Sender<String>,
+    }
+    #[zbus::interface(name = "org.gnome.NautilusPreviewer2")]
+    impl SushiWithActivation {
+        fn show_file(
+            &self,
+            uri: &str,
+            parent: &str,
+            close_if_already_shown: bool,
+            activation_token: &str,
+        ) -> zbus::fdo::Result<()> {
+            self.tokens.send(activation_token.into()).unwrap();
+            self.inner.show_file(uri, parent, close_if_already_shown)
+        }
+        fn close(&self) {
+            self.inner.close();
+        }
+    }
+
     /// A private bus with a Sushi fixture and a directory of preview targets.
     struct Fixture {
         address: String,
         server: zbus::blocking::Connection,
         shows: mpsc::Receiver<(String, String, bool)>,
         closes: mpsc::Receiver<()>,
+        tokens: mpsc::Receiver<String>,
         release: mpsc::Sender<()>,
         directory: std::path::PathBuf,
         process: std::process::Child,
@@ -637,6 +803,14 @@ mod linux_adapter_tests {
     }
     impl Fixture {
         fn new(name: &str, answer: Answer, close_gated: bool) -> Self {
+            Self::with_activation(name, answer, close_gated, false)
+        }
+        fn with_activation(
+            name: &str,
+            answer: Answer,
+            close_gated: bool,
+            activation: bool,
+        ) -> Self {
             let mut process = Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address=1"])
                 .stdout(Stdio::piped())
@@ -651,23 +825,29 @@ mod linux_adapter_tests {
             let (shown, shows) = mpsc::channel();
             let (closed, closes) = mpsc::channel();
             let (release, proceed) = mpsc::channel();
-            let server = zbus::blocking::connection::Builder::address(address.as_str())
-                .unwrap()
-                .serve_at(
-                    PATH,
-                    Sushi {
-                        answer,
-                        close_gated,
-                        shown,
-                        closed,
-                        release: Mutex::new(proceed),
-                    },
-                )
-                .unwrap()
-                .name(NAME)
-                .unwrap()
-                .build()
-                .unwrap();
+            let (tokens, token_receiver) = mpsc::channel();
+            let sushi = Sushi {
+                answer,
+                close_gated,
+                shown,
+                closed,
+                release: Mutex::new(proceed),
+            };
+            let builder = zbus::blocking::connection::Builder::address(address.as_str()).unwrap();
+            let builder = if activation {
+                builder
+                    .serve_at(
+                        PATH,
+                        SushiWithActivation {
+                            inner: sushi,
+                            tokens,
+                        },
+                    )
+                    .unwrap()
+            } else {
+                builder.serve_at(PATH, sushi).unwrap()
+            };
+            let server = builder.name(NAME).unwrap().build().unwrap();
             let directory = std::env::temp_dir()
                 .join(format!("spaceterm-preview-{name}-{}", std::process::id()));
             std::fs::create_dir_all(&directory).unwrap();
@@ -676,10 +856,45 @@ mod linux_adapter_tests {
                 server,
                 shows,
                 closes,
+                tokens: token_receiver,
                 release,
                 directory,
                 process,
             }
+        }
+        fn replace_service(&mut self, activation: bool) {
+            let (shown, shows) = mpsc::channel();
+            let (closed, closes) = mpsc::channel();
+            let (release, proceed) = mpsc::channel();
+            let (tokens, token_receiver) = mpsc::channel();
+            let sushi = Sushi {
+                answer: Answer::Immediate,
+                close_gated: false,
+                shown,
+                closed,
+                release: Mutex::new(proceed),
+            };
+            let builder =
+                zbus::blocking::connection::Builder::address(self.address.as_str()).unwrap();
+            let builder = if activation {
+                builder
+                    .serve_at(
+                        PATH,
+                        SushiWithActivation {
+                            inner: sushi,
+                            tokens,
+                        },
+                    )
+                    .unwrap()
+            } else {
+                builder.serve_at(PATH, sushi).unwrap()
+            };
+            self.server.release_name(NAME).unwrap();
+            self.server = builder.name(NAME).unwrap().build().unwrap();
+            self.shows = shows;
+            self.closes = closes;
+            self.release = release;
+            self.tokens = token_receiver;
         }
         fn client(&self) -> SessionBus {
             SessionBus::connect_to(Some(self.address.clone())).unwrap()
@@ -754,6 +969,34 @@ mod linux_adapter_tests {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 result => return result,
+            }
+        }
+    }
+
+    #[test]
+    fn linux_desktop_sushi_discovers_three_and_four_argument_interfaces() {
+        let mut fixture = Fixture::new("signatures-and-restarts", Answer::Immediate, false);
+        let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
+        let panel = factory.panel();
+        let service = panel.service.clone().unwrap();
+        for activation in [false, true, false] {
+            fixture.replace_service(activation);
+            for name in ["first", "second"] {
+                let (parent, lease) = parent("wayland:signature");
+                let failure = request(&service, panel.owner, fixture.target(name), parent);
+                assert_eq!(
+                    fixture
+                        .shows
+                        .recv_timeout(WAIT)
+                        .expect("ShowFile must use the service's signature"),
+                    (fixture.uri(name), "wayland:signature".into(), false)
+                );
+                settle(&service);
+                assert_eq!(failure.try_recv(), Err(async_channel::TryRecvError::Closed));
+                assert_eq!(lease.try_recv(), Err(async_channel::TryRecvError::Empty));
+                if activation {
+                    assert_eq!(fixture.tokens.recv_timeout(WAIT).unwrap(), "");
+                }
             }
         }
     }

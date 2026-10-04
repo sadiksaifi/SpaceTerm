@@ -93,6 +93,7 @@ serde_json_lenient = "=0.2.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1" }
 zbus = { version = "=5.19.0", features = ["blocking-api"] }
+roxmltree = "=0.21.1"
 gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-03.8", features = ["wayland", "x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
