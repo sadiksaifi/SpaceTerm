@@ -45,8 +45,9 @@ pub(crate) use attention::AttentionFacts;
 pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
     ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot,
-    CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot, ScrollbackMovement,
-    TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+    CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot,
+    ScrollbackMovement, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
+    TerminalUnderlineSnapshot,
 };
 #[cfg(test)]
 pub(crate) use failure::FailureClass;
