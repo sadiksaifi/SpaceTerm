@@ -17,6 +17,7 @@ type Settings = HashMap<String, HashMap<String, OwnedValue>>;
 struct Facts {
     appearance: Appearance,
     contrast: bool,
+    status_shapes: bool,
     reduced_motion: Option<bool>,
     animations: bool,
     primary: bool,
@@ -26,6 +27,7 @@ impl Default for Facts {
         Self {
             appearance: Appearance::Light,
             contrast: false,
+            status_shapes: false,
             reduced_motion: None,
             animations: true,
             primary: true,
@@ -65,6 +67,9 @@ impl Facts {
                     self.primary = value;
                 }
             }
+            ("org.gnome.desktop.a11y.interface", "show-status-shapes") => {
+                self.status_shapes = bool::try_from(value).unwrap_or(false);
+            }
             _ => {}
         }
     }
@@ -77,6 +82,7 @@ impl Facts {
                 &(vec![
                     "org.freedesktop.appearance",
                     "org.gnome.desktop.interface",
+                    "org.gnome.desktop.a11y.interface",
                 ],),
             )
             .map_err(SessionBusError::from)?;
@@ -148,8 +154,10 @@ impl AppearancePlatform for LinuxAppearancePlatform {
         facts.reduced_motion.unwrap_or(!facts.animations)
     }
     fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
+        let facts = self.facts();
         AccessibilityDisplayOptions {
-            increase_contrast: self.facts().contrast,
+            increase_contrast: facts.contrast,
+            differentiate_without_color: facts.status_shapes,
             ..Default::default()
         }
     }

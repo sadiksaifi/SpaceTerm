@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(launch(&["--new"]), InstanceLaunch::Activate);
     }
 
-    /// Dark, increased contrast, and reduced motion: every fact differs from the defaults.
+    /// Dark, increased contrast, reduced motion, and status shapes differ from the defaults.
     fn non_default_settings() -> HashMap<String, HashMap<String, OwnedValue>> {
         HashMap::from([
             (
@@ -437,16 +437,32 @@ mod tests {
                 "org.gnome.desktop.interface".into(),
                 HashMap::from([("enable-animations".into(), false.into())]),
             ),
+            (
+                "org.gnome.desktop.a11y.interface".into(),
+                HashMap::from([("show-status-shapes".into(), true.into())]),
+            ),
         ])
     }
-    struct Settings;
+    struct Settings(HashMap<String, HashMap<String, OwnedValue>>);
     #[zbus::interface(name = "org.freedesktop.portal.Settings")]
     impl Settings {
         fn read_all(
             &self,
-            _namespaces: Vec<String>,
+            namespaces: Vec<String>,
         ) -> HashMap<String, HashMap<String, OwnedValue>> {
-            non_default_settings()
+            self.0
+                .iter()
+                .filter(|(namespace, _)| namespaces.contains(namespace))
+                .map(|(namespace, values)| {
+                    (
+                        namespace.clone(),
+                        values
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.try_clone().unwrap()))
+                            .collect(),
+                    )
+                })
+                .collect()
         }
     }
     #[test]
@@ -455,7 +471,10 @@ mod tests {
         let private = PrivateBus::new();
         let server = private
             .server()
-            .serve_at("/org/freedesktop/portal/desktop", Settings)
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                Settings(non_default_settings()),
+            )
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
@@ -469,7 +488,38 @@ mod tests {
         );
         assert!(appearance.prefers_reduced_motion());
         assert!(appearance.accessibility_display_options().increase_contrast);
+        assert!(
+            appearance
+                .accessibility_display_options()
+                .differentiate_without_color
+        );
         let observation = appearance.observe().unwrap();
+        for (value, expected) in [
+            (OwnedValue::from(false), false),
+            (OwnedValue::from(true), true),
+            (OwnedValue::from(1u32), false),
+        ] {
+            server
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Settings",
+                    "SettingChanged",
+                    &(
+                        "org.gnome.desktop.a11y.interface",
+                        "show-status-shapes",
+                        value,
+                    ),
+                )
+                .unwrap();
+            receive(&observation.changed).unwrap();
+            assert_eq!(
+                appearance
+                    .accessibility_display_options()
+                    .differentiate_without_color,
+                expected
+            );
+        }
         server
             .emit_signal(
                 None::<&str>,
@@ -495,6 +545,45 @@ mod tests {
             Err(async_channel::TryRecvError::Closed),
             "dropping observation stops and closes the watcher"
         );
+    }
+
+    fn assert_status_shapes_disabled(value: Option<OwnedValue>) {
+        use crate::platform::appearance::AppearancePlatform;
+        let private = PrivateBus::new();
+        let values = value
+            .map(|value| HashMap::from([("show-status-shapes".into(), value)]))
+            .unwrap_or_default();
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                Settings(HashMap::from([(
+                    "org.gnome.desktop.a11y.interface".into(),
+                    values,
+                )])),
+            )
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .build()
+            .unwrap();
+        let appearance =
+            crate::platform::linux_appearance::LinuxAppearancePlatform::new(Some(private.client()));
+        assert!(
+            !appearance
+                .accessibility_display_options()
+                .differentiate_without_color
+        );
+    }
+
+    #[test]
+    fn linux_desktop_portal_absent_status_shapes_keeps_color_only_cues() {
+        assert_status_shapes_disabled(None);
+    }
+
+    #[test]
+    fn linux_desktop_portal_malformed_status_shapes_keeps_color_only_cues() {
+        assert_status_shapes_disabled(Some(1u32.into()));
     }
 
     #[test]
