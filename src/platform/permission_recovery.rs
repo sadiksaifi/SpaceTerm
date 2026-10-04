@@ -1,6 +1,9 @@
 #![cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only desktops with a permission recovery route compose this policy")
+    allow(
+        dead_code,
+        reason = "only desktops with a permission recovery route compose this policy"
+    )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionRecoveryError {

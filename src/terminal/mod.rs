@@ -38,8 +38,7 @@ pub(crate) use accessibility::{
 };
 pub(crate) use accessibility::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications,
-    AccessibilityRowId, AccessibilityRowView,
-    TerminalAccessibilityModel,
+    AccessibilityRowId, AccessibilityRowView, TerminalAccessibilityModel,
 };
 pub(crate) use attention::AttentionFacts;
 #[cfg(test)]

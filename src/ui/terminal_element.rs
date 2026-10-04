@@ -3427,7 +3427,11 @@ fn frame_cursor_paint_plan(
 
 #[cfg(test)]
 mod tests {
-    pub(in crate::ui) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
+    pub(in crate::ui) fn terminal_cell_font(
+        family: &SharedString,
+        bold: bool,
+        italic: bool,
+    ) -> Font {
         #[cfg(test)]
         TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
         let mut cell_font = font(family.clone());

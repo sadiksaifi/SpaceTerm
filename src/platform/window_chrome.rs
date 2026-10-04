@@ -142,11 +142,7 @@ impl WindowChrome {
     ) -> WindowOptions {
         options.app_id = crate::app::window_application_id();
         if matches!(role, WindowRole::SidebarWindow) {
-            options.kind = if self.client {
-                WindowKind::Normal
-            } else {
-                WindowKind::Floating
-            };
+            options.kind = WindowKind::Normal;
         }
         if self.client {
             options.window_decorations = Some(WindowDecorations::Client);

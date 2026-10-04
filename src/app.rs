@@ -616,7 +616,6 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         cx,
     )
 }
-
 /// Every live Workspace window, resolved at call time from GPUI's own registry.
 ///
 /// A Settings window is not a Workspace window: it presents no Workspace, cannot host one, and must

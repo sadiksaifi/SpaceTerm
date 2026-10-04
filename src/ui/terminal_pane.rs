@@ -44,14 +44,14 @@ use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
-#[cfg(test)]
-use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
 };
+#[cfg(test)]
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
 use crate::terminal::native_services::file_preview::{FilePreviewPanel, FilePreviewPresenter};
 use crate::terminal::native_services::{
@@ -619,7 +619,8 @@ pub(crate) struct TerminalPane {
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
-    primary_selection: Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
+    primary_selection:
+        Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -2837,7 +2838,10 @@ impl TerminalPane {
         });
         if let Some(copy) = copy {
             if let Some(primary) = &self.primary_selection
-                && let Ok(Some(copy)) = &copy { primary.publish(copy, cx); }
+                && let Ok(Some(copy)) = &copy
+            {
+                primary.publish(copy, cx);
+            }
             self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
@@ -2955,7 +2959,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.terminal_session.session.as_ref()?;
@@ -2993,7 +3000,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_selection(
         &mut self,
@@ -3052,7 +3062,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn insert_native_service_text(
         &mut self,
@@ -3183,7 +3196,8 @@ impl TerminalPane {
             false,
             link.as_ref(),
         )
-        .file_preview && self.file_preview_available;
+        .file_preview
+            && self.file_preview_available;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -3306,7 +3320,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     pub(crate) fn native_service_status(
         &mut self,
@@ -3397,7 +3414,10 @@ impl TerminalPane {
 
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a desktop Services Adapter queries Services state")
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
     )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
         self.terminal_session.session.is_some()

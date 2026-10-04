@@ -213,10 +213,9 @@ pub(crate) use preferences::{
     ThemeSlots,
 };
 pub(crate) use resolution::{
-    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts,
-    FontClass, FontStyle, ResolvedAppearance, ResolvedChromeAppearance,
-    ResolvedChromeTypography, ResolvedFontDescriptor, ResolvedTerminalAppearance,
-    ResolvedTerminalTypography, SystemAppearance,
+    AppearanceChangeSet, AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, FontStyle,
+    ResolvedAppearance, ResolvedChromeAppearance, ResolvedChromeTypography, ResolvedFontDescriptor,
+    ResolvedTerminalAppearance, ResolvedTerminalTypography, SystemAppearance,
 };
 pub(crate) use terminal_theme::{
     Appearance, CatalogError, ChromeColors, TerminalColors, TerminalTheme, ThemeCatalog, ThemeId,

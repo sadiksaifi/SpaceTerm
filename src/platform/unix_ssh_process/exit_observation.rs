@@ -203,7 +203,8 @@ fn register_exit_events(
     process: u32,
     _cancellation: &UnixStream,
 ) -> Result<OwnedFd, SshProcessMechanismError> {
-    let process = libc::pid_t::try_from(process).map_err(|_| SshProcessMechanismError::StatusFailed)?;
+    let process =
+        libc::pid_t::try_from(process).map_err(|_| SshProcessMechanismError::StatusFailed)?;
     // SAFETY: pidfd_open takes a process identifier and flags and returns a new close-on-exec
     // descriptor on success. The exclusive process borrow keeps the unreaped child identity.
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process, 0) };

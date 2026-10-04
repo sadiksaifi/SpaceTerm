@@ -27,6 +27,8 @@ pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
 pub(crate) mod setup_guide_host;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix_selected_file;
 pub(crate) mod window_chrome;
 pub(crate) mod window_frame;
 pub(crate) mod window_visibility;
@@ -320,8 +322,8 @@ mod linux_window_style;
 mod linux_window_visibility;
 
 #[cfg(target_os = "linux")]
-mod linux_session_bus;
+mod linux_application_instance;
 #[cfg(target_os = "linux")]
 mod linux_desktop_events;
 #[cfg(target_os = "linux")]
-mod linux_application_instance;
+mod linux_session_bus;

@@ -314,7 +314,8 @@ mod tests {
     #[test]
     fn commit_saves_the_preview_and_closes_it() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
 
         assert!(preview.commit().is_ok());
@@ -330,7 +331,8 @@ mod tests {
     #[test]
     fn a_failed_commit_keeps_the_preview_open() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
-        let mut preview = AppearancePreview::new(UserSettings::load(storage.clone()));
+        let mut preview =
+            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
         storage.fail_writes(Some(StorageError::Unavailable));
 

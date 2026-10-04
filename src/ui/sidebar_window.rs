@@ -79,8 +79,11 @@ pub(crate) fn group_spacing(appearance: &ChromeAppearance) -> Pixels {
 
 /// The options every sidebar window opens with.
 ///
-/// The host chooses the ordinary, modeless window frame. Resizing, minimizing, and tabbing are
-/// withheld, so content scrolls inside a stable frame of `size`.
+/// A sidebar window stays ordinary and modeless: the normal window level and the ordinary window
+/// class, with only tabbing, resizing, and minimizing withheld. It never orders itself above other
+/// applications, so a system permission prompt a row raises appears above it.
+///
+/// A sidebar window does not resize, so content scrolls inside a stable frame of `size`.
 pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) -> WindowOptions {
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
@@ -102,6 +105,7 @@ pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) 
                     appears_transparent: true,
                     traffic_light_position,
                 }),
+                kind: WindowKind::Normal,
                 is_movable: true,
                 is_resizable: false,
                 is_minimizable: false,

@@ -13,7 +13,9 @@ pub(super) struct LinuxApplicationQuitAdapter {
 }
 
 impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
-    fn last_window_policy(&self) -> super::application_quit::LastWindowPolicy { super::application_quit::LastWindowPolicy::Quit }
+    fn last_window_policy(&self) -> super::application_quit::LastWindowPolicy {
+        super::application_quit::LastWindowPolicy::Quit
+    }
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError> {
         let mut installed = self.handler.borrow_mut();

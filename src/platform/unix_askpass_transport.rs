@@ -4,16 +4,16 @@ use super::app_paths::{
     ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, RegisteredRuntimeSocket,
     RuntimeOwner,
 };
-#[cfg(target_os = "linux")]
-use super::linux_peer_credentials as peer_credentials;
-#[cfg(target_os = "macos")]
-use super::macos_peer_credentials as peer_credentials;
 use super::askpass::{
     AskPassHelperConnector, AskPassLocalAccept, AskPassLocalIpc, AskPassLocalListener,
     AskPassUnavailable, BROKER_CANCELLATION_POLL_INTERVAL, BoundAskPassEndpoint,
     GpuiAskPassBrokerFactory as PortableAskPassBrokerFactory,
     dispatch_helper_from_environment as dispatch_portable_helper,
 };
+#[cfg(target_os = "linux")]
+use super::linux_peer_credentials as peer_credentials;
+#[cfg(target_os = "macos")]
+use super::macos_peer_credentials as peer_credentials;
 use gpui::{App, Window};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -197,18 +197,18 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
     use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::askpass::{
         AskPassHelperReply, AskPassPresentationFailure, AskPassPresenter, AskPassProtocolReply,
         CAPABILITY_ENV, ENDPOINT_ENV, read_reply, start_attempt_with_presenter, write_request,
     };
-    use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
     use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassSecret};
+    use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
     use std::collections::VecDeque;
     use std::fs;
     use std::io::Read;
+    use std::os::fd::AsRawFd;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

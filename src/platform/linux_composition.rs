@@ -156,6 +156,7 @@ fn compose(
         activity,
         visibility: Rc::new(super::linux_window_visibility::LinuxWindowVisibilityFactory),
         wheel: Rc::new(super::linux_scroll::LinuxWheelPhaseEnrichment),
+        permission_setup: None,
     };
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
@@ -218,6 +219,8 @@ fn compose(
             },
             lifecycle,
             microphone_access: None,
+            permission_access: None,
+            setup_guide: None,
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
         },

@@ -177,24 +177,6 @@ pub(crate) fn help_menu() -> Menu {
     }
 }
 
-#[cfg(feature = "developer-tools")]
-fn develop_menu() -> Menu {
-    Menu {
-        disabled: false,
-        name: "Develop".into(),
-        items: vec![
-            MenuItem::action(
-                "Developer Workbench",
-                crate::ui::developer_workbench::OpenDeveloperWorkbench,
-            ),
-            MenuItem::action(
-                "Toggle Appearance",
-                crate::ui::developer_workbench::ToggleAppearancePreview,
-            ),
-        ],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5226,7 +5226,11 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
     assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
 mod unix_adapter_tests {
     include!("../../platform/unix_adapter_tests/emulator.rs");
 }

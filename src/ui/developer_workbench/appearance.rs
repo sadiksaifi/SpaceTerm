@@ -6,7 +6,6 @@ use gpui::{AnyElement, Window, div};
 use spaceterm_ui::{Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
-use super::preview::AppearancePreview;
 use crate::appearance::{Appearance, ChromeDensity, ResetTarget, SettingsDocument};
 use crate::ui::appearance::gpui_color;
 use crate::ui::appearance::settings::SettingsAppearance;

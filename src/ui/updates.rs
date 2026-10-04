@@ -30,7 +30,10 @@ actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native application menu shows the update command")
+    allow(
+        dead_code,
+        reason = "only a native application menu shows the update command"
+    )
 )]
 pub(crate) const CHECK_FOR_UPDATES_TITLE: &str = "Check for Updates…";
 pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";

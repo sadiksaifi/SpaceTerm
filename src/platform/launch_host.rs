@@ -322,10 +322,17 @@ mod tests {
     #[test]
     fn macos_installed_resources_live_in_the_bundle() {
         assert_eq!(
-            installed_resource_root(Path::new("/Applications/SpaceTerm.app/Contents/MacOS/spaceterm")),
-            Some(PathBuf::from("/Applications/SpaceTerm.app/Contents/Resources"))
+            installed_resource_root(Path::new(
+                "/Applications/SpaceTerm.app/Contents/MacOS/spaceterm"
+            )),
+            Some(PathBuf::from(
+                "/Applications/SpaceTerm.app/Contents/Resources"
+            ))
         );
-        assert_eq!(installed_resource_root(Path::new("/usr/local/bin/spaceterm")), None);
+        assert_eq!(
+            installed_resource_root(Path::new("/usr/local/bin/spaceterm")),
+            None
+        );
         assert!(!shell_integration_supported(Path::new("/bin/bash")));
     }
 }

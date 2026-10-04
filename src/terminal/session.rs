@@ -277,7 +277,10 @@ pub(crate) enum SelectionCopyError {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 #[derive(Clone, Debug)]
 pub(crate) struct AccessibilitySelectionSender {
@@ -286,7 +289,10 @@ pub(crate) struct AccessibilitySelectionSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 impl AccessibilitySelectionSender {
     #[cfg(test)]
@@ -313,7 +319,10 @@ impl AccessibilitySelectionSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 #[derive(Clone)]
 pub(crate) struct AccessibilityDemandSender {
@@ -329,7 +338,10 @@ impl fmt::Debug for AccessibilityDemandSender {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
 )]
 impl AccessibilityDemandSender {
     pub(crate) fn request(&self) {
@@ -861,12 +873,18 @@ enum Command {
     ),
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
     )]
     AccessibilitySelection(AccessibilitySelectionRequest),
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "only a native accessibility Adapter requests accessibility work")
+        allow(
+            dead_code,
+            reason = "only a native accessibility Adapter requests accessibility work"
+        )
     )]
     AccessibilityDemand,
     AccessibilityContinue,
@@ -2337,6 +2355,10 @@ fn join_worker(worker: JoinHandle<()>) {
 #[path = "session/tests.rs"]
 mod tests;
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux"), feature = "native-tests"))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
 #[path = "../platform/unix_adapter_tests/session.rs"]
 mod unix_adapter_tests;
