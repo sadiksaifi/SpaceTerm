@@ -53,7 +53,10 @@ impl SettingsSectionId {
         }
     }
 
-    pub(super) const fn description(self) -> &'static str {
+    pub(super) fn description(
+        self,
+        desktop: &crate::desktop_profile::DesktopPresentation,
+    ) -> &'static str {
         match self {
             Self::Interface => "Density, transparency, and blur for SpaceTerm's windows.",
             Self::Font => "The typeface and text rendering in terminal panes.",
@@ -63,9 +66,12 @@ impl SettingsSectionId {
             Self::Keybindings => {
                 "Shortcuts for SpaceTerm commands. Click a shortcut, then press the new keys. Press Delete to remove it."
             }
-            Self::Privacy => {
+            Self::Privacy
+                if desktop.has_feature(crate::desktop_profile::HostFeature::SystemPermissions) =>
+            {
                 "Clipboard access and system permissions for programs running in SpaceTerm."
             }
+            Self::Privacy => "Clipboard access for programs running in SpaceTerm.",
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
@@ -719,6 +725,21 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn privacy_description_promises_only_host_features() {
+        let desktop = crate::desktop_profile::testing_presentation();
+        assert_eq!(
+            SettingsSectionId::Privacy.description(&desktop),
+            "Clipboard access and system permissions for programs running in SpaceTerm."
+        );
+        let desktop =
+            desktop.without_features(&[crate::desktop_profile::HostFeature::SystemPermissions]);
+        assert_eq!(
+            SettingsSectionId::Privacy.description(&desktop),
+            "Clipboard access for programs running in SpaceTerm."
+        );
+    }
 
     /// Searches as on macOS 27 and later; the naming tests below cover earlier systems.
     fn matching_rows(query: &str) -> Vec<SettingsRowId> {
