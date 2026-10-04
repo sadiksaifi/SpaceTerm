@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Test development-app dispatch and the Linux private-prefix staging script."""
 
+import contextlib
+import io
 import importlib.util
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -12,6 +15,7 @@ import tempfile
 import time
 import tomllib
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
@@ -26,16 +30,44 @@ ICON_DOCUMENT = ROOT / "packaging" / "macos" / "development" / "SpaceTerm Develo
 
 
 class DispatchTests(unittest.TestCase):
-    def test_each_supported_platform_dispatches_every_profile_to_its_own_task(self):
+    def test_every_generic_task_dispatches_only_to_available_platform_variants(self):
         tasks = tomllib.loads((ROOT / ".mise.toml").read_text())["tasks"]
+        generic = {
+            name: shlex.split(definition["run"])[2]
+            for name, definition in tasks.items()
+            if isinstance(definition.get("run"), str)
+            and "scripts/run-platform-task.py" in definition["run"]
+        }
+        self.assertTrue(generic, "the dispatcher coverage must include generic tasks")
         for platform, segment in PLATFORM_SEGMENT.items():
-            for profile in ("development", "development:workbench"):
-                task = DISPATCH.platform_task(profile, platform)
-                self.assertTrue(task in tasks, f"{task} is not a mise task")
-                self.assertIn(segment, task.split(":"))
+            for name, profile in generic.items():
+                with self.subTest(platform=platform, task=name):
+                    self.assertEqual(profile, name)
+                    implementation = f"{profile}:{segment}"
+                    error = io.StringIO()
+                    with patch.object(DISPATCH.sys, "platform", platform), \
+                            patch.object(DISPATCH.os, "execvp") as execute, \
+                            contextlib.redirect_stderr(error):
+                        status = DISPATCH.main([profile, "preview argument"])
+                    if implementation in tasks:
+                        execute.assert_called_once_with(
+                            "mise", ["mise", "run", implementation, "preview argument"])
+                    else:
+                        execute.assert_not_called()
+                        self.assertEqual(status, 2)
+                        self.assertIn("task_not_available_on_platform", error.getvalue())
+                        self.assertIn("not available on this platform", error.getvalue())
+                        with self.assertRaises(DISPATCH.TaskUnavailable):
+                            DISPATCH.platform_task(profile, platform)
 
-    def test_unsupported_platform_has_no_task(self):
-        self.assertIsNone(DISPATCH.platform_task("development", "win32"))
+    def test_unsupported_platform_reports_unavailability_without_dispatching(self):
+        error = io.StringIO()
+        with patch.object(DISPATCH.sys, "platform", "win32"), \
+                patch.object(DISPATCH.os, "execvp") as execute, \
+                contextlib.redirect_stderr(error):
+            self.assertEqual(DISPATCH.main(["development"]), 2)
+        execute.assert_not_called()
+        self.assertIn("task_not_available_on_platform", error.getvalue())
 
 
 FAKE_ARTIFACTS = """#!/bin/sh
