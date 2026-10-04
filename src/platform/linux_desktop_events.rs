@@ -466,6 +466,72 @@ mod tests {
         }
     }
     #[test]
+    fn linux_desktop_portal_window_style_decodes_theme_and_icons() {
+        use crate::platform::app_directories::{
+            AppDirectoryEnvironment, DesktopResourceDirectories,
+        };
+        let private = PrivateBus::new();
+        let temporary =
+            std::env::temp_dir().join(format!("spaceterm-portal-icons-{}", std::process::id()));
+        let icon = temporary.as_path().join("icons/ReviewIcons/16/ui");
+        std::fs::create_dir_all(&icon).unwrap();
+        std::fs::write(
+            icon.parent().unwrap().parent().unwrap().join("index.theme"),
+            "[Icon Theme]\nDirectories=16/ui\n[16/ui]\nSize=16\nType=Fixed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            icon.join("window-close-symbolic.svg"),
+            "<svg>review-icon</svg>",
+        )
+        .unwrap();
+        let resources = DesktopResourceDirectories::resolve(
+            &AppDirectoryEnvironment {
+                xdg_data_home: Some(temporary.as_path().into()),
+                xdg_config_home: Some(temporary.as_path().into()),
+                ..Default::default()
+            },
+            Some(temporary.as_path().as_os_str()),
+        );
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                Settings(HashMap::from([(
+                    "org.gnome.desktop.interface".into(),
+                    HashMap::from([
+                        (
+                            "gtk-theme".into(),
+                            zbus::zvariant::Value::from("Breeze").try_into().unwrap(),
+                        ),
+                        (
+                            "icon-theme".into(),
+                            zbus::zvariant::Value::from("ReviewIcons")
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    ]),
+                )])),
+            )
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .build()
+            .unwrap();
+        let controls = crate::platform::linux_window_style::capture_for_desktop(
+            Some(&private.client()),
+            &resources,
+            "",
+        );
+        assert_eq!(controls.style, spaceterm_ui::DesktopWindowStyle::Breeze);
+        assert_eq!(
+            controls.icons[0].as_deref(),
+            Some(b"<svg>review-icon</svg>".as_slice())
+        );
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
     fn linux_desktop_portal_appearance_reads_watches_and_stops_on_drop() {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();

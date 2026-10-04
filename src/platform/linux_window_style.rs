@@ -13,6 +13,18 @@ pub(super) fn capture(
     bus: Option<&SessionBus>,
     resources: &DesktopResourceDirectories,
 ) -> DesktopWindowControls {
+    capture_for_desktop(
+        bus,
+        resources,
+        &std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+    )
+}
+
+pub(super) fn capture_for_desktop(
+    bus: Option<&SessionBus>,
+    resources: &DesktopResourceDirectories,
+    desktop: &str,
+) -> DesktopWindowControls {
     let (theme, icons) = bus
         .and_then(|bus| {
             bus.query(|connection| {
@@ -23,13 +35,18 @@ pub(super) fn capture(
                     "org.freedesktop.portal.Settings",
                 )
                 .map_err(SessionBusError::from)?;
-                let read = |key: &str| {
-                    proxy
-                        .call::<_, _, zbus::zvariant::OwnedValue>(
-                            "Read",
-                            &("org.gnome.desktop.interface", key),
-                        )
-                        .ok()
+                let mut settings: std::collections::HashMap<
+                    String,
+                    std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+                > = proxy
+                    .call("ReadAll", &(vec!["org.gnome.desktop.interface"],))
+                    .map_err(SessionBusError::from)?;
+                let mut interface = settings
+                    .remove("org.gnome.desktop.interface")
+                    .unwrap_or_default();
+                let mut read = |key: &str| {
+                    interface
+                        .remove(key)
                         .and_then(|value| String::try_from(value).ok())
                         .unwrap_or_default()
                 };
@@ -38,15 +55,12 @@ pub(super) fn capture(
             .ok()
         })
         .unwrap_or_default();
-    let style = DesktopWindowStyle::select(
-        &std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
-        &theme,
-    );
+    let style = DesktopWindowStyle::select(desktop, &theme);
     let icons = if style == DesktopWindowStyle::Breeze {
         resources
             .kde_globals_file()
             .and_then(|file| kde_icon_theme(&file))
-            .unwrap_or_else(|| "breeze".into())
+            .unwrap_or(icons)
     } else {
         icons
     };
