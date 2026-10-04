@@ -11,6 +11,7 @@ pub(crate) mod application_menu;
 pub(crate) mod application_menu_model;
 pub(crate) mod application_quit;
 pub(crate) mod control_socket;
+pub(crate) mod desktop_events;
 pub(crate) mod https_transport;
 pub(crate) mod keyboard_layout;
 #[cfg(target_os = "macos")]

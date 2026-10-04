@@ -158,6 +158,7 @@ fn compose(
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),
+            desktop_events: None,
             application_quit: Rc::new(
                 super::macos_application_quit::MacosApplicationQuitAdapter::new(),
             ),

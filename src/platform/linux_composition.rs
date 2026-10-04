@@ -12,7 +12,7 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
-    let (events, desktop_events) = super::linux_desktop_events::LinuxDesktopEvents::new();
+    let (events, desktop_events) = super::linux_desktop_events::LinuxDesktopEvents::new(identity);
     let bus = super::linux_session_bus::SessionBus::connect().ok();
     let token = std::env::var("XDG_ACTIVATION_TOKEN")
         .ok()
@@ -198,8 +198,9 @@ fn compose(
             selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
-                super::linux_application_menu::LinuxApplicationMenuAdapter::new(identity, desktop_events),
+                super::linux_application_menu::LinuxApplicationMenuAdapter,
             ),
+            desktop_events: Some(Rc::new(desktop_events)),
             application_quit: Rc::new(
                 super::linux_application_quit::LinuxApplicationQuitAdapter::default(),
             ),
@@ -242,6 +243,60 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn linux_desktop_composition_installs_events_independently_of_the_menu(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::platform::app_directories::{AppDirectories, AppDirectoryEnvironment};
+        let identity = ApplicationIdentity::current();
+        let temporary = std::env::temp_dir().join(format!(
+            "spaceterm-composition-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temporary).unwrap();
+        let environment = AppDirectoryEnvironment {
+            home: Some(temporary.clone().into()),
+            ..Default::default()
+        };
+        let directories = AppDirectories::resolve_xdg(
+            identity.directory_name(),
+            &environment,
+            Some(temporary.clone()),
+        )
+        .unwrap();
+        let startup = StartupDependencies::capture(
+            environment,
+            crate::ssh::startup_environment::StartupSshEnvironment::default(),
+            super::super::app_paths::AppPaths::from_directories(
+                directories,
+                super::super::unix_local_socket::LOCAL_IPC_PATH_MAXIMUM,
+                Arc::new(super::super::unix_secure_filesystem::UnixSecureFilesystem),
+            )
+            .unwrap(),
+            crate::ssh::command::OpenSshExecutable::new(temporary.join("missing-ssh")).unwrap(),
+            super::super::unix_ssh_process::UnixSshProcessAdapter,
+            Arc::new(super::super::unix_local_socket::UnixControlSocketProbe),
+            Arc::new(super::super::unix_host_config_filesystem::UnixHostConfigFilesystem),
+        )
+        .unwrap();
+        let (sender, events) =
+            super::super::linux_desktop_events::LinuxDesktopEvents::new(identity);
+        let host = compose(startup, identity, None, sender, events).unwrap();
+        cx.update(|cx| crate::app::initialize_application(cx, &host).unwrap());
+        assert_eq!(
+            cx.app_identity(),
+            Some((
+                identity.application_id().into(),
+                identity.display_name().into()
+            ))
+        );
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
 
     #[gpui::test]
     fn desktop_profile_should_present_linux_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {

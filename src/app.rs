@@ -922,6 +922,7 @@ pub(crate) fn window_application_id() -> Option<String> {
 pub(crate) struct ApplicationCapabilities {
     pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
+    pub(crate) desktop_events: Option<Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
     /// Opens and watches the settings file the person edits in their own editor.
@@ -1099,7 +1100,10 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     failure.get().map_or(Ok(()), Err)
 }
 
-fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+pub(crate) fn initialize_application(
+    cx: &mut App,
+    host: &HostComposition,
+) -> Result<(), RuntimeError> {
     if host.modal_prompts {
         crate::ui::application_prompt::install(cx);
     }
@@ -1149,6 +1153,9 @@ fn initialize_application(cx: &mut App, host: &HostComposition) -> Result<(), Ru
             .map(crate::theme_registry::ZedThemeRegistry::new),
         cx,
     );
+    if let Some(events) = &host.adapters.desktop_events {
+        events.install(cx);
+    }
     init(
         cx,
         Rc::clone(&host.adapters.application_menu),
@@ -1267,6 +1274,7 @@ mod runtime_tests {
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
                 ),
+                desktop_events: None,
                 application_quit: Rc::new(
                     crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
                 ),

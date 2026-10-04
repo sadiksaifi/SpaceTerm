@@ -84,12 +84,15 @@ impl DesktopEventSender {
 }
 
 pub(super) struct LinuxDesktopEvents {
+    identity: crate::application_identity::ApplicationIdentity,
     pending: Arc<Mutex<Pending>>,
     receiver: RefCell<Option<async_channel::Receiver<()>>>,
     task: RefCell<Option<Task<()>>>,
 }
 impl LinuxDesktopEvents {
-    pub(super) fn new() -> (DesktopEventSender, Self) {
+    pub(super) fn new(
+        identity: crate::application_identity::ApplicationIdentity,
+    ) -> (DesktopEventSender, Self) {
         let (wake, receiver) = async_channel::bounded(1);
         let pending = Arc::new(Mutex::new(Pending::default()));
         (
@@ -98,13 +101,14 @@ impl LinuxDesktopEvents {
                 wake,
             },
             Self {
+                identity,
                 pending,
                 receiver: RefCell::new(Some(receiver)),
                 task: RefCell::new(None),
             },
         )
     }
-    pub(super) fn install(&self, cx: &mut App) {
+    fn start(&self, cx: &mut App) {
         let Some(receiver) = self.receiver.borrow_mut().take() else {
             return;
         };
@@ -119,6 +123,13 @@ impl LinuxDesktopEvents {
                 cx.update(|cx| events.apply(&mut GpuiEffects(cx)));
             }
         }));
+    }
+}
+
+impl super::desktop_events::DesktopEventAdapter for LinuxDesktopEvents {
+    fn install(&self, cx: &mut App) {
+        cx.set_app_identity(self.identity.application_id(), self.identity.display_name());
+        self.start(cx);
     }
 }
 
@@ -152,7 +163,9 @@ mod tests {
         use crate::terminal::attention_runtime::{AudioBell, DockAttentionDriver};
         let first = cx.add_window(|_, _| gpui::Empty).into();
         let second = cx.add_window(|_, _| gpui::Empty).into();
-        let (sender, events) = super::LinuxDesktopEvents::new();
+        let (sender, events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let mut audio = crate::platform::linux_attention::LinuxAudioBell(sender.clone());
         let mut attention = crate::platform::linux_attention::LinuxWindowAttention::new(sender);
         audio.play(Some(first));
@@ -177,6 +190,26 @@ mod tests {
             cancellations.attention,
             HashMap::from([(first, false), (second, false)])
         );
+    }
+
+    #[gpui::test]
+    fn linux_desktop_events_install_identity_and_start_pump(cx: &mut gpui::TestAppContext) {
+        use crate::platform::desktop_events::DesktopEventAdapter;
+        let identity = crate::application_identity::ApplicationIdentity::current();
+        let (sender, events) = super::LinuxDesktopEvents::new(identity);
+        let window = cx.add_window(|_, _| gpui::Empty).into();
+        cx.update(|cx| events.install(cx));
+        assert_eq!(
+            cx.app_identity(),
+            Some((
+                identity.application_id().into(),
+                identity.display_name().into()
+            ))
+        );
+        sender.bell(window);
+        cx.run_until_parked();
+        assert!(events.pending.lock().unwrap().windows.is_empty());
+        assert!(events.task.borrow().is_some());
     }
 
     struct PrivateBus {
@@ -322,7 +355,9 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let (sender, _events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
             Some(private.client()),
             crate::application_identity::ApplicationIdentity::current(),
@@ -411,7 +446,9 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let (sender, _events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
             Some(private.client()),
             crate::application_identity::ApplicationIdentity::current(),
@@ -476,7 +513,9 @@ mod tests {
             .build()
             .unwrap();
         let bus = private.client();
-        let (sender, events) = super::LinuxDesktopEvents::new();
+        let (sender, events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let identity = crate::application_identity::ApplicationIdentity::current();
         let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
             Some(bus.clone()),
@@ -567,7 +606,9 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let (sender, _events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
             Some(private.client()),
             crate::application_identity::ApplicationIdentity::current(),
@@ -601,7 +642,9 @@ mod tests {
         let private = PrivateBus::new();
         let primary = private.client();
         let secondary = private.client();
-        let (sender, events) = super::LinuxDesktopEvents::new();
+        let (sender, events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         let identity = crate::application_identity::ApplicationIdentity::current();
         assert!(
             !crate::platform::linux_application_instance::forward_if_secondary(
@@ -635,7 +678,9 @@ mod tests {
         let name = identity.application_id();
         let earlier = private.server().name(name).unwrap().build().unwrap();
         let fresh = private.client();
-        let (sender, events) = super::LinuxDesktopEvents::new();
+        let (sender, events) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
 
         assert!(
             !forward_if_secondary(&fresh, identity, InstanceLaunch::New, sender, None).unwrap(),
@@ -643,7 +688,9 @@ mod tests {
         );
 
         earlier.release_name(name).unwrap();
-        let (later, _) = super::LinuxDesktopEvents::new();
+        let (later, _) = super::LinuxDesktopEvents::new(
+            crate::application_identity::ApplicationIdentity::current(),
+        );
         assert!(
             forward_if_secondary(
                 &private.client(),
