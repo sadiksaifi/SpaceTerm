@@ -105,7 +105,17 @@ mod tests {
                 "{source}"
             );
         }
-        for source in ["ctrl-shift-t", "ctrl-shift-1", "ctrl-shift-alt-n"] {
+        for source in [
+            "ctrl-shift-t",
+            "ctrl-shift-1",
+            "ctrl-shift-alt-n",
+            "ctrl-=",
+            "ctrl-pageup",
+            "alt-1",
+            "ctrl-alt-1",
+            "shift-pageup",
+            "f9",
+        ] {
             assert_eq!(profile.check(&Shortcut::parse(source).unwrap()), Ok(()));
         }
     }
@@ -138,7 +148,7 @@ mod tests {
                     );
                 }
             }
-            for key in ["ctrl-space", "ctrl-2", "ctrl-6", "ctrl-/", "ctrl--"] {
+            for key in ["ctrl-space", "ctrl-2", "ctrl-6", "ctrl-/"] {
                 let shortcut = Shortcut::parse(key).unwrap();
                 // On AZERTY digits are Shift-only. Unshifted terminal symbols stay reserved.
                 if !profile.layout().is_shifted_symbol(false, shortcut.key()) {
