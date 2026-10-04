@@ -17,15 +17,24 @@ pub(super) fn observe(
     if process.collected_exit.is_some() {
         return Some(immediate_exit());
     }
-    let observation = native_observation(process.child.id()).ok();
+    let registration = native_observation(process.child.id());
     // A kqueue NOTE_EXIT registration only observes later edges. Checking status after registration
-    // also covers a child that exited before attachment, including an ESRCH registration failure.
-    // The exclusive process borrow retains its identity until this check completes.
-    match adapter.try_status(process) {
-        Ok(Some(_)) => Some(immediate_exit()),
-        Ok(None) => observation,
-        Err(_) => None,
+    // also covers a child that exited before attachment. The exclusive process borrow retains its
+    // identity until this check completes, so a registration that found the child already exiting
+    // is an exit even while its status is not yet collectible.
+    match (adapter.try_status(process), registration) {
+        (Ok(Some(_)), _) | (Ok(None), Err(RegistrationFailure::Exited)) => Some(immediate_exit()),
+        (Ok(None), Ok(observation)) => Some(observation),
+        (Ok(None), Err(RegistrationFailure::Unavailable)) | (Err(_), _) => None,
     }
+}
+
+/// Why native exit registration produced no waiter.
+enum RegistrationFailure {
+    /// The retained child was already exiting, so the kernel refused a new exit registration.
+    Exited,
+    /// The host facility is unavailable; the caller keeps status polling.
+    Unavailable,
 }
 
 fn immediate_exit() -> SshProcessExitObservation {
@@ -83,9 +92,9 @@ impl Drop for NativeExitWait {
     }
 }
 
-fn native_observation(process: u32) -> Result<SshProcessExitObservation, SshProcessMechanismError> {
+fn native_observation(process: u32) -> Result<SshProcessExitObservation, RegistrationFailure> {
     let (cancellation, interrupt) =
-        UnixStream::pair().map_err(|_| SshProcessMechanismError::StatusFailed)?;
+        UnixStream::pair().map_err(|_| RegistrationFailure::Unavailable)?;
     let events = register_exit_events(process, &cancellation)?;
     let interrupt = Arc::new(NativeExitInterrupt(Mutex::new(Some(interrupt))));
     Ok(SshProcessExitObservation::new(
@@ -103,17 +112,17 @@ fn native_observation(process: u32) -> Result<SshProcessExitObservation, SshProc
 fn register_exit_events(
     process: u32,
     cancellation: &UnixStream,
-) -> Result<OwnedFd, SshProcessMechanismError> {
+) -> Result<OwnedFd, RegistrationFailure> {
     // SAFETY: kqueue has no input pointers and returns a new owned descriptor on success.
     let descriptor = unsafe { libc::kqueue() };
     if descriptor < 0 {
-        return Err(SshProcessMechanismError::StatusFailed);
+        return Err(RegistrationFailure::Unavailable);
     }
     // SAFETY: this successful kqueue descriptor has exactly one owner.
     let queue = unsafe { OwnedFd::from_raw_fd(descriptor) };
     // SAFETY: queue remains live; FD_CLOEXEC affects only this privately owned descriptor.
     if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-        return Err(SshProcessMechanismError::StatusFailed);
+        return Err(RegistrationFailure::Unavailable);
     }
     let changes = [
         event(process as usize, libc::EVFILT_PROC, libc::NOTE_EXIT),
@@ -135,8 +144,11 @@ fn register_exit_events(
         if result >= 0 {
             return Ok(queue);
         }
-        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return Err(SshProcessMechanismError::StatusFailed);
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::ESRCH) => return Err(RegistrationFailure::Exited),
+            _ => return Err(RegistrationFailure::Unavailable),
         }
     }
 }
@@ -202,18 +214,19 @@ impl SshProcessExitWait for NativeExitWait {
 fn register_exit_events(
     process: u32,
     _cancellation: &UnixStream,
-) -> Result<OwnedFd, SshProcessMechanismError> {
-    let process =
-        libc::pid_t::try_from(process).map_err(|_| SshProcessMechanismError::StatusFailed)?;
+) -> Result<OwnedFd, RegistrationFailure> {
+    let process = libc::pid_t::try_from(process).map_err(|_| RegistrationFailure::Unavailable)?;
     // SAFETY: pidfd_open takes a process identifier and flags and returns a new close-on-exec
     // descriptor on success. The exclusive process borrow keeps the unreaped child identity.
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process, 0) };
     if descriptor < 0 {
         // Kernels before 5.3 lack pidfd; the caller falls back to status polling.
-        return Err(SshProcessMechanismError::StatusFailed);
+        return Err(match io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => RegistrationFailure::Exited,
+            _ => RegistrationFailure::Unavailable,
+        });
     }
-    let descriptor =
-        i32::try_from(descriptor).map_err(|_| SshProcessMechanismError::StatusFailed)?;
+    let descriptor = i32::try_from(descriptor).map_err(|_| RegistrationFailure::Unavailable)?;
     // SAFETY: this successful pidfd_open descriptor has exactly one owner.
     Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
 }
