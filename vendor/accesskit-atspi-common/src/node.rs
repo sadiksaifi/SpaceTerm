@@ -628,6 +628,11 @@ impl NodeWrapper<'_> {
     }
 
     fn notify_children_changes(&self, adapter: &Adapter, old: &NodeWrapper<'_>) {
+        // Direct TextRun leaves are excluded from the AT-SPI child list.
+        // A retained text index certifies that both child lists contain only those leaves.
+        if self.0.direct_text_run_changes(old.0).is_some() {
+            return;
+        }
         let old_filtered_children = old.filtered_child_ids().collect::<Vec<NodeId>>();
         let new_filtered_children = self.filtered_child_ids().collect::<Vec<NodeId>>();
         for (index, child) in new_filtered_children.iter().enumerate() {

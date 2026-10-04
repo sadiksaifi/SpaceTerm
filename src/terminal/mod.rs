@@ -33,8 +33,9 @@ mod workspace_terminal_session_factory;
 
 #[cfg(test)]
 pub(crate) use accessibility::{
-    AccessibilityCell, AccessibilityLine, AccessibilityRowUpdate, AccessibilityScreen,
-    AccessibilityUpdate, TerminalAccessibilityState,
+    AccessibilityCell, AccessibilityCellRef, AccessibilityLine, AccessibilityRowUpdate,
+    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilityUpdate,
+    TerminalAccessibilityState,
 };
 pub(crate) use accessibility::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications,

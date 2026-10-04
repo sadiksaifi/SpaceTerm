@@ -169,34 +169,149 @@ pub(crate) fn emit_text_changes(
     new_node: &Node<'_>,
     mut emit: impl FnMut(ObjectEvent),
 ) {
+    if let Some(changes) = new_node.direct_text_run_changes(old_node) {
+        let mut group = Vec::new();
+        let mut start = 0;
+        let mut last_position = None;
+        let emit_group = |group: &[(NodeId, &str, &str)], start, emit: &mut _| {
+            let make_runs = |old: bool| {
+                let mut text = String::new();
+                let mut runs = Vec::new();
+                let mut usv_start = 0;
+                for (id, old_value, new_value) in group {
+                    let value = if old { *old_value } else { *new_value };
+                    runs.push(Run {
+                        id: *id,
+                        value,
+                        byte_start: text.len(),
+                        usv_start,
+                    });
+                    text.push_str(value);
+                    usv_start += value.chars().count();
+                }
+                (text, runs)
+            };
+            let (old_text, old_runs) = make_runs(true);
+            let (new_text, new_runs) = make_runs(false);
+            emit_run_changes(&old_text, &old_runs, &new_text, &new_runs, start, emit);
+        };
+        // Content copied across stationary rows can cross unchanged blanks.
+        // Include the intervening runs so the weighted anchor chain preserves
+        // moved text instead of announcing it again in two independent gaps.
+        let old_values: HashMap<_, _> = changes
+            .iter()
+            .filter_map(|(id, _)| {
+                let value = old_node.tree_state.node_by_id(*id)?.data().value()?;
+                (!value.chars().all(char::is_whitespace)).then_some((value, *id))
+            })
+            .collect();
+        let relocated = changes.iter().any(|(id, _)| {
+            new_node
+                .tree_state
+                .node_by_id(*id)
+                .and_then(|node| node.data().value())
+                .and_then(|value| old_values.get(value))
+                .is_some_and(|old_id| old_id != id)
+        });
+        if relocated {
+            let (first, offset) = changes.first().copied().unwrap();
+            let last = changes.last().unwrap().0;
+            let first = new_node
+                .tree_state
+                .node_by_id(first)
+                .unwrap()
+                .parent_and_index()
+                .unwrap()
+                .1;
+            let last = new_node
+                .tree_state
+                .node_by_id(last)
+                .unwrap()
+                .parent_and_index()
+                .unwrap()
+                .1;
+            for id in &new_node.data().children()[first..=last] {
+                let old = old_node
+                    .tree_state
+                    .node_by_tree_local_id(
+                        *id,
+                        old_node.tree_state.locate_node(old_node.id()).unwrap().1,
+                    )
+                    .unwrap();
+                let new = new_node
+                    .tree_state
+                    .node_by_tree_local_id(
+                        *id,
+                        new_node.tree_state.locate_node(new_node.id()).unwrap().1,
+                    )
+                    .unwrap();
+                group.push((
+                    new.id(),
+                    old.data().value().unwrap_or(""),
+                    new.data().value().unwrap_or(""),
+                ));
+            }
+            emit_group(&group, offset, &mut emit);
+            return;
+        }
+        for (id, offset) in changes {
+            let old = old_node.tree_state.node_by_id(id).unwrap();
+            let new = new_node.tree_state.node_by_id(id).unwrap();
+            let position = new.parent_and_index().unwrap().1;
+            if last_position.is_none_or(|last| position != last + 1) {
+                emit_group(&group, start, &mut emit);
+                group.clear();
+                start = offset;
+            }
+            group.push((
+                id,
+                old.data().value().unwrap_or(""),
+                new.data().value().unwrap_or(""),
+            ));
+            last_position = Some(position);
+        }
+        emit_group(&group, start, &mut emit);
+        return;
+    }
     let (old_text, old_runs) = document(old_node);
     let (new_text, new_runs) = document(new_node);
+    emit_run_changes(&old_text, &old_runs, &new_text, &new_runs, 0, &mut emit);
+}
+
+fn emit_run_changes(
+    old_text: &str,
+    old_runs: &[Run<'_>],
+    new_text: &str,
+    new_runs: &[Run<'_>],
+    start: usize,
+    emit: &mut impl FnMut(ObjectEvent),
+) {
     if old_text == new_text {
         return;
     }
     let mut old_start = 0;
     let mut new_start = 0;
-    let mut new_usv_start = 0;
-    for (old_index, new_index) in unchanged_anchors(&old_runs, &new_runs) {
+    let mut new_usv_start = start;
+    for (old_index, new_index) in unchanged_anchors(old_runs, new_runs) {
         let old_run = &old_runs[old_index];
         let new_run = &new_runs[new_index];
         emit_gap(
             &old_text[old_start..old_run.byte_start],
             &new_text[new_start..new_run.byte_start],
             new_usv_start,
-            &mut emit,
+            emit,
         );
         // Earlier events have already transformed the preceding text. Later
         // offsets therefore refer to this new-document position, not the old
         // index that may have shifted when history was removed.
         old_start = old_run.byte_start + old_run.value.len();
         new_start = new_run.byte_start + new_run.value.len();
-        new_usv_start = new_run.usv_start + new_run.value.chars().count();
+        new_usv_start = start + new_run.usv_start + new_run.value.chars().count();
     }
     emit_gap(
         &old_text[old_start..],
         &new_text[new_start..],
         new_usv_start,
-        &mut emit,
+        emit,
     );
 }

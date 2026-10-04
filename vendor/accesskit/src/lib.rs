@@ -14,7 +14,7 @@ extern crate alloc;
 
 #[cfg(feature = "schemars")]
 use alloc::borrow::Cow;
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 #[cfg(feature = "pyo3")]
 use pyo3::pyclass;
@@ -852,10 +852,52 @@ pub struct TextDecoration {
 // The following is based on the technique described here:
 // https://viruta.org/reducing-memory-consumption-in-librsvg-2.html
 
+#[derive(Clone, Debug, Default)]
+struct SharedNodeIds(Arc<Vec<NodeId>>);
+
+impl SharedNodeIds {
+    fn push(&mut self, item: NodeId) {
+        Arc::make_mut(&mut self.0).push(item);
+    }
+}
+
+impl From<Vec<NodeId>> for SharedNodeIds {
+    fn from(value: Vec<NodeId>) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl core::ops::Deref for SharedNodeIds {
+    type Target = [NodeId];
+    fn deref(&self) -> &[NodeId] {
+        &self.0
+    }
+}
+
+impl PartialEq for SharedNodeIds {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for SharedNodeIds {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for SharedNodeIds {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<NodeId>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum PropertyValue {
     None,
-    NodeIdVec(Vec<NodeId>),
+    NodeIdVec(SharedNodeIds),
     NodeId(NodeId),
     String(Box<str>),
     F64(f64),
@@ -1205,10 +1247,10 @@ macro_rules! vec_type_methods {
         })*
         impl Node {
             $(fn $setter(&mut self, id: PropertyId, value: impl Into<Vec<$type>>) {
-                self.properties.set(id, PropertyValue::$variant(value.into()));
+                self.properties.set(id, PropertyValue::$variant(value.into().into()));
             }
             fn $pusher(&mut self, id: PropertyId, item: $type) {
-                if let PropertyValue::$variant(v) = self.properties.get_mut(id, PropertyValue::$variant(Vec::new())) {
+                if let PropertyValue::$variant(v) = self.properties.get_mut(id, PropertyValue::$variant(Vec::new().into())) {
                     v.push(item);
                 }
             })*
@@ -1880,6 +1922,16 @@ copy_type_setters! {
 vec_type_methods! {
     (NodeId, NodeIdVec, get_node_id_vec, set_node_id_vec, push_to_node_id_vec),
     (CustomAction, CustomActionVec, get_custom_action_vec, set_custom_action_vec, push_to_custom_action_vec)
+}
+
+impl Node {
+    /// Set child order with shared immutable storage. Cloning the node retains this storage.
+    pub fn set_shared_children(&mut self, children: Arc<Vec<NodeId>>) {
+        self.properties.set(
+            PropertyId::Children,
+            PropertyValue::NodeIdVec(SharedNodeIds(children)),
+        );
+    }
 }
 
 node_id_vec_property_methods! {
@@ -3157,6 +3209,35 @@ pub trait DeactivationHandler {
 mod tests {
     use super::*;
     use alloc::format;
+
+    #[test]
+    fn shared_children_preserve_order_and_isolate_mutation() {
+        let children = alloc::sync::Arc::new(vec![NodeId(1), NodeId(2)]);
+        let mut node = Node::new(Role::Terminal);
+        node.set_shared_children(alloc::sync::Arc::clone(&children));
+        let mut clone = node.clone();
+        assert!(core::ptr::eq(
+            node.children().as_ptr(),
+            clone.children().as_ptr()
+        ));
+        clone.push_child(NodeId(3));
+        assert_eq!(node.children(), &[NodeId(1), NodeId(2)]);
+        assert_eq!(clone.children(), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let mut ordinary = Node::new(Role::Terminal);
+        ordinary.set_children(vec![NodeId(1), NodeId(2)]);
+        assert_eq!(node, ordinary);
+        #[cfg(feature = "serde")]
+        {
+            assert_eq!(
+                serde_json::to_value(&node).unwrap(),
+                serde_json::to_value(&ordinary).unwrap()
+            );
+            assert_eq!(
+                serde_json::from_value::<Node>(serde_json::to_value(&node).unwrap()).unwrap(),
+                node
+            );
+        }
+    }
 
     #[test]
     fn u64_should_be_convertible_to_node_id() {

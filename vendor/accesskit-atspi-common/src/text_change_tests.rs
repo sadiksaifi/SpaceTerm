@@ -393,3 +393,145 @@ fn retained_text_weight_counts_unicode_scalars_instead_of_bytes() {
         vec![Edit::Insert(0, emoji.clone()), Edit::Remove(30, emoji)],
     );
 }
+
+#[test]
+fn retained_child_order_emits_exact_edits_and_keeps_cursor_offsets_current() {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let context = AppContext::new(None);
+    let children = Arc::new(vec![NodeId(10), NodeId(11), NodeId(12)]);
+    let mut initial = tree(
+        &[(10, "A\u{301}\n"), (11, "界\n"), (12, "last")],
+        true,
+        false,
+    );
+    initial.nodes[1]
+        .1
+        .set_shared_children(Arc::clone(&children));
+    let mut adapter = Adapter::new(
+        &context,
+        Capture(Arc::clone(&capture)),
+        initial,
+        true,
+        WindowBounds::default(),
+        IgnoreActions,
+    );
+    capture.lock().unwrap().clear();
+    let mut terminal = Node::new(Role::Terminal);
+    terminal.set_shared_children(Arc::clone(&children));
+    let mut first = Node::new(Role::TextRun);
+    first.set_value("😀changed\n");
+    first.set_character_lengths(vec![4, 1, 1, 1, 1, 1, 1, 1, 1]);
+    let mut second = Node::new(Role::TextRun);
+    second.set_value("B\n");
+    second.set_character_lengths(vec![1, 1]);
+    adapter.update(TreeUpdate {
+        nodes: vec![
+            (NodeId(1), terminal.clone()),
+            (NodeId(10), first),
+            (NodeId(11), second),
+        ],
+        tree: None,
+        tree_id: TreeId::ROOT,
+        focus: NodeId(1),
+    });
+    let edits = core::mem::take(&mut *capture.lock().unwrap());
+    let mut text: Vec<char> = "A\u{301}\n界\nlast".chars().collect();
+    for edit in &edits {
+        match edit {
+            Edit::Remove(offset, content) => {
+                text.drain(*offset..offset + content.chars().count());
+            }
+            Edit::Insert(offset, content) => {
+                text.splice(*offset..*offset, content.chars());
+            }
+        }
+    }
+    assert_eq!(text.iter().collect::<String>(), "😀changed\nB\nlast");
+    terminal.set_text_selection(accesskit::TextSelection {
+        anchor: accesskit::TextPosition {
+            node: NodeId(12),
+            character_index: 2,
+        },
+        focus: accesskit::TextPosition {
+            node: NodeId(12),
+            character_index: 2,
+        },
+    });
+    adapter.update(TreeUpdate {
+        nodes: vec![(NodeId(1), terminal)],
+        tree: None,
+        tree_id: TreeId::ROOT,
+        focus: NodeId(1),
+    });
+    assert!(
+        capture.lock().unwrap().is_empty(),
+        "cursor-only updates must not emit text edits"
+    );
+}
+
+#[test]
+fn retained_large_history_adapter_frame_measurement() {
+    use std::{hint::black_box, time::Instant};
+    let count = 10_000;
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let context = AppContext::new(None);
+    let rows = (0..count)
+        .map(|line| (line + 10, "xxxxxxxxxxxxxxxxxxxx\n"))
+        .collect::<Vec<_>>();
+    let mut initial = tree(&rows, true, false);
+    let children = Arc::new(rows.iter().map(|(id, _)| NodeId(*id)).collect::<Vec<_>>());
+    initial.nodes[1]
+        .1
+        .set_shared_children(Arc::clone(&children));
+    let mut adapter = Adapter::new(
+        &context,
+        Capture(Arc::clone(&capture)),
+        initial,
+        true,
+        WindowBounds::default(),
+        IgnoreActions,
+    );
+    capture.lock().unwrap().clear();
+    for (name, cursor, output) in [
+        ("unchanged", false, false),
+        ("cursor", true, false),
+        ("single row", false, true),
+    ] {
+        let start = Instant::now();
+        for frame in 0..100 {
+            let mut terminal = Node::new(Role::Terminal);
+            terminal.set_shared_children(Arc::clone(&children));
+            terminal.set_text_selection(accesskit::TextSelection {
+                anchor: accesskit::TextPosition {
+                    node: NodeId(count + 9),
+                    character_index: if cursor { frame % 2 } else { 0 },
+                },
+                focus: accesskit::TextPosition {
+                    node: NodeId(count + 9),
+                    character_index: if cursor { frame % 2 } else { 0 },
+                },
+            });
+            let mut nodes = vec![(NodeId(1), terminal)];
+            if output {
+                let mut run = Node::new(Role::TextRun);
+                run.set_value(if frame % 2 == 0 { "Y\n" } else { "Z\n" });
+                run.set_character_lengths(vec![1, 1]);
+                nodes.push((NodeId(5010), run));
+            }
+            adapter.update(black_box(TreeUpdate {
+                nodes,
+                tree: None,
+                tree_id: TreeId::ROOT,
+                focus: NodeId(1),
+            }));
+        }
+        let micros = start.elapsed().as_secs_f64() * 1_000_000.0 / 100.0;
+        eprintln!("retained AT-SPI {name}, {count} rows, 100 frames: {micros:.2} us/frame");
+        let edits = core::mem::take(&mut *capture.lock().unwrap());
+        if !output {
+            assert!(edits.is_empty());
+        } else {
+            assert!(edits.len() <= 200);
+        }
+    }
+}

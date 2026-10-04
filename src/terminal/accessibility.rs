@@ -330,6 +330,62 @@ impl AccessibilityRowBlock {
     }
 }
 
+// Structural sharing lets publishers find changed rows without scanning retained history.
+#[derive(Debug)]
+struct AccessibilityRowIndex {
+    children: Option<(Arc<Self>, Arc<Self>)>,
+    row: Option<Arc<AccessibilityRow>>,
+}
+
+impl AccessibilityRowIndex {
+    fn build(rows: &[Arc<AccessibilityRow>], previous: Option<&Arc<Self>>) -> Arc<Self> {
+        if rows.len() == 1 {
+            if let Some(previous) = previous
+                && previous
+                    .row
+                    .as_ref()
+                    .is_some_and(|row| Arc::ptr_eq(row, &rows[0]))
+            {
+                return Arc::clone(previous);
+            }
+            return Arc::new(Self {
+                children: None,
+                row: Some(Arc::clone(&rows[0])),
+            });
+        }
+        let previous_children = previous.and_then(|previous| previous.children.as_ref());
+        let middle = rows.len() / 2;
+        let left = Self::build(&rows[..middle], previous_children.map(|(left, _)| left));
+        let right = Self::build(&rows[middle..], previous_children.map(|(_, right)| right));
+        if let Some(previous) = previous
+            && previous_children.is_some_and(|(old_left, old_right)| {
+                Arc::ptr_eq(&left, old_left) && Arc::ptr_eq(&right, old_right)
+            })
+        {
+            return Arc::clone(previous);
+        }
+        Arc::new(Self {
+            children: Some((left, right)),
+            row: None,
+        })
+    }
+
+    fn changed(&self, previous: &Self, start: usize, count: usize, lines: &mut Vec<usize>) {
+        if core::ptr::eq(self, previous) {
+            return;
+        }
+        if let (Some((left, right)), Some((old_left, old_right))) =
+            (&self.children, &previous.children)
+        {
+            let middle = count / 2;
+            left.changed(old_left, start, middle, lines);
+            right.changed(old_right, start + middle, count - middle, lines);
+        } else {
+            lines.push(start);
+        }
+    }
+}
+
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -339,6 +395,8 @@ impl AccessibilityRowBlock {
 )]
 #[derive(Debug)]
 struct AccessibilityDocument {
+    topology: Arc<[AccessibilityRowId]>,
+    row_index: Option<Arc<AccessibilityRowIndex>>,
     blocks: Arc<[Arc<AccessibilityRowBlock>]>,
     block_row_prefix: Arc<[usize]>,
     block_utf16_prefix: Arc<[usize]>,
@@ -350,6 +408,8 @@ struct AccessibilityDocument {
 impl AccessibilityDocument {
     fn empty() -> Arc<Self> {
         Arc::new(Self {
+            topology: Arc::from([]),
+            row_index: None,
             blocks: Arc::from([]),
             block_row_prefix: Arc::from([0]),
             block_utf16_prefix: Arc::from([0]),
@@ -582,6 +642,37 @@ impl TerminalAccessibilityModel {
                 len_utf16: row.len_utf16,
                 row,
             })
+    }
+
+    pub(crate) fn row(&self, line: usize) -> Option<AccessibilityRowView<'_>> {
+        let document = &self.data.document;
+        let (row, _) = document.row(line)?;
+        Some(AccessibilityRowView {
+            id: row.id,
+            revision: row.revision,
+            soft_wrapped: row.soft_wrapped,
+            range: document.range_for_line(line)?,
+            text: &row.text,
+            len_utf16: row.len_utf16,
+            row,
+        })
+    }
+
+    /// None means row identities or order changed and the publisher must rebuild topology.
+    pub(crate) fn changed_rows_since(&self, previous: &Self) -> Option<Vec<usize>> {
+        let document = &self.data.document;
+        let old = &previous.data.document;
+        if self.shares_document(previous) {
+            return Some(Vec::new());
+        }
+        if !Arc::ptr_eq(&document.topology, &old.topology) {
+            return None;
+        }
+        let mut lines = Vec::new();
+        if let (Some(index), Some(old_index)) = (&document.row_index, &old.row_index) {
+            index.changed(old_index, 0, document.rows, &mut lines);
+        }
+        Some(lines)
     }
 
     pub(crate) fn visible_lines(&self) -> Range<usize> {
@@ -1244,6 +1335,15 @@ fn build_document(
         return Arc::clone(previous);
     }
 
+    let same_topology = previous.filter(|document| document.topology.as_ref() == topology);
+    let row_index = Some(AccessibilityRowIndex::build(
+        &ordered,
+        same_topology.and_then(|document| document.row_index.as_ref()),
+    ));
+    let topology = same_topology.map_or_else(
+        || Arc::from(topology),
+        |document| Arc::clone(&document.topology),
+    );
     let mut groups: Vec<Vec<Arc<AccessibilityRow>>> = Vec::new();
     for row in ordered {
         if groups
@@ -1295,6 +1395,8 @@ fn build_document(
         block_utf16_prefix.push(total_utf16);
     }
     Arc::new(AccessibilityDocument {
+        topology,
+        row_index,
         blocks: Arc::from(blocks),
         block_row_prefix: Arc::from(block_row_prefix),
         block_utf16_prefix: Arc::from(block_utf16_prefix),

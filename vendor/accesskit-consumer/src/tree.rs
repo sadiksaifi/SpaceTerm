@@ -3,8 +3,9 @@
 // the LICENSE-APACHE file) or the MIT license (found in
 // the LICENSE-MIT file), at your option.
 
+use crate::text_index::TextIndex;
 use accesskit::{Node as NodeData, NodeId as LocalNodeId, Tree as TreeData, TreeId, TreeUpdate};
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::fmt;
 use hashbrown::{HashMap, HashSet};
 
@@ -49,6 +50,7 @@ pub(crate) struct SubtreeState {
 
 #[derive(Clone, Debug)]
 pub struct State {
+    pub(crate) text_indexes: HashMap<NodeId, Arc<TextIndex>>,
     pub(crate) nodes: HashMap<NodeId, NodeState>,
     pub(crate) data: TreeData,
     pub(crate) root: NodeId,
@@ -64,6 +66,12 @@ struct InternalChanges {
     added_node_ids: HashSet<NodeId>,
     updated_node_ids: HashSet<NodeId>,
     removed_node_ids: HashSet<NodeId>,
+}
+
+fn same_children(left: &NodeData, right: &NodeData) -> bool {
+    let left = left.children();
+    let right = right.children();
+    left.len() == right.len() && core::ptr::eq(left.as_ptr(), right.as_ptr())
 }
 
 impl State {
@@ -215,11 +223,67 @@ impl State {
             }
         }
 
+        let mut rebuild_text = HashSet::new();
+        let mut changed_runs = Vec::new();
+        let update_nodes: HashMap<_, _> = update
+            .nodes
+            .iter()
+            .map(|(id, data)| (map_id(*id), data))
+            .collect();
+        for (id, data) in &update.nodes {
+            let id = map_id(*id);
+            if self.nodes.get(&id).is_none_or(|old| {
+                !same_children(&old.data, data) && old.data.children() != data.children()
+            }) {
+                rebuild_text.insert(id);
+            }
+            if data.role() == accesskit::Role::TextRun {
+                changed_runs.push(id);
+            } else if let Some(old) = self.nodes.get(&id)
+                && old.data.role() == accesskit::Role::TextRun
+                && let Some(ParentAndIndex(parent, _)) = old.parent_and_index
+            {
+                rebuild_text.insert(parent);
+            }
+        }
+        // Unchanged shared child storage needs no parent/index reconciliation.
+        // A changed parent must still not claim a child retained by another parent.
+        for (local_node_id, node_data) in &update.nodes {
+            let parent_id = map_id(*local_node_id);
+            if self
+                .nodes
+                .get(&parent_id)
+                .is_some_and(|old| same_children(&old.data, node_data))
+            {
+                continue;
+            }
+            for child_id in node_data.children() {
+                if let Some(old_child) = self.nodes.get(&map_id(*child_id))
+                    && let Some(ParentAndIndex(old_parent, _)) = old_child.parent_and_index
+                    && old_parent != parent_id
+                    && update_nodes
+                        .get(&old_parent)
+                        .is_some_and(|parent| parent.children().contains(child_id))
+                {
+                    panic!("TreeUpdate includes duplicate child {:?}", child_id);
+                }
+            }
+        }
+        drop(update_nodes);
         for (local_node_id, node_data) in update.nodes {
             let node_id = map_id(local_node_id);
             unreachable.remove(&node_id);
 
-            for (child_index, child_id) in node_data.children().iter().enumerate() {
+            let children_unchanged = self
+                .nodes
+                .get(&node_id)
+                .is_some_and(|old| same_children(&old.data, &node_data));
+            let children = if children_unchanged {
+                &[][..]
+            } else {
+                node_data.children()
+            };
+            for (child_index, child_id) in children.iter().enumerate() {
                 let mapped_child_id = map_id(*child_id);
                 if !seen_child_ids.insert(mapped_child_id) {
                     panic!("TreeUpdate includes duplicate child {:?}", child_id);
@@ -251,7 +315,12 @@ impl State {
                 if local_node_id == root {
                     node_state.parent_and_index = None;
                 }
-                for child_id in node_state.data.children().iter() {
+                let old_children = if children_unchanged {
+                    &[][..]
+                } else {
+                    node_state.data.children()
+                };
+                for child_id in old_children {
                     let mapped_existing_child_id = map_id(*child_id);
                     if !seen_child_ids.contains(&mapped_existing_child_id) {
                         unreachable.insert(mapped_existing_child_id);
@@ -471,6 +540,54 @@ impl State {
             }
         }
 
+        for id in &changed_runs {
+            if let Some(node) = self.nodes.get(id)
+                && let Some(ParentAndIndex(parent, _)) = node.parent_and_index
+                && !self.text_indexes.contains_key(&parent)
+            {
+                rebuild_text.insert(parent);
+            }
+        }
+        for parent in &rebuild_text {
+            self.text_indexes.remove(parent);
+            if let Some(node) = self.nodes.get(parent) {
+                let (_, index) = parent.to_components();
+                let runs = node
+                    .data
+                    .children()
+                    .iter()
+                    .map(|id| {
+                        let id = NodeId::new(*id, index);
+                        let data = &self.nodes.get(&id)?.data;
+                        (data.role() == accesskit::Role::TextRun
+                            && data.children().is_empty()
+                            && data.tree_id().is_none()
+                            && !data.is_hidden())
+                        .then(|| (id, data.value().unwrap_or("")))
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if let Some(runs) = runs.filter(|runs| !runs.is_empty()) {
+                    self.text_indexes.insert(*parent, TextIndex::build(&runs));
+                }
+            }
+        }
+        for id in changed_runs {
+            if let Some(node) = self.nodes.get(&id)
+                && let Some(ParentAndIndex(parent, position)) = node.parent_and_index
+                && !rebuild_text.contains(&parent)
+            {
+                if node.data.is_hidden()
+                    || !node.data.children().is_empty()
+                    || node.data.tree_id().is_some()
+                {
+                    self.text_indexes.remove(&parent);
+                } else if let Some(index) = self.text_indexes.get_mut(&parent) {
+                    *index = index.replace(position, id, node.data.value().unwrap_or(""));
+                }
+            }
+        }
+        self.text_indexes
+            .retain(|id, _| self.nodes.contains_key(id));
         self.focus = self.compute_effective_focus();
 
         self.validate_global();
@@ -607,6 +724,7 @@ impl Tree {
         let mut tree_index_map = TreeIndexMap::default();
         let tree_index = tree_index_map.get_or_create_index(initial_state.tree_id);
         let mut state = State {
+            text_indexes: HashMap::new(),
             nodes: HashMap::new(),
             root: NodeId::new(tree.root, tree_index),
             data: tree,
@@ -698,6 +816,9 @@ impl Tree {
         for id in changes.removed_node_ids {
             self.state.nodes.remove(&id);
         }
+        self.state
+            .text_indexes
+            .clone_from(&self.next_state.text_indexes);
         if self.state.data != self.next_state.data {
             self.state.data.clone_from(&self.next_state.data);
         }
@@ -758,6 +879,88 @@ mod tests {
 
     fn node_id(n: u64) -> NodeId {
         NodeId::new(LocalNodeId(n), TreeIndex(0))
+    }
+
+    #[test]
+    fn retained_text_index_tracks_sparse_edits_and_cursor_offsets() {
+        let children = alloc::sync::Arc::new((1..=10_000).map(LocalNodeId).collect::<Vec<_>>());
+        let mut root = Node::new(Role::Terminal);
+        root.set_shared_children(alloc::sync::Arc::clone(&children));
+        let mut nodes = vec![(LocalNodeId(0), root.clone())];
+        nodes.extend(children.iter().map(|id| {
+            let mut node = Node::new(Role::TextRun);
+            node.set_value("😀x");
+            node.set_character_lengths(vec![4, 1]);
+            (*id, node)
+        }));
+        let mut tree = super::Tree::new(
+            TreeUpdate {
+                nodes,
+                tree: Some(Tree::new(LocalNodeId(0))),
+                tree_id: TreeId::ROOT,
+                focus: LocalNodeId(0),
+            },
+            true,
+        );
+        let previous = tree.state().clone();
+        let mut changed = Node::new(Role::TextRun);
+        changed.set_value("A\u{301}long");
+        changed.set_character_lengths(vec![3, 1, 1, 1, 1]);
+        root.set_text_selection(accesskit::TextSelection {
+            anchor: accesskit::TextPosition {
+                node: LocalNodeId(10_000),
+                character_index: 1,
+            },
+            focus: accesskit::TextPosition {
+                node: LocalNodeId(10_000),
+                character_index: 1,
+            },
+        });
+        tree.update_and_process_changes(
+            TreeUpdate {
+                nodes: vec![(LocalNodeId(17), changed), (LocalNodeId(0), root.clone())],
+                tree: None,
+                tree_id: TreeId::ROOT,
+                focus: LocalNodeId(0),
+            },
+            &mut NoOpHandler,
+        );
+        assert_eq!(
+            tree.state()
+                .root()
+                .direct_text_run_changes(&previous.root()),
+            Some(vec![(node_id(17), 32)])
+        );
+        assert_eq!(
+            tree.state()
+                .root()
+                .text_selection_focus()
+                .unwrap()
+                .to_global_usv_index(),
+            20_003
+        );
+        let previous = tree.state().clone();
+        root.set_text_caret_bounds(accesskit::Rect {
+            x0: 1.0,
+            x1: 1.0,
+            y0: 0.0,
+            y1: 10.0,
+        });
+        tree.update_and_process_changes(
+            TreeUpdate {
+                nodes: vec![(LocalNodeId(0), root)],
+                tree: None,
+                tree_id: TreeId::ROOT,
+                focus: LocalNodeId(0),
+            },
+            &mut NoOpHandler,
+        );
+        assert_eq!(
+            tree.state()
+                .root()
+                .direct_text_run_changes(&previous.root()),
+            Some(Vec::new())
+        );
     }
 
     #[test]

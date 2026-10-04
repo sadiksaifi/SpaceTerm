@@ -21,6 +21,7 @@ pub(crate) mod iterators;
 pub(crate) mod text;
 #[cfg(test)]
 mod text_caret_tests;
+mod text_index;
 #[cfg(test)]
 mod text_word_tests;
 pub use text::{

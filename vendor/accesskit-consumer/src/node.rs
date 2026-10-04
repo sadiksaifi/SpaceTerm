@@ -68,6 +68,33 @@ pub struct Node<'a> {
 }
 
 impl<'a> Node<'a> {
+    /// Changed direct TextRuns and their new Unicode scalar offsets.
+    /// None requests the general text-tree diff when topology or filtering changed.
+    pub fn direct_text_run_changes(&self, previous: &Node<'_>) -> Option<Vec<(NodeId, usize)>> {
+        if self.id != previous.id
+            || self.data().children().len() != previous.data().children().len()
+            || !core::ptr::eq(
+                self.data().children().as_ptr(),
+                previous.data().children().as_ptr(),
+            )
+        {
+            return None;
+        }
+        let index = self.tree_state.text_indexes.get(&self.id)?;
+        let old = previous.tree_state.text_indexes.get(&previous.id)?;
+        let mut changes = Vec::new();
+        index.changed(old, 0, &mut changes);
+        Some(changes)
+    }
+
+    pub(crate) fn direct_text_offset(&self, run: &Node<'_>) -> Option<usize> {
+        let ParentAndIndex(parent, position) = run.state.parent_and_index?;
+        if parent != self.id {
+            return None;
+        }
+        Some(self.tree_state.text_indexes.get(&self.id)?.offset(position))
+    }
+
     pub fn data(&self) -> &'a NodeData {
         &self.state.data
     }

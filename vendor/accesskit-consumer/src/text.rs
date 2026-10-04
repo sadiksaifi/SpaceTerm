@@ -279,6 +279,17 @@ impl<'a> Position<'a> {
     }
 
     pub fn to_global_usv_index(&self) -> usize {
+        if let Some(offset) = self.root_node.direct_text_offset(&self.inner.node) {
+            let end = self.inner.node.data().character_lengths()[..self.inner.character_index]
+                .iter()
+                .copied()
+                .map(usize::from)
+                .sum::<usize>();
+            return offset
+                + self.inner.node.data().value().unwrap()[..end]
+                    .chars()
+                    .count();
+        }
         let mut total_length = 0usize;
         for node in self.root_node.text_runs() {
             let node_text = node.data().value().unwrap();
