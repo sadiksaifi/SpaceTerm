@@ -787,6 +787,15 @@ struct MouseModeState {
     sgr_pixels: bool,
 }
 
+/// A keyboard movement through the Scrollback viewport, as the Scroll Commands request it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScrollbackMovement {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
 #[derive(Debug)]
 pub(crate) struct EmulatorAction {
     pub(crate) bytes: Vec<u8>,
@@ -1493,6 +1502,20 @@ impl TerminalEmulator {
     pub(crate) fn scroll_to(&mut self, offset_rows: u64) -> EmulatorAction {
         let row = usize::try_from(offset_rows).unwrap_or(usize::MAX);
         self.terminal.scroll_viewport(ScrollViewport::Row(row));
+        EmulatorAction::screen_changed()
+    }
+
+    /// Moves the viewport through Scrollback a page at a time or to either end, writing nothing
+    /// to the PTY. The alternate screen has no Scrollback, so its viewport stays put, as it does
+    /// for the wheel when the program has not requested alternate-scroll mode.
+    pub(crate) fn scroll_scrollback(&mut self, movement: ScrollbackMovement) -> EmulatorAction {
+        let page = isize::try_from(self.geometry.grid().rows.max(1)).unwrap_or(isize::MAX);
+        self.terminal.scroll_viewport(match movement {
+            ScrollbackMovement::PageUp => ScrollViewport::Delta(-page),
+            ScrollbackMovement::PageDown => ScrollViewport::Delta(page),
+            ScrollbackMovement::Top => ScrollViewport::Top,
+            ScrollbackMovement::Bottom => ScrollViewport::Bottom,
+        });
         EmulatorAction::screen_changed()
     }
 

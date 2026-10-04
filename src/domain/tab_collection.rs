@@ -18,6 +18,13 @@ struct TabEntry<T> {
     payload: T,
 }
 
+/// A step through the Tab order, as Next Tab, Previous Tab, and Move Tab take it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TabStep {
+    Previous,
+    Next,
+}
+
 pub(crate) struct TabCollection<T> {
     tabs: Vec<TabEntry<T>>,
     active_tab_id: TabId,
@@ -116,6 +123,40 @@ impl<T> TabCollection<T> {
         Ok(true)
     }
 
+    /// The Tab one step from the Active Tab, wrapping around the ends of the Tab order.
+    pub(crate) fn neighbor_of_active_tab(&self, step: TabStep) -> TabId {
+        let index = self.active_index();
+        let len = self.tabs.len();
+        let neighbor = match step {
+            TabStep::Previous => (index + len - 1) % len,
+            TabStep::Next => (index + 1) % len,
+        };
+        self.tabs[neighbor].id
+    }
+
+    /// Moves the Active Tab one step in the Tab order and reports whether the order changed.
+    ///
+    /// The Active Tab stays put at either end of the Tab order instead of wrapping around.
+    pub(crate) fn move_active_tab(&mut self, step: TabStep) -> bool {
+        let index = self.active_index();
+        let position = match step {
+            TabStep::Previous => index.checked_sub(1),
+            TabStep::Next => Some(index + 1).filter(|&position| position < self.tabs.len()),
+        };
+        let Some(position) = position else {
+            return false;
+        };
+        self.tabs.swap(index, position);
+        true
+    }
+
+    fn active_index(&self) -> usize {
+        self.tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab_id)
+            .expect("the Active Tab ID must always reference an owned Tab")
+    }
+
     pub(crate) fn close_tab(&mut self, tab_id: TabId) -> Result<CloseTabOutcome<T>, TabError> {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Err(TabError::TabNotFound(tab_id));
@@ -208,6 +249,52 @@ mod tests {
                 &"first",
             )
         );
+    }
+
+    fn order(tabs: &TabCollection<&'static str>) -> Vec<&'static str> {
+        tabs.iter().map(|(_, tab)| *tab).collect()
+    }
+
+    #[test]
+    fn neighbor_of_active_tab_should_wrap_around_the_tab_order() {
+        let mut tabs = TabCollection::new(|_| "first");
+        let second = tabs.create_tab(|_| "second").unwrap();
+        let third = tabs.create_tab(|_| "third").unwrap();
+        let first = TabId::new(1);
+
+        let from_last = (
+            tabs.neighbor_of_active_tab(TabStep::Next),
+            tabs.neighbor_of_active_tab(TabStep::Previous),
+        );
+        tabs.activate_tab(first).unwrap();
+        let from_first = (
+            tabs.neighbor_of_active_tab(TabStep::Next),
+            tabs.neighbor_of_active_tab(TabStep::Previous),
+        );
+
+        assert_eq!((from_last, from_first), ((first, second), (second, third)));
+        let single = TabCollection::new(|_| "only");
+        assert_eq!(single.neighbor_of_active_tab(TabStep::Next), first);
+        assert_eq!(single.neighbor_of_active_tab(TabStep::Previous), first);
+    }
+
+    #[test]
+    fn move_active_tab_should_step_within_the_tab_order_without_wrapping() {
+        let mut tabs = TabCollection::new(|_| "first");
+        tabs.create_tab(|_| "second").unwrap();
+        let third = tabs.create_tab(|_| "third").unwrap();
+
+        assert!(!tabs.move_active_tab(TabStep::Next));
+        assert_eq!(order(&tabs), ["first", "second", "third"]);
+        assert!(tabs.move_active_tab(TabStep::Previous));
+        assert_eq!(order(&tabs), ["first", "third", "second"]);
+        assert!(tabs.move_active_tab(TabStep::Previous));
+        assert_eq!(order(&tabs), ["third", "first", "second"]);
+        assert!(!tabs.move_active_tab(TabStep::Previous));
+        assert_eq!(order(&tabs), ["third", "first", "second"]);
+        assert!(tabs.move_active_tab(TabStep::Next));
+        assert_eq!(order(&tabs), ["first", "third", "second"]);
+        assert_eq!((tabs.active_tab_id(), tabs.root_tab()), (third, &"first"));
     }
 
     #[test]

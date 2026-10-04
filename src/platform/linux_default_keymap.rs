@@ -120,6 +120,10 @@ pub(super) fn profile(
             Command::ActivateTab9,
             Some(DefaultBinding::new("ctrl-shift-9", &[])),
         ),
+        (Command::NextTab, None),
+        (Command::PreviousTab, None),
+        (Command::MoveTabRight, None),
+        (Command::MoveTabLeft, None),
         (
             Command::ClosePane,
             Some(DefaultBinding::new("ctrl-shift-w", &[])),
@@ -176,6 +180,10 @@ pub(super) fn profile(
             Command::ClearTerminalScreenAndScrollback,
             Some(DefaultBinding::new("ctrl-shift-alt-k", &[])),
         ),
+        (Command::ScrollPageUp, None),
+        (Command::ScrollPageDown, None),
+        (Command::ScrollToTop, None),
+        (Command::ScrollToBottom, None),
         (
             Command::IncreaseTerminalFontSize,
             Some(DefaultBinding::new(
@@ -202,6 +210,7 @@ pub(super) fn profile(
             Command::ToggleSidebarFocus,
             Some(DefaultBinding::new("ctrl-shift-e", &[])),
         ),
+        (Command::KeyboardShortcuts, None),
     ];
     KeymapProfile::new(
         layout,
@@ -382,7 +391,19 @@ mod tests {
             profile.refresh_layout(&testing::UnknownLayout).unwrap();
             let resolved = profile.resolve(&KeybindingPreferences::default());
             for command in Command::ALL {
-                let expected = if command == Command::CloseWorkspace {
+                let expected = if matches!(
+                    command,
+                    Command::CloseWorkspace
+                        | Command::NextTab
+                        | Command::PreviousTab
+                        | Command::MoveTabRight
+                        | Command::MoveTabLeft
+                        | Command::ScrollPageUp
+                        | Command::ScrollPageDown
+                        | Command::ScrollToTop
+                        | Command::ScrollToBottom
+                        | Command::KeyboardShortcuts
+                ) {
                     KeybindingState::Unassigned
                 } else {
                     KeybindingState::Default

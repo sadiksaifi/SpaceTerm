@@ -42,7 +42,7 @@ use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
-    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, ScrollbackMovement, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
@@ -426,6 +426,7 @@ pub(crate) trait TerminalSessionHandle {
     ) -> Result<Option<SelectionCopy>, SelectionCopyError>;
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
+    fn scroll_scrollback(&self, movement: ScrollbackMovement);
     fn set_find_query(&self, generation: FindQueryGeneration, query: String);
     fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection);
     fn end_find(&self, generation: FindQueryGeneration);
@@ -641,6 +642,14 @@ impl TerminalSessionHandle for TerminalSession {
         }
     }
 
+    fn scroll_scrollback(&self, movement: ScrollbackMovement) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::ScrollScrollback(movement)).is_err()
+        {
+            eprintln!("terminal scroll was dropped because the worker has stopped");
+        }
+    }
+
     fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
         if let Some(commands) = &self.commands
             && self.schedule_input.enqueue_find_query(generation, query)
@@ -833,6 +842,7 @@ enum Command {
     ),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
+    ScrollScrollback(ScrollbackMovement),
     FindQueryChanged,
     NavigateFind(FindQueryGeneration, FindDirection),
     RequestPaste(
@@ -909,6 +919,7 @@ impl fmt::Debug for Command {
             Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
             Self::Wheel(..) => "Wheel",
             Self::ScrollTo(..) => "ScrollTo",
+            Self::ScrollScrollback(..) => "ScrollScrollback",
             Self::FindQueryChanged => "FindQueryChanged",
             Self::NavigateFind(..) => "NavigateFind",
             Self::RequestPaste(..) => "RequestPaste",
@@ -1445,6 +1456,13 @@ impl TerminalWorker {
                     return true;
                 }
                 let action = self.emulator.scroll_to_at(offset_rows, generation);
+                self.apply_emulator_action(action)
+            }
+            Command::ScrollScrollback(movement) => {
+                if self.emulator.synchronized_output_deadline().is_some() {
+                    return true;
+                }
+                let action = self.emulator.scroll_scrollback(movement);
                 self.apply_emulator_action(action)
             }
             Command::FindQueryChanged => {

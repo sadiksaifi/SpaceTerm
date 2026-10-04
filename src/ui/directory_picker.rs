@@ -23,8 +23,8 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    NewWorkspace, OpenTerminalFind, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus,
+    MoveTabLeft, MoveTabRight, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab, SplitDown,
+    SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 use crate::domain::PinnedDirectory;
@@ -1387,6 +1387,10 @@ impl Render for DirectoryPicker {
                     .capture_action(block_parent_action::<ActivateTab7>)
                     .capture_action(block_parent_action::<ActivateTab8>)
                     .capture_action(block_parent_action::<ActivateTab9>)
+                    .capture_action(block_parent_action::<NextTab>)
+                    .capture_action(block_parent_action::<PreviousTab>)
+                    .capture_action(block_parent_action::<MoveTabRight>)
+                    .capture_action(block_parent_action::<MoveTabLeft>)
                     .capture_action(block_parent_action::<ClosePane>)
                     .capture_action(block_parent_action::<CloseTab>)
                     .capture_action(block_parent_action::<SplitRight>)

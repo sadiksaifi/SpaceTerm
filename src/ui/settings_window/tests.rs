@@ -4065,7 +4065,7 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
         super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
-        super::open_or_activate(cx);
+        super::open_or_activate(None, cx);
     });
     cx.run_until_parked();
     let settings_windows = |cx: &mut TestAppContext| {
@@ -4080,11 +4080,73 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
 
     // The Settings shortcut dispatches inside Settings once Settings is the main window.
     opened
-        .update(cx, |_, _, cx| super::open_or_activate(cx))
+        .update(cx, |_, _, cx| super::open_or_activate(None, cx))
         .expect("Settings should stay open");
     cx.run_until_parked();
 
     assert_eq!(settings_windows(cx).len(), 1);
+}
+
+#[gpui::test]
+fn keyboard_shortcuts_opens_settings_at_keybindings_and_moves_an_open_window_there(
+    cx: &mut TestAppContext,
+) {
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        &SettingsDocument::default(),
+    ));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::init(cx);
+    });
+    let settings_window = |cx: &mut TestAppContext| {
+        let windows = cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<SettingsWindow>())
+            .collect::<Vec<_>>();
+        let [window] = windows[..] else {
+            panic!(
+                "Settings should have exactly one window, found {}",
+                windows.len()
+            );
+        };
+        window
+    };
+    let active_section = |window: gpui::WindowHandle<SettingsWindow>, cx: &mut TestAppContext| {
+        window
+            .read_with(cx, |settings, _| settings.active_section())
+            .expect("Settings should stay open")
+    };
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenKeyboardShortcuts));
+    cx.run_until_parked();
+    let opened = settings_window(cx);
+    assert_eq!(active_section(opened, cx), SettingsSectionId::Keybindings);
+
+    opened
+        .update(cx, |settings, _, cx| {
+            settings.select_section(SettingsSectionId::Font, cx);
+        })
+        .expect("Settings should stay open");
+    cx.update(|cx| cx.dispatch_action(&super::OpenSettings));
+    cx.run_until_parked();
+    assert_eq!(
+        active_section(opened, cx),
+        SettingsSectionId::Font,
+        "Open Settings keeps the section in view"
+    );
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenKeyboardShortcuts));
+    cx.run_until_parked();
+    assert_eq!(settings_window(cx), opened);
+    assert_eq!(active_section(opened, cx), SettingsSectionId::Keybindings);
 }
 
 #[gpui::test]

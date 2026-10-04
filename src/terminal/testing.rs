@@ -8,10 +8,10 @@ use super::geometry::TerminalGeometry;
 use super::{
     FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, PasteConfirmationId,
     PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
-    SelectionCopy, SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalKeyInputAdapter,
-    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionError, SessionEvent,
+    StartedTerminalSession, TerminalAccessibilityModel, TerminalAppearanceUpdate,
+    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalLaunchPlan,
+    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 
@@ -141,6 +141,7 @@ pub(crate) enum RecordedSessionCommand {
     PointerAndCopySelection(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
+    ScrollScrollback(ScrollbackMovement),
     SetFindQuery(FindQueryGeneration, String),
     NavigateFind(FindQueryGeneration, FindDirection),
     EndFind(FindQueryGeneration),
@@ -542,6 +543,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
         self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
+    }
+
+    fn scroll_scrollback(&self, movement: ScrollbackMovement) {
+        self.record(RecordedSessionCommand::ScrollScrollback(movement));
     }
 
     fn set_find_query(&self, generation: FindQueryGeneration, query: String) {

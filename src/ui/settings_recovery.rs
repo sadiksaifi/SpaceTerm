@@ -74,7 +74,7 @@ fn reset(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) {
                     ..
                 }
             ) {
-                super::settings_window::open_or_activate(cx);
+                super::settings_window::open_or_activate(None, cx);
             }
         });
         if result.is_err() {

@@ -21,9 +21,10 @@ use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusC
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
-    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
-    PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError,
-    TERMINAL_KEY_CONTEXT, TabIdentity, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
+    NextTab, PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, PreviousTab,
+    RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -56,7 +57,9 @@ pub(crate) struct PreparedTabManagerRemoteRestart {
 }
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{CloseTabOutcome, PaneId, TabCollection, TabError, TabId, WorkspaceId};
+use crate::domain::{
+    CloseTabOutcome, PaneId, TabCollection, TabError, TabId, TabStep, WorkspaceId,
+};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
@@ -1335,6 +1338,21 @@ impl TabManager {
         }
     }
 
+    fn step_active_tab(&mut self, step: TabStep, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.tabs.neighbor_of_active_tab(step);
+        if tab_id != self.tabs.active_tab_id() {
+            self.activate_tab(tab_id, window, cx);
+        }
+    }
+
+    fn move_active_tab(&mut self, step: TabStep, cx: &mut Context<Self>) {
+        if self.tabs.move_active_tab(step) {
+            self.scroll_active_tab_into_view();
+            cx.emit(TabManagerEvent::PresentationChanged);
+            cx.notify();
+        }
+    }
+
     fn close_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_workspace_requested {
             return;
@@ -1426,6 +1444,22 @@ impl TabManager {
 
     fn on_activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_tab_at(8, window, cx);
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_active_tab(TabStep::Next, window, cx);
+    }
+
+    fn on_previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_active_tab(TabStep::Previous, window, cx);
+    }
+
+    fn on_move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Next, cx);
+    }
+
+    fn on_move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Previous, cx);
     }
 
     /// The copy of a dragged Tab that follows the pointer, at the size its Tab was painted.
@@ -1982,6 +2016,10 @@ impl Render for TabManager {
             .on_action(cx.listener(Self::on_activate_tab_7))
             .on_action(cx.listener(Self::on_activate_tab_8))
             .on_action(cx.listener(Self::on_activate_tab_9))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_previous_tab))
+            .on_action(cx.listener(Self::on_move_tab_right))
+            .on_action(cx.listener(Self::on_move_tab_left))
             .on_action(cx.listener(Self::on_close_tab))
             .child(
                 div()
@@ -3918,6 +3956,67 @@ mod tests {
         }
 
         assert_eq!(active_tab_ids, (1..=9).map(TabId::new).collect::<Vec<_>>());
+    }
+
+    #[gpui::test]
+    fn next_and_previous_tab_should_wrap_around_the_workspace(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+
+        let mut active_tab_ids = Vec::new();
+        for shortcut in [
+            "cmd-}",
+            "ctrl-tab",
+            "cmd-{",
+            "ctrl-shift-tab",
+            "ctrl-shift-tab",
+        ] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
+        }
+
+        assert_eq!(
+            active_tab_ids,
+            [1, 2, 1, 3, 2].map(TabId::new),
+            "Next Tab and Previous Tab should step through the Tab order and wrap at both ends"
+        );
+    }
+
+    #[gpui::test]
+    fn move_tab_should_reorder_the_active_tab_and_stop_at_the_ends(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+        let order =
+            |cx: &mut VisualTestContext| manager.read_with(cx, |manager, _| manager.tab_ids());
+
+        let mut orders = Vec::new();
+        for right in [true, false, false, false] {
+            if right {
+                cx.dispatch_action(MoveTabRight);
+            } else {
+                cx.dispatch_action(MoveTabLeft);
+            }
+            cx.run_until_parked();
+            orders.push(order(cx));
+        }
+
+        assert_eq!(
+            orders,
+            [[1, 2, 3], [1, 3, 2], [3, 1, 2], [3, 1, 2]]
+                .map(|order| order.map(TabId::new).to_vec()),
+        );
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(3),
+            "moving a Tab should keep it active"
+        );
     }
 
     #[gpui::test]

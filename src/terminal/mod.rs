@@ -46,7 +46,7 @@ pub(crate) use attention::AttentionFacts;
 pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
     ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot,
-    CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot,
+    CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot, ScrollbackMovement,
     TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
 #[cfg(test)]

@@ -6,7 +6,7 @@ mod workspace_collection;
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,
 };
-pub(crate) use tab_collection::{TabCollection, TabError};
+pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
 pub(crate) use terminal_tab::{
     FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef, SplitAxis,
     SplitId, TabId, TerminalTab, ZoomState,

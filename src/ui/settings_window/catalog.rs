@@ -684,6 +684,10 @@ shortcut_rows! {
     ActivateTab7 => "activate-tab-7",
     ActivateTab8 => "activate-tab-8",
     ActivateTab9 => "activate-tab-9",
+    NextTab => "next-tab",
+    PreviousTab => "previous-tab",
+    MoveTabRight => "move-tab-right",
+    MoveTabLeft => "move-tab-left",
     ClosePane => "close-pane",
     SplitRight => "split-right",
     SplitDown => "split-down",
@@ -698,11 +702,16 @@ shortcut_rows! {
     FindNext => "find-next",
     FindPrevious => "find-previous",
     ClearTerminalScreenAndScrollback => "clear-terminal-screen-and-scrollback",
+    ScrollPageUp => "scroll-page-up",
+    ScrollPageDown => "scroll-page-down",
+    ScrollToTop => "scroll-to-top",
+    ScrollToBottom => "scroll-to-bottom",
     IncreaseTerminalFontSize => "increase-terminal-font-size",
     DecreaseTerminalFontSize => "decrease-terminal-font-size",
     ResetTerminalFontSize => "reset-terminal-font-size",
     ToggleSidebar => "toggle-sidebar",
     ToggleSidebarFocus => "toggle-sidebar-focus",
+    KeyboardShortcuts => "keyboard-shortcuts",
 }
 
 #[cfg(test)]

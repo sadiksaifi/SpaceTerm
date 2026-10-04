@@ -2306,6 +2306,36 @@ fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppCon
     )));
 }
 
+#[gpui::test]
+fn scroll_shortcuts_move_scrollback_without_sending_keys(cx: &mut TestAppContext) {
+    use crate::terminal::ScrollbackMovement;
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let before = records.commands().len();
+
+    for shortcut in ["cmd-pageup", "cmd-pagedown", "cmd-home", "cmd-end"] {
+        cx.simulate_keystrokes(shortcut);
+    }
+
+    let commands = records.commands();
+    assert_eq!(
+        commands[before..]
+            .iter()
+            .map(|call| &call.command)
+            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .collect::<Vec<_>>(),
+        [
+            ScrollbackMovement::PageUp,
+            ScrollbackMovement::PageDown,
+            ScrollbackMovement::Top,
+            ScrollbackMovement::Bottom,
+        ]
+        .map(RecordedSessionCommand::ScrollScrollback)
+        .iter()
+        .collect::<Vec<_>>(),
+        "Scroll Commands move the viewport and send the terminal no key"
+    );
+}
+
 fn publish_terminal_preferences(
     preferences: crate::appearance::AppearancePreferences,
     cx: &mut App,

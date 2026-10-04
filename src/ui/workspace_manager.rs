@@ -46,10 +46,10 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    NewRemoteWorkspace, NewWorkspace, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind,
-    RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT,
-    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
+    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable, SplitDown,
+    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -3576,6 +3576,10 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab7>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab8>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab9>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<NextTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<PreviousTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabRight>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabLeft>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ClosePane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<SplitRight>))

@@ -31,9 +31,9 @@ use super::{
     CancelUnsafePaste, ClearTerminalScreenAndScrollback, CloseTerminalFind, ConfirmUnsafePaste,
     CopySelection, DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
-    OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
-    TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
-    TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
+    OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
+    TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT, TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
 use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
@@ -66,10 +66,11 @@ use crate::terminal::{
     NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, PaneTerminalState,
     PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
     PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
-    TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionHandle,
-    UnhandledKeyDiagnostic, WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
+    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionEvent,
+    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
+    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
+    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 #[cfg(test)]
 use gpui::ClipboardItem;
@@ -2477,6 +2478,30 @@ impl TerminalPane {
         }
     }
 
+    fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::PageUp, cx);
+    }
+
+    fn scroll_page_down(&mut self, _: &ScrollPageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::PageDown, cx);
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::Top, cx);
+    }
+
+    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::Bottom, cx);
+    }
+
+    /// Moves the Scrollback viewport for a Scroll Command; nothing reaches the PTY.
+    fn scroll_scrollback(&mut self, movement: ScrollbackMovement, cx: &mut Context<Self>) {
+        if let Some(session) = &self.terminal_session.session {
+            session.scroll_scrollback(movement);
+            self.reveal_scrollbar(cx);
+        }
+    }
+
     fn set_font_size(&mut self, font_size: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_delta = font_size - self.appearance.terminal.typography.cell_size;
         let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
@@ -4466,6 +4491,10 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::clear_screen_and_scrollback))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))

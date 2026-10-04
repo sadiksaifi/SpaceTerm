@@ -3945,6 +3945,73 @@ fn scrollback_wheel_changes_visible_rows() {
 }
 
 #[test]
+fn scroll_commands_page_through_scrollback_without_writing_to_the_pty() {
+    let mut emulator = emulator(10, 3);
+    for line in 0..12 {
+        emulator.feed(format!("line {line}\r\n").as_bytes());
+    }
+    // A snapshot is published only when the screen changed, so an unmoved viewport keeps the last.
+    let mut latest = emulator.snapshot().unwrap().unwrap();
+    let mut offset = |emulator: &mut TerminalEmulator| {
+        if let Some(snapshot) = emulator.snapshot().unwrap() {
+            latest = snapshot;
+        }
+        latest.scrollbar.offset_rows
+    };
+    let bottom = offset(&mut emulator);
+    assert_eq!(bottom, 13 - 3);
+
+    let mut offsets = Vec::new();
+    for movement in [
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::Top,
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::PageDown,
+        ScrollbackMovement::Bottom,
+        ScrollbackMovement::PageDown,
+    ] {
+        let action = emulator.scroll_scrollback(movement);
+        assert!(action.bytes.is_empty(), "{movement:?}");
+        assert!(action.screen_changed, "{movement:?}");
+        offsets.push(offset(&mut emulator));
+    }
+
+    assert_eq!(
+        offsets,
+        [bottom - 3, bottom - 6, 0, 0, 3, bottom, bottom],
+        "a page is the visible rows, and neither end wraps"
+    );
+}
+
+#[test]
+fn scroll_commands_leave_the_alternate_screen_and_its_program_alone() {
+    // With alternate-scroll mode the wheel sends arrow keys here; a Scroll Command never writes
+    // to the PTY, and the alternate screen has no Scrollback to move through.
+    let mut emulator = emulator(10, 3);
+    for line in 0..12 {
+        emulator.feed(format!("line {line}\r\n").as_bytes());
+    }
+    emulator.feed(b"\x1b[?1049h\x1b[?1007h\x1b[Halt");
+    let before = emulator.snapshot().unwrap().unwrap();
+    assert!(row_text(&before, 0).starts_with("alt"));
+
+    for movement in [
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::Top,
+        ScrollbackMovement::PageDown,
+        ScrollbackMovement::Bottom,
+    ] {
+        let action = emulator.scroll_scrollback(movement);
+        assert!(action.bytes.is_empty(), "{movement:?}");
+        if let Some(after) = emulator.snapshot().unwrap() {
+            assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
+            assert!(row_text(&after, 0).starts_with("alt"), "{movement:?}");
+        }
+    }
+}
+
+#[test]
 fn new_output_follows_the_bottom_only_from_a_following_viewport() {
     let mut following = emulator(10, 2);
     following.feed(b"one\r\ntwo\r\nthree");

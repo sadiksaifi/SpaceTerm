@@ -91,6 +91,7 @@ actions!(
     spaceterm,
     [
         OpenSettings,
+        OpenKeyboardShortcuts,
         CloseSettingsWindow,
         FocusSettingsSearch,
         ClearSettingsSearch
@@ -153,8 +154,8 @@ fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
         .then_some(handle)
 }
 
-/// Opens Settings, or activates it when it is already open.
-pub(crate) fn open_or_activate(cx: &mut App) {
+/// Opens Settings, or activates it when it is already open, showing `section` when one is given.
+pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
         // Settings edits the retained document through the appearance runtime. Without it there is
         // nothing to present, so declining is the honest outcome rather than an empty window.
@@ -163,7 +164,12 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     }
     if let Some(existing) = open_settings_window(cx) {
         cx.defer(move |cx| {
-            let _ = existing.update(cx, |_, window, _| window.activate_window());
+            let _ = existing.update(cx, |settings, window, cx| {
+                if let Some(section) = section {
+                    settings.select_section(section, cx);
+                }
+                window.activate_window();
+            });
         });
         return;
     }
@@ -182,13 +188,17 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         ),
         |window, cx| {
             let settings = cx.new(|cx| {
-                SettingsWindow::new_with_capabilities(
+                let mut settings = SettingsWindow::new_with_capabilities(
                     Rc::clone(&window_drag),
                     permissions.clone(),
                     theme_registry.clone(),
                     window,
                     cx,
-                )
+                );
+                if let Some(section) = section {
+                    settings.select_section(section, cx);
+                }
+                settings
             });
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
@@ -233,7 +243,10 @@ enum CloseIntent {
 
 /// Registers the application-scoped Settings actions.
 pub(crate) fn init(cx: &mut App) {
-    cx.on_action(|_: &OpenSettings, cx| open_or_activate(cx));
+    cx.on_action(|_: &OpenSettings, cx| open_or_activate(None, cx));
+    cx.on_action(|_: &OpenKeyboardShortcuts, cx| {
+        open_or_activate(Some(SettingsSectionId::Keybindings), cx);
+    });
 }
 
 fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
