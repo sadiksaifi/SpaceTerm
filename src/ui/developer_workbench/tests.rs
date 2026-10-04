@@ -82,6 +82,77 @@ fn status(workbench: &Entity<DeveloperWorkbench>, cx: &mut VisualTestContext) ->
     cx.update(|_, cx| workbench.read(cx).status.to_string())
 }
 
+#[gpui::test]
+fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut TestAppContext) {
+    let (_, platform) = install(cx);
+    let (workbench, cx) = open_workbench_window(cx);
+    workbench.update(cx, |workbench, cx| {
+        workbench.apply(
+            |preview| preview.set_transparency(0.8),
+            "Fixture transparency",
+            cx,
+        );
+        workbench.apply(|preview| preview.set_blur(false), "Fixture blur", cx);
+    });
+    cx.run_until_parked();
+    for (transparency, blur) in [(false, false), (true, false), (false, true)] {
+        platform.set_native_window_transparency_supported(transparency);
+        platform.set_native_window_blur_supported(blur);
+        cx.run_until_parked();
+        let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
+        let before_status = status(&workbench, cx);
+        let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+        let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+        assert!(
+            thumb.center().x > track.center().x,
+            "Blur must show its effective default"
+        );
+        // The disabled selected segment still presents the effective Default stop.
+        let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
+        let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
+        cx.update(|window, _| {
+            let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                    .map(|quad| quad.background)
+            };
+            assert_ne!(
+                fill(default_bounds),
+                fill(maximum_bounds),
+                "Default must be the selected stop"
+            );
+        });
+        for selector in [
+            "workbench-transparency-opaque",
+            "workbench-transparency-maximum",
+            "workbench-blur",
+        ] {
+            click(selector, cx);
+        }
+        assert_eq!(
+            workbench.read_with(cx, |workbench, _| workbench.preview.document()),
+            before
+        );
+        assert_eq!(status(&workbench, cx), before_status);
+    }
+    // Once both effects return, the controls present and edit the retained choices again.
+    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_blur_supported(true);
+    cx.run_until_parked();
+    let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+    let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+    assert!(thumb.center().x < track.center().x);
+    click("workbench-transparency-maximum", cx);
+    click("workbench-blur", cx);
+    let preferences = workbench.read_with(cx, |workbench, _| {
+        workbench.preview.document().preferences.window
+    });
+    assert_eq!(preferences.transparency, 1.0);
+    assert!(preferences.blur);
+}
+
 #[test]
 fn every_section_is_reachable_by_its_launch_argument() {
     for section in WorkbenchSection::ALL {
