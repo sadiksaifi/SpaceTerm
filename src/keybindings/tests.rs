@@ -956,6 +956,73 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
     );
 }
 
+#[test]
+fn an_inactive_override_keeps_its_reason_when_another_override_owns_its_default() {
+    let profile = KeymapProfile::new(
+        crate::platform::keyboard_layout::testing::us(),
+        TerminalConventions::ControlShiftShortcuts,
+        [
+            (
+                Command::CreateTab,
+                Some(DefaultBinding::new("ctrl-shift-t", &[])),
+            ),
+            (
+                Command::SplitRight,
+                Some(DefaultBinding::new("ctrl-shift-d", &[])),
+            ),
+        ],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    for (retained, reason) in [
+        (
+            "cmd-t",
+            Reservation::System(SystemReservation::DesktopShortcut),
+        ),
+        (
+            "ctrl-c",
+            Reservation::Terminal(TerminalConvention::ControlCharacter),
+        ),
+    ] {
+        let mut prefs = KeybindingPreferences::default();
+        prefs.set(Command::CreateTab, Some(shortcut(retained)));
+        prefs.set(Command::SplitRight, Some(shortcut("ctrl-shift-t")));
+        let original = prefs.clone();
+        assert_eq!(prefs.validate(), Ok(()));
+
+        let resolved = profile.resolve(&prefs);
+
+        assert_eq!(resolved.inactive_override(Command::CreateTab), Some(reason));
+        assert_eq!(
+            resolved.state(Command::CreateTab),
+            KeybindingState::Displaced {
+                by: Command::SplitRight
+            }
+        );
+        assert_eq!(resolved.shortcut(Command::CreateTab), None);
+        assert_eq!(
+            resolved.owner(&shortcut("ctrl-shift-t")),
+            Some(Command::SplitRight)
+        );
+        assert_eq!(
+            resolved.shortcut(Command::SplitRight),
+            Some(&shortcut("ctrl-shift-t"))
+        );
+        assert_eq!(
+            resolved.state(Command::SplitRight),
+            KeybindingState::Overridden
+        );
+        assert!(!resolved.key_bindings().iter().any(|binding| {
+            binding
+                .action()
+                .partial_eq(Command::CreateTab.action().as_ref())
+        }));
+        assert_eq!(prefs, original);
+    }
+}
+
 /// GPUI spells the platform modifier per host, so expectations use its own spelling.
 fn spelling(source: &str) -> String {
     gpui::Keystroke::parse(source).unwrap().unparse()

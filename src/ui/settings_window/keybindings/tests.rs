@@ -579,6 +579,76 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut TestAppContext) {
+    let document = with_keybindings(r#"{"create_tab":"cmd-t","split_right":"ctrl-shift-t"}"#);
+    let (window, cx) = open_keybindings_on(
+        MemoryStorage::with_document(&document),
+        |cx| {
+            use crate::keybindings::{DefaultBinding, KeymapProfile, TerminalConventions};
+            let profile = KeymapProfile::new(
+                crate::platform::keyboard_layout::testing::us(),
+                TerminalConventions::ControlShiftShortcuts,
+                [
+                    (
+                        Command::CreateTab,
+                        Some(DefaultBinding::new("ctrl-shift-t", &[])),
+                    ),
+                    (
+                        Command::SplitRight,
+                        Some(DefaultBinding::new("ctrl-shift-d", &[])),
+                    ),
+                ],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            cx.clear_key_bindings();
+            crate::keybindings::runtime::install(profile, cx);
+        },
+        cx,
+    );
+
+    assert_eq!(
+        description(&window, Command::CreateTab, cx),
+        Some(ShortcutDescription {
+            text: "Primary+T is reserved by Operating System for desktop shortcuts here. Its default shortcut is assigned to Split Right.".into(),
+            tone: CaptionTone::Warning,
+        })
+    );
+    assert_eq!(
+        retained(&window, Command::CreateTab, cx),
+        Some(Some(shortcut("cmd-t")))
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        None
+    );
+    click("settings-row-shortcut-create-tab-reset", cx);
+
+    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(retained(&window, Command::SplitRight, cx), Some(None));
+    assert_eq!(description(&window, Command::CreateTab, cx), None);
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        Some(shortcut("ctrl-shift-t"))
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::SplitRight)
+            .cloned()),
+        None
+    );
+}
+
+#[gpui::test]
 fn reset_all_restores_every_keybinding(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(
         with_keybindings(r#"{"new_workspace":"cmd-shift-y","close_tab":null}"#),

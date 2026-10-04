@@ -268,7 +268,7 @@ impl KeymapProfile {
 
     /// Applies the retained overrides to the host defaults. An override Reserved on this host,
     /// such as a Command chord written on another desktop, stays retained but inactive, and its
-    /// Command keeps the host default.
+    /// Command falls back to the host default when that Shortcut is available.
     pub fn resolve(&self, preferences: &KeybindingPreferences) -> ResolvedKeymap {
         let mut resolved = ResolvedKeymap::default();
         for (command, shortcut) in preferences.iter() {

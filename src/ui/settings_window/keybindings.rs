@@ -568,7 +568,9 @@ impl SettingsWindow {
             ),
             _ => match (resolved.state(command), resolved.inactive_override(command)) {
                 (
-                    state @ (KeybindingState::Default | KeybindingState::Unassigned),
+                    state @ (KeybindingState::Default
+                    | KeybindingState::Unassigned
+                    | KeybindingState::Displaced { .. }),
                     Some(reservation),
                 ) => {
                     let chord = keybindings
@@ -584,12 +586,17 @@ impl SettingsWindow {
                             system_reservation_text(reason, presentation)
                         }
                     };
-                    // The default stands in for the override, so only a Command left without a
-                    // Shortcut reads as an error.
-                    let (outcome, tone) = if state == KeybindingState::Default {
-                        (", so the default shortcut is active", CaptionTone::Warning)
-                    } else {
-                        (" and isn't active", CaptionTone::Error)
+                    // Keep the inactive override's reason when another Command owns the default.
+                    let (outcome, tone) = match state {
+                        KeybindingState::Default => (
+                            ", so the default shortcut is active".to_owned(),
+                            CaptionTone::Warning,
+                        ),
+                        KeybindingState::Displaced { by } => (
+                            format!(". Its default shortcut is assigned to {}", by.label()),
+                            CaptionTone::Warning,
+                        ),
+                        _ => (" and isn't active".to_owned(), CaptionTone::Error),
                     };
                     (format!("{chord} is {reason} here{outcome}.").into(), tone)
                 }
