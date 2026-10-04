@@ -489,6 +489,29 @@ mod tests {
     }
 
     #[test]
+    fn native_control_bracket_preserves_layout_and_negotiated_protocols() {
+        let control = Modifiers::control();
+        // German AltGr selects [ on physical Digit8 without setting portable Alt.
+        let german_bracket = NativeGesture::new(9, "[", Some('8'), control);
+        let us_bracket = NativeGesture::new(26, "[", Some('['), control);
+        for gesture in [&german_bracket, &us_bracket] {
+            assert_eq!(encode_gesture(&[], gesture), (b"\x1b".to_vec(), vec![]));
+            assert_eq!(
+                encode_gesture(b"\x1b[>4;2m", gesture),
+                (b"\x1b[27;5;91~".to_vec(), vec![])
+            );
+        }
+        assert_eq!(
+            encode_gesture(b"\x1b[>15u", &german_bracket),
+            (b"\x1b[56;5u".to_vec(), b"\x1b[56;5:3u".to_vec())
+        );
+        assert_eq!(
+            encode_gesture(b"\x1b[>15u", &us_bracket),
+            (b"\x1b[91;5u".to_vec(), b"\x1b[91;5:3u".to_vec())
+        );
+    }
+
+    #[test]
     fn native_control_chords_encode_the_layout_key_instead_of_its_us_position() {
         let control = Modifiers::control();
         let control_shift = Modifiers {

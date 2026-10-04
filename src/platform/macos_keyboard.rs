@@ -530,6 +530,39 @@ mod tests {
     }
 
     #[test]
+    fn native_control_bracket_preserves_negotiated_protocols() {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        for policy in [OptionAsAltPolicy::None, OptionAsAltPolicy::Both] {
+            let bridge = MacosKeyboardBridge::new(policy);
+            let mut emulator =
+                crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                    CellGridSize::new(80, 24),
+                    LogicalCellSize::new(10.0, 20.0),
+                    BackingScale::ONE,
+                ))
+                .unwrap();
+            for (mode, expected_press, expected_release) in [
+                (b"".as_slice(), b"\x1b".as_slice(), b"".as_slice()),
+                (b"\x1b[>4;2m", b"\x1b[27;5;91~", b""),
+                (b"\x1b[>4;0m\x1b[>15u", b"\x1b[91;5u", b"\x1b[91;5:3u"),
+            ] {
+                emulator.feed(mode);
+                // current_key restores layout text when AppKit reports a control character.
+                let mut event = native(33, "[");
+                event.modifiers.control = true;
+                event.modifiers.control_left = true;
+                let press = encoded(bridge.translate(event.clone()));
+                event.action = KeyAction::Release;
+                let release = encoded(bridge.translate(event));
+                assert_eq!(emulator.key(press).unwrap().bytes, expected_press);
+                assert_eq!(emulator.key(release).unwrap().bytes, expected_release);
+            }
+        }
+    }
+
+    #[test]
     fn help_shortcut_reaches_appkit_without_entering_terminal_input() {
         let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
         for action in [KeyAction::Press, KeyAction::Repeat, KeyAction::Release] {
