@@ -21,6 +21,7 @@ import shlex
 import shutil
 import signal
 import statistics
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,6 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTES = ROOT.parent / ".linux-port"
 DISPLAY_NUMBER = 94
 WAYLAND_SOCKET = "wayland-spaceterm-94"
 MARKER = "spaceterm-a11y"
@@ -51,7 +51,8 @@ def parse_args():
     parser.add_argument("--backend", choices=("both", "x11", "wayland"), default="both")
     parser.add_argument("--binary", type=Path, help="Existing source-built executable; skips building")
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
-    parser.add_argument("--output-dir", type=Path, default=NOTES / "accessibility-smoke")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Evidence directory; defaults to a fresh temporary directory")
     parser.add_argument("--session-timeout", type=int, default=600,
                         help="Maximum runtime per display backend in seconds")
     parser.add_argument("--isolation-only", action="store_true",
@@ -186,9 +187,45 @@ def signal_private_process(pid, started, home, runtime, kind):
         os.close(descriptor)
 
 
+def create_private_runtime(output):
+    runtime = Path(tempfile.mkdtemp(prefix="spaceterm-a11y-")).resolve()
+    try:
+        identity = runtime.stat()
+        scope = output.stat()
+        ownership = {"runtime_device": identity.st_dev, "runtime_inode": identity.st_ino,
+                     "output_device": scope.st_dev, "output_inode": scope.st_ino}
+        descriptor = os.open(output / "private-runtime.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(ownership, stream)
+    except Exception:
+        shutil.rmtree(runtime)
+        raise
+    return runtime
+
+
+def require_private_runtime(runtime, output):
+    try:
+        identity = runtime.lstat()
+        scope = output.stat()
+        record = output / "private-runtime.json"
+        record_identity = record.lstat()
+        require(runtime.is_absolute() and stat.S_ISDIR(identity.st_mode)
+                and identity.st_uid == os.getuid() and stat.S_IMODE(identity.st_mode) == 0o700
+                and stat.S_ISREG(record_identity.st_mode) and record_identity.st_uid == os.getuid()
+                and stat.S_IMODE(record_identity.st_mode) == 0o600,
+                "private_runtime_ownership_missing")
+        require(json.loads(record.read_text()) == {
+            "runtime_device": identity.st_dev, "runtime_inode": identity.st_ino,
+            "output_device": scope.st_dev, "output_inode": scope.st_ino},
+            "private_runtime_ownership_missing")
+    except (OSError, ValueError):
+        raise SmokeFailure("private_runtime_ownership_missing") from None
+
+
 def cleanup_private_processes(runtime, home, output):
-    require(runtime.parent == NOTES.resolve() and runtime.name.startswith("r94-")
-            and home == output / "home", "cleanup_private_scope_invalid")
+    require_private_runtime(runtime, output)
+    require(home == output / "home", "cleanup_private_scope_invalid")
     proof = {"pidfd_identity_checked": True, "exact_home_and_runtime_required": True,
              "private_environment": {"HOME": str(home), "XDG_RUNTIME_DIR": str(runtime)},
              "process_group_signals_used": False, "passed": False}
@@ -1363,8 +1400,7 @@ def verify_private_settings_bus(bus, output):
         return {key: actual.get(key.encode()) == value.encode() for key, value in expected.items()}
 
     try:
-        require(runtime.parent == NOTES.resolve() and runtime.name.startswith("r94-"),
-                "private_runtime_ownership_missing")
+        require_private_runtime(runtime, output)
         require(all(os.environ.get(key) == value for key, value in expected.items()),
                 "private_settings_environment_missing")
         profile = Path(expected["DCONF_PROFILE"])
@@ -1748,13 +1784,13 @@ def main():
     require(sys.platform == "linux", "linux_required")
     require(sys.version_info >= (3, 11), "system_python_3_11_required")
     require(1 <= args.session_timeout <= 1800, "session_timeout_out_of_range")
-    output = args.output_dir.resolve()
-    require(output.is_relative_to(NOTES.resolve()), "output_must_be_under_linux_port")
     if args.private_session:
         require(os.environ.get("SPACETERM_ACCESSIBILITY_SMOKE_SESSION") == args.private_session,
                 "private_session_wrapper_required")
-        require(Path(os.environ.get("XDG_RUNTIME_DIR", "/")).resolve().is_relative_to(NOTES.resolve())
-                and Path(os.environ.get("XDG_CONFIG_HOME", "/")).resolve().is_relative_to(output)
+        require(args.output_dir is not None, "private_session_output_required")
+        output = args.output_dir.resolve()
+        require_private_runtime(Path(os.environ.get("XDG_RUNTIME_DIR", "/")), output)
+        require(Path(os.environ.get("XDG_CONFIG_HOME", "/")).resolve().is_relative_to(output)
                 and Path(os.environ.get("HOME", "/")).resolve().is_relative_to(output),
                 "private_session_directories_required")
         return private_session(args)
@@ -1763,6 +1799,8 @@ def main():
     # Verify kernel support before starting any private bus/display/reader.
     capability_descriptor = os.pidfd_open(os.getpid())
     os.close(capability_descriptor)
+    output = (args.output_dir.resolve() if args.output_dir else
+              Path(tempfile.mkdtemp(prefix="spaceterm-accessibility-smoke-")))
     output.mkdir(parents=True, exist_ok=True)
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
@@ -1772,8 +1810,7 @@ def main():
     for backend in backends:
         backend_output = run_output / backend
         backend_output.mkdir()
-        runtime = Path(tempfile.mkdtemp(prefix="r94-", dir=NOTES))
-        runtime.chmod(0o700)
+        runtime = create_private_runtime(backend_output)
         environment = dict(os.environ)
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS", "DBUS_STARTER_ADDRESS",
                     "DBUS_STARTER_BUS_TYPE", "AT_SPI_BUS_ADDRESS", "XAUTHORITY", "SESSION_MANAGER",

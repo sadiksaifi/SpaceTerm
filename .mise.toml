@@ -669,7 +669,7 @@ usage = '''
 flag "--backend <backend>" help="both, x11 or wayland" default="both"
 flag "--binary <binary>" help="Existing source executable; skips building"
 flag "--expected-binary-sha256 <expected_binary_sha256>" help="Required SHA256 pin for --binary"
-flag "--output-dir <output_dir>" help="Output directory beneath the sibling .linux-port folder"
+flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
 flag "--session-timeout <session_timeout>" help="Maximum runtime per backend in seconds" default="600"
 flag "--isolation-only" help="Verify private bus/dconf ownership without launching a display"
 '''
@@ -685,7 +685,7 @@ exec /usr/bin/python3 scripts/accessibility-smoke-linux.py "$@"
 [tasks."test:accessibility:regressions:linux"]
 description = "Test real Linux accessibility FIFOs and owned-process cleanup"
 usage = '''
-flag "--output-dir <output_dir>" help="Evidence directory beneath the sibling .linux-port folder"
+flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
 '''
 run = '''
 set --

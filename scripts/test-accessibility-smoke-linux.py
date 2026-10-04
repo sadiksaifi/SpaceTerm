@@ -3,7 +3,7 @@
 
 Requires system Python 3.11+, the installed Orca debug.py source and kernel pidfds.
 No display, D-Bus, application or screen reader is launched. Retained evidence
-stays under --output-dir; temporary runtime ownership markers stay under NOTES.
+stays under --output-dir, or in a fresh temporary directory by default.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTES = ROOT.parent / ".linux-port"
 
 
 def check(condition, classification):
@@ -182,7 +181,7 @@ def cleanup_regression(smoke, directory, proof, fail_after_spawn=False):
     check(libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0, "subreaper_state_unavailable")
     home = directory / "home"
     home.mkdir(mode=0o700)
-    runtime = Path(tempfile.mkdtemp(prefix="r94-", dir=NOTES))
+    runtime = smoke.create_private_runtime(directory)
     control_home = directory / "control-home"
     control_runtime = directory / "control-runtime"
     owner = None
@@ -375,14 +374,80 @@ def cleanup_failure_regression(smoke, directory, proof):
         raise AssertionError("controlled_failure_not_raised")
 
 
+def storage_regression(smoke, directory, proof):
+    # Copy just the script into a clean checkout with no sibling review folder.
+    checkout = directory / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    script = checkout / "scripts/accessibility-smoke-linux.py"
+    shutil.copy2(ROOT / "scripts/accessibility-smoke-linux.py", script)
+    environment = dict(os.environ)
+    temporary = directory / "temporary"
+    temporary.mkdir(mode=0o700)
+    environment["TMPDIR"] = str(temporary)
+    # The missing SHA256 pin stops at the existing binary gate, after output
+    # setup and before any build, bus, display, application or reader launch.
+    for output in (directory / "outside checkout", Path("relative output"), None):
+        arguments = [] if output is None else ["--output-dir", str(output)]
+        result = subprocess.run(
+            [sys.executable, str(script), "--binary", "unused", *arguments],
+            cwd=checkout, env=environment, capture_output=True, text=True)
+        check(result.returncode != 0 and "existing_binary_sha256_required" in result.stderr,
+              "output_rejected_before_binary_gate")
+        if output is not None:
+            destination = output if output.is_absolute() else checkout / output
+            check(any(destination.glob("run-*")), "custom_output_not_created")
+    defaults = list(temporary.glob("spaceterm-accessibility-smoke-*"))
+    check(len(defaults) == 1 and any(defaults[0].glob("run-*")), "default_output_not_temporary")
+    check(not (directory / ".linux-port").exists(), "sibling_folder_created")
+    runtime = smoke.create_private_runtime(directory)
+    other_runtime = Path(tempfile.mkdtemp(prefix="spaceterm-a11y-"))
+    link = directory / "runtime-link"
+    link.symlink_to(runtime, target_is_directory=True)
+
+    def rejected(candidate, output=directory):
+        try:
+            smoke.require_private_runtime(candidate, output)
+        except smoke.SmokeFailure as error:
+            check(str(error) == "private_runtime_ownership_missing", "wrong_ownership_failure")
+        else:
+            raise AssertionError("unowned_runtime_accepted")
+
+    try:
+        smoke.require_private_runtime(runtime, directory)
+        rejected(other_runtime)
+        rejected(link)
+        wrong_output = directory / "other-output"
+        wrong_output.mkdir()
+        shutil.copy2(directory / "private-runtime.json", wrong_output / "private-runtime.json")
+        rejected(runtime, wrong_output)
+        runtime.chmod(0o755)
+        rejected(runtime)
+        runtime.chmod(0o700)
+        smoke.require_private_runtime(runtime, directory)
+        # Cleanup must reject an unowned scope before attempting any signals.
+        try:
+            smoke.cleanup_private_processes(other_runtime, directory / "home", directory)
+        except smoke.SmokeFailure as error:
+            check(str(error) == "private_runtime_ownership_missing", "wrong_cleanup_scope_failure")
+        else:
+            raise AssertionError("unowned_cleanup_scope_accepted")
+        proof["unowned_symlink_shared_and_wrong_output_runtimes_rejected"] = True
+    finally:
+        shutil.rmtree(runtime)
+        shutil.rmtree(other_runtime)
+
+    proof.update(clean_checkout_output_accepted=True, default_output_temporary=True, passed=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=NOTES / "accessibility-regressions")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Evidence directory; defaults to a fresh temporary directory")
     args = parser.parse_args()
     check(sys.platform == "linux", "linux_required")
     check(sys.version_info >= (3, 11), "system_python_3_11_required")
-    output = args.output_dir.resolve()
-    check(output.is_relative_to(NOTES.resolve()), "output_must_be_under_linux_port")
+    output = (args.output_dir.resolve() if args.output_dir else
+              Path(tempfile.mkdtemp(prefix="spaceterm-accessibility-regressions-")))
     check(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "pidfd_required")
     descriptor = os.pidfd_open(os.getpid())
     os.close(descriptor)
@@ -390,9 +455,11 @@ def main():
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     smoke = load_smoke()
     proof = {"linux": True, "passed": False, "no_display_bus_application_or_reader": True,
-             "parser": {"passed": False}, "process_cleanup": {"passed": False},
+             "storage": {"passed": False}, "parser": {"passed": False},
+             "process_cleanup": {"passed": False},
              "process_failure_cleanup": {"passed": False}}
-    regressions = (("parser", parser_regression), ("process_cleanup", cleanup_regression),
+    regressions = (("storage", storage_regression), ("parser", parser_regression),
+                   ("process_cleanup", cleanup_regression),
                    ("process_failure_cleanup", cleanup_failure_regression))
     for name, regression in regressions:
         directory = run_dir / name
