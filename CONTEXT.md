@@ -129,7 +129,8 @@ macOS or Super shortcuts on Linux.
 
 **Inactive Override**:
 A retained override that is invalid or Reserved on this host, such as a macOS Command-T read on
-Linux. Settings keep it unchanged, and the Command keeps its host default.
+Linux. Settings keep it unchanged, and the Command keeps its host default unless another Command owns that
+Shortcut.
 
 **Keyboard Shortcuts**:
 The Command that opens Settings at its Keybindings section.
