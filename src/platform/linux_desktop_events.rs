@@ -1,13 +1,59 @@
 //! Coalesces desktop callbacks into one application-owned foreground task.
 use gpui::{App, Task};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct Pending {
+    windows: HashMap<gpui::AnyWindowHandle, WindowEffects>,
+    activation: Option<Option<String>>,
+}
+
+#[derive(Default)]
+struct WindowEffects {
     bell: bool,
     attention: Option<bool>,
-    activation: Option<Option<String>>,
+}
+
+/// GPUI's native window operations are the only effects of this foreground event pump.
+trait DesktopEffects {
+    fn bell(&mut self, window: gpui::AnyWindowHandle);
+    fn attention(&mut self, window: gpui::AnyWindowHandle, requested: bool);
+    fn activate(&mut self, token: Option<String>);
+}
+struct GpuiEffects<'a>(&'a mut App);
+impl DesktopEffects for GpuiEffects<'_> {
+    fn bell(&mut self, handle: gpui::AnyWindowHandle) {
+        let _ = handle.update(self.0, |_, window, _| window.play_system_bell());
+    }
+    fn attention(&mut self, handle: gpui::AnyWindowHandle, requested: bool) {
+        let _ = handle.update(self.0, |_, window, _| {
+            if requested {
+                window.request_attention();
+            } else {
+                window.cancel_attention();
+            }
+        });
+    }
+    fn activate(&mut self, token: Option<String>) {
+        crate::app::activate_default_window(self.0, token.as_deref());
+    }
+}
+impl Pending {
+    fn apply(self, effects: &mut impl DesktopEffects) {
+        for (window, pending) in self.windows {
+            if pending.bell {
+                effects.bell(window);
+            }
+            if let Some(requested) = pending.attention {
+                effects.attention(window, requested);
+            }
+        }
+        if let Some(token) = self.activation {
+            effects.activate(token);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -25,11 +71,11 @@ impl DesktopEventSender {
         );
         let _ = self.wake.try_send(());
     }
-    pub(super) fn bell(&self) {
-        self.send(|pending| pending.bell = true);
+    pub(super) fn bell(&self, window: gpui::AnyWindowHandle) {
+        self.send(|pending| pending.windows.entry(window).or_default().bell = true);
     }
-    pub(super) fn attention(&self, requested: bool) {
-        self.send(|pending| pending.attention = Some(requested));
+    pub(super) fn attention(&self, window: gpui::AnyWindowHandle, requested: bool) {
+        self.send(|pending| pending.windows.entry(window).or_default().attention = Some(requested));
     }
     pub(super) fn activate(&self, token: Option<String>) {
         let token = token.filter(|value| !value.is_empty() && value.len() <= 4096);
@@ -64,34 +110,13 @@ impl LinuxDesktopEvents {
         };
         let pending = self.pending.clone();
         *self.task.borrow_mut() = Some(cx.spawn(async move |cx| {
-            let mut attention_window: Option<gpui::WindowHandle<crate::ui::WorkspaceManager>> =
-                None;
             while receiver.recv().await.is_ok() {
                 let events = std::mem::take(
                     &mut *pending
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
-                cx.update(|cx| {
-                    let front = crate::ui::updates::front_workspace_window(cx);
-                    if events.bell
-                        && let Some(handle) = front
-                    {
-                        let _ = handle.update(cx, |_, window, _| window.play_system_bell());
-                    }
-                    if let Some(requested) = events.attention {
-                        if let Some(handle) = attention_window.take() {
-                            let _ = handle.update(cx, |_, window, _| window.cancel_attention());
-                        }
-                        if requested && let Some(handle) = front {
-                            let _ = handle.update(cx, |_, window, _| window.request_attention());
-                            attention_window = Some(handle);
-                        }
-                    }
-                    if let Some(token) = events.activation {
-                        crate::app::activate_default_window(cx, token.as_deref());
-                    }
-                });
+                cx.update(|cx| events.apply(&mut GpuiEffects(cx)));
             }
         }));
     }
@@ -107,6 +132,52 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
     use zbus::zvariant::OwnedValue;
+
+    #[gpui::test]
+    fn linux_desktop_events_coalesce_and_deliver_to_each_origin(cx: &mut gpui::TestAppContext) {
+        #[derive(Default)]
+        struct Recorded {
+            bells: Vec<gpui::AnyWindowHandle>,
+            attention: HashMap<gpui::AnyWindowHandle, bool>,
+        }
+        impl super::DesktopEffects for Recorded {
+            fn bell(&mut self, window: gpui::AnyWindowHandle) {
+                self.bells.push(window);
+            }
+            fn attention(&mut self, window: gpui::AnyWindowHandle, requested: bool) {
+                self.attention.insert(window, requested);
+            }
+            fn activate(&mut self, _token: Option<String>) {}
+        }
+        use crate::terminal::attention_runtime::{AudioBell, DockAttentionDriver};
+        let first = cx.add_window(|_, _| gpui::Empty).into();
+        let second = cx.add_window(|_, _| gpui::Empty).into();
+        let (sender, events) = super::LinuxDesktopEvents::new();
+        let mut audio = crate::platform::linux_attention::LinuxAudioBell(sender.clone());
+        let mut attention = crate::platform::linux_attention::LinuxWindowAttention::new(sender);
+        audio.play(Some(first));
+        audio.play(Some(first));
+        audio.play(Some(second));
+        attention.set_windows(&[first]);
+        attention.request().unwrap();
+        attention.set_windows(&[first, second]);
+        let mut recorded = Recorded::default();
+        std::mem::take(&mut *events.pending.lock().unwrap()).apply(&mut recorded);
+        assert_eq!(recorded.bells.len(), 2);
+        assert!(recorded.bells.contains(&first) && recorded.bells.contains(&second));
+        assert_eq!(
+            recorded.attention,
+            HashMap::from([(first, true), (second, true)])
+        );
+        attention.set_windows(&[second]);
+        attention.cancel();
+        let mut cancellations = Recorded::default();
+        std::mem::take(&mut *events.pending.lock().unwrap()).apply(&mut cancellations);
+        assert_eq!(
+            cancellations.attention,
+            HashMap::from([(first, false), (second, false)])
+        );
+    }
 
     struct PrivateBus {
         child: Child,

@@ -36,10 +36,13 @@ impl DockAttentionSchedule {
 pub(crate) trait DockAttentionDriver {
     fn request(&mut self) -> Result<(), AttentionFailure>;
     fn cancel(&mut self);
+    /// The Operating-System Windows whose Panes own the current attention request.
+    /// Application-wide native attention adapters can ignore this set.
+    fn set_windows(&mut self, _windows: &[gpui::AnyWindowHandle]) {}
 }
 
 pub(crate) trait AudioBell {
-    fn play(&mut self);
+    fn play(&mut self, window: Option<gpui::AnyWindowHandle>);
 }
 
 #[cfg_attr(
@@ -63,11 +66,15 @@ impl DockAttentionDriver for Box<dyn DockAttentionDriver> {
     fn cancel(&mut self) {
         self.as_mut().cancel();
     }
+    fn set_windows(&mut self, windows: &[gpui::AnyWindowHandle]) {
+        self.as_mut().set_windows(windows);
+    }
 }
 
 struct DockAttentionCoordinator<D: DockAttentionDriver> {
     driver: D,
     owners: BTreeSet<AttentionPaneId>,
+    windows: BTreeMap<AttentionPaneId, gpui::AnyWindowHandle>,
     outstanding: bool,
     last_request: Option<Instant>,
     last_failure: Option<AttentionFailure>,
@@ -81,6 +88,7 @@ impl<D: DockAttentionDriver> DockAttentionCoordinator<D> {
         Self {
             driver,
             owners: BTreeSet::new(),
+            windows: BTreeMap::new(),
             outstanding: false,
             last_request: None,
             last_failure: None,
@@ -92,6 +100,7 @@ impl<D: DockAttentionDriver> DockAttentionCoordinator<D> {
 
     fn request(&mut self, pane: AttentionPaneId, now: Instant) -> Option<DockAttentionSchedule> {
         self.owners.insert(pane);
+        self.sync_windows();
         self.reconcile(now)
     }
 
@@ -115,8 +124,24 @@ impl<D: DockAttentionDriver> DockAttentionCoordinator<D> {
         None
     }
 
+    fn sync_windows(&mut self) {
+        let mut windows = Vec::new();
+        for pane in &self.owners {
+            if let Some(window) = self.windows.get(pane)
+                && !windows.contains(window)
+            {
+                windows.push(*window);
+            }
+        }
+        self.driver.set_windows(&windows);
+    }
+
     fn clear(&mut self, pane: AttentionPaneId) {
-        if !self.owners.remove(&pane) || !self.owners.is_empty() {
+        if !self.owners.remove(&pane) {
+            return;
+        }
+        self.sync_windows();
+        if !self.owners.is_empty() {
             return;
         }
         self.invalidate_schedule();
@@ -380,7 +405,7 @@ struct Runtime {
     dock: DockAttentionCoordinator<Box<dyn DockAttentionDriver>>,
     notifications: NotificationCoordinator<Box<dyn NotificationDriver>>,
     activity: Rc<dyn crate::platform::application_activity::ApplicationActivity>,
-    panes: BTreeSet<AttentionPaneId>,
+    panes: BTreeMap<AttentionPaneId, Option<gpui::AnyWindowHandle>>,
     next_pane: u64,
     tasks: Vec<(AttentionSchedule, Task<()>)>,
 }
@@ -416,7 +441,7 @@ impl AttentionRuntime {
             dock: DockAttentionCoordinator::new(dock),
             notifications: NotificationCoordinator::new(notifications),
             activity,
-            panes: BTreeSet::new(),
+            panes: BTreeMap::new(),
             next_pane: 0,
             tasks: Vec::new(),
         })))
@@ -428,7 +453,7 @@ impl AttentionRuntime {
     ) -> Self {
         struct Silent;
         impl AudioBell for Silent {
-            fn play(&mut self) {}
+            fn play(&mut self, _window: Option<gpui::AnyWindowHandle>) {}
         }
         impl DockAttentionDriver for Silent {
             fn request(&mut self) -> Result<(), AttentionFailure> {
@@ -448,7 +473,7 @@ impl AttentionRuntime {
         )
     }
 
-    pub(crate) fn register_pane(&self) -> AttentionPaneId {
+    pub(crate) fn register_pane(&self, window: Option<gpui::AnyWindowHandle>) -> AttentionPaneId {
         let mut runtime = self.0.borrow_mut();
         // Exhausting this identity space requires creating more Panes than the process can retain.
         runtime.next_pane = runtime
@@ -456,16 +481,20 @@ impl AttentionRuntime {
             .checked_add(1)
             .expect("attention identity exhausted");
         let pane = AttentionPaneId(runtime.next_pane);
-        runtime.panes.insert(pane);
+        runtime.panes.insert(pane, window);
+        if let Some(window) = window {
+            runtime.dock.windows.insert(pane, window);
+        }
         pane
     }
 
     pub(crate) fn remove_pane(&self, pane: AttentionPaneId) {
         let mut runtime = self.0.borrow_mut();
-        if !runtime.panes.remove(&pane) {
+        if runtime.panes.remove(&pane).is_none() {
             return;
         }
         runtime.dock.clear(pane);
+        runtime.dock.windows.remove(&pane);
         runtime.notifications.clear(pane);
         runtime.cancel_invalid_tasks();
     }
@@ -477,12 +506,12 @@ impl AttentionRuntime {
         now: Instant,
     ) -> AttentionSchedules {
         let mut runtime = self.0.borrow_mut();
-        if !runtime.panes.contains(&pane) {
+        let Some(window) = runtime.panes.get(&pane).copied() else {
             return AttentionSchedules::default();
-        }
+        };
         let mut schedules = AttentionSchedules::default();
         if effects.audio_bell {
-            runtime.audio.play();
+            runtime.audio.play(window);
         }
         if effects.request_dock_attention {
             schedules.dock = runtime.dock.request(pane, now);
@@ -1022,6 +1051,8 @@ mod tests {
     #[derive(Default)]
     struct RecordedEffects {
         bells: usize,
+        bell_windows: Vec<Option<gpui::AnyWindowHandle>>,
+        dock_windows: Vec<gpui::AnyWindowHandle>,
         dock_requests: usize,
         dock_cancels: usize,
         deliveries: Vec<u32>,
@@ -1030,11 +1061,16 @@ mod tests {
 
     struct RecordingEffects(Rc<RefCell<RecordedEffects>>);
     impl AudioBell for RecordingEffects {
-        fn play(&mut self) {
-            self.0.borrow_mut().bells += 1;
+        fn play(&mut self, window: Option<gpui::AnyWindowHandle>) {
+            let mut effects = self.0.borrow_mut();
+            effects.bells += 1;
+            effects.bell_windows.push(window);
         }
     }
     impl DockAttentionDriver for RecordingEffects {
+        fn set_windows(&mut self, windows: &[gpui::AnyWindowHandle]) {
+            self.0.borrow_mut().dock_windows = windows.to_vec();
+        }
         fn request(&mut self) -> Result<(), AttentionFailure> {
             self.0.borrow_mut().dock_requests += 1;
             Ok(())
@@ -1081,14 +1117,41 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn attention_effects_retain_the_originating_windows(cx: &mut gpui::TestAppContext) {
+        let first_window = cx.add_window(|_, _| gpui::Empty).into();
+        let second_window = cx.add_window(|_, _| gpui::Empty).into();
+        let (runtime, effects) = recording_runtime();
+        let first = runtime.register_pane(Some(first_window));
+        let same_window = runtime.register_pane(Some(first_window));
+        let second = runtime.register_pane(Some(second_window));
+        let now = Instant::now();
+        runtime.apply(first, bell_effects(), now);
+        runtime.apply(same_window, bell_effects(), now);
+        runtime.apply(second, bell_effects(), now);
+        assert_eq!(
+            effects.borrow().bell_windows,
+            [Some(first_window), Some(first_window), Some(second_window)]
+        );
+        assert_eq!(effects.borrow().dock_windows, [first_window, second_window]);
+        runtime.remove_pane(first);
+        assert_eq!(effects.borrow().dock_windows, [first_window, second_window]);
+        runtime.remove_pane(same_window);
+        assert_eq!(effects.borrow().dock_windows, [second_window]);
+        assert_eq!(effects.borrow().dock_cancels, 0);
+        runtime.remove_pane(second);
+        assert!(effects.borrow().dock_windows.is_empty());
+        assert_eq!(effects.borrow().dock_cancels, 1);
+    }
+
     #[test]
     fn removed_registration_cannot_request_effects_or_target_successor() {
         let epoch = Instant::now();
         let (runtime, effects) = recording_runtime();
-        let old = runtime.register_pane();
+        let old = runtime.register_pane(None);
         let pending = runtime.apply(old, bell_effects(), epoch);
         runtime.remove_pane(old);
-        let successor = runtime.register_pane();
+        let successor = runtime.register_pane(None);
         let stale = runtime.apply(old, bell_effects(), epoch);
         for schedule in pending.into_array().into_iter().flatten() {
             let _ = runtime.reconcile_scheduled(schedule, epoch + Duration::from_secs(5));
@@ -1108,8 +1171,8 @@ mod tests {
         let epoch = Instant::now();
         let (first_window, effects) = recording_runtime();
         let second_window = first_window.clone();
-        let first = first_window.register_pane();
-        let second = second_window.register_pane();
+        let first = first_window.register_pane(None);
+        let second = second_window.register_pane(None);
         let pending = first_window.apply(first, bell_effects(), epoch);
         let _ = second_window.apply(second, bell_effects(), epoch + Duration::from_secs(2));
         first_window.remove_pane(first);
@@ -1126,7 +1189,7 @@ mod tests {
     fn activation_cancels_all_delayed_notifications_and_native_dock_effects() {
         let epoch = Instant::now();
         let (runtime, effects) = recording_runtime();
-        let pane = runtime.register_pane();
+        let pane = runtime.register_pane(None);
         let pending = runtime.apply(pane, bell_effects(), epoch);
         let _ = runtime.update_application_activation(true, epoch);
         for schedule in pending.into_array().into_iter().flatten() {
@@ -1172,8 +1235,8 @@ mod tests {
     ) {
         let epoch = Instant::now();
         let (runtime, _) = recording_runtime();
-        let first = runtime.register_pane();
-        let second = runtime.register_pane();
+        let first = runtime.register_pane(None);
+        let second = runtime.register_pane(None);
         let schedules = runtime.apply(first, bell_effects(), epoch);
         let _ = runtime.apply(second, bell_effects(), epoch);
         cx.update(|cx| runtime.schedule(schedules, cx));
@@ -1190,8 +1253,8 @@ mod tests {
     fn shared_timer_delivers_once_after_origin_is_retired(cx: &mut gpui::TestAppContext) {
         let epoch = Instant::now() - NOTIFICATION_AGGREGATION;
         let (runtime, effects) = recording_runtime();
-        let first = runtime.register_pane();
-        let second = runtime.register_pane();
+        let first = runtime.register_pane(None);
+        let second = runtime.register_pane(None);
         let schedules = runtime.apply(first, bell_effects(), epoch);
         let _ = runtime.apply(second, bell_effects(), epoch);
         cx.update(|cx| runtime.schedule(schedules, cx));

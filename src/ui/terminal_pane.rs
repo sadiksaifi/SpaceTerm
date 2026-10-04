@@ -883,7 +883,11 @@ impl TerminalPane {
             attention: AttentionState::default(),
             attention_visual: false,
             attention_generation: 0,
-            native_attention_pane: Some(lifecycle_dependencies.attention.register_pane()),
+            native_attention_pane: Some(
+                lifecycle_dependencies
+                    .attention
+                    .register_pane(Some(window.window_handle())),
+            ),
             hidden_input: false,
             secure_input_pane: lifecycle_dependencies.secure_input.register_pane(),
             lifecycle_dependencies,

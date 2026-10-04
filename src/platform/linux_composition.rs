@@ -140,7 +140,9 @@ fn compose(
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
         attention: crate::terminal::attention_runtime::AttentionRuntime::new(
             Box::new(super::linux_attention::LinuxAudioBell(events.clone())),
-            Box::new(super::linux_attention::LinuxWindowAttention(events.clone())),
+            Box::new(super::linux_attention::LinuxWindowAttention::new(
+                events.clone(),
+            )),
             Box::new(
                 crate::terminal::attention_notification::AttentionNotifications::new(Arc::new(
                     super::linux_notification::LinuxNotificationAdapter::new(
