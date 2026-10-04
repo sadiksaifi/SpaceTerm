@@ -29,12 +29,25 @@ signal.signal(signal.SIGTERM, signal.SIG_IGN)
 pathlib.Path(sys.argv[1]).touch()
 time.sleep(60)
 """, str(ready)], start_new_session=os.environ["RUNNER_TEST_KIND"] == "accessibility")
-while not ready.exists():
+display = None
+lock = record.with_suffix(".lock")
+if os.environ["RUNNER_TEST_KIND"] == "compose":
+    display = subprocess.Popen([sys.executable, "-c", """
+import pathlib, signal, sys, time
+lock = pathlib.Path(sys.argv[1])
+def interrupted(_signal, _frame):
+    lock.unlink()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, interrupted)
+lock.touch()
+time.sleep(60)
+""", str(lock)])
+while not ready.exists() or (display is not None and not lock.exists()):
     time.sleep(0.01)
 pending = record.with_suffix(".next")
 pending.write_text(json.dumps({"wrapper": os.getpid(), "child": child.pid,
                              "runtime": os.environ["XDG_RUNTIME_DIR"],
-                             "home": os.environ["HOME"]}))
+                             "home": os.environ["HOME"], "display": None if display is None else display.pid}))
 pending.replace(record)
 time.sleep(60)
 '''
@@ -87,6 +100,7 @@ raise SystemExit(compose.main())
                                    stderr=subprocess.PIPE, text=True,
                                    preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_DFL))
         identities = {}
+        keys = ("wrapper", "child", "display") if kind == "compose" else ("wrapper", "child")
         descriptors = {}
         stop = threading.Event()
         reaper = None
@@ -96,12 +110,12 @@ raise SystemExit(compose.main())
                 time.sleep(0.01)
             self.assertTrue(self.record.exists(), "the controlled private session must start")
             identities = json.loads(self.record.read_text())
-            for key in ("wrapper", "child"):
+            for key in keys:
                 descriptors[key] = os.pidfd_open(identities[key])
 
             def reap():
                 while not stop.is_set():
-                    for key in ("wrapper", "child"):
+                    for key in keys:
                         try:
                             os.waitpid(identities[key], os.WNOHANG)
                         except ChildProcessError:
@@ -116,17 +130,20 @@ raise SystemExit(compose.main())
             self.assertNotEqual(process.returncode, 0, error)
             runtime = Path(identities["runtime"])
             self.assertFalse(runtime.exists(), "interruption must remove the private runtime")
+            if kind == "compose":
+                self.assertFalse(self.record.with_suffix(".lock").exists(),
+                                 "the private display must receive time to remove its lock")
             if kind == "accessibility":
                 proof = json.loads((Path(identities["home"]).parent / "cleanup.json").read_text())
                 self.assertTrue(proof["passed"], proof)
             elif signum is not None:
                 self.assertEqual(process.returncode, 128 + signum, error)
             deadline = time.monotonic() + 5
-            while any(Path(f"/proc/{identities[key]}").exists() for key in ("wrapper", "child")):
+            while any(Path(f"/proc/{identities[key]}").exists() for key in keys):
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.01)
-            for key in ("wrapper", "child"):
+            for key in keys:
                 with self.assertRaises(ProcessLookupError, msg=key):
                     os.kill(identities[key], 0)
         finally:
@@ -144,7 +161,7 @@ raise SystemExit(compose.main())
             if reaper is not None:
                 stop.set()
                 reaper.join(timeout=5)
-            for key in ("wrapper", "child"):
+            for key in keys:
                 if key in identities:
                     try:
                         os.waitpid(identities[key], 0)

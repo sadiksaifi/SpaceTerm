@@ -100,12 +100,18 @@ def run_private_session(command, environment):
         return process.wait(timeout=1300)
     except BaseException:
         if process is not None:
-            # The unreaped session leader retains the group identity during cleanup.
-            # Kill resistant descendants too, then reap the exact direct child.
+            # Keep the leader unreaped while displays remove their sockets and locks.
+            # Then force resistant descendants to exit before reaping the direct child.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            else:
+                time.sleep(3)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             process.wait(timeout=5)
         raise
     finally:
