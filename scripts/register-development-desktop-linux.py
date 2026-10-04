@@ -191,7 +191,7 @@ def register(prefix: Path) -> None:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: development-desktop-linux.py PREFIX", file=sys.stderr)
+        print("usage: register-development-desktop-linux.py PREFIX", file=sys.stderr)
         return 2
     try:
         register(Path(sys.argv[1]))

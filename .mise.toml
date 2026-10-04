@@ -669,7 +669,7 @@ if [ -n "${usage_binary:-}" ]; then set -- "$@" --binary "$usage_binary"; fi
 if [ -n "${usage_expected_binary_sha256:-}" ]; then set -- "$@" --expected-binary-sha256 "$usage_expected_binary_sha256"; fi
 if [ -n "${usage_output_dir:-}" ]; then set -- "$@" --output-dir "$usage_output_dir"; fi
 if [ "${usage_isolation_only:-false}" = true ]; then set -- "$@" --isolation-only; fi
-exec /usr/bin/python3 scripts/accessibility-smoke-linux.py "$@"
+exec /usr/bin/python3 scripts/verify-accessibility-linux.py "$@"
 '''
 
 [tasks."test:accessibility:regressions:linux"]
@@ -680,7 +680,7 @@ flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh t
 run = '''
 set --
 if [ -n "${usage_output_dir:-}" ]; then set -- --output-dir "$usage_output_dir"; fi
-exec /usr/bin/python3 scripts/test-accessibility-smoke-linux.py "$@"
+exec /usr/bin/python3 scripts/test-verify-accessibility-linux.py "$@"
 '''
 
 [tasks."test:scripts:linux"]
@@ -693,8 +693,8 @@ run = '''
 set -eu
 bash -n scripts/run-development-app-linux.sh
 shellcheck -x scripts/run-development-app-linux.sh
-python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/development-desktop-linux.py").read_text())'
-python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in ("scripts/accessibility-smoke-linux.py", "scripts/test-accessibility-smoke-linux.py")]'
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/register-development-desktop-linux.py").read_text())'
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in ("scripts/verify-accessibility-linux.py", "scripts/test-verify-accessibility-linux.py")]'
 '''
 
 [tasks."validate:linux"]

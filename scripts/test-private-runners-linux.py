@@ -67,7 +67,7 @@ class PrivateRunnerTests(unittest.TestCase):
 
     def run_interrupted(self, kind, signum):
         self.environment["RUNNER_TEST_KIND"] = kind
-        command = [sys.executable, str(SCRIPTS / "accessibility-smoke-linux.py"),
+        command = [sys.executable, str(SCRIPTS / "verify-accessibility-linux.py"),
                    "--backend", "x11", "--isolation-only", "--output-dir", str(self.root / "output")]
         if kind == "compose":
             command = [sys.executable, str(SCRIPTS / "test-compose-input-linux.py"), "x11"]

@@ -116,7 +116,7 @@ class LinuxPrefixTests(unittest.TestCase):
         scripts = self.root / "scripts"
         scripts.mkdir()
         shutil.copy2(SCRIPTS / "run-development-app-linux.sh", scripts)
-        shutil.copy2(SCRIPTS / "development-desktop-linux.py", scripts)
+        shutil.copy2(SCRIPTS / "register-development-desktop-linux.py", scripts)
         (scripts / "cargo-artifacts.sh").write_text(FAKE_ARTIFACTS)
         (scripts / "cargo-artifacts.sh").chmod(0o755)
         (scripts / "build-cargo-executable.py").write_text(FAKE_BUILD)

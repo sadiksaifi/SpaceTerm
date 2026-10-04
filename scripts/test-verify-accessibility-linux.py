@@ -44,7 +44,7 @@ def save(path, proof):
 
 def load_smoke():
     spec = importlib.util.spec_from_file_location(
-        "accessibility_smoke_linux", ROOT / "scripts/accessibility-smoke-linux.py")
+        "accessibility_smoke_linux", ROOT / "scripts/verify-accessibility-linux.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -378,8 +378,8 @@ def storage_regression(smoke, directory, proof):
     # Copy just the script into a clean checkout with no sibling review folder.
     checkout = directory / "checkout"
     (checkout / "scripts").mkdir(parents=True)
-    script = checkout / "scripts/accessibility-smoke-linux.py"
-    shutil.copy2(ROOT / "scripts/accessibility-smoke-linux.py", script)
+    script = checkout / "scripts/verify-accessibility-linux.py"
+    shutil.copy2(ROOT / "scripts/verify-accessibility-linux.py", script)
     environment = dict(os.environ)
     temporary = directory / "temporary"
     temporary.mkdir(mode=0o700)
