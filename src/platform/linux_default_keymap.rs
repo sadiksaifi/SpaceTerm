@@ -576,6 +576,11 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn scroll_shortcuts_from_sidebar_focus_use_the_host_keymap(cx: &mut gpui::TestAppContext) {
+        crate::ui::assert_scroll_shortcuts_from_sidebar_focus(profile(), cx);
+    }
+
     #[cfg(feature = "developer-tools")]
     #[test]
     fn workbench_close_shortcuts_do_not_capture_terminal_control_w() {

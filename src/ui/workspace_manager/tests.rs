@@ -8162,6 +8162,68 @@ fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_windo
 }
 
 #[gpui::test]
+fn scroll_shortcuts_from_sidebar_focus_use_the_active_tabs_focused_pane(cx: &mut TestAppContext) {
+    let profile = crate::desktop_profile::default_keymap::profile(
+        crate::platform::keyboard_layout::testing::us(),
+        vec![],
+    )
+    .unwrap();
+    crate::ui::assert_scroll_shortcuts_from_sidebar_focus(profile, cx);
+}
+
+pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
+    profile: crate::keybindings::KeymapProfile,
+    cx: &mut TestAppContext,
+) {
+    use crate::keybindings::{Command, KeybindingPreferences};
+    use crate::terminal::ScrollbackMovement;
+    let (manager, records, cx) = workspace_manager(cx);
+    let keymap = profile.resolve(&KeybindingPreferences::default());
+    cx.update(|_, cx| {
+        cx.clear_key_bindings();
+        cx.bind_keys(
+            keymap
+                .key_bindings()
+                .into_iter()
+                .chain(profile.control_bindings().iter().cloned())
+                .chain(profile.fixed_bindings().iter().cloned()),
+        );
+        crate::keybindings::runtime::install(profile, cx);
+    });
+    let shortcut = |command| keymap.shortcut(command).unwrap().to_string();
+    cx.simulate_keystrokes(&shortcut(Command::CreateTab));
+    cx.run_until_parked();
+    cx.simulate_keystrokes(&shortcut(Command::SplitRight));
+    cx.run_until_parked();
+    assert_eq!(records.starts().len(), 3);
+    for (command, movement) in [
+        (Command::ScrollPageUp, ScrollbackMovement::PageUp),
+        (Command::ScrollPageDown, ScrollbackMovement::PageDown),
+        (Command::ScrollToTop, ScrollbackMovement::Top),
+        (Command::ScrollToBottom, ScrollbackMovement::Bottom),
+    ] {
+        cx.simulate_keystrokes(&shortcut(Command::ToggleSidebarFocus));
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+        let before = records.commands().len();
+        cx.simulate_keystrokes(&shortcut(command));
+        cx.run_until_parked();
+        let calls = records.commands();
+        let calls = calls[before..]
+            .iter()
+            .filter(|call| !matches!(call.command, RecordedSessionCommand::Focus(_)))
+            .map(|call| (call.session_id, &call.command))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![(3, &RecordedSessionCommand::ScrollScrollback(movement))],
+            "{command:?} must move only the Active Tab's Focused Pane and send no terminal input"
+        );
+        assert!(cx.update(|window, cx| !manager.read(cx).sidebar.read(cx).is_focused(window)));
+    }
+}
+
+#[gpui::test]
 fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
     cx: &mut TestAppContext,
 ) {

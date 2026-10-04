@@ -47,8 +47,9 @@ use super::{
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
-    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable, SplitDown,
-    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
+    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
     ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
@@ -3580,6 +3581,10 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<PreviousTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabRight>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabLeft>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollPageUp>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollPageDown>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollToTop>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollToBottom>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ClosePane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<SplitRight>))
@@ -3808,4 +3813,4 @@ impl WorkspaceManager {
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]
-mod tests;
+pub(crate) mod tests;
