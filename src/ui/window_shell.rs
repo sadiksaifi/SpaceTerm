@@ -13,6 +13,40 @@ use crate::platform::window_chrome::{frame_inset, frame_shadows};
 const RESIZE_BAND: f32 = 10.0;
 const CORNER_TARGET: f32 = 24.0;
 
+#[derive(Default)]
+struct PublishedInputRegion {
+    region: Option<(Option<Bounds<Pixels>>, f32)>,
+}
+
+impl PublishedInputRegion {
+    fn publish(
+        &mut self,
+        region: Option<Bounds<Pixels>>,
+        scale_factor: f32,
+        publish: impl FnOnce(Option<&[Bounds<Pixels>]>),
+    ) {
+        if self.region == Some((region, scale_factor)) {
+            return;
+        }
+        match region {
+            Some(bounds) => publish(Some(&[bounds])),
+            None => publish(None),
+        }
+        self.region = Some((region, scale_factor));
+    }
+}
+
+fn publish_input_region(region: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut App) {
+    let state = window.use_keyed_state("client-window-input-region", cx, |_, _| {
+        PublishedInputRegion::default()
+    });
+    state.update(cx, |state, _| {
+        state.publish(region, window.scale_factor(), |region| {
+            window.set_input_region(region)
+        })
+    });
+}
+
 fn padding(tiling: Tiling, frame_inset: f32) -> Edges<Pixels> {
     Edges {
         top: px(if tiling.top { 0.0 } else { frame_inset }),
@@ -145,7 +179,7 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
     let Decorations::Client { tiling } = window.window_decorations() else {
         window.set_client_inset(px(0.0));
         window.set_client_frame(None);
-        window.set_input_region(None);
+        publish_input_region(None, window, cx);
         return content.into_any_element();
     };
     let tiling = if window.is_fullscreen() || window.is_maximized() {
@@ -192,13 +226,17 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
     let input_top = (inset.top - band).max(px(0.0));
     let input_right = (inset.right - band).max(px(0.0));
     let input_bottom = (inset.bottom - band).max(px(0.0));
-    window.set_input_region(Some(&[Bounds::new(
-        point(input_left, input_top),
-        size(
-            viewport.width - input_left - input_right,
-            viewport.height - input_top - input_bottom,
-        ),
-    )]));
+    publish_input_region(
+        Some(Bounds::new(
+            point(input_left, input_top),
+            size(
+                viewport.width - input_left - input_right,
+                viewport.height - input_top - input_bottom,
+            ),
+        )),
+        window,
+        cx,
+    );
     let radii = frame_corners(tiling, transparent_frame, style.corner_radius());
     let dark = spaceterm_ui::window_controls_dark(super::appearance::gpui_color(
         super::appearance::chrome(cx).colors.title_bar_background,
@@ -289,6 +327,46 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn input_region_publishes_only_geometry_and_decoration_changes() {
+        let mut published = PublishedInputRegion::default();
+        let first = Bounds::new(point(px(10.), px(10.)), size(px(800.), px(600.)));
+        let resized = Bounds::new(first.origin, size(px(900.), px(600.)));
+        let tiled = Bounds::new(point(px(0.), px(0.)), resized.size);
+        let mut calls = Vec::new();
+        for region in [
+            None,
+            None,
+            Some(first),
+            Some(first),
+            Some(resized),
+            Some(tiled),
+            Some(tiled),
+            None,
+            None,
+            Some(first),
+        ] {
+            published.publish(region, 1.0, |region| calls.push(region.map(<[_]>::to_vec)));
+        }
+        for scale_factor in [2.0, 2.0] {
+            published.publish(Some(first), scale_factor, |region| {
+                calls.push(region.map(<[_]>::to_vec))
+            });
+        }
+        assert_eq!(
+            calls,
+            [
+                None,
+                Some(vec![first]),
+                Some(vec![resized]),
+                Some(vec![tiled]),
+                None,
+                Some(vec![first]),
+                Some(vec![first]),
+            ]
+        );
+    }
 
     #[test]
     fn native_frame_geometry_removes_radii_padding_and_resize_on_tiled_edges() {
