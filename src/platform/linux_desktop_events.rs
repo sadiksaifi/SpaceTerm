@@ -194,6 +194,181 @@ mod tests {
             self.closed.send(id).unwrap();
         }
     }
+    struct RestartNotifications {
+        submitted: mpsc::Sender<u32>,
+        gate: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        id: u32,
+        foreign_id: bool,
+    }
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl RestartNotifications {
+        #[allow(clippy::too_many_arguments)]
+        fn notify(
+            &self,
+            _app: &str,
+            replaces: u32,
+            _icon: &str,
+            _summary: &str,
+            _body: &str,
+            _actions: Vec<String>,
+            _hints: HashMap<String, OwnedValue>,
+            _expire: i32,
+        ) -> zbus::fdo::Result<u32> {
+            let rejected = (self.foreign_id && replaces == 42)
+                || self.reject.swap(false, std::sync::atomic::Ordering::SeqCst);
+            self.submitted.send(replaces).unwrap();
+            if let Some(gate) = self.gate.lock().unwrap().take() {
+                gate.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            if rejected {
+                return Err(zbus::fdo::Error::AccessDenied("fixture rejection".into()));
+            }
+            Ok(self.id)
+        }
+        fn close_notification(&self, _id: u32) {}
+    }
+
+    fn notification_restart(in_flight: bool) {
+        let private = PrivateBus::new();
+        let (submitted, notifications) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let old = private
+            .server()
+            .allow_name_replacements(true)
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                RestartNotifications {
+                    submitted: submitted.clone(),
+                    gate: std::sync::Mutex::new(in_flight.then_some(gate)),
+                    reject: Default::default(),
+                    id: 42,
+                    foreign_id: false,
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
+            Some(private.client()),
+            crate::application_identity::ApplicationIdentity::current(),
+            sender,
+        );
+        adapter.submit(1).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            0
+        );
+        if !in_flight {
+            // Receipt of Clear at the old service would retire the ID, so instead wait for the
+            // notification reply through a second request and keep its returned ID retained.
+            adapter.submit(2).unwrap();
+            assert_eq!(
+                notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+                42
+            );
+        }
+        if !in_flight {
+            old.release_name("org.freedesktop.Notifications").unwrap();
+        }
+        let replacement = private
+            .server()
+            .replace_existing_names(true)
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                RestartNotifications {
+                    submitted,
+                    gate: std::sync::Mutex::new(None),
+                    reject: Default::default(),
+                    id: 43,
+                    foreign_id: true,
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        // The old connection remains alive and can reply after losing the well-known name.
+        if in_flight {
+            release.send(()).unwrap();
+        }
+        adapter.submit(3).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(3)).unwrap(),
+            0,
+            "the replacement service owns ID 42 for another client"
+        );
+        adapter.submit(4).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            43
+        );
+        drop(replacement);
+    }
+    #[test]
+    fn linux_desktop_notifications_restart_invalidates_retained_id() {
+        notification_restart(false);
+    }
+    #[test]
+    fn linux_desktop_notifications_restart_discards_in_flight_id() {
+        notification_restart(true);
+    }
+
+    #[test]
+    fn linux_desktop_notifications_rejected_replacement_is_not_retained() {
+        let private = PrivateBus::new();
+        let (submitted, notifications) = mpsc::channel();
+        let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                RestartNotifications {
+                    submitted,
+                    gate: std::sync::Mutex::new(None),
+                    reject: reject.clone(),
+                    id: 43,
+                    foreign_id: false,
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        let (sender, _events) = super::LinuxDesktopEvents::new();
+        let adapter = crate::platform::linux_notification::LinuxNotificationAdapter::new(
+            Some(private.client()),
+            crate::application_identity::ApplicationIdentity::current(),
+            sender,
+        );
+        adapter.submit(1).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            0
+        );
+        adapter.submit(2).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            43
+        );
+        reject.store(true, std::sync::atomic::Ordering::SeqCst);
+        adapter.submit(3).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            43
+        );
+        adapter.submit(4).unwrap();
+        assert_eq!(
+            notifications.recv_timeout(Duration::from_secs(2)).unwrap(),
+            0
+        );
+    }
+
     fn receive<T>(receiver: &async_channel::Receiver<T>) -> Result<T, async_channel::TryRecvError> {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {

@@ -36,6 +36,14 @@ impl From<zbus::Error> for SessionBusError {
             zbus::Error::FDO(error)
                 if matches!(
                     *error,
+                    zbus::fdo::Error::NameHasNoOwner(_) | zbus::fdo::Error::ServiceUnknown(_)
+                ) =>
+            {
+                Self::Unavailable
+            }
+            zbus::Error::FDO(error)
+                if matches!(
+                    *error,
                     zbus::fdo::Error::NoReply(_) | zbus::fdo::Error::Timeout(_)
                 ) =>
             {

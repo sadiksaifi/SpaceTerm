@@ -12,6 +12,7 @@ use crate::terminal::attention_runtime::AttentionFailure;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use zbus::blocking::{Connection, Proxy};
+use zbus::names::OwnedUniqueName;
 use zbus::zvariant::Value;
 
 const NAME: &str = "org.freedesktop.Notifications";
@@ -24,12 +25,27 @@ enum Request {
 
 #[derive(Default)]
 struct NotificationState {
+    owner: Option<OwnedUniqueName>,
+    generation: u64,
     id: Option<u32>,
     token: Option<String>,
     /// The latest request not yet applied.
     request: Option<Request>,
     /// A delivery job is queued or running and applies `request` before it finishes.
     delivering: bool,
+    /// The last local delivery diagnostic, with no native error or desktop content retained.
+    failure: Option<AttentionFailure>,
+}
+
+impl NotificationState {
+    fn set_owner(&mut self, owner: Option<OwnedUniqueName>) {
+        if self.owner != owner {
+            self.owner = owner;
+            self.generation = self.generation.wrapping_add(1);
+            self.id = None;
+            self.token = None;
+        }
+    }
 }
 
 pub(super) struct LinuxNotificationAdapter {
@@ -39,7 +55,7 @@ pub(super) struct LinuxNotificationAdapter {
     delivery: Option<SessionBus>,
     state: Arc<Mutex<NotificationState>>,
     identity: ApplicationIdentity,
-    _subscription: Option<BusSubscription>,
+    _subscriptions: Vec<BusSubscription>,
 }
 impl LinuxNotificationAdapter {
     pub(super) fn new(
@@ -51,58 +67,106 @@ impl LinuxNotificationAdapter {
         let delivery = bus
             .as_ref()
             .and_then(|bus| bus.dedicated(RETAINED_REPLY_TIMEOUT).ok());
-        let subscription = delivery.as_ref().and_then(|bus| {
-            let rule = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .sender(NAME)
-                .ok()?
-                .path(PATH)
-                .ok()?
-                .interface(NAME)
-                .ok()?
-                .build()
-                .to_owned();
-            let state = state.clone();
-            bus.subscribe(rule.into(), move |message| {
-                let mut state = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match message.header().member().map(|name| name.as_str()) {
-                    Some("ActivationToken") => {
-                        if let Ok((id, token)) = message.body().deserialize::<(u32, String)>()
-                            && state.id == Some(id)
-                            && token.len() <= 4096
+        let subscriptions = delivery
+            .as_ref()
+            .and_then(|bus| {
+                let rule = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .sender(NAME)
+                    .ok()?
+                    .path(PATH)
+                    .ok()?
+                    .interface(NAME)
+                    .ok()?
+                    .build()
+                    .to_owned();
+                let owner_state = state.clone();
+                let owner_rule = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .sender("org.freedesktop.DBus")
+                    .ok()?
+                    .path("/org/freedesktop/DBus")
+                    .ok()?
+                    .interface("org.freedesktop.DBus")
+                    .ok()?
+                    .member("NameOwnerChanged")
+                    .ok()?
+                    .arg(0, NAME)
+                    .ok()?
+                    .build()
+                    .to_owned();
+                let owner_subscription = bus
+                    .subscribe(owner_rule.into(), move |message| {
+                        if let Ok((_, _, new)) =
+                            message.body().deserialize::<(String, String, String)>()
                         {
-                            state.token = Some(token);
+                            let owner = if new.is_empty() {
+                                None
+                            } else {
+                                new.try_into().ok()
+                            };
+                            lock(&owner_state).set_owner(owner);
                         }
-                    }
-                    Some("ActionInvoked") => {
-                        if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
-                            && state.id == Some(id)
-                            && action == "default"
+                    })
+                    .ok()?;
+                let state = state.clone();
+                let signals = bus
+                    .subscribe(rule.into(), move |message| {
+                        let mut state = state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if message.header().sender().map(|sender| sender.as_str())
+                            != state.owner.as_ref().map(|owner| owner.as_str())
                         {
-                            events.activate(state.token.take());
+                            return;
                         }
-                    }
-                    Some("NotificationClosed") => {
-                        if let Ok((id, _)) = message.body().deserialize::<(u32, u32)>()
-                            && state.id == Some(id)
-                        {
-                            state.id = None;
-                            state.token = None;
+                        match message.header().member().map(|name| name.as_str()) {
+                            Some("ActivationToken") => {
+                                if let Ok((id, token)) =
+                                    message.body().deserialize::<(u32, String)>()
+                                    && state.id == Some(id)
+                                    && token.len() <= 4096
+                                {
+                                    state.token = Some(token);
+                                }
+                            }
+                            Some("ActionInvoked") => {
+                                if let Ok((id, action)) =
+                                    message.body().deserialize::<(u32, String)>()
+                                    && state.id == Some(id)
+                                    && action == "default"
+                                {
+                                    events.activate(state.token.take());
+                                }
+                            }
+                            Some("NotificationClosed") => {
+                                if let Ok((id, _)) = message.body().deserialize::<(u32, u32)>()
+                                    && state.id == Some(id)
+                                {
+                                    state.id = None;
+                                    state.token = None;
+                                }
+                            }
+                            _ => {}
                         }
-                    }
-                    _ => {}
-                }
+                    })
+                    .ok()?;
+                Some(vec![owner_subscription, signals])
             })
-            .ok()
-        });
+            .unwrap_or_default();
+        // Delivery needs both observers to retain service-owned authority safely.
+        let delivery = if subscriptions.len() == 2 {
+            delivery
+        } else {
+            None
+        };
+
         Self {
             bus,
             delivery,
             identity,
             state,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 }
@@ -201,54 +265,117 @@ fn lock(state: &Mutex<NotificationState>) -> std::sync::MutexGuard<'_, Notificat
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Reads ownership before and after a retained-object call. Signals invalidate immediately;
+/// the bounded query also closes the race when the signal worker has not caught up yet.
+fn service_owner(
+    connection: &Connection,
+    state: &Mutex<NotificationState>,
+    activate: bool,
+) -> Result<(OwnedUniqueName, u64), SessionBusError> {
+    for _ in 0..3 {
+        let generation = lock(state).generation;
+        let dbus =
+            zbus::blocking::fdo::DBusProxy::new(connection).map_err(SessionBusError::from)?;
+        let read = || {
+            dbus.get_name_owner(NAME.try_into().expect("static bus name"))
+                .map_err(|error| SessionBusError::from(zbus::Error::FDO(Box::new(error))))
+        };
+        let owner = read().or_else(|error| {
+            if activate && error == SessionBusError::Unavailable {
+                let _: (String, String, String, String) = proxy(connection)?
+                    .call("GetServerInformation", &())
+                    .map_err(SessionBusError::from)?;
+                read()
+            } else {
+                Err(error)
+            }
+        });
+        let mut state = lock(state);
+        if state.generation != generation {
+            continue;
+        }
+        match owner {
+            Ok(owner) => {
+                state.set_owner(Some(owner.clone()));
+                return Ok((owner, state.generation));
+            }
+            Err(error) => {
+                if error == SessionBusError::Unavailable {
+                    state.set_owner(None);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Err(SessionBusError::Rejected)
+}
+
 fn deliver(
     connection: &Connection,
     state: &Mutex<NotificationState>,
     identity: ApplicationIdentity,
 ) {
     loop {
-        let (request, replaces) = {
+        let request = {
             let mut state = lock(state);
             let Some(request) = state.request.take() else {
                 state.delivering = false;
                 return;
             };
-            // A replacement starts without the previous activation token. A token for the same
-            // id that arrives while Notify is outstanding is a real activation and is kept.
-            state.token = None;
-            if matches!(request, Request::Clear) {
-                (request, state.id.take())
-            } else {
-                (request, state.id)
-            }
+            request
         };
-        let result = match request {
-            Request::Show(count) => {
-                notify(connection, identity, count, replaces.unwrap_or(0)).map(|id| {
+        let result = (|| {
+            let (owner, generation) =
+                service_owner(connection, state, matches!(request, Request::Show(_)))?;
+            let replaces = {
+                let mut state = lock(state);
+                if state.generation != generation {
+                    return Err(SessionBusError::Unavailable);
+                }
+                // Only a token from this service arriving during replacement may survive.
+                state.token = None;
+                if matches!(request, Request::Clear) {
+                    state.id.take()
+                } else {
+                    state.id
+                }
+            };
+            match request {
+                Request::Show(count) => {
+                    let id = notify(connection, &owner, identity, count, replaces.unwrap_or(0))?;
+                    let current = service_owner(connection, state, false)?;
                     let mut state = lock(state);
-                    if state.id != Some(id) {
-                        state.token = None;
+                    if current == (owner, generation) && state.generation == generation {
+                        if state.id != Some(id) {
+                            state.token = None;
+                        }
+                        state.id = Some(id);
                     }
-                    state.id = Some(id);
-                })
+                }
+                Request::Clear => {
+                    if let Some(id) = replaces {
+                        Proxy::new(connection, owner.as_str(), PATH, NAME)
+                            .map_err(SessionBusError::from)?
+                            .call::<_, _, ()>("CloseNotification", &(id,))
+                            .map_err(SessionBusError::from)?;
+                    }
+                }
             }
-            Request::Clear => match replaces {
-                Some(id) => proxy(connection).and_then(|proxy| {
-                    proxy
-                        .call::<_, _, ()>("CloseNotification", &(id,))
-                        .map_err(Into::into)
-                }),
-                None => Ok(()),
-            },
-        };
-        if let Err(error) = result {
-            eprintln!("desktop notification failed: {error}");
+            Ok(())
+        })();
+        let mut state = lock(state);
+        state.failure = result.err().map(failure);
+        if state.failure.is_some() {
+            // A rejected replaces_id supplies no authority for the next request.
+            state.id = None;
+            state.token = None;
         }
     }
 }
 
 fn notify(
     connection: &Connection,
+    owner: &OwnedUniqueName,
     identity: ApplicationIdentity,
     count: u32,
     replaces: u32,
@@ -257,7 +384,8 @@ fn notify(
         ("desktop-entry", Value::from(identity.application_id())),
         ("urgency", Value::from(1u8)),
     ]);
-    proxy(connection)?
+    Proxy::new(connection, owner.as_str(), PATH, NAME)
+        .map_err(SessionBusError::from)?
         .call(
             "Notify",
             &(
@@ -272,4 +400,31 @@ fn notify(
             ),
         )
         .map_err(SessionBusError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_notification_service_departure_retires_id_and_activation_token() {
+        let mut state = NotificationState::default();
+        let owner: OwnedUniqueName = ":1.7".try_into().unwrap();
+        state.set_owner(Some(owner.clone()));
+        state.id = Some(42);
+        state.token = Some("fixture-token".into());
+        let generation = state.generation;
+        state.set_owner(None);
+        assert_eq!((state.id, state.token.as_deref()), (None, None));
+        assert_ne!(state.generation, generation);
+        state.set_owner(Some(owner));
+        assert_ne!(
+            state.generation, generation,
+            "reacquisition has a new owner generation"
+        );
+        state.id = Some(42);
+        state.token = Some("fixture-token".into());
+        state.set_owner(Some(":1.8".try_into().unwrap()));
+        assert_eq!((state.id, state.token.as_deref()), (None, None));
+    }
 }
