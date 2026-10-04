@@ -906,6 +906,137 @@ mod tests {
         );
     }
 
+    #[test]
+    fn linux_desktop_portal_appearance_reconciles_changes_during_observer_installation() {
+        use crate::platform::appearance::AppearancePlatform;
+        let private = PrivateBus::new();
+        let server = private
+            .server()
+            .serve_at("/org/freedesktop/portal/desktop", Settings(HashMap::new()))
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .build()
+            .unwrap();
+        let bus = private.client();
+        let appearance =
+            crate::platform::linux_appearance::LinuxAppearancePlatform::new(Some(bus.clone()));
+        assert_eq!(
+            appearance.system_appearance(),
+            Some(crate::appearance::Appearance::Light)
+        );
+        let (entered, running) = std::sync::mpsc::channel();
+        let (resume, blocked) = std::sync::mpsc::channel();
+        bus.dispatch(move |_| {
+            entered.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+        })
+        .unwrap();
+        running.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (starting, started) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            starting.send(()).unwrap();
+            let observation = appearance.observe().unwrap();
+            assert_eq!(
+                appearance.system_appearance(),
+                Some(crate::appearance::Appearance::Dark)
+            );
+            assert!(appearance.prefers_reduced_motion());
+            assert!(appearance.accessibility_display_options().increase_contrast);
+            assert!(
+                appearance
+                    .accessibility_display_options()
+                    .differentiate_without_color
+            );
+            assert!(!appearance.primary_enabled());
+            receive(&observation.changed).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let interface = server
+            .object_server()
+            .interface::<_, Settings>("/org/freedesktop/portal/desktop")
+            .unwrap();
+        let mut settings = non_default_settings();
+        settings
+            .get_mut("org.gnome.desktop.interface")
+            .unwrap()
+            .insert("gtk-enable-primary-paste".into(), false.into());
+        interface.get_mut().0 = settings;
+        server
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+                "SettingChanged",
+                &(
+                    "org.freedesktop.appearance",
+                    "color-scheme",
+                    zbus::zvariant::Value::from(1u32),
+                ),
+            )
+            .unwrap();
+        resume.send(()).unwrap();
+        observer.join().unwrap();
+    }
+
+    struct ChangingSettings(std::sync::atomic::AtomicUsize);
+    #[zbus::interface(name = "org.freedesktop.portal.Settings")]
+    impl ChangingSettings {
+        async fn read_all(
+            &self,
+            _namespaces: Vec<String>,
+            #[zbus(connection)] connection: &zbus::Connection,
+        ) -> HashMap<String, HashMap<String, OwnedValue>> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                // ReadAll captured Light, then the setting changes before its reply is sent.
+                connection
+                    .emit_signal(
+                        None::<&str>,
+                        "/org/freedesktop/portal/desktop",
+                        "org.freedesktop.portal.Settings",
+                        "SettingChanged",
+                        &(
+                            "org.freedesktop.appearance",
+                            "color-scheme",
+                            zbus::zvariant::Value::from(1u32),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            HashMap::new()
+        }
+    }
+
+    #[test]
+    fn linux_desktop_portal_appearance_preserves_change_during_snapshot_refresh() {
+        use crate::platform::appearance::AppearancePlatform;
+        let private = PrivateBus::new();
+        let _server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                ChangingSettings(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .build()
+            .unwrap();
+        let appearance =
+            crate::platform::linux_appearance::LinuxAppearancePlatform::new(Some(private.client()));
+        assert_eq!(
+            appearance.system_appearance(),
+            Some(crate::appearance::Appearance::Light)
+        );
+        let observation = appearance.observe().unwrap();
+        receive(&observation.changed).unwrap();
+        assert_eq!(
+            appearance.system_appearance(),
+            Some(crate::appearance::Appearance::Dark)
+        );
+    }
+
     fn assert_status_shapes_disabled(value: Option<OwnedValue>) {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();

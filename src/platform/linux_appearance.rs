@@ -165,6 +165,7 @@ impl AppearancePlatform for LinuxAppearancePlatform {
         let bus = self.bus.as_ref()?;
         let (sender, changed) = async_channel::bounded(1);
         let facts = self.facts.clone();
+        let signal_sender = sender.clone();
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender(NAME)
@@ -188,11 +189,26 @@ impl AppearancePlatform for LinuxAppearancePlatform {
                     let old = *facts;
                     facts.update(&namespace, &key, &value);
                     if old != *facts {
-                        let _ = sender.try_send(());
+                        let _ = signal_sender.try_send(());
                     }
                 }
             })
             .ok()?;
+        // The match is installed before refreshing. Block callbacks through the snapshot
+        // commit so a change delivered during ReadAll applies after that snapshot.
+        {
+            let mut retained = self
+                .facts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Ok(snapshot) = bus.query(Facts::read) {
+                let changed = *retained != snapshot;
+                *retained = snapshot;
+                if changed {
+                    let _ = sender.try_send(());
+                }
+            }
+        }
         Some(SystemAppearanceObservation {
             changed,
             subscription: Box::new(Observation {
