@@ -128,11 +128,11 @@ pub(crate) fn profile(
         ),
         (
             Command::NextTab,
-            Some(DefaultBinding::new("cmd-shift-]", &["ctrl-tab"])),
+            Some(DefaultBinding::new("cmd-shift-]", &[])),
         ),
         (
             Command::PreviousTab,
-            Some(DefaultBinding::new("cmd-shift-[", &["ctrl-shift-tab"])),
+            Some(DefaultBinding::new("cmd-shift-[", &[])),
         ),
         (Command::MoveTabRight, None),
         (Command::MoveTabLeft, None),

@@ -3967,13 +3967,7 @@ mod tests {
         }
 
         let mut active_tab_ids = Vec::new();
-        for shortcut in [
-            "cmd-}",
-            "ctrl-tab",
-            "cmd-{",
-            "ctrl-shift-tab",
-            "ctrl-shift-tab",
-        ] {
+        for shortcut in ["cmd-}", "cmd-}", "cmd-{", "cmd-{", "cmd-{"] {
             cx.simulate_keystrokes(shortcut);
             cx.run_until_parked();
             active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
@@ -3983,6 +3977,41 @@ mod tests {
             active_tab_ids,
             [1, 2, 1, 3, 2].map(TabId::new),
             "Next Tab and Previous Tab should step through the Tab order and wrap at both ends"
+        );
+    }
+
+    #[gpui::test]
+    fn command_key_profile_should_leave_control_tab_to_the_terminal(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+        let active_tab_id = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id());
+        let key_inputs = |records: &TestTerminalSessionRecords| {
+            records
+                .commands()
+                .into_iter()
+                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .count()
+        };
+        let before = key_inputs(&records);
+
+        let mut active_tab_ids = Vec::new();
+        for shortcut in ["ctrl-tab", "ctrl-shift-tab"] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
+        }
+
+        assert_eq!(
+            active_tab_ids, [active_tab_id; 2],
+            "Control-Tab is not a Tab navigation Shortcut in the Command-key profile"
+        );
+        assert_eq!(
+            key_inputs(&records) - before,
+            2,
+            "Control-Tab and Control-Shift-Tab should reach the focused terminal session"
         );
     }
 

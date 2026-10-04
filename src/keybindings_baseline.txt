@@ -176,9 +176,7 @@ cmd-7	Some(Identifier("TerminalPane"))	terminal::ActivateTab7
 cmd-8	Some(Identifier("TerminalPane"))	terminal::ActivateTab8
 cmd-9	Some(Identifier("TerminalPane"))	terminal::ActivateTab9
 cmd-}	Some(Identifier("TerminalPane"))	terminal::NextTab
-ctrl-tab	Some(Identifier("TerminalPane"))	terminal::NextTab
 cmd-{	Some(Identifier("TerminalPane"))	terminal::PreviousTab
-ctrl-shift-tab	Some(Identifier("TerminalPane"))	terminal::PreviousTab
 cmd-w	None	terminal::ClosePane
 cmd-d	Some(Identifier("TerminalPane"))	terminal::SplitRight
 cmd-shift-d	Some(Identifier("TerminalPane"))	terminal::SplitDown

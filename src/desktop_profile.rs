@@ -487,7 +487,7 @@ mod tests {
             let tagged = keymap.bindings().enumerate().filter_map(|(index, binding)| {
                 (binding.meta() == Some(crate::keybindings::CUSTOMIZABLE_BINDINGS)).then_some(index)
             }).collect::<Vec<_>>();
-            assert_eq!(tagged.len(), 56);
+            assert_eq!(tagged.len(), 54);
             assert!(tagged.windows(2).all(|pair| pair[1] == pair[0] + 1));
             assert_eq!(DesktopPresentation::get(cx).shortcut(&crate::ui::IncreaseTerminalFontSize).as_deref(), Some("Primary+="));
             // Settings keeps its fixed Shortcut outside the customizable segment.
