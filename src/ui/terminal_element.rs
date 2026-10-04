@@ -2192,8 +2192,11 @@ fn prepare_padding_background_geometry(
         }
     };
     for (row_index, row) in rows.iter().enumerate() {
+        // Both edges come from cumulative offsets, like the row backgrounds, so adjacent strips
+        // snap to the same device pixel.
         let top = grid_bounds.top() + line_height * row_index as f32;
-        let bottom = (top + line_height).min(grid_bounds.bottom());
+        let bottom = (grid_bounds.top() + line_height * row_index.saturating_add(1) as f32)
+            .min(grid_bounds.bottom());
         if let Some(color) = row.padding.leading {
             push(bounds.left(), top, grid_bounds.left(), bottom, color);
         }
@@ -5734,6 +5737,44 @@ mod tests {
                     padding_quad(98.0, 0.0, 100.0, 25.0, ink),
                 ]
         );
+    }
+
+    #[test]
+    fn side_padding_strips_share_edges_with_their_neighbors_at_fractional_heights() {
+        // 28 rows fitted into a 561-point grid at y=80. Computing a row's bottom as
+        // `top + line_height` rounds differently from the next row's cumulative top, and the two
+        // edges can snap a device pixel apart.
+        let ink = Color::rgb(0x0a_0a_0a);
+        let rows = (0..28)
+            .map(|_| padding_row([painted_cell("a", ink), cell("b"), painted_cell("c", ink)]))
+            .collect::<Vec<_>>();
+        let bounds = Bounds::new(point(px(0.0), px(80.0)), size(px(100.0), px(563.0)));
+        let grid_bounds = TerminalPadding::new(px(2.0), px(2.0)).grid_bounds(bounds);
+        let line_height = grid_bounds.size.height / 28.0;
+
+        let leading = prepare_padding_background_geometry(
+            &rows,
+            true,
+            bounds,
+            grid_bounds,
+            px(32.0),
+            line_height,
+        )
+        .into_iter()
+        .filter(|quad| quad.bounds.left() == bounds.left())
+        .map(|quad| quad.bounds)
+        .collect::<Vec<_>>();
+
+        assert_eq!(leading.len(), 28);
+        for (index, pair) in leading.windows(2).enumerate() {
+            assert_eq!(
+                pair[0].bottom(),
+                pair[1].top(),
+                "row {index} must end exactly where row {} begins",
+                index + 1
+            );
+        }
+        assert_eq!(leading.last().unwrap().bottom(), grid_bounds.bottom());
     }
 
     #[test]
