@@ -135,6 +135,42 @@ impl FullscreenEscapeSequence {
     }
 }
 
+/// The physical keys a Terminal Session received a press for but no release yet.
+///
+/// A program reporting key events must only see releases of presses it received. Presses that a
+/// Command, an IME composition, or another surface consumed keep their releases out of the
+/// session. The record outlives Terminal Input Focus changes, so a key held across one still
+/// releases exactly what the program saw pressed.
+#[derive(Default)]
+struct DeliveredKeyPresses {
+    session_identity: u64,
+    keys: Vec<PhysicalKey>,
+}
+
+impl DeliveredKeyPresses {
+    fn press(&mut self, session_identity: u64, key: PhysicalKey) {
+        if self.session_identity != session_identity {
+            self.keys.clear();
+            self.session_identity = session_identity;
+        }
+        if !self.keys.contains(&key) {
+            self.keys.push(key);
+        }
+    }
+
+    /// Ends a press, reporting whether the session received it.
+    fn release(&mut self, session_identity: u64, key: PhysicalKey) -> bool {
+        if self.session_identity != session_identity {
+            return false;
+        }
+        let Some(index) = self.keys.iter().position(|pressed| *pressed == key) else {
+            return false;
+        };
+        self.keys.swap_remove(index);
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) enum StatusIntent {
     #[default]
@@ -589,7 +625,7 @@ pub(crate) struct TerminalPane {
     preedit_layout: Option<PreeditLayout>,
     preedit_layout_key: Option<PreeditLayoutKey>,
     marked_revision: u64,
-    ime_suppressed_keys: Vec<PhysicalKey>,
+    delivered_key_presses: DeliveredKeyPresses,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
     /// Permissions a Permission Request asked for that the person has not answered. The Pane
@@ -885,7 +921,7 @@ impl TerminalPane {
             preedit_layout: None,
             preedit_layout_key: None,
             marked_revision: 0,
-            ime_suppressed_keys: Vec::new(),
+            delivered_key_presses: DeliveredKeyPresses::default(),
             pending_file_insertion: None,
             pending_paste: None,
             requested_permissions: Vec::new(),
@@ -1228,7 +1264,6 @@ impl TerminalPane {
                 }
                 self.ime.cancel();
                 self.invalidate_preedit_layout();
-                self.ime_suppressed_keys.clear();
             }
             if let Some(session) = &self.terminal_session.session {
                 session.focus(focused);
@@ -2326,18 +2361,22 @@ impl TerminalPane {
             .key_input_adapter
             .key_down_with_native(event, window.native_key_event());
         if self.ime.marked_text().is_some() {
-            if let KeyTranslation::Encoded(input) = &input
-                && input.physical_key != PhysicalKey::Unidentified
-                && !self.ime_suppressed_keys.contains(&input.physical_key)
-            {
-                self.ime_suppressed_keys.push(input.physical_key);
-            }
             if !matches!(input, KeyTranslation::Unhandled(_)) {
                 cx.stop_propagation();
             }
             return;
         }
+        let press = match &input {
+            KeyTranslation::Encoded(input) => Some(input.physical_key),
+            KeyTranslation::TextInput(_) | KeyTranslation::Unhandled(_) => None,
+        };
         if self.send_key_translation(input, cx) {
+            if let Some(key) = press
+                && self.terminal_session.session.is_some()
+            {
+                self.delivered_key_presses
+                    .press(self.terminal_session.native_service_session_identity, key);
+            }
             cx.stop_propagation();
         }
     }
@@ -2350,12 +2389,11 @@ impl TerminalPane {
             .key_input_adapter
             .key_up_with_native(event, window.native_key_event());
         if let KeyTranslation::Encoded(input) = &input
-            && let Some(index) = self
-                .ime_suppressed_keys
-                .iter()
-                .position(|key| *key == input.physical_key)
+            && !self.delivered_key_presses.release(
+                self.terminal_session.native_service_session_identity,
+                input.physical_key,
+            )
         {
-            self.ime_suppressed_keys.swap_remove(index);
             cx.stop_propagation();
             return;
         }

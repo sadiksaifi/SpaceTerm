@@ -4671,6 +4671,97 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
     assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
 }
 
+#[gpui::test]
+fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestAppContext) {
+    use crate::terminal::ScrollbackMovement;
+    use crate::terminal::geometry::{
+        BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+    };
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let before = records.commands().len();
+    let key = |cx: &mut VisualTestContext, keystroke: &str, pressed: bool| {
+        let keystroke = Keystroke::parse(keystroke).unwrap();
+        if pressed {
+            cx.simulate_event(KeyDownEvent {
+                keystroke,
+                prefer_character_input: false,
+                is_held: false,
+            });
+        } else {
+            cx.simulate_event(KeyUpEvent { keystroke });
+        }
+        cx.run_until_parked();
+    };
+
+    let leave_and_return = |cx: &mut VisualTestContext| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_tab: false,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+        });
+        cx.run_until_parked();
+    };
+
+    // A Scroll Command consumes its press, so its release must not reach the program, even
+    // after a Tab change.
+    key(cx, "cmd-pageup", true);
+    key(cx, "cmd-pageup", false);
+    key(cx, "cmd-pageup", true);
+    leave_and_return(cx);
+    key(cx, "cmd-pageup", false);
+    // An ordinary key reaches the program as a whole gesture, even across a Tab change.
+    key(cx, "a", true);
+    key(cx, "a", false);
+    key(cx, "b", true);
+    leave_and_return(cx);
+    key(cx, "b", false);
+
+    let commands = records.commands();
+    assert!(
+        commands[before..].iter().any(|call| call.command
+            == RecordedSessionCommand::ScrollScrollback(ScrollbackMovement::PageUp))
+    );
+    let mut emulator =
+        crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        ))
+        .unwrap();
+    emulator.feed(b"\x1b[>11u");
+    let mut bytes = Vec::new();
+    for call in &commands[before..] {
+        if let RecordedSessionCommand::Key(input) = &call.command {
+            bytes.extend(emulator.key(input.clone()).unwrap().bytes);
+        }
+    }
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "\x1b[97u\x1b[97;1:3u\x1b[98u\x1b[98;1:3u"
+    );
+}
+
+#[test]
+fn delivered_key_presses_belong_to_one_terminal_session() {
+    let mut presses = DeliveredKeyPresses::default();
+    presses.press(1, PhysicalKey::A);
+    presses.press(1, PhysicalKey::A);
+    assert!(presses.release(1, PhysicalKey::A));
+    assert!(!presses.release(1, PhysicalKey::A));
+
+    // A replacement session never received the previous session's presses.
+    presses.press(1, PhysicalKey::B);
+    assert!(!presses.release(2, PhysicalKey::B));
+    presses.press(2, PhysicalKey::C);
+    assert!(!presses.release(2, PhysicalKey::B));
+    assert!(presses.release(2, PhysicalKey::C));
+}
+
 #[test]
 fn escape_pair_within_window_requests_fullscreen_exit() {
     let start = Instant::now();
