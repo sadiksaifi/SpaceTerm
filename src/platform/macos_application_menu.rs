@@ -394,7 +394,8 @@ mod native {
         MenuItemIcon, NativeKeyEquivalent,
     };
 
-    use crate::platform::application_menu_model::{ABOUT_DESCRIPTION, HELP_URL};
+    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
+    const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
     pub(super) fn decorate(
         application_name: &str,

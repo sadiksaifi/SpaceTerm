@@ -104,6 +104,7 @@ pub(crate) mod testing {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn de() -> KeyboardLayout {
         pairs(&[
             ("1", "!"),
@@ -126,6 +127,7 @@ pub(crate) mod testing {
         ])
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn fr_azerty() -> KeyboardLayout {
         pairs(&[
             ("&", "1"),
@@ -148,6 +150,7 @@ pub(crate) mod testing {
         ])
     }
 
+    #[cfg(target_os = "linux")]
     fn pairs(pairs: &[(&str, &str)]) -> KeyboardLayout {
         let mut layout = KeyboardLayout::default();
         for &(base, shifted) in pairs {

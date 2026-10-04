@@ -4,10 +4,6 @@ pub(crate) mod appearance;
 pub(crate) mod application_activity;
 pub(crate) mod application_menu;
 #[cfg(any(target_os = "macos", test))]
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "native menu effects are available only on macOS")
-)]
 pub(crate) mod application_menu_model;
 pub(crate) mod application_quit;
 pub(crate) mod control_socket;

@@ -19,8 +19,6 @@ use crate::ui::{
 };
 
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
-pub(crate) const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
-pub(crate) const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
 pub(crate) fn menus(application_name: &str) -> Vec<Menu> {
     let mut menus = vec![

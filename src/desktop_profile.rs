@@ -55,6 +55,10 @@ pub(crate) enum ShortcutSelection {
     NativeMenu,
     /// The binding that reaches the terminal first, for a desktop without a native menu whose
     /// text fields use other chords than the terminal.
+    #[allow(
+        dead_code,
+        reason = "only a desktop without a native menu bar composes this selection"
+    )]
     TerminalSurface,
 }
 

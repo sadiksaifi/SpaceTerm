@@ -21,6 +21,10 @@ pub(crate) enum FilePreviewSubmission {
     Presented,
     /// A deferred adapter sends at most one failure. The channel closes without one once the
     /// request was presented, superseded, or dismissed.
+    #[allow(
+        dead_code,
+        reason = "only a deferred preview Adapter answers asynchronously"
+    )]
     Pending(async_channel::Receiver<FilePreviewError>),
 }
 
