@@ -22,7 +22,7 @@ use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_
 #[cfg(test)]
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
-    TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation,
+    TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation, TerminalPadding,
 };
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
@@ -94,6 +94,9 @@ const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
 const TERMINAL_SIDE_INSET: f32 = 2.0;
 const TERMINAL_BOTTOM_INSET: f32 = 2.0;
+/// The terminal paints this margin with its edge-cell backgrounds, so it reaches the Pane edge.
+const TERMINAL_PADDING: TerminalPadding =
+    TerminalPadding::new(px(TERMINAL_SIDE_INSET), px(TERMINAL_BOTTOM_INSET));
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
@@ -4246,6 +4249,7 @@ impl Render for TerminalPane {
                 line_height: px(self.line_height),
                 cell_width: self.cell_width,
                 grid_size,
+                padding: TERMINAL_PADDING,
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
@@ -4342,7 +4346,7 @@ impl Render for TerminalPane {
                     return;
                 };
                 let _ = pane.update(cx, |pane, cx| {
-                    pane.update_grid_bounds(bounds, cx);
+                    pane.update_grid_bounds(TERMINAL_PADDING.grid_bounds(bounds), cx);
                     pane.sync_native_accessibility(window, terminal_input_focused);
                 });
             })
@@ -4352,8 +4356,6 @@ impl Render for TerminalPane {
             .relative()
             .size_full()
             .overflow_hidden()
-            .px(px(TERMINAL_SIDE_INSET))
-            .pb(px(TERMINAL_BOTTOM_INSET))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())

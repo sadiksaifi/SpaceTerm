@@ -19,9 +19,9 @@ use crate::terminal::geometry::{
     CellGridPosition, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, FindHighlightSpan,
-    RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
-    TerminalUnderlineSnapshot,
+    CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot,
+    CursorSnapshot, FindHighlightSpan, RowSnapshot, ScreenSnapshot, TerminalColor,
+    TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
 
 use super::appearance::TerminalFonts;
@@ -227,6 +227,34 @@ fn take_aligned_row<T>(
     None
 }
 
+/// The margin a terminal keeps between its layout edges and its cell grid.
+///
+/// Text, the cursor, hit testing, and IME geometry stay inside the grid. Edge-cell backgrounds
+/// extend across the margin, so a program that paints its own background reaches the layout
+/// edges and any enclosing rounded mask clips one continuous surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TerminalPadding {
+    side: Pixels,
+    bottom: Pixels,
+}
+
+impl TerminalPadding {
+    pub(crate) const fn new(side: Pixels, bottom: Pixels) -> Self {
+        Self { side, bottom }
+    }
+
+    /// The cell grid inside layout `bounds`.
+    pub(crate) fn grid_bounds(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        Bounds::new(
+            point(bounds.left() + self.side, bounds.top()),
+            size(
+                (bounds.size.width - self.side * 2.0).max(px(0.0)),
+                (bounds.size.height - self.bottom).max(px(0.0)),
+            ),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct TerminalGridElement {
     background: Color,
@@ -260,6 +288,7 @@ pub(crate) struct TerminalGridElement {
     fallback_generation: Option<crate::terminal::PresentationGeneration>,
     paint_fault: Option<PaintPreflightFault>,
     cursor_layer: Option<presentation::CursorLayer>,
+    padding: TerminalPadding,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -271,6 +300,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) line_height: Pixels,
     pub(crate) cell_width: Pixels,
     pub(crate) grid_size: CellGridSize,
+    pub(crate) padding: TerminalPadding,
     pub(crate) preedit: Option<PreeditLayout>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) input: Entity<TerminalPane>,
@@ -324,6 +354,7 @@ impl TerminalGridElement {
                         line_height: configuration.line_height,
                         cell_width: configuration.cell_width,
                         grid_size: configuration.grid_size,
+                        padding: configuration.padding,
                         preedit: None,
                         focus_handle: configuration.focus_handle.clone(),
                         input: configuration.input.clone(),
@@ -408,6 +439,7 @@ impl TerminalGridElement {
             fallback_generation,
             paint_fault: configuration.paint_fault,
             cursor_layer: None,
+            padding: configuration.padding,
         }
     }
 }
@@ -639,6 +671,8 @@ pub(crate) struct PrepaintState {
 
 struct TerminalPaintBatch {
     surface: Option<PaintQuad>,
+    /// Edge-cell backgrounds extended across the padding, outside the grid's content mask.
+    padding_backgrounds: Vec<PaintQuad>,
     grid_bounds: Bounds<Pixels>,
     line_height: Pixels,
     rows: Vec<PreparedFrameRow>,
@@ -725,6 +759,13 @@ impl TerminalPaintBatch {
                 counter,
             );
             window.paint_quad(surface.clone());
+        }
+        for background in &self.padding_backgrounds {
+            record_quad_paint(
+                #[cfg(test)]
+                counter,
+            );
+            window.paint_quad(background.clone());
         }
         window.with_content_mask(
             Some(ContentMask {
@@ -1610,8 +1651,12 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
+        let grid_bounds = self.padding.grid_bounds(bounds);
         let fitted_cell = TerminalGeometry::fitted_cell_size(
-            LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            LogicalSize::new(
+                f32::from(grid_bounds.size.width),
+                f32::from(grid_bounds.size.height),
+            ),
             LogicalCellSize::new(
                 f32::from(self.nominal_cell_width),
                 f32::from(self.nominal_line_height),
@@ -1623,7 +1668,6 @@ impl Element for TerminalGridElement {
         let viewport_rows = usize::from(self.grid_size.rows);
         let visible_rows = viewport_rows.min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
-        let grid_bounds = bounds;
         let grid_left = grid_bounds.left();
         let base_font = self.terminal_fonts.regular.clone();
         let font_id = window.text_system().resolve_font(&base_font);
@@ -1683,7 +1727,7 @@ impl Element for TerminalGridElement {
         let mut batch_cursor_text_overlay = None;
 
         for (row_index, stable) in stable_rows.iter().cloned().enumerate() {
-            let row_top = bounds.top() + self.line_height * row_index as f32;
+            let row_top = grid_bounds.top() + self.line_height * row_index as f32;
             let find_backgrounds = prepare_background_geometry(
                 &find_background_spans(
                     row_index,
@@ -1764,6 +1808,14 @@ impl Element for TerminalGridElement {
 
         let mut candidate = TerminalPaintBatch {
             surface: None,
+            padding_backgrounds: prepare_padding_background_geometry(
+                &self.rows[..visible_rows],
+                visible_rows == viewport_rows,
+                bounds,
+                grid_bounds,
+                self.cell_width,
+                self.line_height,
+            ),
             grid_bounds,
             line_height: self.line_height,
             rows: prepared_rows,
@@ -1796,6 +1848,7 @@ impl Element for TerminalGridElement {
             candidate.cursor_text_overlay = None;
             Some(std::rc::Rc::new(TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, gpui_color(self.background))),
+                padding_backgrounds: Vec::new(),
                 grid_bounds: cursor_bounds,
                 line_height: self.line_height,
                 rows: vec![cursor_row],
@@ -1823,7 +1876,7 @@ impl Element for TerminalGridElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
@@ -1885,7 +1938,7 @@ impl Element for TerminalGridElement {
         TerminalPane::capture_pointer_drag(&pane, window);
         window.handle_input(
             &self.focus_handle,
-            ElementInputHandler::new(bounds, pane.clone()),
+            ElementInputHandler::new(prepaint.candidate.grid_bounds, pane.clone()),
             cx,
         );
         let presentation = Arc::clone(&self.presentation);
@@ -1928,6 +1981,90 @@ struct RowPaintInput {
     selections: Vec<BackgroundSpan>,
     under_text_decorations: Vec<DecorationSpan>,
     over_text_decorations: Vec<DecorationSpan>,
+    padding: RowPadding,
+}
+
+/// What one row lends to the terminal padding beside and below the cell grid.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RowPadding {
+    leading: Option<Color>,
+    trailing: Option<Color>,
+    /// Whether this row may extend its backgrounds below the grid when it is the last row.
+    ///
+    /// Follows Ghostty's `neverExtendBg`: a default background already matches the padding,
+    /// and prompts and perfect-fit Powerline glyphs look wrong stretched.
+    extends_below: bool,
+}
+
+/// Extends edge-cell backgrounds across the padding between `grid_bounds` and `bounds`.
+///
+/// Every row extends sideways. The last row extends downward, corners included, only when it
+/// fills the viewport's last row and [`RowPadding::extends_below`] allows it.
+fn prepare_padding_background_geometry(
+    rows: &[Arc<RowPaintInput>],
+    reaches_last_row: bool,
+    bounds: Bounds<Pixels>,
+    grid_bounds: Bounds<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+) -> Vec<PaintQuad> {
+    let mut quads = Vec::new();
+    let mut push = |left: Pixels, top: Pixels, right: Pixels, bottom: Pixels, color: Color| {
+        if right > left && bottom > top {
+            quads.push(fill(
+                Bounds::from_corners(point(left, top), point(right, bottom)),
+                gpui_color(color),
+            ));
+        }
+    };
+    for (row_index, row) in rows.iter().enumerate() {
+        let top = grid_bounds.top() + line_height * row_index as f32;
+        let bottom = (top + line_height).min(grid_bounds.bottom());
+        if let Some(color) = row.padding.leading {
+            push(bounds.left(), top, grid_bounds.left(), bottom, color);
+        }
+        if let Some(color) = row.padding.trailing {
+            push(grid_bounds.right(), top, bounds.right(), bottom, color);
+        }
+    }
+    if let Some(last) = rows
+        .last()
+        .filter(|row| reaches_last_row && row.padding.extends_below)
+    {
+        // A row that extends below has an opaque span over every cell, so its spans tile the
+        // grid's width and the outermost spans also cover the corners.
+        let span_count = last.backgrounds.len();
+        for (index, span) in last.backgrounds.iter().enumerate() {
+            let left = if index == 0 {
+                bounds.left()
+            } else {
+                grid_bounds.left() + cell_width * span.start as f32
+            };
+            let right = if index + 1 == span_count {
+                bounds.right()
+            } else {
+                grid_bounds.left() + cell_width * (span.start + span.len) as f32
+            };
+            push(
+                left,
+                grid_bounds.bottom(),
+                right,
+                bounds.bottom(),
+                span.color,
+            );
+        }
+    }
+    quads
+}
+
+/// Ghostty's perfect-fit Powerline range, which never extends into the padding.
+fn is_perfect_fit_powerline(cell: &CellSnapshot) -> bool {
+    cell.text.chars().next().is_some_and(|character| {
+        matches!(
+            u32::from(character),
+            0xe0b0..=0xe0c8 | 0xe0ca | 0xe0cc..=0xe0d2 | 0xe0d4
+        )
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -2737,10 +2874,14 @@ fn prepare_row_cached(
     let mut underlines = Vec::new();
     let mut overlines = Vec::new();
     let mut strikethroughs = Vec::new();
+    let mut extends_below = !row.is_empty();
 
     for (column, cell) in row.iter().enumerate() {
         let placeholder = is_kitty_placeholder(cell);
         let (_, background) = effective_colors(cell, colors);
+        extends_below &= background != colors.effective_background()
+            && cell.semantic_content == CellSemanticSnapshot::Output
+            && !is_perfect_fit_powerline(cell);
         // Source identity matters even when a program's explicit RGB matches the default tint.
         // Reverse video turns foreground colors into cell backgrounds, which remain opaque.
         if cell.inverse
@@ -2872,6 +3013,17 @@ fn prepare_row_cached(
     }
 
     underlines.extend(overlines);
+    let padding = RowPadding {
+        leading: backgrounds
+            .first()
+            .filter(|span| span.start == 0)
+            .map(|span| span.color),
+        trailing: backgrounds
+            .last()
+            .filter(|span| span.start + span.len == row.len())
+            .map(|span| span.color),
+        extends_below,
+    };
     RowPaintInput {
         font_resolution_identity: terminal_fonts.resolution_identity.clone(),
         fragments,
@@ -2880,6 +3032,7 @@ fn prepare_row_cached(
         selections,
         under_text_decorations: underlines,
         over_text_decorations: strikethroughs,
+        padding,
     }
 }
 
@@ -3578,6 +3731,7 @@ mod tests {
         if !retained {
             return vec![TerminalPaintBatch {
                 surface: None,
+                padding_backgrounds: Vec::new(),
                 grid_bounds,
                 line_height,
                 rows,
@@ -3594,6 +3748,7 @@ mod tests {
         vec![
             TerminalPaintBatch {
                 surface: None,
+                padding_backgrounds: Vec::new(),
                 grid_bounds,
                 line_height,
                 rows,
@@ -3604,6 +3759,7 @@ mod tests {
             },
             TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, rgba(0x0b_0b_0b_ff))),
+                padding_backgrounds: Vec::new(),
                 grid_bounds: cursor_bounds,
                 line_height,
                 rows: vec![cursor_row],
@@ -3973,6 +4129,7 @@ mod tests {
                 candidate.rows[0].preedit = Some(preedit[0].clone());
                 let retained = TerminalPaintBatch {
                     surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
+                    padding_backgrounds: Vec::new(),
                     grid_bounds: candidate.grid_bounds,
                     line_height: candidate.line_height,
                     rows: Vec::new(),
@@ -4023,6 +4180,7 @@ mod tests {
                 let candidate = cursor_render_batches(window, false).remove(0);
                 let retained = TerminalPaintBatch {
                     surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
+                    padding_backgrounds: Vec::new(),
                     grid_bounds: candidate.grid_bounds,
                     line_height: candidate.line_height,
                     rows: Vec::new(),
@@ -4819,6 +4977,7 @@ mod tests {
                 PaintBatches {
                     batches: vec![TerminalPaintBatch {
                         surface: None,
+                        padding_backgrounds: Vec::new(),
                         grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(60.0))),
                         line_height: px(20.0),
                         rows: vec![
@@ -5114,6 +5273,152 @@ mod tests {
                 len: 1,
                 color: colors.background
             }]
+        );
+    }
+
+    fn painted_cell(text: &str, background: Color) -> CellSnapshot {
+        let mut painted = cell(text);
+        painted.background_source = TerminalColor::Rgb(background);
+        painted
+    }
+
+    fn padding_row(cells: impl IntoIterator<Item = CellSnapshot>) -> Arc<RowPaintInput> {
+        let row = cells.into_iter().collect::<Arc<[CellSnapshot]>>();
+        Arc::new(prepare_row(&row, &colors(), &"Menlo".into()))
+    }
+
+    /// Paints the padding for a 3x2 grid of 32x25 cells inside 2-point side and bottom padding.
+    fn padding_paint(
+        rows: &[Arc<RowPaintInput>],
+        reaches_last_row: bool,
+    ) -> Vec<(Bounds<Pixels>, gpui::Background)> {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(52.0)));
+        prepare_padding_background_geometry(
+            rows,
+            reaches_last_row,
+            bounds,
+            TerminalPadding::new(px(2.0), px(2.0)).grid_bounds(bounds),
+            px(32.0),
+            px(25.0),
+        )
+        .into_iter()
+        .map(|quad| (quad.bounds, quad.background))
+        .collect()
+    }
+
+    fn padding_quad(
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        color: Color,
+    ) -> (Bounds<Pixels>, gpui::Background) {
+        (
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom))),
+            gpui_color(color).into(),
+        )
+    }
+
+    #[test]
+    fn padding_keeps_the_grid_inside_its_side_and_bottom_margins() {
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(52.0)));
+
+        assert_eq!(
+            TerminalPadding::new(px(2.0), px(3.0)).grid_bounds(bounds),
+            Bounds::new(point(px(12.0), px(20.0)), size(px(96.0), px(49.0)))
+        );
+    }
+
+    #[test]
+    fn edge_cell_backgrounds_extend_across_the_side_and_bottom_padding() {
+        let ink = Color::rgb(0x0a_0a_0a);
+        let accent = Color::rgb(0x33_66_99);
+        let rows = [
+            padding_row([painted_cell("a", ink), cell("b"), painted_cell("c", accent)]),
+            padding_row([
+                painted_cell("d", ink),
+                painted_cell("e", ink),
+                painted_cell("f", accent),
+            ]),
+        ];
+
+        let painted = padding_paint(&rows, true);
+
+        assert!(
+            painted
+                == [
+                    padding_quad(0.0, 0.0, 2.0, 25.0, ink),
+                    padding_quad(98.0, 0.0, 100.0, 25.0, accent),
+                    padding_quad(0.0, 25.0, 2.0, 50.0, ink),
+                    padding_quad(98.0, 25.0, 100.0, 50.0, accent),
+                    padding_quad(0.0, 50.0, 66.0, 52.0, ink),
+                    padding_quad(66.0, 50.0, 100.0, 52.0, accent),
+                ],
+            "each row extends sideways and the last row extends down through both corners: {:?}",
+            painted.iter().map(|(bounds, _)| bounds).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn default_background_edges_leave_the_padding_to_the_pane_surface() {
+        let ink = Color::rgb(0x0a_0a_0a);
+        let rows = [padding_row([cell("a"), painted_cell("b", ink), cell("c")])];
+
+        assert!(padding_paint(&rows, true).is_empty());
+    }
+
+    #[test]
+    fn last_row_extends_down_only_when_every_cell_owns_a_non_default_background() {
+        let ink = Color::rgb(0x0a_0a_0a);
+        let default = colors().background;
+        let mut prompt = painted_cell("$", ink);
+        prompt.semantic_content = crate::terminal::CellSemanticSnapshot::Prompt;
+        let mut input = painted_cell("l", ink);
+        input.semantic_content = crate::terminal::CellSemanticSnapshot::Input;
+        let refused = [
+            ("a default background", cell("x")),
+            (
+                "an explicit background equal to the default",
+                painted_cell("x", default),
+            ),
+            ("a prompt", prompt),
+            ("command input", input),
+            (
+                "a perfect-fit Powerline glyph",
+                painted_cell("\u{e0b0}", ink),
+            ),
+        ];
+
+        for (reason, refusing) in refused {
+            let row = padding_row([painted_cell("a", ink), refusing, painted_cell("c", ink)]);
+            assert!(
+                !row.padding.extends_below,
+                "a last row with {reason} must not extend below the grid"
+            );
+        }
+        let row = padding_row([
+            painted_cell("a", ink),
+            painted_cell("b", ink),
+            painted_cell("c", ink),
+        ]);
+        assert!(row.padding.extends_below);
+    }
+
+    #[test]
+    fn rows_short_of_the_viewport_never_extend_below_the_grid() {
+        let ink = Color::rgb(0x0a_0a_0a);
+        let rows = [padding_row([
+            painted_cell("a", ink),
+            painted_cell("b", ink),
+            painted_cell("c", ink),
+        ])];
+
+        assert!(
+            padding_paint(&rows, false)
+                == [
+                    padding_quad(0.0, 0.0, 2.0, 25.0, ink),
+                    padding_quad(98.0, 0.0, 100.0, 25.0, ink),
+                ]
         );
     }
 
@@ -6159,6 +6464,7 @@ mod tests {
                     PaintBatches {
                         batches: vec![TerminalPaintBatch {
                             surface: None,
+                            padding_backgrounds: Vec::new(),
                             grid_bounds: layout.grid_bounds,
                             line_height: layout.line_height,
                             rows: stable.iter().cloned().map(PreparedFrameRow::new).collect(),
@@ -6592,6 +6898,7 @@ mod idle_retention_tests {
                 selections: Vec::new(),
                 under_text_decorations: Vec::new(),
                 over_text_decorations: Vec::new(),
+                padding: RowPadding::default(),
             }),
         });
         cache.prepared_text.push(PreparedRowTextCacheEntry {
