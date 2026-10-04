@@ -12,6 +12,7 @@ use std::{
 #[derive(Clone, Default)]
 pub(super) struct ChromeFrame {
     regions: Rc<RefCell<Vec<Hitbox>>>,
+    controls: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     pub(super) pointer: Rc<Cell<Option<MouseButton>>>,
     blocker: Rc<RefCell<Option<super::render::ModalPointerBlocker>>>,
 }
@@ -67,6 +68,7 @@ impl Element for ChromeScope {
         cx: &mut App,
     ) {
         self.frame.regions.borrow_mut().clear();
+        self.frame.controls.borrow_mut().clear();
         self.frame.blocker.borrow_mut().take();
         let _guard = FrameGuard(CURRENT_FRAME.replace(Some(self.frame.clone())));
         self.content.prepaint(window, cx);
@@ -90,6 +92,7 @@ impl Element for ChromeScope {
 
 pub(super) struct ChromeRegion {
     pub(super) content: AnyElement,
+    pub(super) protect_from_resize: bool,
 }
 impl IntoElement for ChromeRegion {
     type Element = Self;
@@ -125,6 +128,16 @@ impl Element for ChromeRegion {
         cx: &mut App,
     ) {
         self.content.prepaint(window, cx);
+        if self.protect_from_resize {
+            CURRENT_FRAME.with_borrow(|frame| {
+                if let Some(frame) = frame {
+                    frame
+                        .controls
+                        .borrow_mut()
+                        .push(bounds.intersect(&window.content_mask().bounds));
+                }
+            });
+        }
         // Register after this region's descendants, before later siblings. A titlebar
         // tracker remains behind application controls, which can occlude its marker.
         if CURRENT_FRAME.with_borrow(Option::is_some) {
@@ -170,6 +183,25 @@ pub(super) fn insert_hitbox(
         }
     });
     hitbox
+}
+
+pub(super) fn insert_resize_hitboxes(bounds: Bounds<Pixels>, window: &mut Window) -> Vec<Hitbox> {
+    let regions = CURRENT_FRAME.with_borrow(|frame| {
+        let mut regions = vec![bounds];
+        if let Some(frame) = frame {
+            for control in frame.controls.borrow().iter() {
+                regions = regions
+                    .into_iter()
+                    .flat_map(|bounds| subtract_region(bounds, *control))
+                    .collect();
+            }
+        }
+        regions
+    });
+    regions
+        .into_iter()
+        .map(|bounds| insert_hitbox(bounds, HitboxBehavior::BlockMouse, window))
+        .collect()
 }
 
 pub(super) fn prepaint_blocker(bounds: Bounds<Pixels>, window: &mut Window) -> ChromeRouting {

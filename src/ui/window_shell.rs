@@ -287,12 +287,13 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
                     move |bounds, window, _| {
                         resize_regions(bounds.size, tiling, frame_inset)
                             .into_iter()
-                            .map(|(mut region, edge)| {
+                            .flat_map(|(mut region, edge)| {
                                 region.origin += bounds.origin;
-                                (
-                                    spaceterm_ui::ModalLayer::window_chrome_hitbox(region, window),
-                                    edge,
+                                spaceterm_ui::ModalLayer::window_chrome_resize_hitboxes(
+                                    region, window,
                                 )
+                                .into_iter()
+                                .map(move |hitbox| (hitbox, edge))
                             })
                             .collect::<Vec<_>>()
                     },
@@ -440,19 +441,26 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let closed = self.0.clone();
-            super::render(
+            spaceterm_ui::ModalLayer::new(super::render(
                 div()
                     .debug_selector(|| "chrome-content".into())
                     .size_full()
                     .flex()
-                    .justify_end()
+                    .justify_between()
                     .items_start()
+                    .child(
+                        spaceterm_ui::ClientWindowControls::new(Rc::new({
+                            let closed = closed.clone();
+                            move |_, _| closed.set(closed.get() + 1)
+                        }))
+                        .side(spaceterm_ui::WindowControlSide::Left),
+                    )
                     .child(spaceterm_ui::ClientWindowControls::new(Rc::new(
                         move |_, _| closed.set(closed.get() + 1),
                     ))),
                 window,
                 cx,
-            )
+            ))
         }
     }
 
@@ -574,6 +582,56 @@ mod tests {
                 ResizeEdge::TopLeft
             )]
         );
+    }
+
+    #[gpui::test]
+    fn opaque_resize_bands_leave_window_control_edges_operable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| super::super::init(cx).unwrap());
+        for style in [
+            spaceterm_ui::DesktopWindowStyle::Adwaita,
+            spaceterm_ui::DesktopWindowStyle::Breeze,
+        ] {
+            cx.set_global(spaceterm_ui::DesktopWindowControls {
+                style,
+                ..Default::default()
+            });
+            let closed = Rc::new(Cell::new(0));
+            let (_, cx) = cx.add_window_view(|_, _| ChromeHarness(closed.clone()));
+            cx.simulate_decorations(Decorations::Client {
+                tiling: Tiling::default(),
+            });
+            cx.simulate_transparent_client_frame_support(cx.window_handle(), false);
+            cx.run_until_parked();
+            for left in [false, true] {
+                cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+                    left: if left {
+                        [Some(gpui::WindowButton::Close), None, None]
+                    } else {
+                        [None; 3]
+                    },
+                    right: if left {
+                        [None; 3]
+                    } else {
+                        [Some(gpui::WindowButton::Close), None, None]
+                    },
+                }));
+                cx.run_until_parked();
+                let bounds = cx.debug_bounds("window-close").unwrap();
+                for position in [
+                    bounds.origin + point(px(1.), px(1.)),
+                    point(bounds.right() - px(1.), bounds.top() + px(1.)),
+                    point(bounds.right() - px(1.), bounds.center().y),
+                    point(bounds.left() + px(1.), bounds.center().y),
+                ] {
+                    cx.simulate_click(position, gpui::Modifiers::none());
+                }
+            }
+            assert_eq!(closed.get(), 8, "{style:?} control edges must close");
+            assert!(
+                cx.window_requests().is_empty(),
+                "control edges must not resize"
+            );
+        }
     }
 
     #[gpui::test]

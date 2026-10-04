@@ -119,17 +119,28 @@ impl ModalLayer {
     pub fn window_chrome(content: impl IntoElement) -> impl IntoElement {
         super::window_chrome::ChromeRegion {
             content: content.into_any_element(),
+            protect_from_resize: false,
         }
     }
 
-    /// Inserts an occluding pointer-only window-management hitbox, such as a resize band.
+    pub(crate) fn window_controls(content: impl IntoElement) -> impl IntoElement {
+        super::window_chrome::ChromeRegion {
+            content: content.into_any_element(),
+            protect_from_resize: true,
+        }
+    }
+
+    /// Inserts resize hitboxes with the painted Window Control bounds excluded.
     ///
     /// Call during prepaint inside this layer, before the modal overlay. The hitbox retains its
     /// pointer and cursor routes under a modal; the modal surface and later application siblings
     /// still occlude it. It blocks earlier application content from claiming the same press.
     /// Register only the geometry that performs window management.
-    pub fn window_chrome_hitbox(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
-        super::window_chrome::insert_hitbox(bounds, HitboxBehavior::BlockMouse, window)
+    pub fn window_chrome_resize_hitboxes(
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+    ) -> Vec<Hitbox> {
+        super::window_chrome::insert_resize_hitboxes(bounds, window)
     }
 
     /// Presents a complete transient owner above ordinary content and below an active modal.

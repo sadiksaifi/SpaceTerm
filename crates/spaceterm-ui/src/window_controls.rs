@@ -309,7 +309,7 @@ impl RenderOnce for ClientWindowControls {
         if !matches!(window.window_decorations(), Decorations::Client { .. })
             || window.is_fullscreen()
         {
-            return crate::ModalLayer::window_chrome(controls);
+            return crate::ModalLayer::window_controls(controls);
         }
         let dark = self.surface.map_or(
             matches!(
@@ -390,7 +390,7 @@ impl RenderOnce for ClientWindowControls {
                     ),
             );
         }
-        crate::ModalLayer::window_chrome(controls)
+        crate::ModalLayer::window_controls(controls)
     }
 }
 
