@@ -9,6 +9,7 @@ import os
 import plistlib
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -294,6 +295,48 @@ assert app.launch([], None)
             self.record.read_text().splitlines(),
             [str(prefix / "bin" / "spaceterm"), "controls", "1", "--new-instance"],
         )
+
+    def test_sigterm_exits_after_removing_the_staging_prefix(self):
+        commands = self.private / "commands"
+        commands.mkdir()
+        ready = self.private / "tic-ready"
+        release = self.private / "tic-release"
+        tic = commands / "tic"
+        tic.write_text(f"#!{sys.executable}\n" + """import os, pathlib, sys, time
+arguments = sys.argv[1:]
+output = pathlib.Path(arguments[arguments.index("-o") + 1]) / "x/xterm-spaceterm"
+output.parent.mkdir(parents=True)
+output.touch()
+pathlib.Path(os.environ["SPACETERM_TEST_READY"]).touch()
+while not pathlib.Path(os.environ["SPACETERM_TEST_RELEASE"]).exists():
+    time.sleep(0.01)
+""")
+        tic.chmod(0o755)
+        environment = self.environment()
+        environment.update(PATH=str(commands) + os.pathsep + os.environ["PATH"],
+                           SPACETERM_TEST_READY=str(ready), SPACETERM_TEST_RELEASE=str(release))
+        process = subprocess.Popen(
+            ["bash", str(self.root / "scripts/run-development-app-linux.sh")],
+            env=environment, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "the controlled tic must reach the staging boundary")
+            process.send_signal(signal.SIGTERM)
+            # Bash handles a signal after its foreground child returns.
+            release.touch()
+            _, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 128 + signal.SIGTERM, error)
+            self.assertFalse(self.record.exists())
+            self.assertEqual(list((self.root / "target/development-apps").iterdir()), [])
+            self.assertEqual(list(self.private.glob("spaceterm-development-executable.*")), [])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
 
     def test_unknown_profile_is_rejected_before_building(self):
         result = self.run_profile("release")

@@ -32,7 +32,10 @@ cleanup() {
     fi
     return "$exit_status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "$SCRIPT_DIR/cargo-artifacts.sh" run -- \
     python3 "$SCRIPT_DIR/build-cargo-executable.py" \
