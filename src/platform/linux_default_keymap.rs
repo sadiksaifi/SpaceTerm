@@ -234,7 +234,7 @@ pub(super) fn profile(
         ),
         (
             Command::ToggleSidebar,
-            Some(DefaultBinding::new("ctrl-shift-b", &["f9"])),
+            Some(DefaultBinding::new("ctrl-shift-b", &[])),
         ),
         (
             Command::ToggleSidebarFocus,
@@ -506,7 +506,7 @@ mod tests {
             (Command::IncreaseTerminalFontSize, &["ctrl-=", "ctrl-+"]),
             (Command::DecreaseTerminalFontSize, &["ctrl--"]),
             (Command::ResetTerminalFontSize, &["ctrl-0"]),
-            (Command::ToggleSidebar, &["ctrl-shift-b", "f9"]),
+            (Command::ToggleSidebar, &["ctrl-shift-b"]),
             (Command::KeyboardShortcuts, &["ctrl-?"]),
         ] {
             assert_eq!(

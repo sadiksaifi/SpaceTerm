@@ -1094,18 +1094,22 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn find_next(&mut self, _: &FindNext, _window: &mut Window, _cx: &mut Context<Self>) {
-        if let Some(session) = &self.terminal_session.session
-            && self.find_input.is_some()
-        {
+    fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_input.is_none() {
+            cx.propagate();
+            return;
+        }
+        if let Some(session) = &self.terminal_session.session {
             session.navigate_find(self.find_generation, FindDirection::Next);
         }
     }
 
-    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, _cx: &mut Context<Self>) {
-        if let Some(session) = &self.terminal_session.session
-            && self.find_input.is_some()
-        {
+    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_input.is_none() {
+            cx.propagate();
+            return;
+        }
+        if let Some(session) = &self.terminal_session.session {
             session.navigate_find(self.find_generation, FindDirection::Previous);
         }
     }

@@ -181,7 +181,6 @@ ctrl-+	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 ctrl--	Some(Identifier("TerminalPane"))	terminal::DecreaseTerminalFontSize
 ctrl-0	Some(Identifier("TerminalPane"))	terminal::ResetTerminalFontSize
 ctrl-shift-b	Some(Identifier("TerminalPane"))	terminal::ToggleSidebar
-f9	Some(Identifier("TerminalPane"))	terminal::ToggleSidebar
 ctrl-shift-e	Some(Identifier("TerminalPane"))	terminal::ToggleSidebarFocus
 ctrl-?	None	spaceterm::OpenKeyboardShortcuts
 shift-enter	Some(Identifier("TerminalFind"))	terminal::FindPrevious

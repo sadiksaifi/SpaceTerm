@@ -399,7 +399,7 @@ mod tests {
                         .then_some(index)
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(customizable.len(), 66);
+            assert_eq!(customizable.len(), 65);
             assert!(customizable.windows(2).all(|pair| pair[1] == pair[0] + 1));
             keymap
                 .bindings()
@@ -571,6 +571,78 @@ mod tests {
             );
             cx.simulate_keystrokes("escape");
         }
+    }
+
+    #[gpui::test]
+    fn linux_function_keys_reach_terminal_unless_find_owns_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{RecordedSessionCommand, TerminalEmulator};
+        use crate::terminal::{FindDirection, KeyAction, PhysicalKey};
+        let (_pane, cx, records) = linux_terminal_pane(cx);
+        cx.simulate_keystrokes("f3 shift-f3 f9");
+        let keys = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(key) if key.action == KeyAction::Press => {
+                    Some((key.physical_key, key.modifiers.shift))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                (PhysicalKey::F3, false),
+                (PhysicalKey::F3, true),
+                (PhysicalKey::F9, false)
+            ]
+        );
+        let geometry = crate::terminal::geometry::TerminalGeometry::from_grid(
+            crate::terminal::geometry::CellGridSize::new(80, 30),
+            crate::terminal::geometry::LogicalCellSize::new(10.0, 20.0),
+            crate::terminal::geometry::BackingScale::ONE,
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        let bytes = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(key) => Some(emulator.key(key).unwrap().bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, b"\x1bOR\x1b[13;2~\x1b[20~");
+        assert!(cx.update(|_, cx| {
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_action(&crate::ui::ToggleSidebar)
+                .all(|binding| binding.keystrokes()[0].key() != "f9")
+        }));
+        cx.dispatch_action(crate::ui::OpenTerminalFind);
+        cx.simulate_keystrokes("f3 shift-f3");
+        let directions = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::NavigateFind(_, direction) => Some(direction),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(directions, [FindDirection::Next, FindDirection::Previous]);
+        // Closing Find restores the same function keys to the Terminal Session.
+        cx.simulate_keystrokes("escape f3");
+        assert_eq!(
+            records
+                .commands()
+                .into_iter()
+                .filter(|call| matches!(&call.command,
+            RecordedSessionCommand::Key(key) if key.action == KeyAction::Press))
+                .count(),
+            4
+        );
     }
 
     #[gpui::test]
