@@ -1071,6 +1071,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual measurement of full and incremental large-history publication"]
     fn accesskit_large_history_publication_measurement() {
         use std::{hint::black_box, time::Instant};
         let mut fixture = RetainedFixture::new(10_000);
