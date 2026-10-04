@@ -1780,6 +1780,7 @@ impl PaneHost {
         let surface_terminal = terminal.clone();
         let surface_appearance = appearance.clone();
         let radius = frame.pane_radius();
+        let rim_width = frame.pane_rim_width();
         let pane_rim = {
             let rim_terminal = terminal.clone();
             let rim_appearance = appearance.clone();
@@ -1790,6 +1791,7 @@ impl PaneHost {
                         rim_appearance.pane_rim_on(rim_terminal.read(cx).surface_background());
                     window.paint_quad(
                         gpui::outline(bounds, gpui_color(rim), gpui::BorderStyle::Solid)
+                            .border_widths(rim_width)
                             .corner_radii(radius),
                     );
                 },
