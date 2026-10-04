@@ -334,8 +334,14 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
         refresh_layout(cx);
         let resolved = InstalledKeymap::get(cx);
         assert_eq!(
+            resolved.inactive_override(Command::NewWorkspace),
+            Some(crate::keybindings::Reservation::System(
+                SystemReservation::Screenshot
+            ))
+        );
+        assert_eq!(
             resolved.state(Command::NewWorkspace),
-            KeybindingState::Blocked(SystemReservation::Screenshot)
+            KeybindingState::Default
         );
         assert_eq!(
             KeymapRuntime::profile(cx).check(&Shortcut::parse("cmd-§").unwrap()),

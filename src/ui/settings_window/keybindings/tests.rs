@@ -368,6 +368,51 @@ fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(
+        with_keybindings(r#"{"create_tab":"ctrl-c","close_workspace":"cmd-q"}"#),
+        cx,
+    );
+
+    assert_eq!(
+        description(&window, Command::CreateTab, cx),
+        Some(ShortcutDescription {
+            text: "Ctrl+C is reserved for terminal input here, so the default shortcut is active."
+                .into(),
+            tone: CaptionTone::Warning,
+        })
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        Some(shortcut("cmd-t"))
+    );
+    // Close Workspace has no default to fall back to.
+    assert_eq!(
+        description(&window, Command::CloseWorkspace, cx),
+        Some(ShortcutDescription {
+            text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
+                .into(),
+            tone: CaptionTone::Error,
+        })
+    );
+    // Both overrides stay retained until the person changes them.
+    assert_eq!(
+        retained(&window, Command::CreateTab, cx),
+        Some(Some(shortcut("ctrl-c")))
+    );
+    assert_eq!(
+        retained(&window, Command::CloseWorkspace, cx),
+        Some(Some(shortcut("cmd-q")))
+    );
+    click("settings-row-shortcut-create-tab-reset", cx);
+    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(description(&window, Command::CreateTab, cx), None);
+}
+
+#[gpui::test]
 fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(with_keybindings(r#"{"close_workspace":"cmd-n"}"#), cx);
 

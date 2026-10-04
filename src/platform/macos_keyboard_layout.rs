@@ -141,9 +141,7 @@ unsafe extern "C" {
 #[cfg(all(test, feature = "native-tests"))]
 pub(crate) mod tests {
     use super::*;
-    use crate::keybindings::{
-        Command, KeybindingPreferences, KeybindingState, Shortcut, SystemReservation,
-    };
+    use crate::keybindings::{Command, KeybindingPreferences, Shortcut, SystemReservation};
     use std::rc::Rc;
 
     #[link(name = "Carbon", kind = "framework")]
@@ -223,8 +221,12 @@ pub(crate) mod tests {
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
             assert_eq!(
-                profile.resolve(&preferences).state(Command::NewWorkspace),
-                KeybindingState::Blocked(SystemReservation::Screenshot)
+                profile
+                    .resolve(&preferences)
+                    .inactive_override(Command::NewWorkspace),
+                Some(crate::keybindings::Reservation::System(
+                    SystemReservation::Screenshot
+                ))
             );
         }
         for (id, source, key, modifiers) in [

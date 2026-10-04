@@ -119,8 +119,12 @@ pub enum KeybindingState {
     Default,
     Overridden,
     Unassigned,
-    Displaced { by: Command },
+    Displaced {
+        by: Command,
+    },
+    /// The default is System Reserved on the active keyboard layout.
     Blocked(SystemReservation),
+    /// The default is Terminal Reserved on the active keyboard layout.
     TerminalBlocked(TerminalConvention),
 }
 
@@ -260,19 +264,21 @@ impl KeymapProfile {
         self.system_reserved.get(shortcut).copied()
     }
 
+    /// Applies the retained overrides to the host defaults. An override Reserved on this host,
+    /// such as a Command chord written on another desktop, stays retained but inactive, and its
+    /// Command keeps the host default.
     pub fn resolve(&self, preferences: &KeybindingPreferences) -> ResolvedKeymap {
         let mut resolved = ResolvedKeymap::default();
         for (command, shortcut) in preferences.iter() {
             let (shortcuts, state) = match shortcut {
                 None => (Vec::new(), KeybindingState::Unassigned),
                 Some(shortcut) => {
-                    let reservation = self.check(shortcut).err();
+                    if let Err(reservation) = self.check(shortcut) {
+                        resolved.inactive_overrides.insert(command, reservation);
+                        continue;
+                    }
                     let shortcut = shortcut.resolve(&self.layout);
-                    if let Some(Reservation::Terminal(reason)) = reservation {
-                        (Vec::new(), KeybindingState::TerminalBlocked(reason))
-                    } else if let Some(Reservation::System(reason)) = reservation {
-                        (Vec::new(), KeybindingState::Blocked(reason))
-                    } else if let Some(by) = resolved.owner(&shortcut) {
+                    if let Some(by) = resolved.owner(&shortcut) {
                         // Invalid duplicate overrides still cannot install two owners.
                         (Vec::new(), KeybindingState::Displaced { by })
                     } else {
@@ -286,7 +292,7 @@ impl KeymapProfile {
                 .insert(command, ResolvedCommand { shortcuts, state });
         }
         for command in Command::ALL {
-            if preferences.is_overridden(command) {
+            if resolved.commands.contains_key(&command) {
                 continue;
             }
             let defaults = self.defaults(command);
@@ -488,9 +494,16 @@ struct ResolvedCommand {
 pub struct ResolvedKeymap {
     commands: BTreeMap<Command, ResolvedCommand>,
     owners: HashMap<Shortcut, Command>,
+    inactive_overrides: BTreeMap<Command, Reservation>,
 }
 
 impl ResolvedKeymap {
+    /// Why the Command's retained override is inactive on this host, when it is. The Command
+    /// then resolves as if it had no override; the retained spelling is left unchanged.
+    pub fn inactive_override(&self, command: Command) -> Option<Reservation> {
+        self.inactive_overrides.get(&command).copied()
+    }
+
     pub fn shortcut(&self, command: Command) -> Option<&Shortcut> {
         self.shortcuts(command).first()
     }

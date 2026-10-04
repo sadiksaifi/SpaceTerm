@@ -455,6 +455,85 @@ mod tests {
     }
 
     #[test]
+    fn an_override_reserved_on_this_host_keeps_the_host_default_in_both_directions() {
+        use crate::keybindings::{KeybindingState, Reservation, SystemReservation};
+        let cases = [
+            (
+                profile(),
+                r#"{"create_tab":"cmd-t","split_right":"cmd-d"}"#,
+                [
+                    (Command::CreateTab, "ctrl-shift-t"),
+                    (Command::SplitRight, "ctrl-shift-d"),
+                ],
+                Reservation::System(SystemReservation::DesktopShortcut),
+            ),
+            (
+                crate::desktop_profile::default_keymap::profile(
+                    crate::platform::keyboard_layout::testing::us(),
+                    vec![],
+                )
+                .unwrap(),
+                r#"{"create_tab":"ctrl-shift-t","split_right":"ctrl-shift-d"}"#,
+                [
+                    (Command::CreateTab, "cmd-t"),
+                    (Command::SplitRight, "cmd-d"),
+                ],
+                Reservation::Terminal(crate::keybindings::TerminalConvention::ControlCharacter),
+            ),
+        ];
+        for (host, overrides, defaults, reservation) in cases {
+            let preferences: KeybindingPreferences = serde_json::from_str(overrides).unwrap();
+            let retained = serde_json::to_string(&preferences).unwrap();
+            let resolved = host.resolve(&preferences);
+            for (command, default) in defaults {
+                assert_eq!(resolved.state(command), KeybindingState::Default);
+                assert_eq!(
+                    resolved
+                        .shortcut(command)
+                        .map(ToString::to_string)
+                        .as_deref(),
+                    Some(default),
+                    "{command:?}"
+                );
+                assert_eq!(resolved.inactive_override(command), Some(reservation));
+                assert!(resolved.key_bindings().iter().any(|binding| {
+                    binding.action().partial_eq(command.action().as_ref())
+                        && binding.keystrokes()[0].inner().unparse()
+                            == gpui::Keystroke::parse(default).unwrap().unparse()
+                }));
+            }
+            assert_eq!(resolved.inactive_override(Command::NewWorkspace), None);
+            // Resolution never rewrites the retained overrides.
+            assert_eq!(serde_json::to_string(&preferences).unwrap(), retained);
+        }
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn workbench_close_shortcuts_do_not_capture_terminal_control_w() {
+        let bindings = control_bindings();
+        let workbench =
+            gpui::KeyContext::parse(crate::ui::developer_workbench::WORKBENCH_KEY_CONTEXT).unwrap();
+        let terminal = gpui::KeyContext::parse(TERMINAL_KEY_CONTEXT).unwrap();
+        for shortcut in ["ctrl-w", "ctrl-shift-w"] {
+            let key = gpui::Keystroke::parse(shortcut).unwrap();
+            let binding = bindings
+                .iter()
+                .find(|binding| {
+                    binding
+                        .action()
+                        .as_any()
+                        .is::<crate::ui::developer_workbench::CloseDeveloperWorkbench>()
+                        && binding.match_keystrokes(std::slice::from_ref(&key)) == Some(false)
+                })
+                .expect("the Workbench has a close shortcut");
+            let predicate = binding.predicate().unwrap();
+            assert!(predicate.eval(std::slice::from_ref(&workbench)));
+            assert!(!predicate.eval(std::slice::from_ref(&terminal)));
+        }
+    }
+
+    #[test]
     fn linux_fixed_bindings_use_the_dispatched_spelling() {
         let profile = profile();
         let keystrokes = profile

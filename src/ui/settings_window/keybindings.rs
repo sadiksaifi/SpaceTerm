@@ -544,6 +544,7 @@ impl SettingsWindow {
     ) -> Option<ShortcutDescription> {
         let presentation = DesktopPresentation::get(cx);
         let keybindings = &self.editor.document().keybindings;
+        let resolved = self.resolved_keymap(cx);
         let notice = self
             .shortcuts
             .notice
@@ -564,33 +565,56 @@ impl SettingsWindow {
                 format!("Its shortcut is now assigned to {}.", owner.label()).into(),
                 CaptionTone::Warning,
             ),
-            _ => match self.resolved_keymap(cx).state(command) {
-                KeybindingState::Displaced { by } => (
-                    format!("Its default shortcut is assigned to {}.", by.label()).into(),
-                    CaptionTone::Warning,
-                ),
-                KeybindingState::TerminalBlocked(_) => (
-                    "This shortcut is reserved for terminal input and isn't active.".into(),
-                    CaptionTone::Error,
-                ),
-                KeybindingState::Blocked(reason) => {
+            _ => match (resolved.state(command), resolved.inactive_override(command)) {
+                (
+                    state @ (KeybindingState::Default | KeybindingState::Unassigned),
+                    Some(reservation),
+                ) => {
                     let chord = keybindings
                         .get(command)
                         .and_then(Option::as_ref)
-                        .map(|shortcut| presentation.format(shortcut))
-                        .unwrap_or_else(|| "Its default shortcut".into());
-                    (
-                        format!(
-                            "{chord} is {} and isn't active.",
+                        .map_or_else(
+                            || "Its shortcut".into(),
+                            |shortcut| presentation.format(shortcut),
+                        );
+                    let reason = match reservation {
+                        Reservation::Terminal(_) => "reserved for terminal input".to_owned(),
+                        Reservation::System(reason) => {
                             system_reservation_text(reason, presentation)
-                        )
-                        .into(),
-                        CaptionTone::Error,
-                    )
+                        }
+                    };
+                    // The default stands in for the override, so only a Command left without a
+                    // Shortcut reads as an error.
+                    let (outcome, tone) = if state == KeybindingState::Default {
+                        (", so the default shortcut is active", CaptionTone::Warning)
+                    } else {
+                        (" and isn't active", CaptionTone::Error)
+                    };
+                    (format!("{chord} is {reason} here{outcome}.").into(), tone)
                 }
-                KeybindingState::Default
-                | KeybindingState::Overridden
-                | KeybindingState::Unassigned => return None,
+                (KeybindingState::Displaced { by }, _) => (
+                    format!("Its default shortcut is assigned to {}.", by.label()).into(),
+                    CaptionTone::Warning,
+                ),
+                // Only a default can be blocked: a Reserved override is inactive instead.
+                (KeybindingState::TerminalBlocked(_), _) => (
+                    "Its default shortcut is reserved for terminal input and isn't active.".into(),
+                    CaptionTone::Error,
+                ),
+                (KeybindingState::Blocked(reason), _) => (
+                    format!(
+                        "Its default shortcut is {} and isn't active.",
+                        system_reservation_text(reason, presentation)
+                    )
+                    .into(),
+                    CaptionTone::Error,
+                ),
+                (
+                    KeybindingState::Default
+                    | KeybindingState::Overridden
+                    | KeybindingState::Unassigned,
+                    _,
+                ) => return None,
             },
         };
         Some(ShortcutDescription { text, tone })

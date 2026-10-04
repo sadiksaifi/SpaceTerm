@@ -172,11 +172,11 @@ fn preferences_are_sparse_and_validate_only_override_conflicts() {
         Err(KeybindingPreferencesError::DuplicateShortcut)
     );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"unknown":null}"#).is_err());
+    let reserved = profile().resolve(&preferences(r#"{"close_tab":"ctrl-c"}"#));
+    assert_eq!(reserved.state(Command::CloseTab), KeybindingState::Default);
     assert_eq!(
-        profile()
-            .resolve(&preferences(r#"{"close_tab":"ctrl-c"}"#))
-            .state(Command::CloseTab),
-        KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+        reserved.inactive_override(Command::CloseTab),
+        Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"close_tab":12}"#).is_err());
     assert_eq!(preferences(r#"{"close_tab":"cmd-q"}"#).validate(), Ok(()));
@@ -346,11 +346,14 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         resolved.state(Command::CloseTab),
         KeybindingState::Unassigned
     );
+    // A Reserved override is inactive, and its Command keeps the host default.
+    assert_eq!(resolved.state(Command::CreateTab), KeybindingState::Default);
     assert_eq!(
-        resolved.state(Command::CreateTab),
-        KeybindingState::Blocked(SystemReservation::Quit)
+        resolved.inactive_override(Command::CreateTab),
+        Some(Reservation::System(SystemReservation::Quit))
     );
-    assert!(resolved.shortcuts(Command::CreateTab).is_empty());
+    assert_eq!(resolved.shortcuts(Command::CreateTab), &[shortcut("cmd-t")]);
+    assert_eq!(resolved.inactive_override(Command::NewWorkspace), None);
     assert_eq!(
         resolved.state(Command::IncreaseTerminalFontSize),
         KeybindingState::Default
@@ -360,7 +363,7 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         &[shortcut("cmd-="), shortcut("alt-cmd-=")]
     );
     assert_eq!(resolved.owner(&shortcut("cmd-n")), None);
-    assert_eq!(resolved.owner(&shortcut("cmd-t")), None);
+    assert_eq!(resolved.owner(&shortcut("cmd-t")), Some(Command::CreateTab));
     assert_eq!(profile.resolve(&prefs), resolved);
 }
 
@@ -420,9 +423,14 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
         .unwrap();
         let mut prefs = preferences(r#"{"new_workspace":"cmd-q"}"#);
         let before = prefs.clone();
+        let resolved = profile.resolve(&prefs);
         assert_eq!(
-            profile.resolve(&prefs).state(Command::NewWorkspace),
-            KeybindingState::Blocked(reason)
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Unassigned
+        );
+        assert_eq!(
+            resolved.inactive_override(Command::NewWorkspace),
+            Some(Reservation::System(reason))
         );
         assert_eq!(
             profile.check(&shortcut("cmd-q")),
@@ -802,8 +810,10 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
         .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"ctrl-shift-7"}"#);
     assert_eq!(
-        profile.resolve(&prefs).state(Command::NewWorkspace),
-        KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+        profile
+            .resolve(&prefs)
+            .inactive_override(Command::NewWorkspace),
+        Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
     assert_eq!(
         profile.assign(
@@ -904,8 +914,8 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
     .unwrap();
     for command in [Command::NewWorkspace, Command::CreateTab, Command::CloseTab] {
         assert_eq!(
-            us.resolve(&document.keybindings).state(command),
-            KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+            us.resolve(&document.keybindings).inactive_override(command),
+            Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
         );
     }
 

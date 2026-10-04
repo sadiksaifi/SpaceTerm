@@ -576,10 +576,18 @@ mod tests {
             serde_json::from_str(r#"{"new_workspace":"cmd-alt-a"}"#).unwrap();
         let resolved = profile.resolve(&preferences);
         assert_eq!(
-            resolved.state(Command::NewWorkspace),
-            KeybindingState::Blocked(SystemReservation::DeveloperWorkbench)
+            resolved.inactive_override(Command::NewWorkspace),
+            Some(Reservation::System(SystemReservation::DeveloperWorkbench))
         );
-        assert!(resolved.shortcuts(Command::NewWorkspace).is_empty());
+        assert_eq!(
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Default
+        );
+        assert!(
+            !resolved
+                .shortcuts(Command::NewWorkspace)
+                .contains(&workbench)
+        );
     }
 
     #[gpui::test]
