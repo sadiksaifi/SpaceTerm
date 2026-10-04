@@ -1,9 +1,9 @@
 //! A client frame around application content, driven by the window's decoration facts.
 
 use gpui::{
-    AnyElement, App, Bounds, ClientFrame, Corners, CursorStyle, Decorations, Edges, HitboxBehavior,
-    MouseButton, MouseDownEvent, Pixels, ResizeEdge, Size, Tiling, Window, canvas, div, point,
-    prelude::*, px, rgba, size,
+    AnyElement, App, Bounds, ClientFrame, Corners, CursorStyle, Decorations, Edges, MouseButton,
+    MouseDownEvent, Pixels, ResizeEdge, Size, Tiling, Window, canvas, div, point, prelude::*, px,
+    rgba, size,
 };
 
 #[cfg(test)]
@@ -251,7 +251,10 @@ pub(super) fn render(content: impl IntoElement, window: &mut Window, cx: &mut Ap
                             .into_iter()
                             .map(|(mut region, edge)| {
                                 region.origin += bounds.origin;
-                                (window.insert_hitbox(region, HitboxBehavior::Normal), edge)
+                                (
+                                    spaceterm_ui::ModalLayer::window_chrome_hitbox(region, window),
+                                    edge,
+                                )
                             })
                             .collect::<Vec<_>>()
                     },
@@ -541,6 +544,135 @@ mod tests {
             gpui::Modifiers::none(),
         );
         assert_eq!(cx.window_requests().len(), 1);
+    }
+
+    struct ModalFrameHarness(Rc<Cell<usize>>);
+
+    impl Render for ModalFrameHarness {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let presses = self.0.clone();
+            spaceterm_ui::ModalLayer::new(super::render(
+                div().size_full().flex().items_end().child(
+                    spaceterm_ui::Button::new("frame-content", "Application content")
+                        .debug_selector("frame-content")
+                        .on_activate(move |_, _, _| presses.set(presses.get() + 1)),
+                ),
+                window,
+                cx,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn modal_client_frame_preserves_resize_bands_and_blocks_content(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| super::super::init(cx).unwrap());
+        for transparent in [true, false] {
+            let presses = Rc::new(Cell::new(0));
+            let (root, cx) = cx.add_window_view(|_, _| ModalFrameHarness(presses.clone()));
+            cx.simulate_decorations(Decorations::Client {
+                tiling: Tiling::default(),
+            });
+            cx.simulate_transparent_client_frame_support(cx.window_handle(), transparent);
+            cx.update(|window, cx| {
+                window.activate_window();
+                root.update(cx, |_, cx| {
+                    spaceterm_ui::Dialog::new(
+                        spaceterm_ui::ModalId::new("frame-modal"),
+                        "Frame modal",
+                        "Notice",
+                        vec![spaceterm_ui::ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            spaceterm_ui::ModalActionRole::Cancel,
+                            "frame-cancel",
+                        )],
+                        spaceterm_ui::DialogInitialFocus::Action("cancel"),
+                    )
+                    .present(
+                        window,
+                        cx,
+                        |_, _, _| spaceterm_ui::DialogCloseDecision::Deny {
+                            first_invalid: None,
+                        },
+                        |_, _| {},
+                    )
+                    .unwrap();
+                });
+            });
+            cx.run_until_parked();
+            let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+            let viewport = cx.update(|window, _| window.viewport_size());
+            let inset = if transparent {
+                CLIENT_FRAME_INSET
+            } else {
+                RESIZE_BAND
+            };
+            let near = px(inset - RESIZE_BAND / 2.);
+            let far_x = viewport.width - near;
+            let far_y = viewport.height - near;
+            for (position, edge, expected_cursor) in [
+                (
+                    point(viewport.width / 2., near),
+                    ResizeEdge::Top,
+                    CursorStyle::ResizeUpDown,
+                ),
+                (
+                    point(viewport.width / 2., far_y),
+                    ResizeEdge::Bottom,
+                    CursorStyle::ResizeUpDown,
+                ),
+                (
+                    point(near, viewport.height / 2.),
+                    ResizeEdge::Left,
+                    CursorStyle::ResizeLeftRight,
+                ),
+                (
+                    point(far_x, viewport.height / 2.),
+                    ResizeEdge::Right,
+                    CursorStyle::ResizeLeftRight,
+                ),
+                (
+                    point(near, near),
+                    ResizeEdge::TopLeft,
+                    CursorStyle::ResizeUpLeftDownRight,
+                ),
+                (
+                    point(far_x, near),
+                    ResizeEdge::TopRight,
+                    CursorStyle::ResizeUpRightDownLeft,
+                ),
+                (
+                    point(near, far_y),
+                    ResizeEdge::BottomLeft,
+                    CursorStyle::ResizeUpRightDownLeft,
+                ),
+                (
+                    point(far_x, far_y),
+                    ResizeEdge::BottomRight,
+                    CursorStyle::ResizeUpLeftDownRight,
+                ),
+            ] {
+                cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+                cx.simulate_click(position, gpui::Modifiers::none());
+                assert_eq!(
+                    cx.window_requests().last(),
+                    Some(&gpui::TestWindowRequest::StartWindowResize(edge)),
+                    "transparent={transparent}, {edge:?}"
+                );
+                assert_eq!(cursor(edge), expected_cursor);
+                assert!(cx.update(|window, _| focused.is_focused(window)));
+            }
+            let content = cx.debug_bounds("frame-content").unwrap().center();
+            cx.simulate_click(content, gpui::Modifiers::none());
+            assert_eq!(presses.get(), 0);
+            assert_eq!(cx.window_requests().len(), 8);
+            assert!(cx.update(|window, _| focused.is_focused(window)));
+            assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        }
     }
 
     #[test]

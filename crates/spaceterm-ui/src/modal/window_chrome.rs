@@ -125,16 +125,11 @@ impl Element for ChromeRegion {
         cx: &mut App,
     ) {
         self.content.prepaint(window, cx);
-        CURRENT_FRAME.with_borrow(|frame| {
-            if let Some(frame) = frame {
-                // Register after this region's descendants, before later siblings. A titlebar
-                // tracker remains behind application controls, which can occlude its marker.
-                frame
-                    .regions
-                    .borrow_mut()
-                    .push(window.insert_hitbox(bounds, HitboxBehavior::Normal));
-            }
-        });
+        // Register after this region's descendants, before later siblings. A titlebar
+        // tracker remains behind application controls, which can occlude its marker.
+        if CURRENT_FRAME.with_borrow(Option::is_some) {
+            insert_hitbox(bounds, HitboxBehavior::Normal, window);
+        }
     }
     fn paint(
         &mut self,
@@ -154,12 +149,27 @@ pub(super) struct ChromeRouting {
     regions: Vec<Hitbox>,
     pub(super) pointer: Rc<Cell<Option<MouseButton>>>,
 }
+
 impl ChromeRouting {
     pub(super) fn contains(&self, position: Point<Pixels>, window: &Window) -> bool {
         self.regions
             .iter()
             .any(|region| region.is_hovered_at(position, window))
     }
+}
+
+pub(super) fn insert_hitbox(
+    bounds: Bounds<Pixels>,
+    behavior: HitboxBehavior,
+    window: &mut Window,
+) -> Hitbox {
+    let hitbox = window.insert_hitbox(bounds, behavior);
+    CURRENT_FRAME.with_borrow(|frame| {
+        if let Some(frame) = frame {
+            frame.regions.borrow_mut().push(hitbox.clone());
+        }
+    });
+    hitbox
 }
 
 pub(super) fn prepaint_blocker(bounds: Bounds<Pixels>, window: &mut Window) -> ChromeRouting {

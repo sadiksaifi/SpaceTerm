@@ -1,10 +1,11 @@
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, HitboxBehavior, ImageSource, InspectorElementId, InteractiveElement as _,
-    IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba,
-    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
+    GlobalElementId, Hitbox, HitboxBehavior, ImageSource, InspectorElementId,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, RenderOnce, Rgba, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, canvas, div, img,
+    prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -119,6 +120,16 @@ impl ModalLayer {
         super::window_chrome::ChromeRegion {
             content: content.into_any_element(),
         }
+    }
+
+    /// Inserts an occluding pointer-only window-management hitbox, such as a resize band.
+    ///
+    /// Call during prepaint inside this layer, before the modal overlay. The hitbox retains its
+    /// pointer and cursor routes under a modal; the modal surface and later application siblings
+    /// still occlude it. It blocks earlier application content from claiming the same press.
+    /// Register only the geometry that performs window management.
+    pub fn window_chrome_hitbox(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
+        super::window_chrome::insert_hitbox(bounds, HitboxBehavior::BlockMouse, window)
     }
 
     /// Presents a complete transient owner above ordinary content and below an active modal.
