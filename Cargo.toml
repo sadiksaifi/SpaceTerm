@@ -36,13 +36,12 @@ members = [
     "third_party/libghostty-vt-sys",
 ]
 default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
-exclude = ["vendor/accesskit", "vendor/accesskit-consumer", "vendor/accesskit-atspi-common"]
 resolver = "2"
 
 [patch.crates-io]
-accesskit = { path = "vendor/accesskit" }
-accesskit_consumer = { path = "vendor/accesskit-consumer" }
-accesskit_atspi_common = { path = "vendor/accesskit-atspi-common" }
+accesskit = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-05" }
+accesskit_consumer = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-05" }
+accesskit_atspi_common = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-05" }
 
 [features]
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.

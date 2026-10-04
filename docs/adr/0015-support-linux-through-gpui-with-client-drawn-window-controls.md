@@ -31,12 +31,14 @@ collisions with installed versions, with recorded checksums and notices.
 Terminal text starts with the bundled SpaceTerm Default family and falls back to fontconfig
 monospace on Linux.
 
-Linux accessibility uses GPUI's AccessKit integration with AT-SPI. File Preview uses GNOME Sushi
-when its D-Bus service is activatable; the command is otherwise absent. Hide, Hide Others, Show All,
-Bring All to Front, the character palette, Services, Secure Input, System Permissions, and
-microphone controls have no Linux capability. Linux quit confirmations use SpaceTerm's Alert,
-closing the last window quits, and a session-bus application identity makes subsequent launches
-activate the existing instance.
+Linux accessibility uses GPUI's AccessKit integration with AT-SPI. SpaceTerm pins the core,
+consumer, and AT-SPI translation crates to its AccessKit fork so terminal geometry, text
+navigation, and bounded text-event patches are maintained and tested with their dependency owner.
+File Preview uses GNOME Sushi when its D-Bus service is activatable; the command is otherwise
+absent. Hide, Hide Others, Show All, Bring All to Front, the character palette, Services, Secure
+Input, System Permissions, and microphone controls have no Linux capability. Linux quit
+confirmations use SpaceTerm's Alert, closing the last window quits, and a session-bus application
+identity makes subsequent launches activate the existing instance.
 
 Linux supports source builds through mise only. This change adds no packaging, distribution, or
 updates: the Linux update adapter stays inert and update controls are absent.

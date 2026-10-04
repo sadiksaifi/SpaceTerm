@@ -137,7 +137,10 @@ point. Hide, Hide Others, Show All, Bring All to Front, the character palette, S
 System Permissions, and microphone controls are absent.
 Linux currently supports source builds only, with no packaging, distribution, or updates.
 
-`mise run validate:linux` includes the native adapters and retained AccessKit patch tests.
+`mise run validate:linux` includes the native adapters and SpaceTerm accessibility tests.
+The pinned AccessKit fork owns its patch tests and validation, documented in its `SPACETERM.md`.
+For local fork development, run `mise run accesskit:local:on /path/to/accesskit`; restore the
+published tag with `mise run accesskit:local:off`. Keep the `.cargo/config.toml` addition uncommitted.
 For terminal screen-reader checks on private X11 and Wayland displays, install system Python 3.11+
 and the dependencies listed in `scripts/accessibility-smoke-linux.py`, then run
 `mise run test:accessibility:regressions:linux` and `mise run test:accessibility:linux`.

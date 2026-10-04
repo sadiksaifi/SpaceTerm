@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "accesskit"
 version = "0.24.1"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-05#f759e6723dda5bd2cba31f538e3d90c232fc92f6"
 dependencies = [
  "enumn",
  "uuid",
@@ -13,6 +14,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-05#f759e6723dda5bd2cba31f538e3d90c232fc92f6"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -25,6 +27,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-05#f759e6723dda5bd2cba31f538e3d90c232fc92f6"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",

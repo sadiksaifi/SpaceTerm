@@ -4,8 +4,9 @@ SpaceTerm Third-Party Notices
 AccessKit core, consumer and AT-SPI translation layer
 ---------------------------------------------------
 AccessKit 0.24.1, accesskit_consumer 0.38.0 and accesskit_atspi_common 0.19.1.
-Retained source and patch provenance are in vendor/accesskit*, with MIT,
-Apache-2.0 and Chromium license files from the pinned upstream revisions.
+Source and patch provenance are in https://github.com/sadiksaifi/accesskit,
+pinned to spaceterm-2026-10-05. The fork retains the upstream MIT, Apache-2.0
+and Chromium license files.
 
 Copyright 2021 The AccessKit Authors. All rights reserved.
 MIT License
