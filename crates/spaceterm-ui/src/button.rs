@@ -1500,13 +1500,18 @@ impl ButtonCore {
                 let down_hitbox = hitbox.clone();
                 let move_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture() || !down_hitbox.is_hovered(window) {
+                    if !down_hitbox.is_hovered(window) {
                         return;
                     }
-                    // A Button owns presses on its surface even when it leaves ancestors hovered.
-                    // Secondary presses must not reach an enclosing window drag region.
+                    // Let transient overlays observe outside presses during capture, then keep
+                    // secondary and middle presses from reaching an enclosing window drag region.
                     if event.button != MouseButton::Left {
-                        cx.stop_propagation();
+                        if phase.bubble() {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if !phase.capture() {
                         return;
                     }
                     if event.first_mouse && !accept_first_mouse {
@@ -2764,26 +2769,66 @@ mod tests {
                 crate::WindowDragRegion::new(
                     "chrome-drag-region",
                     "Move window",
-                    div().size_full().child(
-                        crate::IconButton::new("sidebar-toggle", "Toggle sidebar", |_| {
-                            div().into_any_element()
-                        })
-                        .preserve_ancestor_hover()
-                        .debug_selector("sidebar-toggle")
-                        .on_activate(|_, _, _| {}),
-                    ),
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            crate::IconButton::new("sidebar-toggle", "Toggle sidebar", |_| {
+                                div().into_any_element()
+                            })
+                            .preserve_ancestor_hover()
+                            .debug_selector("sidebar-toggle")
+                            .on_activate(|_, _, _| {}),
+                        )
+                        .child(
+                            crate::Menu::new(
+                                "chrome-menu",
+                                "Actions",
+                                vec![crate::MenuEntry::action("Open", ())],
+                            )
+                            .debug_selector("chrome-menu-trigger")
+                            .on_activate(|_, _, _| {}),
+                        ),
                 )
+                .middle_activation(true)
                 .on_event(move |event, _, _| events.borrow_mut().push(*event))
             }
         }
+        cx.update(crate::menu::init);
         cx.set_global(test_theme());
+        let metrics = crate::MenuMetrics::new(px(160.0), px(28.0));
+        cx.set_global(crate::MenuTheme::new(
+            crate::MenuPaint::new(
+                rgba(0xffffffff),
+                rgba(0xaaaaaaff),
+                rgba(0x777777ff),
+                rgba(0x336699ff),
+                rgba(0xffffffff),
+                rgba(0xff5555ff),
+            ),
+            crate::MenuSizes::new(metrics, metrics, metrics),
+        ));
         let events = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view(|_, _| ChromeRoot(events.clone()));
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let button = cx.debug_bounds("sidebar-toggle").unwrap().center();
-        cx.simulate_mouse_down(button, MouseButton::Right, Modifiers::none());
-        cx.simulate_mouse_up(button, MouseButton::Right, Modifiers::none());
-        assert!(events.borrow().is_empty());
+        for mouse_button in [MouseButton::Right, MouseButton::Middle] {
+            cx.simulate_mouse_down(button, mouse_button, Modifiers::none());
+            cx.simulate_mouse_up(button, mouse_button, Modifiers::none());
+            assert!(events.borrow().is_empty());
+            let trigger = cx.debug_bounds("chrome-menu-trigger").unwrap().center();
+            cx.simulate_click(trigger, Modifiers::none());
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+            cx.simulate_mouse_down(button, mouse_button, Modifiers::none());
+            cx.simulate_mouse_up(button, mouse_button, Modifiers::none());
+            cx.run_until_parked();
+            assert!(!cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+            assert!(events.borrow().is_empty());
+        }
         let empty = button + gpui::point(px(100.0), px(0.0));
         cx.simulate_mouse_down(empty, MouseButton::Right, Modifiers::none());
         assert_eq!(
