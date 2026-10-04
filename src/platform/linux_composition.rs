@@ -536,6 +536,65 @@ mod tests {
     }
 
     #[gpui::test]
+    fn local_pane_without_permission_setup_ignores_direct_and_retained_requests(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::platform::permission_access::SystemPermission;
+        use crate::terminal::permission_request::PermissionRequest;
+        use crate::terminal::testing::RecordedSessionCommand;
+        use crate::terminal::{ScreenSnapshot, ScrollbarSnapshot, SessionEvent};
+        let (_pane, cx, records) = linux_terminal_pane(cx);
+        let session_id = records.starts().last().unwrap().session_id;
+        let events = records.last_event_sender().unwrap();
+        for retained in [false, true] {
+            let request = PermissionRequest::for_test(&[
+                SystemPermission::ScreenRecording,
+                SystemPermission::Accessibility,
+            ]);
+            if retained {
+                records.retain_permission_request(session_id, request);
+                events
+                    .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
+                        vec![vec![].into()].into(),
+                        ScrollbarSnapshot::default(),
+                        "permission request test",
+                        1,
+                    )))
+                    .unwrap();
+            } else {
+                events
+                    .try_send(SessionEvent::PermissionRequested(request))
+                    .unwrap();
+            }
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("permission-request").is_none());
+            assert!(
+                cx.update(|window, _| window
+                    .context_stack()
+                    .iter()
+                    .all(|context| !context
+                        .contains(crate::ui::TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT)))
+            );
+            let before = records.commands().len();
+            cx.simulate_keystrokes("a ctrl-enter");
+            cx.run_until_parked();
+            let inputs = records
+                .commands()
+                .into_iter()
+                .skip(before)
+                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .count();
+            assert_eq!(
+                inputs, 2,
+                "ignored requests must leave terminal input active"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn linux_installed_keymap_preserves_unshifted_xterm_control_forms(
         cx: &mut gpui::TestAppContext,
     ) {
