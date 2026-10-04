@@ -98,12 +98,12 @@ output.write_text(str(executable))
 """
 
 
-@unittest.skipUnless(
-    sys.platform == "linux" and shutil.which("tic") and shutil.which("desktop-file-validate"),
-    "the Linux prefix needs GNU tools, tic, and desktop-file-utils",
-)
+@unittest.skipUnless(sys.platform == "linux", "the private prefix is Linux-only")
 class LinuxPrefixTests(unittest.TestCase):
     def setUp(self):
+        for tool in ("tic", "desktop-file-validate"):
+            self.assertIsNotNone(shutil.which(tool),
+                                 f"{tool} is required; run mise run doctor:linux")
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.private = Path(directory.name)
@@ -208,11 +208,10 @@ class LinuxPrefixTests(unittest.TestCase):
                 for paint in ("fill", "stroke"):
                     if element.get(paint) not in (None, "none"):
                         self.assertEqual(drawn[shape(element)].get(paint), "#FFFFFF")
-        if shutil.which("desktop-file-validate"):
-            parsed = subprocess.run(
-                ["desktop-file-validate", str(entry)], env=self.environment(), capture_output=True, text=True,
-            )
-            self.assertEqual(parsed.returncode, 0, parsed.stderr + parsed.stdout)
+        parsed = subprocess.run(
+            ["desktop-file-validate", str(entry)], env=self.environment(), capture_output=True, text=True,
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr + parsed.stdout)
 
     def test_relative_or_empty_xdg_data_home_uses_the_private_home_registry(self):
         for value in ("relative-data", ""):
@@ -251,15 +250,16 @@ class LinuxPrefixTests(unittest.TestCase):
         self.assertEqual(entry.read_text(), "retain previous metadata")
         self.assertNotIn("private-diagnostic", result.stderr)
 
-    @unittest.skipUnless(Path("/usr/bin/python3").exists(), "GIO parsing uses system Python")
     def test_registered_exec_round_trips_reserved_characters_through_gio(self):
+        self.assertTrue(Path("/usr/bin/python3").is_file(),
+                        "system Python with python3-gi is required; run mise run doctor:linux")
         probe = subprocess.run(
             ["/usr/bin/python3", "-c", "from gi.repository import Gio; assert Gio.DesktopAppInfo"],
             env=self.environment(),
             capture_output=True,
         )
-        if probe.returncode:
-            self.skipTest("Python GIO desktop parser is unavailable")
+        self.assertEqual(probe.returncode, 0,
+                         "GIO desktop parsing needs python3-gi and gir1.2-glib-2.0; run mise run doctor:linux")
         result = self.run_profile()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.record.unlink()
@@ -299,6 +299,31 @@ assert app.launch([], None)
         result = self.run_profile("release")
         self.assertEqual(result.returncode, 2)
         self.assertFalse((self.root / "target").exists())
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux prerequisites")
+class LinuxPrerequisiteTests(unittest.TestCase):
+    def test_missing_prefix_tools_fail_with_install_guidance(self):
+        which = shutil.which
+        for tool in ("tic", "desktop-file-validate"):
+            with self.subTest(tool=tool), patch.object(
+                shutil, "which", side_effect=lambda name: None if name == tool else which(name),
+            ):
+                result = unittest.TestResult()
+                LinuxPrefixTests("test_unknown_profile_is_rejected_before_building").run(result)
+                self.assertFalse(result.skipped)
+                self.assertEqual(len(result.failures), 1, result.errors)
+                self.assertIn(tool, result.failures[0][1])
+                self.assertIn("doctor:linux", result.failures[0][1])
+
+    def test_missing_gio_fails_with_install_guidance(self):
+        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+            result = unittest.TestResult()
+            LinuxPrefixTests("test_registered_exec_round_trips_reserved_characters_through_gio").run(result)
+        self.assertFalse(result.skipped)
+        self.assertEqual(len(result.failures), 1, result.errors)
+        self.assertIn("python3-gi", result.failures[0][1])
+        self.assertIn("doctor:linux", result.failures[0][1])
 
 
 if __name__ == "__main__":

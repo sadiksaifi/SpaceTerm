@@ -599,6 +599,10 @@ command -v desktop-file-validate >/dev/null || {
   echo "Install desktop-file-utils to validate the Development desktop entry" >&2
   exit 1
 }
+/usr/bin/python3 -c 'from gi.repository import Gio; assert Gio.DesktopAppInfo' || {
+  echo "Install python3-gi and gir1.2-glib-2.0 to test the Development desktop entry" >&2
+  exit 1
+}
 command -v dbus-daemon
 command -v ssh
 test -x /bin/zsh || {
