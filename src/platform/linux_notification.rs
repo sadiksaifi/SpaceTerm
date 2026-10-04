@@ -38,6 +38,18 @@ struct NotificationState {
 }
 
 impl NotificationState {
+    fn owner_changed(&mut self, old: &str, owner: Option<OwnedUniqueName>) {
+        // Discovery can overtake the signal worker. A superseded owner's departure cannot
+        // revoke an ID or token issued by the owner that discovery has already established.
+        if self
+            .owner
+            .as_ref()
+            .is_none_or(|current| current.as_str() == old)
+        {
+            self.set_owner(owner);
+        }
+    }
+
     fn set_owner(&mut self, owner: Option<OwnedUniqueName>) {
         if self.owner != owner {
             self.owner = owner;
@@ -97,7 +109,7 @@ impl LinuxNotificationAdapter {
                     .to_owned();
                 let owner_subscription = bus
                     .subscribe(owner_rule.into(), move |message| {
-                        if let Ok((_, _, new)) =
+                        if let Ok((_, old, new)) =
                             message.body().deserialize::<(String, String, String)>()
                         {
                             let owner = if new.is_empty() {
@@ -105,7 +117,7 @@ impl LinuxNotificationAdapter {
                             } else {
                                 new.try_into().ok()
                             };
-                            lock(&owner_state).set_owner(owner);
+                            lock(&owner_state).owner_changed(&old, owner);
                         }
                     })
                     .ok()?;
@@ -405,6 +417,27 @@ fn notify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_notification_delayed_departure_cannot_revoke_a_new_service_id() {
+        let mut state = NotificationState::default();
+        state.set_owner(Some(":1.7".try_into().unwrap()));
+        // The delivery query has already observed the replacement before its signal is handled.
+        let replacement: OwnedUniqueName = ":1.8".try_into().unwrap();
+        state.set_owner(Some(replacement.clone()));
+        state.id = Some(43);
+        state.token = Some("replacement-token".into());
+        let generation = state.generation;
+        state.owner_changed(":1.7", None);
+        state.owner_changed("", Some(replacement));
+        assert_eq!(
+            (state.id, state.token.as_deref()),
+            (Some(43), Some("replacement-token"))
+        );
+        assert_eq!(state.generation, generation);
+        state.owner_changed(":1.8", None);
+        assert_eq!((state.id, state.token.as_deref()), (None, None));
+    }
 
     #[test]
     fn linux_notification_service_departure_retires_id_and_activation_token() {
