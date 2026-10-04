@@ -40,4 +40,5 @@ __pycache__/
 
 # others
 *.swp
-vendor
+# Vendored crate build outputs
+/vendor/*/target/
