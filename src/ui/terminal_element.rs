@@ -298,32 +298,41 @@ struct BottomCorners {
 
 impl BottomCorners {
     fn paint(self, quad: &PaintQuad, window: &mut Window) {
-        match self.rounded(quad) {
-            Some(rounded) => {
-                window.with_content_mask(
-                    Some(ContentMask {
-                        bounds: quad.bounds,
-                    }),
-                    |window| {
-                        window.paint_quad(rounded);
-                    },
-                );
+        if quad.border_widths != Edges::default() {
+            match square_outline_fills(quad).filter(|_| self.reaches(quad.bounds)) {
+                Some(fills) => fills.iter().for_each(|fill| self.paint(fill, window)),
+                None => window.paint_quad(quad.clone()),
             }
-            None => window.paint_quad(quad.clone()),
+            return;
         }
+        let Some(rounded) = self.rounded(quad) else {
+            window.paint_quad(quad.clone());
+            return;
+        };
+        if let Some(mask) = device_pixel_mask(quad.bounds, window.scale_factor()) {
+            window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+                window.paint_quad(rounded);
+            });
+        }
+    }
+
+    fn reaches(self, fill: Bounds<Pixels>) -> bool {
+        let reach = self.radius;
+        reach > px(0.0)
+            && fill.bottom() > self.bounds.bottom() - reach
+            && (fill.left() < self.bounds.left() + reach
+                || fill.right() > self.bounds.right() - reach)
     }
 
     /// The quad to paint, masked to `quad.bounds`, when `quad` reaches a rounded corner.
     fn rounded(self, quad: &PaintQuad) -> Option<PaintQuad> {
         let fill = quad.bounds;
-        let reach = self.radius;
-        let near_bottom = fill.bottom() > self.bounds.bottom() - reach;
-        let left = near_bottom && fill.left() < self.bounds.left() + reach;
-        let right = near_bottom && fill.right() > self.bounds.right() - reach;
-        let bordered = quad.border_widths != Edges::default();
-        if reach <= px(0.0) || bordered || !(left || right) {
+        if quad.border_widths != Edges::default() || !self.reaches(fill) {
             return None;
         }
+        let reach = self.radius;
+        let left = fill.left() < self.bounds.left() + reach;
+        let right = fill.right() > self.bounds.right() - reach;
         // GPUI clamps a radius to half the quad's shorter side, so the anchored quad spans at
         // least twice the radius toward the grid.
         let span = reach * 2.0;
@@ -351,6 +360,64 @@ impl BottomCorners {
         };
         Some(rounded)
     }
+}
+
+/// The content mask that admits exactly the device pixels GPUI paints a quad with `bounds` into.
+///
+/// GPUI rounds quad edges to the nearest device pixel, halves toward zero, but expands content
+/// masks outward to whole device pixels. A mask with fractional bounds would admit one device
+/// pixel of the neighboring fill, so each mask edge sits just inside the quad's own pixels.
+fn device_pixel_mask(bounds: Bounds<Pixels>, scale_factor: f32) -> Option<Bounds<Pixels>> {
+    const INSIDE: f32 = 1.0 / 64.0;
+    let snap = |value: Pixels| {
+        let device = f32::from(value) * scale_factor;
+        (device.abs() - 0.5).ceil().copysign(device)
+    };
+    let (left, top) = (snap(bounds.left()), snap(bounds.top()));
+    let (right, bottom) = (snap(bounds.right()), snap(bounds.bottom()));
+    (right > left && bottom > top).then(|| {
+        let logical = |device: f32| px(device / scale_factor);
+        Bounds::from_corners(
+            point(logical(left + INSIDE), logical(top + INSIDE)),
+            point(logical(right - INSIDE), logical(bottom - INSIDE)),
+        )
+    })
+}
+
+/// A square solid outline as its background and four border strips, so a corner can clip each
+/// part like any other fill.
+fn square_outline_fills(quad: &PaintQuad) -> Option<Vec<PaintQuad>> {
+    if quad.corner_radii != Corners::default() || quad.border_style != BorderStyle::Solid {
+        return None;
+    }
+    let bounds = quad.bounds;
+    let widths = quad.border_widths;
+    let inner_top = bounds.top() + widths.top;
+    let inner_bottom = bounds.bottom() - widths.bottom;
+    let strips = [
+        Bounds::from_corners(bounds.origin, point(bounds.right(), inner_top)),
+        Bounds::from_corners(point(bounds.left(), inner_bottom), bounds.bottom_right()),
+        Bounds::from_corners(
+            point(bounds.left(), inner_top),
+            point(bounds.left() + widths.left, inner_bottom),
+        ),
+        Bounds::from_corners(
+            point(bounds.right() - widths.right, inner_top),
+            point(bounds.right(), inner_bottom),
+        ),
+    ];
+    let background = (!quad.background.is_transparent()).then(|| fill(bounds, quad.background));
+    Some(
+        background
+            .into_iter()
+            .chain(
+                strips
+                    .into_iter()
+                    .filter(|strip| strip.size.width > px(0.0) && strip.size.height > px(0.0))
+                    .map(|strip| fill(strip, quad.border_color)),
+            )
+            .collect(),
+    )
 }
 
 #[derive(Clone)]
@@ -2104,8 +2171,9 @@ struct RowPadding {
 
 /// Extends edge-cell backgrounds across the padding between `grid_bounds` and `bounds`.
 ///
-/// Every row extends sideways. The last row extends downward, corners included, only when it
-/// fills the viewport's last row and [`RowPadding::extends_below`] allows it.
+/// Every visible row extends sideways. The last row extends downward, corners included, only
+/// when it is the viewport's last row, at least partly visible, and [`RowPadding::extends_below`]
+/// allows it.
 fn prepare_padding_background_geometry(
     rows: &[Arc<RowPaintInput>],
     reaches_last_row: bool,
@@ -2133,9 +2201,12 @@ fn prepare_padding_background_geometry(
             push(grid_bounds.right(), top, bounds.right(), bottom, color);
         }
     }
+    // A Pane shorter than its minimum rows clips the last row, which then never extends down.
+    let last_row_top = grid_bounds.top() + line_height * rows.len().saturating_sub(1) as f32;
+    let last_row_visible = last_row_top < grid_bounds.bottom();
     if let Some(last) = rows
         .last()
-        .filter(|row| reaches_last_row && row.padding.extends_below)
+        .filter(|row| reaches_last_row && last_row_visible && row.padding.extends_below)
     {
         // A row that extends below has an opaque span over every cell, so its spans tile the
         // grid's width and the outermost spans also cover the corners.
@@ -5488,6 +5559,73 @@ mod tests {
     }
 
     #[test]
+    fn corner_masks_admit_exactly_the_device_pixels_of_their_fill() {
+        // GPUI expands content masks outward to whole device pixels.
+        let covered = |mask: Bounds<Pixels>, scale: f32| {
+            (
+                (f32::from(mask.left()) * scale).floor(),
+                (f32::from(mask.top()) * scale).floor(),
+                (f32::from(mask.right()) * scale).ceil(),
+                (f32::from(mask.bottom()) * scale).ceil(),
+            )
+        };
+        let bounds = |left: f32, top: f32, right: f32, bottom: f32| {
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom)))
+        };
+
+        let mask = device_pixel_mask(bounds(1.5, 24.5, 34.5, 52.0), 1.0).unwrap();
+        assert_eq!(
+            covered(mask, 1.0),
+            (1.0, 24.0, 34.0, 52.0),
+            "halves round toward zero like GPUI quad edges, never into the neighboring fill"
+        );
+        let mask = device_pixel_mask(bounds(2.0, 25.3, 34.25, 50.0), 2.0).unwrap();
+        assert_eq!(covered(mask, 2.0), (4.0, 51.0, 68.0, 100.0));
+        assert_eq!(
+            device_pixel_mask(bounds(10.2, 0.0, 10.4, 25.0), 1.0),
+            None,
+            "a fill that covers no device pixel paints nothing"
+        );
+    }
+
+    #[test]
+    fn outlines_reaching_a_corner_split_into_fills_the_corner_can_round() {
+        let corners = BottomCorners {
+            bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(52.0))),
+            radius: px(9.0),
+        };
+        let ink = rgba(0x0a_0a_0a_ff);
+        let bounds = |left: f32, top: f32, right: f32, bottom: f32| {
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom)))
+        };
+        let cursor = outline(bounds(66.0, 25.0, 98.0, 50.0), ink, BorderStyle::Solid);
+
+        let fills = square_outline_fills(&cursor).unwrap();
+
+        assert_eq!(
+            fills.iter().map(|fill| fill.bounds).collect::<Vec<_>>(),
+            [
+                bounds(66.0, 25.0, 98.0, 26.0),
+                bounds(66.0, 49.0, 98.0, 50.0),
+                bounds(66.0, 26.0, 67.0, 49.0),
+                bounds(97.0, 26.0, 98.0, 49.0),
+            ],
+            "a hollow cursor is its four border strips"
+        );
+        assert!(fills.iter().all(|fill| {
+            fill.background == ink.into() && fill.border_widths == Edges::default()
+        }));
+        assert!(corners.reaches(cursor.bounds));
+        assert!(
+            corners.rounded(&fills[1]).is_some(),
+            "the bottom strip rounds at the Pane corner"
+        );
+        let mut rounded_outline = cursor.clone();
+        rounded_outline.corner_radii = Corners::all(px(2.0));
+        assert!(square_outline_fills(&rounded_outline).is_none());
+    }
+
+    #[test]
     fn padding_keeps_the_grid_and_painted_interior_inside_their_margins() {
         let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(52.0)));
 
@@ -5594,6 +5732,31 @@ mod tests {
                 == [
                     padding_quad(0.0, 0.0, 2.0, 25.0, ink),
                     padding_quad(98.0, 0.0, 100.0, 25.0, ink),
+                ]
+        );
+    }
+
+    #[test]
+    fn a_last_row_clipped_below_the_grid_never_extends() {
+        let ink = Color::rgb(0x0a_0a_0a);
+        let accent = Color::rgb(0x33_66_99);
+        let painted_row = |color| {
+            padding_row([
+                painted_cell("a", color),
+                painted_cell("b", color),
+                painted_cell("c", color),
+            ])
+        };
+        // Three rows of 25 points overflow a 50-point grid, so the third row is hidden.
+        let rows = [painted_row(ink), painted_row(ink), painted_row(accent)];
+
+        assert!(
+            padding_paint(&rows, true)
+                == [
+                    padding_quad(0.0, 0.0, 2.0, 25.0, ink),
+                    padding_quad(98.0, 0.0, 100.0, 25.0, ink),
+                    padding_quad(0.0, 25.0, 2.0, 50.0, ink),
+                    padding_quad(98.0, 25.0, 100.0, 50.0, ink),
                 ]
         );
     }
