@@ -91,7 +91,7 @@ else
 fi
 '''
 
-[tasks."fonts:ui:prepare"]
+[tasks."fonts:prepare:ui"]
 description = "Prepare private UI font identities from the pinned Inter archive"
 usage = '''
 arg "<archive>" help="Inter-4.1.zip from the official Inter 4.1 release"
@@ -692,10 +692,6 @@ set --
 if [ -n "${usage_output_dir:-}" ]; then set -- --output-dir "$usage_output_dir"; fi
 exec /usr/bin/python3 scripts/test-accessibility-smoke-linux.py "$@"
 '''
-
-[tasks."lint:accessibility:linux"]
-description = "Check the Linux AT-SPI runtime smoke script"
-run = "python3 -c 'import ast, pathlib; ast.parse(pathlib.Path(\"scripts/accessibility-smoke-linux.py\").read_text())'"
 
 [tasks."lint:scripts:linux"]
 description = "Check Linux scripts"

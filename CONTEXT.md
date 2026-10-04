@@ -58,7 +58,7 @@ A native window that presents SpaceTerm.
 
 **Window Controls**:
 The close, minimize, and maximize controls of an Operating-System Window: native traffic lights on
-macOS; drawn by SpaceTerm at the top right on Linux, following the desktop button layout.
+macOS; drawn by SpaceTerm on Linux on the side the desktop button layout names.
 
 ## Settings
 
