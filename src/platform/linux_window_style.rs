@@ -81,13 +81,22 @@ fn safe_name(name: &str) -> bool {
         && !Path::new(name).is_absolute()
 }
 
+/// Reads a desktop-owned resource of at most `limit` bytes. Startup captures these resources
+/// synchronously, so a FIFO or device in their place must neither stall the open waiting for a
+/// writer nor stall the read waiting for more bytes: the open is nonblocking and only a regular
+/// file, checked on the opened handle, is read.
 fn read_bounded(path: &Path, limit: usize) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
     (bytes.len() <= limit).then_some(bytes)
 }
 
@@ -286,5 +295,28 @@ mod tests {
         );
         assert!(read_bounded(&fallback, 4).is_none());
         std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn linux_desktop_resource_read_rejects_a_fifo_without_waiting_for_a_writer() {
+        let path = std::env::temp_dir().join(format!(
+            "spaceterm-desktop-resource-fifo-{}",
+            std::process::id()
+        ));
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path. This creates only this test's private FIFO.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let resource = path.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_bounded(&resource, 256 * 1024));
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            result,
+            Ok(None),
+            "a FIFO in place of a desktop resource is rejected promptly"
+        );
     }
 }
