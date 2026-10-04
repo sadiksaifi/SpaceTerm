@@ -294,6 +294,17 @@ mod tests {
             .expect("the copied image should start");
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
         fixture.1 = Some(child);
+        // The child reports the parent's image until its exec completes.
+        let started = (0..250).any(|_| {
+            std::fs::read_link(&link).is_ok_and(|path| path == image) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(
+            started,
+            "the copied image should replace the forked test image"
+        );
         assert_eq!(running_executable_of(&link), Some(image.clone()));
 
         let replacement = fixture.0.join("replacement");
