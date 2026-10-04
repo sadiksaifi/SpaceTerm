@@ -683,6 +683,10 @@ if [ -n "${usage_output_dir:-}" ]; then set -- --output-dir "$usage_output_dir";
 exec /usr/bin/python3 scripts/test-accessibility-smoke-linux.py "$@"
 '''
 
+[tasks."test:scripts:linux"]
+description = "Test private Linux runner cleanup without a bus or display"
+run = "python3 scripts/test-private-runners-linux.py"
+
 [tasks."lint:scripts:linux"]
 description = "Check Linux scripts"
 run = '''
@@ -700,4 +704,5 @@ run = [
   { task = "fmt:check:linux" },
   { task = "test:linux" },
   { task = "lint:scripts:linux" },
+  { task = "test:scripts:linux" },
 ]

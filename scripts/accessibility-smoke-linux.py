@@ -1796,6 +1796,17 @@ def main():
         return private_session(args)
     require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
             "pidfd_cleanup_required")
+    interruption = {"spawning": False, "received": False}
+    def interrupted(_signal, _frame):
+        # Defer during Popen until the finally block can retire the exact child.
+        if interruption["received"]:
+            return
+        interruption["received"] = True
+        if not interruption["spawning"]:
+            raise SmokeFailure("session_interrupted")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     # Verify kernel support before starting any private bus/display/reader.
     capability_descriptor = os.pidfd_open(os.getpid())
     os.close(capability_descriptor)
@@ -1853,10 +1864,16 @@ def main():
             command.extend(("--binary", str(binary)))
         if args.isolation_only:
             command.append("--isolation-only")
-        process = subprocess.Popen(command, cwd=ROOT, env=environment, start_new_session=True,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = None
         timed_out = False
         try:
+            interruption["spawning"] = True
+            try:
+                process = subprocess.Popen(command, cwd=ROOT, env=environment, start_new_session=True,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            finally:
+                interruption["spawning"] = False
+            require(not interruption["received"], "session_interrupted")
             status |= process.wait(timeout=args.session_timeout)
         except subprocess.TimeoutExpired:
             status = 1
@@ -1864,13 +1881,15 @@ def main():
         finally:
             cleanup_failed = False
             try:
-                retire_direct_child(process)
+                if process is not None:
+                    retire_direct_child(process)
             except (OSError, subprocess.TimeoutExpired):
                 cleanup_failed = True
             try:
                 cleanup_private_processes(runtime, Path(environment["HOME"]), backend_output)
                 # Reap the exact direct wrapper if pidfd cleanup finished it.
-                process.wait(timeout=3)
+                if process is not None:
+                    process.wait(timeout=3)
             except Exception:
                 cleanup_failed = True
             if cleanup_failed:

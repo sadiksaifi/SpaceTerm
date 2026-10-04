@@ -5,6 +5,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import tempfile
 import time
@@ -58,7 +59,8 @@ def session(backend):
         result = subprocess.run([
             "cargo", "test", "--package", "spaceterm", "--bin", "spaceterm", "--features", "native-tests",
             "--locked", "linux_compose_input_native", "--", "--ignored", "--test-threads=1",
-        ], timeout=1200).returncode
+        ]).returncode
+        # The outer runner owns the deadline and the entire inherited process group.
         if result != 0 and backend == "wayland":
             compositor_output.flush()
             print(compositor_log.read_text()[-12000:], file=sys.stderr)
@@ -72,6 +74,43 @@ def session(backend):
                 process.kill()
                 process.wait(timeout=5)
         compositor_output.close()
+
+
+def run_private_session(command, environment):
+    process = None
+    interruption = {"spawning": False, "signal": None}
+
+    def interrupted(signum, _frame):
+        if interruption["signal"] is not None:
+            return
+        interruption["signal"] = signum
+        if not interruption["spawning"]:
+            raise SystemExit(128 + signum)
+
+    handlers = {kind: signal.signal(kind, interrupted)
+                for kind in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    try:
+        interruption["spawning"] = True
+        try:
+            process = subprocess.Popen(command, env=environment, start_new_session=True)
+        finally:
+            interruption["spawning"] = False
+        if interruption["signal"] is not None:
+            raise SystemExit(128 + interruption["signal"])
+        return process.wait(timeout=1300)
+    except BaseException:
+        if process is not None:
+            # The unreaped session leader retains the group identity during cleanup.
+            # Kill resistant descendants too, then reap the exact direct child.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+        raise
+    finally:
+        for kind, handler in handlers.items():
+            signal.signal(kind, handler)
 
 
 def main():
@@ -100,9 +139,9 @@ def main():
         environment["DISPLAY" if args.backend == "x11" else "WAYLAND_DISPLAY"] = (
             ":96" if args.backend == "x11" else "spaceterm-compose-test"
         )
-        return subprocess.run([
+        return run_private_session([
             "dbus-run-session", "--", sys.executable, str(Path(__file__).resolve()), args.backend, "--session",
-        ], env=environment, timeout=1300).returncode
+        ], environment)
 
 
 if __name__ == "__main__":
