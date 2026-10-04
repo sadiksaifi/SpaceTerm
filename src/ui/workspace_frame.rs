@@ -48,6 +48,8 @@ const TOP_CHIP_TRIM: f32 = 6.0;
 const SPLIT_GAP_OPTICAL_TRIM: f32 = 2.0;
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
+/// Width of the hairline rim each Pane paints over its own edge.
+const PANE_RIM_WIDTH: f32 = 1.0;
 
 /// Resolved whole-point geometry of the floating Workspace frame for one density.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,6 +203,16 @@ impl WorkspaceFrame {
     /// Corner radius of every floating Pane surface.
     pub(crate) const fn pane_radius(self) -> Pixels {
         self.pane_radius
+    }
+
+    /// Width of the hairline rim on every Pane's edge. Pane content stays inside it.
+    pub(crate) const fn pane_rim_width(self) -> Pixels {
+        px(PANE_RIM_WIDTH)
+    }
+
+    /// Corner radius of a Pane's interior, inside the rim and concentric with the Pane.
+    pub(crate) fn pane_inner_radius(self) -> Pixels {
+        (self.pane_radius - px(PANE_RIM_WIDTH)).max(px(0.0))
     }
 
     /// Corner radius of every selection chip: selected sidebar rows and the Active Tab.

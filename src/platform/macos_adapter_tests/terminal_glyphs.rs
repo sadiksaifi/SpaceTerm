@@ -40,6 +40,7 @@ fn macos_painted_cluster(cluster: &'static str, wide: bool) -> Vec<PaintedGlyph>
                 batches: vec![TerminalPaintBatch {
                     surface: None,
                     padding_backgrounds: Vec::new(),
+                    corners: BottomCorners::default(),
                     grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(120.0), px(80.0))),
                     line_height: key.line_height,
                     rows: vec![PreparedFrameRow::new(Arc::new(stable))],

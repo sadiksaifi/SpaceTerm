@@ -94,7 +94,7 @@ const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
 const TERMINAL_SIDE_INSET: f32 = 2.0;
 const TERMINAL_BOTTOM_INSET: f32 = 2.0;
-/// The terminal paints this margin with its edge-cell backgrounds, so it reaches the Pane edge.
+/// The terminal paints this margin with its edge-cell backgrounds, up to the Pane rim.
 const TERMINAL_PADDING: TerminalPadding =
     TerminalPadding::new(px(TERMINAL_SIDE_INSET), px(TERMINAL_BOTTOM_INSET));
 const MIN_COLS: u16 = 2;
@@ -4249,7 +4249,13 @@ impl Render for TerminalPane {
                 line_height: px(self.line_height),
                 cell_width: self.cell_width,
                 grid_size,
-                padding: TERMINAL_PADDING,
+                padding: {
+                    let frame = super::workspace_frame::WorkspaceFrame::for_appearance(
+                        super::appearance::chrome(cx),
+                        cx,
+                    );
+                    TERMINAL_PADDING.within_rim(frame.pane_rim_width(), frame.pane_inner_radius())
+                },
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),

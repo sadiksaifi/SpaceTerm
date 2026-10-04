@@ -5,10 +5,10 @@ mod presentation;
 pub(crate) use presentation::TerminalGridPresentation;
 
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, Font, GlobalElementId, GlyphPaintRegion, Hsla, InspectorElementId, IntoElement,
-    LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
-    fill, outline, point, px, relative, rgba, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
+    Entity, FocusHandle, Font, GlobalElementId, GlyphPaintRegion, Hsla, InspectorElementId,
+    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
+    UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
 #[cfg(test)]
 use gpui::{FontFallbacks, FontFeatures, font};
@@ -230,17 +230,46 @@ fn take_aligned_row<T>(
 /// The margin a terminal keeps between its layout edges and its cell grid.
 ///
 /// Text, the cursor, hit testing, and IME geometry stay inside the grid. Edge-cell backgrounds
-/// extend across the margin, so a program that paints its own background reaches the layout
-/// edges and any enclosing rounded mask clips one continuous surface.
+/// extend across the margin up to the enclosing shape's rim, so a program that paints its own
+/// background fills the shape's interior. The terminal paints nothing in the rim band and
+/// rounds its fills at the rim's inner bottom corners.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TerminalPadding {
     side: Pixels,
     bottom: Pixels,
+    rim: Pixels,
+    bottom_corner_radius: Pixels,
 }
 
 impl TerminalPadding {
     pub(crate) const fn new(side: Pixels, bottom: Pixels) -> Self {
-        Self { side, bottom }
+        Self {
+            side,
+            bottom,
+            rim: Pixels::ZERO,
+            bottom_corner_radius: Pixels::ZERO,
+        }
+    }
+
+    /// Leaves a `rim` band on the side and bottom edges unpainted and rounds fills at the rim's
+    /// inner bottom corners with `bottom_corner_radius`.
+    pub(crate) const fn within_rim(self, rim: Pixels, bottom_corner_radius: Pixels) -> Self {
+        Self {
+            rim,
+            bottom_corner_radius,
+            ..self
+        }
+    }
+
+    /// The region inside the rim that the terminal may paint within layout `bounds`.
+    fn interior(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        Bounds::new(
+            point(bounds.left() + self.rim, bounds.top()),
+            size(
+                (bounds.size.width - self.rim * 2.0).max(px(0.0)),
+                (bounds.size.height - self.rim).max(px(0.0)),
+            ),
+        )
     }
 
     /// The cell grid inside layout `bounds`.
@@ -252,6 +281,75 @@ impl TerminalPadding {
                 (bounds.size.height - self.bottom).max(px(0.0)),
             ),
         )
+    }
+}
+
+/// The rounded bottom corners of the region a terminal may paint.
+///
+/// GPUI content masks are rectangular, and Chrome painted over a corner is translucent, so it
+/// tints terminal fills instead of hiding them. The terminal therefore clips its own fills: a
+/// fill reaching a corner paints as a quad rounded at that exact corner, masked back to the
+/// fill's rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct BottomCorners {
+    bounds: Bounds<Pixels>,
+    radius: Pixels,
+}
+
+impl BottomCorners {
+    fn paint(self, quad: &PaintQuad, window: &mut Window) {
+        match self.rounded(quad) {
+            Some(rounded) => {
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: quad.bounds,
+                    }),
+                    |window| {
+                        window.paint_quad(rounded);
+                    },
+                );
+            }
+            None => window.paint_quad(quad.clone()),
+        }
+    }
+
+    /// The quad to paint, masked to `quad.bounds`, when `quad` reaches a rounded corner.
+    fn rounded(self, quad: &PaintQuad) -> Option<PaintQuad> {
+        let fill = quad.bounds;
+        let reach = self.radius;
+        let near_bottom = fill.bottom() > self.bounds.bottom() - reach;
+        let left = near_bottom && fill.left() < self.bounds.left() + reach;
+        let right = near_bottom && fill.right() > self.bounds.right() - reach;
+        let bordered = quad.border_widths != Edges::default();
+        if reach <= px(0.0) || bordered || !(left || right) {
+            return None;
+        }
+        // GPUI clamps a radius to half the quad's shorter side, so the anchored quad spans at
+        // least twice the radius toward the grid.
+        let span = reach * 2.0;
+        let mut rounded_left = fill.left();
+        let mut rounded_right = fill.right();
+        if left {
+            rounded_left = self.bounds.left();
+            rounded_right = rounded_right.max(rounded_left + span);
+        }
+        if right {
+            rounded_right = self.bounds.right();
+            rounded_left = rounded_left.min(rounded_right - span);
+        }
+        let rounded_bottom = self.bounds.bottom();
+        let rounded_top = fill.top().min(rounded_bottom - span);
+        let mut rounded = quad.clone();
+        rounded.bounds = Bounds::from_corners(
+            point(rounded_left, rounded_top),
+            point(rounded_right, rounded_bottom),
+        );
+        rounded.corner_radii = Corners {
+            bottom_left: if left { reach } else { px(0.0) },
+            bottom_right: if right { reach } else { px(0.0) },
+            ..Corners::default()
+        };
+        Some(rounded)
     }
 }
 
@@ -673,6 +771,7 @@ struct TerminalPaintBatch {
     surface: Option<PaintQuad>,
     /// Edge-cell backgrounds extended across the padding, outside the grid's content mask.
     padding_backgrounds: Vec<PaintQuad>,
+    corners: BottomCorners,
     grid_bounds: Bounds<Pixels>,
     line_height: Pixels,
     rows: Vec<PreparedFrameRow>,
@@ -758,14 +857,14 @@ impl TerminalPaintBatch {
                 #[cfg(test)]
                 counter,
             );
-            window.paint_quad(surface.clone());
+            self.corners.paint(surface, window);
         }
         for background in &self.padding_backgrounds {
             record_quad_paint(
                 #[cfg(test)]
                 counter,
             );
-            window.paint_quad(background.clone());
+            self.corners.paint(background, window);
         }
         window.with_content_mask(
             Some(ContentMask {
@@ -781,7 +880,7 @@ impl TerminalPaintBatch {
                             #[cfg(test)]
                             counter,
                         );
-                        window.paint_quad(background.clone());
+                        self.corners.paint(background, window);
                     }
                 }
                 self.graphics
@@ -860,7 +959,7 @@ impl TerminalPaintBatch {
                                 #[cfg(test)]
                                 counter,
                             );
-                            window.paint_quad(background.clone());
+                            self.corners.paint(background, window);
                         }
                         for text in preedit.text.iter() {
                             paint_preedit_text(text, self.line_height, window)
@@ -1652,6 +1751,11 @@ impl Element for TerminalGridElement {
         _cx: &mut App,
     ) -> Self::PrepaintState {
         let grid_bounds = self.padding.grid_bounds(bounds);
+        let interior = self.padding.interior(bounds);
+        let corners = BottomCorners {
+            bounds: interior,
+            radius: self.padding.bottom_corner_radius,
+        };
         let fitted_cell = TerminalGeometry::fitted_cell_size(
             LogicalSize::new(
                 f32::from(grid_bounds.size.width),
@@ -1811,11 +1915,12 @@ impl Element for TerminalGridElement {
             padding_backgrounds: prepare_padding_background_geometry(
                 &self.rows[..visible_rows],
                 visible_rows == viewport_rows,
-                bounds,
+                interior,
                 grid_bounds,
                 self.cell_width,
                 self.line_height,
             ),
+            corners,
             grid_bounds,
             line_height: self.line_height,
             rows: prepared_rows,
@@ -1849,6 +1954,7 @@ impl Element for TerminalGridElement {
             Some(std::rc::Rc::new(TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, gpui_color(self.background))),
                 padding_backgrounds: Vec::new(),
+                corners,
                 grid_bounds: cursor_bounds,
                 line_height: self.line_height,
                 rows: vec![cursor_row],
@@ -3732,6 +3838,7 @@ mod tests {
             return vec![TerminalPaintBatch {
                 surface: None,
                 padding_backgrounds: Vec::new(),
+                corners: BottomCorners::default(),
                 grid_bounds,
                 line_height,
                 rows,
@@ -3749,6 +3856,7 @@ mod tests {
             TerminalPaintBatch {
                 surface: None,
                 padding_backgrounds: Vec::new(),
+                corners: BottomCorners::default(),
                 grid_bounds,
                 line_height,
                 rows,
@@ -3760,6 +3868,7 @@ mod tests {
             TerminalPaintBatch {
                 surface: Some(fill(cursor_bounds, rgba(0x0b_0b_0b_ff))),
                 padding_backgrounds: Vec::new(),
+                corners: BottomCorners::default(),
                 grid_bounds: cursor_bounds,
                 line_height,
                 rows: vec![cursor_row],
@@ -4130,6 +4239,7 @@ mod tests {
                 let retained = TerminalPaintBatch {
                     surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
                     padding_backgrounds: Vec::new(),
+                    corners: BottomCorners::default(),
                     grid_bounds: candidate.grid_bounds,
                     line_height: candidate.line_height,
                     rows: Vec::new(),
@@ -4181,6 +4291,7 @@ mod tests {
                 let retained = TerminalPaintBatch {
                     surface: Some(fill(candidate.grid_bounds, rgba(0x22_33_44_ff))),
                     padding_backgrounds: Vec::new(),
+                    corners: BottomCorners::default(),
                     grid_bounds: candidate.grid_bounds,
                     line_height: candidate.line_height,
                     rows: Vec::new(),
@@ -4978,6 +5089,7 @@ mod tests {
                     batches: vec![TerminalPaintBatch {
                         surface: None,
                         padding_backgrounds: Vec::new(),
+                        corners: BottomCorners::default(),
                         grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(60.0))),
                         line_height: px(20.0),
                         rows: vec![
@@ -5320,12 +5432,76 @@ mod tests {
     }
 
     #[test]
-    fn padding_keeps_the_grid_inside_its_side_and_bottom_margins() {
-        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(52.0)));
+    fn fills_reaching_a_bottom_corner_round_at_that_exact_corner() {
+        let corners = BottomCorners {
+            bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(52.0))),
+            radius: px(9.0),
+        };
+        let ink = rgba(0x0a_0a_0a_ff);
+        let rounded = |left: f32, top: f32, right: f32, bottom: f32| {
+            corners
+                .rounded(&fill(
+                    Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom))),
+                    ink,
+                ))
+                .map(|quad| (quad.bounds, quad.corner_radii))
+        };
+        let anchored = |left: f32, top: f32, right: f32, bottom_left: f32, bottom_right: f32| {
+            Some((
+                Bounds::from_corners(point(px(left), px(top)), point(px(right), px(52.0))),
+                Corners {
+                    bottom_left: px(bottom_left),
+                    bottom_right: px(bottom_right),
+                    ..Corners::default()
+                },
+            ))
+        };
 
         assert_eq!(
-            TerminalPadding::new(px(2.0), px(3.0)).grid_bounds(bounds),
-            Bounds::new(point(px(12.0), px(20.0)), size(px(96.0), px(49.0)))
+            rounded(0.0, 50.0, 34.0, 52.0),
+            anchored(0.0, 34.0, 34.0, 9.0, 0.0),
+            "the bottom padding's leading span rounds at the bottom-left corner"
+        );
+        assert_eq!(
+            rounded(2.0, 25.0, 34.0, 50.0),
+            anchored(0.0, 25.0, 34.0, 9.0, 0.0),
+            "the corner cell rounds at the Pane corner, not at its own corner"
+        );
+        assert_eq!(
+            rounded(66.0, 50.0, 98.0, 52.0),
+            anchored(66.0, 34.0, 100.0, 0.0, 9.0)
+        );
+        assert_eq!(
+            rounded(0.0, 50.0, 100.0, 52.0),
+            anchored(0.0, 34.0, 100.0, 9.0, 9.0)
+        );
+        assert_eq!(
+            rounded(40.0, 25.0, 60.0, 52.0),
+            None,
+            "a fill between the corners stays square"
+        );
+        assert_eq!(
+            rounded(0.0, 0.0, 2.0, 25.0),
+            None,
+            "a fill above the corners stays square"
+        );
+    }
+
+    #[test]
+    fn padding_keeps_the_grid_and_painted_interior_inside_their_margins() {
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(52.0)));
+
+        let padding = TerminalPadding::new(px(2.0), px(3.0)).within_rim(px(1.0), px(8.0));
+
+        assert_eq!(
+            padding.grid_bounds(bounds),
+            Bounds::new(point(px(12.0), px(20.0)), size(px(96.0), px(49.0))),
+            "the rim never moves the grid"
+        );
+        assert_eq!(
+            padding.interior(bounds),
+            Bounds::new(point(px(11.0), px(20.0)), size(px(98.0), px(51.0))),
+            "the painted interior stops at the rim's inner edge on the sides and bottom"
         );
     }
 
@@ -6465,6 +6641,7 @@ mod tests {
                         batches: vec![TerminalPaintBatch {
                             surface: None,
                             padding_backgrounds: Vec::new(),
+                            corners: BottomCorners::default(),
                             grid_bounds: layout.grid_bounds,
                             line_height: layout.line_height,
                             rows: stable.iter().cloned().map(PreparedFrameRow::new).collect(),
