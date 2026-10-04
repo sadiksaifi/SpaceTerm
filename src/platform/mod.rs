@@ -328,3 +328,6 @@ mod linux_application_instance;
 mod linux_desktop_events;
 #[cfg(target_os = "linux")]
 mod linux_session_bus;
+
+#[cfg(target_os = "linux")]
+mod linux_ssh_executable;

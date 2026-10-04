@@ -8,7 +8,7 @@ use crate::desktop_profile::{
     DesktopWording, HostFeature,
 };
 use crate::terminal::NativeTerminalSessionFactory;
-use std::{path::PathBuf, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let identity = ApplicationIdentity::current();
@@ -56,12 +56,19 @@ fn capture_startup_dependencies(
         Arc::clone(&secure_filesystem),
     )
     .map_err(|_| StartupDependenciesError::Paths)?;
-    let executable = crate::ssh::command::OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh"))
+    let inherited_path = std::env::var_os("PATH");
+    let executable = super::linux_ssh_executable::capture(inherited_path.as_deref())
         .map_err(|_| StartupDependenciesError::Paths)?;
     StartupDependencies::capture(
         path_environment,
         crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
-            |key| std::env::var_os(key),
+            |key| {
+                if key == "PATH" {
+                    inherited_path.clone()
+                } else {
+                    std::env::var_os(key)
+                }
+            },
             "/usr/local/bin:/usr/bin:/bin".into(),
         )
         .map_err(|_| StartupDependenciesError::Paths)?,
@@ -243,6 +250,7 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[gpui::test]
     fn linux_desktop_composition_installs_events_independently_of_the_menu(
