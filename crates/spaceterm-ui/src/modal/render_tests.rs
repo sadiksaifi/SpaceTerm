@@ -338,6 +338,7 @@ impl Render for WindowChromeFixture {
                 .size_full()
                 .flex()
                 .justify_between()
+                .items_end()
                 .child(
                     crate::ClientWindowControls::new(close.clone())
                         .side(crate::WindowControlSide::Left),
@@ -594,6 +595,111 @@ fn modal_window_chrome_preserves_pointer_operations_and_focus(cx: &mut TestAppCo
             assert!(cx.update(|window, _| focused.is_focused(window)));
         }
     }
+}
+
+#[gpui::test]
+fn modal_window_chrome_is_occluded_only_where_the_surface_overlaps(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let presses = Rc::new(Cell::new(0));
+    let closes = Rc::new(Cell::new(0));
+    let (root, cx) = cx.add_window_view(|_, _| WindowChromeFixture {
+        drag_disabled: false,
+        application_presses: presses.clone(),
+        closes: closes.clone(),
+    });
+    cx.simulate_resize(size(px(360.), px(200.)));
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    let presentation = cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |_, cx| {
+            Dialog::new(
+                ModalId::new("overlapping-chrome"),
+                "Overlapping chrome",
+                "Notice",
+                vec![ModalAction::new(
+                    "cancel",
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "overlap-cancel",
+                )],
+                DialogInitialFocus::Action("cancel"),
+            )
+            .present(
+                window,
+                cx,
+                |_, _, _| DialogCloseDecision::Deny {
+                    first_invalid: None,
+                },
+                |_, _| {},
+            )
+            .unwrap()
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(presentation.presentation_id().value(), 1);
+    let surface = cx.debug_bounds("modal-surface-1").unwrap();
+    let titlebar = cx.debug_bounds("modal-titlebar").unwrap();
+    assert!(!surface.intersect(&titlebar).is_empty());
+    let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+    for selector in [
+        "window-minimize",
+        "window-maximize",
+        "window-close",
+        "titlebar-content",
+    ] {
+        let overlap = surface.intersect(&cx.debug_bounds(selector).unwrap());
+        assert!(!overlap.is_empty(), "{selector} must overlap the surface");
+        cx.simulate_click(overlap.center(), Modifiers::none());
+    }
+    let overlap = point(surface.left() + px(5.), surface.top() + px(2.));
+    for (button, click_count) in [
+        (MouseButton::Left, 1),
+        (MouseButton::Left, 2),
+        (MouseButton::Middle, 1),
+        (MouseButton::Right, 1),
+    ] {
+        cx.simulate_event(MouseDownEvent {
+            position: overlap,
+            button,
+            click_count,
+            modifiers: Modifiers::none(),
+            first_mouse: false,
+        });
+        cx.simulate_mouse_move(overlap + point(px(5.), px(0.)), button, Modifiers::none());
+        cx.simulate_event(MouseUpEvent {
+            position: overlap,
+            button,
+            click_count,
+            modifiers: Modifiers::none(),
+        });
+    }
+    assert!(
+        cx.window_requests().is_empty(),
+        "surface presses must never reach Window Controls or the drag tracker"
+    );
+    assert_eq!(closes.get(), 0);
+    assert_eq!(presses.get(), 0);
+    let minimize = cx.debug_bounds("window-minimize").unwrap();
+    let outside = point(minimize.center().x, surface.top() - px(2.));
+    assert!(minimize.contains(&outside));
+    cx.simulate_click(outside, Modifiers::none());
+    assert_eq!(cx.window_requests(), [gpui::TestWindowRequest::Minimize]);
+    let outside = point(surface.left() + px(5.), surface.top() - px(2.));
+    cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        outside + point(px(5.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+    assert_eq!(
+        cx.window_requests()[1],
+        gpui::TestWindowRequest::StartWindowMove
+    );
+    assert!(cx.update(|window, _| focused.is_focused(window)));
+    assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
 }
 
 struct AlertFixture {

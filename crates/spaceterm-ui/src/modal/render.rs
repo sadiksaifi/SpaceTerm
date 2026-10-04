@@ -391,6 +391,8 @@ fn render_overlay(
         .max_h(geometry.size.height)
         .min_w_0()
         .min_h_0()
+        // The surface owns pointer input even where it covers a window-management region.
+        .occlude()
         .flex()
         .flex_col()
         .text_color(paint.primary_text)
