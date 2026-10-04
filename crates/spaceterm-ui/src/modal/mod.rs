@@ -108,6 +108,7 @@ mod dialog;
 mod policy;
 mod progress_dialog;
 mod render;
+mod window_chrome;
 
 use std::{error::Error, fmt, time::Duration};
 

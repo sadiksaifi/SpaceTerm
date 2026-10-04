@@ -5337,14 +5337,22 @@ fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mu
 }
 
 #[gpui::test]
-fn client_window_close_preserves_running_work_until_confirmation(cx: &mut TestAppContext) {
+fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut TestAppContext) {
     for layout in [
         gpui::WindowButtonLayout {
             left: [None; 3],
-            right: [Some(gpui::WindowButton::Close), None, None],
+            right: [
+                Some(gpui::WindowButton::Close),
+                Some(gpui::WindowButton::Minimize),
+                Some(gpui::WindowButton::Maximize),
+            ],
         },
         gpui::WindowButtonLayout {
-            left: [Some(gpui::WindowButton::Close), None, None],
+            left: [
+                Some(gpui::WindowButton::Close),
+                Some(gpui::WindowButton::Minimize),
+                Some(gpui::WindowButton::Maximize),
+            ],
             right: [None; 3],
         },
     ] {
@@ -5353,8 +5361,16 @@ fn client_window_close_preserves_running_work_until_confirmation(cx: &mut TestAp
         cx.simulate_decorations(gpui::Decorations::Client {
             tiling: gpui::Tiling::default(),
         });
+        let alert = present_test_alert(&manager, "window-close-under-alert", cx);
         redraw(cx);
+        let alert_focus = cx.update(|window, cx| window.focused(cx).unwrap());
         click("window-close", cx);
+        assert!(cx.update(|window, _| alert_focus.is_focused(window)));
+        assert!(cx.debug_bounds("modal-action-acknowledge").is_some());
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-cancel")
+                .is_none()
+        );
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
                 .close_confirmation
@@ -5362,6 +5378,36 @@ fn client_window_close_preserves_running_work_until_confirmation(cx: &mut TestAp
                 .map(|pending| pending.target)),
             Some(CloseTarget::Window)
         );
+        cx.update(|window, cx| alert.dismiss(window, cx).unwrap());
+        redraw(cx);
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-confirm-keyboard-focus")
+                .is_some()
+        );
+        let pending = manager.read_with(cx, |manager, _| manager.close_confirmation.pending());
+        let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+        click("window-minimize", cx);
+        click("window-maximize", cx);
+        assert_eq!(
+            cx.window_requests(),
+            [
+                gpui::TestWindowRequest::Minimize,
+                gpui::TestWindowRequest::Zoom
+            ]
+        );
+        assert!(cx.update(|window, _| focused.is_focused(window)));
+        click("toggle-sidebar-button", cx);
+        assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+        click("window-close", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.close_confirmation.pending()),
+            pending
+        );
+        assert!(cx.update(|window, _| focused.is_focused(window)));
+        assert_eq!(cx.windows().len(), 1);
+        assert!(records.dropped_session_ids().is_empty());
         click("modal-action-close-confirmation-cancel", cx);
         assert_eq!(cx.windows().len(), 1);
         assert!(records.dropped_session_ids().is_empty());

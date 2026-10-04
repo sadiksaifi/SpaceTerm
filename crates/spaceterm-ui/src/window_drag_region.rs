@@ -389,6 +389,11 @@ impl RenderOnce for WindowDragRegion {
         .absolute()
         .inset_0();
 
+        let pointer_tracker = if enabled {
+            crate::ModalLayer::window_chrome(pointer_tracker).into_any_element()
+        } else {
+            pointer_tracker.into_any_element()
+        };
         let root_selector = self
             .debug_selector
             .unwrap_or_else(|| self.accessibility_name.to_string());

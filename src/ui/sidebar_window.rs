@@ -340,7 +340,9 @@ impl WindowMovement {
     ) -> WindowDragRegionResponse {
         match event {
             WindowDragRegionEvent::InteractionStarted { .. } => {
-                self.window_focus.focus(window, cx);
+                if !spaceterm_ui::window_modal_is_open(window, cx) {
+                    self.window_focus.focus(window, cx);
+                }
                 if let Err(error) = self.platform.interaction_started() {
                     self.report("begin", error);
                 }

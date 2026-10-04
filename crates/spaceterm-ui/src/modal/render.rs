@@ -87,7 +87,7 @@ pub(super) fn init(cx: &mut App) {
 /// CommandPalette owners through [`Self::transient`] so the layer owns their placement above
 /// ordinary content. The active modal is painted as the final normal
 /// child rather than a deferred draw, allowing a modal-owned deferred Menu to remain above it. The
-/// full-viewport scrim blocks outside pointer press, release, move, and wheel input without outside
+/// scrim blocks application pointer press, release, move, and wheel input without outside
 /// dismissal or click-through. The modal key context blocks underlay keyboard routing while the
 /// leading and trailing sentinels contain the complete current-frame GPUI tab-stop order.
 ///
@@ -109,6 +109,18 @@ impl ModalLayer {
         }
     }
 
+    /// Marks a pointer-only Operating-System Window management region in the underlay.
+    ///
+    /// The region keeps its pointer route and preserves modal focus. Wrap only window-management
+    /// content, such as client Window Controls or an empty-titlebar pointer tracker. Later
+    /// application siblings still occlude this region and remain blocked by the modal. Keyboard
+    /// routing and modal focus containment are unchanged.
+    pub fn window_chrome(content: impl IntoElement) -> impl IntoElement {
+        super::window_chrome::ChromeRegion {
+            content: content.into_any_element(),
+        }
+    }
+
     /// Presents a complete transient owner above ordinary content and below an active modal.
     ///
     /// Keeping the owner intact preserves its action routing. Its deferred child Menus remain
@@ -122,25 +134,38 @@ impl ModalLayer {
 impl RenderOnce for ModalLayer {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let root = window.use_keyed_state("spaceterm-modal-root-scope", cx, ModalRootScope::new);
-        let (root_focus, owner) =
-            root.read_with(cx, |root, _| (root.focus.clone(), root.owner.clone()));
+        let (root_focus, owner, chrome_frame) = root.read_with(cx, |root, _| {
+            (
+                root.focus.clone(),
+                root.owner.clone(),
+                root.chrome_frame.clone(),
+            )
+        });
+        if !super::window_modal_is_open(window, cx) {
+            chrome_frame.pointer.set(None);
+        }
         register_root_scope(&owner, &root_focus, cx);
 
-        crate::TooltipLayer::new(
-            div()
-                .id("spaceterm-modal-root")
-                .debug_selector(|| "spaceterm-modal-root".to_owned())
-                .relative()
-                .size_full()
-                .track_focus(&root_focus)
-                .child(self.content)
-                .children(self.transients)
-                .child(ModalOwnerView { owner }),
-        )
+        super::window_chrome::ChromeScope {
+            frame: chrome_frame,
+            content: crate::TooltipLayer::new(
+                div()
+                    .id("spaceterm-modal-root")
+                    .debug_selector(|| "spaceterm-modal-root".to_owned())
+                    .relative()
+                    .size_full()
+                    .track_focus(&root_focus)
+                    .child(self.content)
+                    .children(self.transients)
+                    .child(ModalOwnerView { owner }),
+            )
+            .into_any_element(),
+        }
     }
 }
 
 struct ModalRootScope {
+    chrome_frame: super::window_chrome::ChromeFrame,
     focus: FocusHandle,
     owner: gpui::Entity<ModalWindowOwner>,
 }
@@ -149,15 +174,19 @@ impl ModalRootScope {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let owner = modal_owner_for_layer(window, cx);
         let press_owner = owner.read_with(cx, |owner, _| owner.press_owner());
+        let chrome_frame = super::window_chrome::ChromeFrame::default();
+        let chrome_pointer = chrome_frame.pointer.clone();
         cx.observe_window_activation(window, move |_, window, cx| {
             if !window.is_window_active() {
                 press_owner.disarm(cx);
+                chrome_pointer.set(None);
             }
         })
         .detach();
         cx.on_release(|state, cx| retire_window_owner(&state.owner, cx))
             .detach();
         Self {
+            chrome_frame,
             focus: cx.focus_handle(),
             owner,
         }
@@ -465,44 +494,98 @@ fn render_overlay(
 
 fn render_blocker(geometry: ModalSurfaceGeometry, press_owner: ModalPressOwner) -> AnyElement {
     canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse),
-        move |_, _, window, _| {
-            let down_owner = press_owner.clone();
-            let up_owner = press_owner.clone();
-            let move_owner = press_owner.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase.capture() && !surface_contains(geometry, event.position) {
-                    down_owner.disarm(cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            });
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                if phase.capture() && !surface_contains(geometry, event.position) {
-                    up_owner.disarm(cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            });
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                if phase.capture() && !surface_contains(geometry, event.position) {
-                    move_owner.disarm(cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            });
-            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase.capture() && !surface_contains(geometry, event.position) {
-                    press_owner.disarm(cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
+        move |bounds, window, _| {
+            let chrome = super::window_chrome::prepaint_blocker(bounds, window);
+            super::window_chrome::set_blocker(ModalPointerBlocker {
+                geometry,
+                press_owner,
+                chrome,
             });
         },
+        |_, _, _, _| {},
     )
     .absolute()
     .inset_0()
     .into_any_element()
+}
+
+pub(super) struct ModalPointerBlocker {
+    geometry: ModalSurfaceGeometry,
+    press_owner: ModalPressOwner,
+    chrome: super::window_chrome::ChromeRouting,
+}
+
+impl ModalPointerBlocker {
+    // Register before painting the underlay. GPUI runs capture handlers from back to front,
+    // so application controls must encounter this gate before they can claim a chrome press.
+    pub(super) fn register(self, window: &mut Window) {
+        let Self {
+            geometry,
+            press_owner,
+            chrome,
+        } = self;
+        let chrome = std::rc::Rc::new(chrome);
+        let down_chrome = chrome.clone();
+        let up_chrome = chrome.clone();
+        let down_owner = press_owner.clone();
+        let up_owner = press_owner.clone();
+        let move_owner = press_owner.clone();
+        let exit_pointer = chrome.pointer.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if !phase.capture() {
+                return;
+            }
+            down_chrome.pointer.set(None);
+            if !surface_contains(geometry, event.position) {
+                down_owner.disarm(cx);
+                window.prevent_default();
+                if down_chrome.contains(event.position, window) {
+                    down_chrome.pointer.set(Some(event.button));
+                } else {
+                    cx.stop_propagation();
+                }
+            }
+        });
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if !phase.capture() {
+                return;
+            }
+            if up_chrome.pointer.get() == Some(event.button) {
+                up_chrome.pointer.set(None);
+                return;
+            }
+            if !surface_contains(geometry, event.position) {
+                up_owner.disarm(cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        });
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase.capture() && !surface_contains(geometry, event.position) {
+                move_owner.disarm(cx);
+                if chrome.pointer.get().is_some() && chrome.pointer.get() == event.pressed_button {
+                    return;
+                }
+                if event.pressed_button.is_none() && chrome.contains(event.position, window) {
+                    return;
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        });
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+            if phase.capture() && !surface_contains(geometry, event.position) {
+                press_owner.disarm(cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        });
+        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, _| {
+            if phase.capture() {
+                exit_pointer.set(None);
+            }
+        });
+    }
 }
 
 fn surface_contains(geometry: ModalSurfaceGeometry, point: gpui::Point<gpui::Pixels>) -> bool {

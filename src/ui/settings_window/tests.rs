@@ -2339,6 +2339,58 @@ fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn settings_window_titlebar_preserves_modal_focus_while_moving(cx: &mut TestAppContext) {
+    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let (_window, _harness, cx) = open_settings_with_drag(
+        cx,
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        records.clone(),
+    );
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [Some(gpui::WindowButton::Close), None, None],
+        right: [None; 3],
+    }));
+    cx.run_until_parked();
+    select_section(SettingsSectionId::Advanced, cx);
+    click("settings-reset-all", cx);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-settings-reset-all-confirm-keyboard-focus")
+            .is_some()
+    );
+    let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+    for region in [
+        "settings-sidebar-drag-region-hitbox",
+        "settings-detail-drag-region-hitbox",
+    ] {
+        let bounds = cx.debug_bounds(region).unwrap();
+        let start = point(bounds.right() - px(10.), bounds.top() + px(10.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "{region} must preserve modal focus on press"
+        );
+        cx.simulate_mouse_move(
+            point(start.x - px(8.), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "{region} must preserve modal focus after movement"
+        );
+    }
+    assert_eq!(records.counts(), (2, 2, 2, 0));
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+}
+
+#[gpui::test]
 fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
     cx: &mut TestAppContext,
 ) {
