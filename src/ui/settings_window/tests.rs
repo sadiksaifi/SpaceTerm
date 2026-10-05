@@ -514,6 +514,17 @@ fn several_rapid_changes_produce_one_write_carrying_the_last_value(cx: &mut Test
             .base_size,
         21.0
     );
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .preferences
+            .terminal
+            .typography
+            .base_size,
+        21.0
+    );
 }
 
 #[gpui::test]
@@ -682,17 +693,26 @@ fn a_document_published_without_identity_pauses_editing_until_reload(cx: &mut Te
         ))
     ));
     assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+
+    harness.storage.drop_identity(false);
+    click("settings-banner-reload", cx);
+
+    assert_eq!(status(&window, cx), SaveStatus::Saved);
+    assert!(window.read_with(cx, |window, _| window.editor.editable()));
+    assert_eq!(
+        document_of(&window, cx).preferences.window.density,
+        ChromeDensity::Comfortable
+    );
 }
 
 #[gpui::test]
 fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+    let (_window, harness, cx) = open_settings(cx);
     click("settings-density-comfortable", cx);
     assert_eq!(harness.storage.writes(), 0);
+    let handle = cx.update(|native, _| native.window_handle());
 
-    cx.update(|_, cx| {
-        window.update(cx, |window, cx| window.editor.flush(cx));
-    });
+    cx.dispatch_action(super::CloseSettingsWindow);
     cx.run_until_parked();
 
     assert_eq!(harness.storage.writes(), 1);
@@ -706,6 +726,7 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
             .density,
         ChromeDensity::Comfortable
     );
+    assert!(!cx.cx.update(|cx| cx.windows().contains(&handle)));
 }
 
 // Appearance Mode ----------------------------------------------------------------------------
@@ -2894,6 +2915,29 @@ fn request_window_close(window: &Entity<SettingsWindow>, cx: &mut VisualTestCont
     cx.run_until_parked();
 }
 
+/// Starts the real debounced job and leaves it queued for background execution.
+fn start_scheduled_write(
+    window: &Entity<SettingsWindow>,
+    storage: &MemoryStorage,
+    cx: &mut VisualTestContext,
+) -> super::test_support::BlockedWrite {
+    let blocked = storage.block_next_write();
+    // Advance time without draining the scheduled job into the blocked storage write.
+    cx.cx
+        .dispatcher
+        .scheduler()
+        .clock()
+        .advance(COMMIT_DELAY * 2);
+    while !window.read_with(cx, |settings, _| settings.editor.is_writing()) {
+        assert!(
+            cx.cx.dispatcher.tick(false),
+            "the scheduled commit should start"
+        );
+    }
+    assert_eq!(storage.writes(), 0);
+    blocked
+}
+
 #[gpui::test]
 fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     cx: &mut TestAppContext,
@@ -2904,9 +2948,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     });
     cx.run_until_parked();
     click("settings-density-comfortable", cx);
-    let (job, finished) = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
-    });
+    let blocked = start_scheduled_write(&window, &harness.storage, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -2917,12 +2959,21 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     });
     let handle = cx.update(|native, _| native.window_handle());
 
-    click("window-close", cx);
+    cx.update(|native, cx| {
+        let focused = native
+            .focused(cx)
+            .expect("the Settings control should own focus");
+        focused.dispatch_action(&super::CloseSettingsWindow, native, cx);
+    });
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 
-    finished.try_send(job.run()).unwrap();
+    let release = std::thread::spawn(move || {
+        blocked.wait_until_started();
+        blocked.release();
+    });
     cx.run_until_parked();
+    release.join().unwrap();
 
     assert_eq!(
         harness
@@ -2991,9 +3042,7 @@ fn a_failed_application_quit_save_reports_failure(cx: &mut TestAppContext) {
 fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-density-comfortable", cx);
-    let (job, finished) = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
-    });
+    let blocked = start_scheduled_write(&window, &harness.storage, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -3019,8 +3068,13 @@ fn application_quit_waits_for_the_latest_settings_edit(cx: &mut TestAppContext) 
         settings.close_after_save.as_ref(),
         Some(super::CloseIntent::Application(_))
     )));
-    finished.try_send(job.run()).unwrap();
+    assert_eq!(completions.get(), 0);
+    let release = std::thread::spawn(move || {
+        blocked.wait_until_started();
+        blocked.release();
+    });
     cx.run_until_parked();
+    release.join().unwrap();
 
     assert_eq!(
         harness
@@ -3063,9 +3117,7 @@ fn native_shutdown_saves_an_edit_before_its_debounce_runs(cx: &mut TestAppContex
 fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     click("settings-density-comfortable", cx);
-    let (job, finished) = cx.update(|_, cx| {
-        window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
-    });
+    let blocked = start_scheduled_write(&window, &harness.storage, cx);
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.edit(
@@ -3074,11 +3126,15 @@ fn native_shutdown_drains_background_writes_without_a_foreground_callback(cx: &m
             )
         })
     });
-    finished.try_send(job.run()).unwrap();
-
-    // The storage result is ready, but GPUI has not run its background result publication or
-    // foreground callback.
+    let release = std::thread::spawn(move || {
+        blocked.wait_until_started();
+        blocked.release();
+    });
+    // Shutdown must drive the queued job and its result publication before saving the newer edit.
+    assert!(window.read_with(cx, |settings, _| settings.editor.is_writing()));
+    assert_eq!(harness.storage.writes(), 0);
     cx.cx.update(|cx| cx.shutdown());
+    release.join().unwrap();
 
     assert_eq!(
         harness
@@ -3903,14 +3959,35 @@ fn finish_import(
 
 #[gpui::test]
 fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
+    let mut before = SettingsDocument {
+        revision: 12,
+        terminal_themes: crate::appearance::translate_zed_family(PAIRED_FAMILY)
+            .expect("fixture Zed family"),
+        ..Default::default()
+    };
+    before.preferences.window.transparency = 0.8;
+    before.preferences.window.blur = false;
+    before.preferences.terminal.typography.base_size = 27.0;
+    before.preferences.terminal.themes.light = before.terminal_themes[0].id.clone();
+    before.preferences.terminal.themes.dark = before.terminal_themes[1].id.clone();
+    before.updates.automatic_downloads = false;
+    before.clipboard.allow_write = false;
+    before.clipboard.allow_read = true;
+    before.keybindings = serde_json::from_str(r#"{"new_workspace":"cmd-shift-y"}"#).unwrap();
+    let imported = exported_document_with_a_theme();
+    let mut expected = crate::settings::parse_settings(&imported).unwrap();
+    expected.revision = before.revision + 1;
+    let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&before));
     select_section(SettingsSectionId::Advanced, cx);
 
-    finish_import(&window, Ok(exported_document_with_a_theme()), cx);
+    finish_import(&window, Ok(imported), cx);
     assert!(
         cx.update(|native, cx| spaceterm_ui::window_modal_is_open(native, cx)),
         "the import should ask before replacing anything"
     );
+    assert_eq!(document_of(&window, cx), before);
+    assert_eq!(harness.storage.document().as_ref(), Some(&before));
+    assert_eq!(harness.storage.writes(), 0);
     click("modal-action-settings-import-confirm", cx);
     settle(cx);
 
@@ -3920,6 +3997,8 @@ fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext
         ChromeDensity::Comfortable
     );
     assert_eq!(retained.terminal_themes.len(), 1);
+    assert_eq!(retained, expected);
+    assert_eq!(harness.storage.writes(), 1);
 }
 
 #[gpui::test]

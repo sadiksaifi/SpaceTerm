@@ -16,8 +16,6 @@ use std::{
 use gpui::{Context, Task};
 
 use crate::appearance::{ResetTarget, ThemeId, ThemeSummary};
-#[cfg(test)]
-use crate::settings::CommitJob;
 use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
@@ -307,24 +305,6 @@ impl SettingsEditor {
                 cx.notify();
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_deferred_commit(
-        &mut self,
-        cx: &mut Context<SettingsWindow>,
-    ) -> (
-        CommitJob,
-        async_channel::Sender<Result<CommitOutcome, SettingsError>>,
-    ) {
-        self.pending = None;
-        let job = self.draft.prepare_commit().unwrap();
-        let (sender, receiver) = async_channel::bounded(1);
-        let result = cx
-            .background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() });
-        self.track_commit(self.generation, result, cx);
-        (job, sender)
     }
 
     fn track_commit(
