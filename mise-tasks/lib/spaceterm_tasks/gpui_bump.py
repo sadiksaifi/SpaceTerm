@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import os
 import re
 import signal
 import subprocess
@@ -17,6 +16,7 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 from spaceterm_tasks import ROOT
+from spaceterm_tasks.processes import OWN_GROUP, stop_group
 
 FORK_URL = "https://github.com/sadiksaifi/zed"
 EXPECTED = {
@@ -293,41 +293,17 @@ def cargo_update(root: Path, packages: list[str]) -> None:
             cwd=root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=os.name == "posix",
+            start_new_session=OWN_GROUP,
         )
     except OSError as error:
         raise BumpError(Failure.UPDATE_FAILED) from error
     try:
         returncode = process.wait()
     except BaseException:
-        stop_cargo_process(process)
+        stop_group(process)
         raise
     if returncode != 0:
         raise BumpError(Failure.UPDATE_FAILED)
-
-
-def stop_cargo_process(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except ProcessLookupError:
-        process.wait()
-        return
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
-            pass
-        process.wait()
 
 
 def bump(root: Path, tag: str, remote: Remote, update=cargo_update) -> BumpResult:

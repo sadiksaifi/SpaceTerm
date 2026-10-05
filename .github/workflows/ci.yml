@@ -26,11 +26,13 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           install_args: cocogitto
-      # Squash merges make the title the commit message.
+      # Squash merges make the title the commit message. cog verify reads an author from Git.
       - name: Validate Conventional Commit title
         env:
           TITLE: ${{ github.event.pull_request.title }}
-        run: cog verify "$TITLE"
+        run: |
+          git config user.name "github-actions[bot]"
+          cog verify "$TITLE"
 
   macos:
     name: Validate macOS

@@ -1,13 +1,15 @@
-"""Exercise release notes, feed verification, and cask version policy."""
+"""Exercise release notes, feed verification, and cask updates."""
 
 import base64
+import json
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import ROOT, TaskError, release
 from spaceterm_tasks.release import (
     RELEASES,
     SPARKLE_NS,
@@ -112,6 +114,35 @@ class CaskTests(unittest.TestCase):
         self.assertFalse(supersedes("0.3.10", "0.10.0"))
         self.assertTrue(supersedes("0.4.0", "0.4.0"))
         self.assertTrue(supersedes("0.10.0", "0.4.0"))
+
+
+class CaskUpdateTests(unittest.TestCase):
+    DIGEST = "ab" * 32
+
+    def update(self, version, sha256):
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory)
+            (assets / "SHA256SUMS").write_text(f"{self.DIGEST}  {release.archive_name('0.4.0')}\n")
+            info = json.dumps({"casks": [{"version": version, "sha256": sha256}]})
+            with (
+                patch.object(release, "RELEASE_ASSETS", assets),
+                patch.object(release, "checked", return_value=info),
+                patch.object(release.subprocess, "run") as run,
+            ):
+                run.return_value.returncode = 0
+                release.update_cask("v0.4.0")
+        return run
+
+    def test_a_cask_that_already_matches_the_release_is_left_alone(self):
+        self.update("0.4.0", self.DIGEST).assert_not_called()
+        self.update("0.5.0", "cd" * 32).assert_not_called()
+
+    def test_a_new_release_or_rebuilt_archive_updates_the_cask(self):
+        for version, sha256 in (("0.3.0", "cd" * 32), ("0.4.0", "cd" * 32)):
+            with self.subTest(version=version):
+                command = self.update(version, sha256).call_args.args[0]
+                self.assertEqual(command[:2], ["brew", "bump-cask-pr"])
+                self.assertIn(self.DIGEST, command)
 
 
 if __name__ == "__main__":

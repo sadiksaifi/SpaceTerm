@@ -237,12 +237,15 @@ def supersedes(version, installed):
 def update_cask(tag):
     """Point the tapped cask at a release; an older release's job never rolls the tap back."""
     version = release_version(tag)
-    info = json.loads(checked(["brew", "info", "--cask", "--json=v2", CASK]))
-    installed = info["casks"][0]["version"]
-    if not supersedes(version, installed):
+    cask = json.loads(checked(["brew", "info", "--cask", "--json=v2", CASK]))["casks"][0]
+    if not supersedes(version, cask["version"]):
         print(f"The cask already installs a release newer than SpaceTerm {tag}.")
         return
     digest = archive_digest(version, (RELEASE_ASSETS / "SHA256SUMS").read_text())
+    # brew bump-cask-pr refuses a cask that already matches, so a rerun stops here.
+    if (cask["version"], cask["sha256"]) == (version, digest):
+        print(f"The cask already installs SpaceTerm {tag}.")
+        return
     if subprocess.run(
         [
             "brew",

@@ -1,5 +1,6 @@
 """Shared code for SpaceTerm's mise file tasks. Standard library only."""
 
+import errno
 import sys
 from pathlib import Path
 
@@ -11,10 +12,15 @@ class TaskError(Exception):
 
 
 def main(entry):
-    """Run a task entry point and report TaskError as a one-line failure."""
+    """Run a task entry point and report TaskError or OSError as a content-free line."""
     try:
         status = entry()
     except TaskError as error:
         print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except OSError as error:
+        # Native errors name paths; report only their classification.
+        kind = errno.errorcode.get(error.errno or 0, type(error).__name__)
+        print(f"error: an operating-system operation failed ({kind})", file=sys.stderr)
         raise SystemExit(1) from None
     raise SystemExit(status or 0)

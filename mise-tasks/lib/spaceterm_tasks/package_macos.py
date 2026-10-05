@@ -54,9 +54,22 @@ def require_apple_silicon():
         raise TaskError("SpaceTerm packages only on Apple Silicon Macs")
 
 
+def require_clean_checkout():
+    """Packaging reads files Cargo never sees, and Cargo can reuse a build script's last check."""
+    status = checked(
+        ["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal"],
+        "Git could not report the checkout state",
+        cwd=ROOT,
+    )
+    if status.strip():
+        raise TaskError("a release package requires a clean checkout")
+
+
 def package(release_tag=None):
     """Build, bundle, and verify one identity, then move the app and disk image into dist/."""
     require_apple_silicon()
+    if release_tag:
+        require_clean_checkout()
     name = selected_identity(release_tag)
     template = identity(name)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION

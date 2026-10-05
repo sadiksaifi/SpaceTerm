@@ -27,6 +27,22 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        # Release packaging requires a clean Git checkout.
+        (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
+        for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    *arguments,
+                ],
+                cwd=self.root,
+                check=True,
+                capture_output=True,
+            )
 
         self.bin = Path(self.directory.name) / "bin"
         self.bin.mkdir()
@@ -152,6 +168,16 @@ int main(int argc, char **argv) {{
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
+
+    def test_release_packaging_rejects_a_dirty_checkout_before_building(self):
+        self.compile_executable(self.artifact, "SpaceTerm")
+        with (self.root / "Cargo.toml").open("a") as manifest:
+            manifest.write("\n")
+        result = self.package("v0.0.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a release package requires a clean checkout", result.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertFalse((self.root / "dist/SpaceTerm.app").exists())
 
     def test_release_packaging_rejects_a_preflight_identity_with_the_same_name_prefix(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")

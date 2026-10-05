@@ -473,7 +473,7 @@ class GpuiBumpTests(unittest.TestCase):
             process.pid = 12345
             process.poll.return_value = None
             process.wait.side_effect = [KeyboardInterrupt, 0]
-            with patch.object(MODULE.os, "killpg", create=True) as killpg:
+            with patch.object(os, "killpg", create=True) as killpg:
                 with self.assertRaises(KeyboardInterrupt):
                     MODULE.cargo_update(self.root, list(LOCK_NAMES))
         if os.name == "posix":
