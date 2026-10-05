@@ -162,7 +162,7 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn fixtures_supply_display_facts_only_while_enabled(cx: &mut TestAppContext) {
+    fn caption_and_link_display_fixtures_toggle_independently(cx: &mut TestAppContext) {
         cx.update(|cx| {
             assert!(caption_fixture(cx).is_none());
             assert!(link_preview_fixture(cx).is_none());
@@ -181,6 +181,9 @@ mod tests {
                 link_preview_fixture(cx),
                 Some("https://example.invalid/workbench-fixture")
             );
+            reset_fixtures(cx);
+            assert!(caption_fixture(cx).is_none());
+            assert!(link_preview_fixture(cx).is_none());
         });
     }
 }

@@ -759,7 +759,7 @@ mod tests {
     /// unrelated role, such as a terminal selection color, produces a fill from another hue family
     /// and a state that reads as a different control.
     #[test]
-    fn a_selected_element_should_gain_weight_on_hover_without_leaving_its_family() {
+    fn selected_and_ghost_fills_remain_opaque_with_distinct_selection_hover() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = chrome_base(appearance);
 

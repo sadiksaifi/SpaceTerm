@@ -835,6 +835,13 @@ mod tests {
             "Disabled contrast floor unmet: Element; Disabled separation target unmet: Toggle; Disabled shared paint unmet: Input; Disabled selected step unmet: Segmented"
         );
         assert!(control_diagnostic_lines(&appearance)[0].1);
+        assert_eq!(
+            control_diagnostic_lines(&appearance)
+                .iter()
+                .map(|line| line.1)
+                .collect::<Vec<_>>(),
+            [true, false, false, false]
+        );
     }
 
     struct DiagnosticsFixture;

@@ -13,8 +13,6 @@ use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
 
-#[cfg(test)]
-use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
@@ -24,31 +22,6 @@ use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, Tex
 
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
-
-/// A field action rests on its field and uses complete neutral paints while interacting.
-#[cfg(test)]
-pub(crate) fn field_action_style(colors: &ChromeColors) -> spaceterm_ui::ButtonVariantStyle {
-    let paint = |background, foreground| {
-        spaceterm_ui::ButtonPaint::new(
-            gpui_color(background),
-            gpui_color(foreground),
-            gpui::rgba(0),
-        )
-    };
-    spaceterm_ui::ButtonVariantStyle::new(
-        paint(colors.input_background, colors.input_text),
-        paint(
-            colors.ghost_element_hover,
-            colors.ghost_element_hover_foreground,
-        ),
-        paint(
-            colors.ghost_element_active,
-            colors.ghost_element_active_foreground,
-        ),
-        paint(colors.input_disabled_background, colors.input_disabled_text),
-    )
-}
-
 /// The horizontal breathing room every row keeps inside the card that holds it.
 ///
 /// Rows carry it rather than the card, so a fill a row paints, such as the one Settings Search
@@ -825,37 +798,6 @@ pub(crate) fn action_button(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn field_action_preserves_a_light_field_and_opposite_hover_paint() {
-        use crate::appearance::{ChromeColors, Color};
-        let colors = ChromeColors {
-            input_background: Color::WHITE,
-            input_text: Color::rgb(0x111111),
-            text: Color::WHITE,
-            ghost_element_hover: Color::rgb(0x111111),
-            ghost_element_hover_foreground: Color::WHITE,
-            ..ChromeColors::default()
-        };
-        let style = super::field_action_style(&colors);
-        assert_eq!(
-            style.normal().background(),
-            super::gpui_color(colors.input_background)
-        );
-        assert_eq!(
-            style.normal().foreground(),
-            super::gpui_color(colors.input_text)
-        );
-        assert_eq!(
-            style.hovered().background(),
-            super::gpui_color(colors.ghost_element_hover)
-        );
-        assert_eq!(
-            style.hovered().foreground(),
-            super::gpui_color(colors.ghost_element_hover_foreground)
-        );
-    }
-
     #[test]
     fn stepper_divider_uses_materialized_card_field_state() {
         let mut appearance = ChromeAppearance::default();

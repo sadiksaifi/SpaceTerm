@@ -50,7 +50,7 @@ fn open(cx: &mut TestAppContext) -> WindowHandle<AboutWindow> {
 }
 
 #[gpui::test]
-fn a_second_request_activates_the_open_about_window(cx: &mut TestAppContext) {
+fn repeated_about_requests_reuse_the_open_window(cx: &mut TestAppContext) {
     install(cx);
     let opened = open(cx);
 

@@ -728,7 +728,7 @@ mod tests {
         }
     }
     #[test]
-    fn captions_resolve_all_control_states_on_opposite_and_program_surfaces() {
+    fn captions_resolve_text_marks_and_enabled_controls_on_program_surfaces() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             let colors = builtin::chrome_base(appearance);
             for surface in [

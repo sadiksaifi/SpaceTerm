@@ -147,94 +147,159 @@ mod tests {
         let theme = theme(&colors);
         assert_eq!(
             theme.paint(false, true, false, false),
-            paint(
-                colors.toggle_off_background,
-                colors.toggle_off_mark,
-                colors.toggle_off_border,
-                colors.toggle_off_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_off_background),
+                gpui_color(colors.toggle_off_mark),
+                gpui_color(colors.toggle_off_border),
+                gpui_color(colors.toggle_off_label)
             )
         );
         assert_eq!(
             theme.paint(false, true, true, false),
-            paint(
-                colors.toggle_off_hover_background,
-                colors.toggle_off_hover_mark,
-                colors.toggle_off_hover_border,
-                colors.toggle_off_hover_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_off_hover_background),
+                gpui_color(colors.toggle_off_hover_mark),
+                gpui_color(colors.toggle_off_hover_border),
+                gpui_color(colors.toggle_off_hover_label)
             )
         );
         assert_eq!(
             theme.paint(false, true, true, true),
-            paint(
-                colors.toggle_off_pressed_background,
-                colors.toggle_off_pressed_mark,
-                colors.toggle_off_pressed_border,
-                colors.toggle_off_pressed_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_off_pressed_background),
+                gpui_color(colors.toggle_off_pressed_mark),
+                gpui_color(colors.toggle_off_pressed_border),
+                gpui_color(colors.toggle_off_pressed_label)
             )
         );
         assert_eq!(
             theme.paint(false, false, true, true),
-            paint(
-                colors.toggle_off_disabled_background,
-                colors.toggle_off_disabled_mark,
-                colors.toggle_off_disabled_border,
-                colors.toggle_off_disabled_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_off_disabled_background),
+                gpui_color(colors.toggle_off_disabled_mark),
+                gpui_color(colors.toggle_off_disabled_border),
+                gpui_color(colors.toggle_off_disabled_label)
             )
         );
         assert_eq!(
             theme.paint(true, true, false, false),
-            paint(
-                colors.toggle_on_background,
-                colors.toggle_on_mark,
-                colors.toggle_on_border,
-                colors.toggle_on_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_on_background),
+                gpui_color(colors.toggle_on_mark),
+                gpui_color(colors.toggle_on_border),
+                gpui_color(colors.toggle_on_label)
             )
         );
         assert_eq!(
             theme.paint(true, true, true, false),
-            paint(
-                colors.toggle_on_hover_background,
-                colors.toggle_on_hover_mark,
-                colors.toggle_on_hover_border,
-                colors.toggle_on_hover_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_on_hover_background),
+                gpui_color(colors.toggle_on_hover_mark),
+                gpui_color(colors.toggle_on_hover_border),
+                gpui_color(colors.toggle_on_hover_label)
             )
         );
         assert_eq!(
             theme.paint(true, true, true, true),
-            paint(
-                colors.toggle_on_pressed_background,
-                colors.toggle_on_pressed_mark,
-                colors.toggle_on_pressed_border,
-                colors.toggle_on_pressed_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_on_pressed_background),
+                gpui_color(colors.toggle_on_pressed_mark),
+                gpui_color(colors.toggle_on_pressed_border),
+                gpui_color(colors.toggle_on_pressed_label)
             )
         );
         assert_eq!(
             theme.paint(true, false, true, true),
-            paint(
-                colors.toggle_on_disabled_background,
-                colors.toggle_on_disabled_mark,
-                colors.toggle_on_disabled_border,
-                colors.toggle_on_disabled_label
+            TogglePaint::new(
+                gpui_color(colors.toggle_on_disabled_background),
+                gpui_color(colors.toggle_on_disabled_mark),
+                gpui_color(colors.toggle_on_disabled_border),
+                gpui_color(colors.toggle_on_disabled_label)
             )
         );
     }
 
-    #[test]
-    fn theme_should_scale_toggle_geometry() {
-        let theme = theme(&ChromeColors::default());
-
-        assert_ne!(theme, theme.scaled_metrics(1.25, 1.25));
-    }
-
-    #[test]
-    fn authored_on_state_alpha_and_mark_are_preserved() {
-        let colors = ChromeColors {
-            toggle_on_background: Color::rgba(0x12345678),
-            toggle_on_mark: Color::rgba(0xabcdef98),
-            ..ChromeColors::default()
-        };
-        let paint = theme(&colors).paint(true, true, false, false);
-        assert_eq!(paint.background(), gpui_color(colors.toggle_on_background));
-        assert_eq!(paint.foreground(), gpui_color(colors.toggle_on_mark));
+    #[gpui::test]
+    fn theme_should_scale_toggle_geometry(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        struct Fixture;
+        impl gpui::Render for Fixture {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .child(
+                        spaceterm_ui::Checkbox::new(
+                            "geometry-checkbox",
+                            "Label",
+                            spaceterm_ui::CheckboxState::Unchecked,
+                        )
+                        .size(spaceterm_ui::ToggleSize::Compact)
+                        .debug_selector("geometry-checkbox")
+                        .on_change(|_, _, _| {}),
+                    )
+                    .child(
+                        spaceterm_ui::Switch::new("geometry-switch", "Label", false)
+                            .size(spaceterm_ui::ToggleSize::Compact)
+                            .debug_selector("geometry-switch")
+                            .on_change(|_, _, _| {}),
+                    )
+            }
+        }
+        let base = theme(&ChromeColors::default());
+        let scaled = base.scaled_metrics(1.25, 1.25);
+        for on in [false, true] {
+            for enabled in [false, true] {
+                for hovered in [false, true] {
+                    for pressed in [false, true] {
+                        assert_eq!(
+                            base.paint(on, enabled, hovered, pressed),
+                            scaled.paint(on, enabled, hovered, pressed)
+                        );
+                    }
+                }
+            }
+        }
+        cx.set_global(scaled);
+        let (_, cx) = cx.add_window_view(|_, _| Fixture);
+        cx.run_until_parked();
+        let checkbox = cx
+            .debug_bounds("geometry-checkbox-indicator")
+            .expect("checkbox paints");
+        let switch = cx
+            .debug_bounds("geometry-switch-indicator")
+            .expect("switch paints");
+        assert_eq!(checkbox.size, gpui::size(px(17.5), px(17.5)));
+        assert_eq!(switch.size.width, px(37.5));
+        let body_size = ChromeTypography::default().style(TextRole::Body).size * 1.25;
+        let expected_label_width = cx.update(|window, _| {
+            window
+                .text_system()
+                .shape_line(
+                    "Label".into(),
+                    body_size,
+                    &[gpui::TextRun {
+                        len: 5,
+                        font: spaceterm_ui::ControlTypography::default().regular().clone(),
+                        color: gpui::black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+                .width
+        });
+        for (row, indicator) in [("geometry-checkbox", checkbox), ("geometry-switch", switch)] {
+            assert_eq!(
+                cx.debug_bounds(row).unwrap().size.width - indicator.size.width - px(7.5),
+                expected_label_width
+            );
+        }
     }
 }

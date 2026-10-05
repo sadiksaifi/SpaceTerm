@@ -133,16 +133,6 @@ fn fill_weight_cap<const N: usize>(ordinary_fill: Color, hosts: [Color; N]) -> f
         .map(|host| ordinary_fill.source_over(host).contrast_ratio(host))
         .fold(f64::INFINITY, f64::min)
 }
-
-#[cfg(test)]
-fn paired_fill_weight_cap(active_fill: Color, inactive_fill: Color, hosts: [Color; 2]) -> f64 {
-    [active_fill, inactive_fill]
-        .into_iter()
-        .zip(hosts)
-        .map(|(fill, host)| fill.source_over(host).contrast_ratio(host))
-        .fold(f64::INFINITY, f64::min)
-}
-
 fn fill_is_within_limits<const N: usize>(
     fill: Color,
     hosts: [Color; N],
@@ -1960,23 +1950,6 @@ mod tests {
         assert!(resolved.content.contrast_ratio(fill) >= 3.0);
         assert!(relative_luminance(resolved.content) < relative_luminance(fill));
     }
-
-    #[test]
-    fn shared_fill_cap_pairs_each_activity_fill_with_its_own_host() {
-        let hosts = [Color::BLACK, Color::WHITE];
-        let active_fill = Color::rgb(0xe0e0e0);
-        let inactive_fill = Color::rgb(0x202020);
-
-        let cap = paired_fill_weight_cap(active_fill, inactive_fill, hosts);
-        let expected = active_fill
-            .contrast_ratio(hosts[0])
-            .min(inactive_fill.contrast_ratio(hosts[1]));
-
-        assert!((cap - expected).abs() < 1e-9);
-        assert!(cap > active_fill.contrast_ratio(hosts[1]));
-        assert!(cap > inactive_fill.contrast_ratio(hosts[0]));
-    }
-
     #[test]
     fn disabled_selected_chip_uses_the_first_quantized_step_in_enabled_direction() {
         let track = Color::rgb(0xededed);
@@ -2052,6 +2025,11 @@ mod tests {
             true,
             &mut diagnostics,
         ));
+        assert!(
+            diagnostics.contains(&DisabledControlDiagnostic::SharedPaint {
+                family: FloatingControlFamily::Segmented,
+            })
+        );
         for colors in [active, inactive] {
             let track = colors.element_background;
             assert!(

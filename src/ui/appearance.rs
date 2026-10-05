@@ -564,22 +564,6 @@ fn readable_toward_endpoint<const N: usize>(
         .readable_preserving_chroma_toward(&backgrounds, minimum, endpoint_is_lighter)
         .unwrap_or(endpoint)
 }
-
-#[cfg(test)]
-fn resolve_floating_field_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> (ChromeColors, ChromeColors) {
-    let resolved =
-        resolve_floating_field_colors_detailed(authored, floors, reference, paint, material, wash);
-    let _pending_diagnostics = resolved.fallback_families;
-    (resolved.reference, resolved.colors)
-}
-
 fn resolve_floating_field_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -1181,23 +1165,6 @@ fn resolve_floating_family_for_presentation<const N: usize>(
         host_backgrounds[0] != host_backgrounds[1] || used_content_fallback,
     ))
 }
-
-#[cfg(test)]
-fn resolve_floating_control_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: &ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> ChromeColors {
-    let resolved = resolve_floating_control_colors_detailed(
-        authored, floors, reference, paint, material, wash,
-    );
-    let _pending_diagnostics = resolved.fallback_families;
-    resolved.colors
-}
-
 fn resolve_floating_control_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -3427,23 +3394,6 @@ fn state_floating_material(
         (tone, wash)
     }
 }
-
-#[cfg(test)]
-fn resolve_floating_segmented_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: &ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> ChromeColors {
-    let resolved = resolve_floating_segmented_colors_detailed(
-        authored, floors, reference, paint, material, wash, false,
-    );
-    let _pending_diagnostics = resolved.fallback_families;
-    resolved.colors
-}
-
 fn resolve_floating_segmented_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -4033,9 +3983,8 @@ impl ChromeAppearance {
     ///
     /// A Pane is an ordinary resting surface in both appearances: it paints only its difference
     /// from the window sheet, so it transmits what the Transparency Setting asks of every other
-    /// resting surface and keeps its authored step from the chrome around it. Light authors that
-    /// step upward and Dark downward, and the same overlay carries either direction, so neither
-    /// appearance needs a backing of its own, and neither does a chip or a row resting beside it.
+    /// resting surface and keeps its authored step from the chrome around it. The overlay carries
+    /// the authored luminance relationship without a separate backing.
     /// Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         self.surface(SurfaceRole::Surface, terminal_background)
@@ -4484,13 +4433,14 @@ impl ChromeAppearance {
 mod typography_tests {
     use super::{
         FloatingContrastFloors, floating_constraint, floating_host_constraint, floating_state,
-        host_relative_fill, relative_luminance, resolve_floating_control_colors,
-        resolve_floating_field_colors, resolve_floating_frame, resolve_floating_segmented_colors,
-        resolve_floating_state_at_alpha, resolve_material_control_colors,
+        host_relative_fill, relative_luminance, resolve_floating_control_colors_detailed,
+        resolve_floating_field_colors_detailed, resolve_floating_frame,
+        resolve_floating_segmented_colors_detailed, resolve_floating_state_at_alpha,
+        resolve_material_control_colors,
     };
 
     #[test]
-    fn material_frame_strengthens_the_fill_before_changing_authored_content_polarity() {
+    fn material_frame_changes_fill_before_authored_content_polarity() {
         use crate::appearance::Color;
 
         let host = Color::WHITE;
@@ -4597,7 +4547,7 @@ mod typography_tests {
     }
 
     #[test]
-    fn inactive_material_resolution_keeps_focus_absent_and_collapses_the_field_frame() {
+    fn inactive_material_resolution_hides_focus_and_preserves_invalid_border() {
         use crate::appearance::{ChromeColors, Color};
         let host = Color::WHITE;
         let reference = ChromeColors {
@@ -4754,36 +4704,54 @@ mod typography_tests {
     fn panel_and_card_controls_preserve_the_authored_root_relative_step() {
         use crate::appearance::{ChromeColors, Color, CompositionCapabilities, SurfaceMaterials};
         let authored = ChromeColors::default();
-        for host in [
-            authored.background,
-            Color::rgb(0x202020),
-            Color::rgb(0x303030),
+        for control_host in [
+            spaceterm_ui::ControlHost::Panel,
+            spaceterm_ui::ControlHost::Card,
         ] {
-            let prepared = super::prepare_state_control_host(
-                &authored,
-                (host, host),
-                spaceterm_ui::ControlHost::Panel,
-                SurfaceMaterials::OPAQUE,
-                super::ChromeStatePolicy {
-                    active: true,
-                    capabilities: CompositionCapabilities::default(),
-                },
-                super::FloatingContrastFloors::STANDARD,
-                false,
-            );
-            for (fill, actual) in [
-                (
-                    authored.element_background,
-                    prepared.reference.element_background,
-                ),
-                (authored.element_hover, prepared.reference.element_hover),
-                (authored.element_active, prepared.reference.element_active),
+            for host in [
+                authored.background,
+                Color::rgb(0x202020),
+                Color::rgb(0x303030),
             ] {
-                assert_eq!(
-                    actual,
-                    host_relative_fill(fill, authored.background, host).unwrap(),
-                    "host={host:?}, authored fill={fill:?}"
+                let prepared = super::prepare_state_control_host(
+                    &authored,
+                    (host, host),
+                    control_host,
+                    SurfaceMaterials::OPAQUE,
+                    super::ChromeStatePolicy {
+                        active: true,
+                        capabilities: CompositionCapabilities::default(),
+                    },
+                    super::FloatingContrastFloors::STANDARD,
+                    false,
                 );
+                for (fill, actual) in [
+                    (
+                        authored.element_background,
+                        prepared.reference.element_background,
+                    ),
+                    (authored.element_hover, prepared.reference.element_hover),
+                    (authored.element_active, prepared.reference.element_active),
+                ] {
+                    assert_eq!(
+                        relative_luminance(actual).partial_cmp(&relative_luminance(host)),
+                        relative_luminance(fill)
+                            .partial_cmp(&relative_luminance(authored.background)),
+                    );
+                    let authored_ratio = (relative_luminance(fill) + 0.05)
+                        / (relative_luminance(authored.background) + 0.05);
+                    let actual_ratio =
+                        (relative_luminance(actual) + 0.05) / (relative_luminance(host) + 0.05);
+                    assert!(
+                        (authored_ratio - actual_ratio).abs() < 0.012,
+                        "{control_host:?} host={host:?}: authored={authored_ratio}, actual={actual_ratio}"
+                    );
+                    assert_eq!(
+                        actual,
+                        host_relative_fill(fill, authored.background, host).unwrap(),
+                        "host={host:?}, authored fill={fill:?}"
+                    );
+                }
             }
         }
     }
@@ -4838,7 +4806,7 @@ mod typography_tests {
     }
 
     #[test]
-    fn floating_fields_use_the_opaque_frame_when_shifted_endpoints_have_no_readable_foreground() {
+    fn floating_fields_report_input_fallback_and_keep_endpoint_text_readable() {
         use crate::appearance::{ChromeColors, Color};
 
         let reference = ChromeColors {
@@ -4852,7 +4820,7 @@ mod typography_tests {
             input_background: Color::rgba(0x737373e7),
             ..reference.clone()
         };
-        let (_, resolved) = resolve_floating_field_colors(
+        let resolution = resolve_floating_field_colors_detailed(
             &reference,
             FloatingContrastFloors::STANDARD,
             reference.clone(),
@@ -4861,6 +4829,12 @@ mod typography_tests {
             Color::rgba(0),
         );
 
+        assert!(
+            resolution
+                .fallback_families
+                .contains(&super::FloatingControlFamily::Input)
+        );
+        let resolved = resolution.colors;
         for underlay in [Color::BLACK, Color::WHITE] {
             let background = resolved.input_background.source_over(underlay);
             assert!(
@@ -4875,7 +4849,7 @@ mod typography_tests {
     }
 
     #[test]
-    fn floating_segment_labels_use_the_opaque_track_when_shifted_endpoints_are_unreadable() {
+    fn floating_segment_labels_report_fallback_and_keep_endpoint_text_readable() {
         use crate::appearance::{ChromeColors, Color};
 
         let reference = ChromeColors {
@@ -4888,15 +4862,22 @@ mod typography_tests {
             element_background: Color::rgba(0x737373e7),
             ..reference.clone()
         };
-        let resolved = resolve_floating_segmented_colors(
+        let resolution = resolve_floating_segmented_colors_detailed(
             &reference,
             FloatingContrastFloors::STANDARD,
             &reference,
             paint,
             Color::rgba(0),
             Color::rgba(0),
+            false,
         );
 
+        assert!(
+            resolution
+                .fallback_families
+                .contains(&super::FloatingControlFamily::Segmented)
+        );
+        let resolved = resolution.colors;
         for underlay in [Color::BLACK, Color::WHITE] {
             let background = resolved.element_background.source_over(underlay);
             assert!(
@@ -4911,7 +4892,7 @@ mod typography_tests {
     }
 
     #[test]
-    fn floating_progress_accent_uses_the_opaque_track_when_shifted_endpoints_are_unreadable() {
+    fn floating_toggle_fallback_keeps_accent_readable_on_host_and_track_endpoints() {
         use crate::appearance::{ChromeColors, Color};
 
         let reference = ChromeColors {
@@ -4926,7 +4907,7 @@ mod typography_tests {
             ..reference.clone()
         };
         let material = Color::rgba(0x666666ef);
-        let resolved = resolve_floating_control_colors(
+        let resolution = resolve_floating_control_colors_detailed(
             &reference,
             FloatingContrastFloors::STANDARD,
             &reference,
@@ -4935,6 +4916,12 @@ mod typography_tests {
             Color::rgba(0),
         );
 
+        assert!(
+            resolution
+                .fallback_families
+                .contains(&super::FloatingControlFamily::Toggle)
+        );
+        let resolved = resolution.colors;
         for underlay in [Color::BLACK, Color::WHITE] {
             let host = material.source_over(underlay);
             let track = resolved.toggle_off_background.source_over(host);
@@ -4960,7 +4947,7 @@ mod typography_tests {
             warning_border: Color::rgb(0xf0f0f0),
             ..ChromeColors::default()
         };
-        let resolved = resolve_floating_control_colors(
+        let resolution = resolve_floating_control_colors_detailed(
             &reference,
             FloatingContrastFloors::STANDARD,
             &reference,
@@ -4969,6 +4956,7 @@ mod typography_tests {
             Color::WHITE,
         );
 
+        let resolved = resolution.colors;
         assert_ne!(resolved.warning_border, resolved.warning);
         assert!(resolved.warning_border.contrast_ratio(Color::WHITE) >= 3.0,);
     }

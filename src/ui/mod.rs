@@ -273,7 +273,17 @@ mod tests {
         let command_period =
             Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
 
-        let has_binding = cx.update(|cx| !cx.all_bindings_for_input(&[command_period]).is_empty());
+        let has_binding = cx.update(|cx| {
+            cx.all_bindings_for_input(&[command_period])
+                .iter()
+                .any(|binding| {
+                    binding.action().name() == "spaceterm_modal::ActivatePlatformCancel"
+                        && binding.predicate().is_some_and(|predicate| {
+                            predicate.eval(&[gpui::KeyContext::parse("SpaceTermModal").unwrap()])
+                                && !predicate.eval(&[gpui::KeyContext::parse("Terminal").unwrap()])
+                        })
+                })
+        });
 
         assert!(has_binding);
     }
@@ -360,6 +370,8 @@ mod tests {
                         panic!("invalid test shortcut {shortcut}: {error}")
                     });
                     let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    let binding = bindings.last().expect("the command has a binding");
+                    assert!(binding.predicate().is_none(), "{shortcut} must be global");
                     (
                         *shortcut,
                         bindings

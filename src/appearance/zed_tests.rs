@@ -95,6 +95,18 @@ fn file_identity_is_deterministic_and_names_the_family_author_theme_and_appearan
     .unwrap();
     let renamed = &translate_zed_family(&renamed).unwrap()[0];
 
+    let reauthored = serde_json::to_vec(&json!({
+        "name": "Fixture", "author": "Another Author",
+        "themes": [{ "name": "Only", "appearance": "dark", "style": {} }],
+    }))
+    .unwrap();
+    let retitled = serde_json::to_vec(&json!({
+        "name": "Fixture", "author": "Fixture Author",
+        "themes": [{ "name": "Another Theme", "appearance": "dark", "style": {} }],
+    }))
+    .unwrap();
+    assert_ne!(dark.id, translate_zed_family(&reauthored).unwrap()[0].id);
+    assert_ne!(dark.id, translate_zed_family(&retitled).unwrap()[0].id);
     assert_ne!(dark.id, light.id);
     assert_ne!(dark.id, renamed.id);
 }
@@ -230,6 +242,8 @@ fn a_family_the_user_selected_installs_nothing_when_any_theme_is_malformed() {
         json!([{ "name": "Unknown", "appearance": "sepia" }]),
         json!([{ "name": "Control\u{7}", "appearance": "dark" }]),
         json!(["not an object"]),
+        json!([{ "name": "Valid", "appearance": "dark", "style": {} },
+               { "name": "Invalid", "appearance": "sepia" }]),
     ] {
         assert_eq!(
             translate_zed_family(&family(themes)),

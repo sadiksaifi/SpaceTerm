@@ -373,6 +373,23 @@ mod tests {
         ] {
             let presentation =
                 resolve(LaunchState::Required, state.clone()).expect("a held launch is presented");
+            assert_eq!(presentation.title, "Updating SpaceTerm");
+            assert_eq!(presentation.message.as_deref(), Some(format!(
+                "SpaceTerm {CURRENT_VERSION} is out of date. The update installs before SpaceTerm opens."
+            ).as_str()));
+            let (status, detail) = match state {
+                UpdateState::Available { .. }
+                | UpdateState::Verifying { .. }
+                | UpdateState::Ready { .. } => ("Preparing SpaceTerm 0.4.2…", None),
+                UpdateState::Installing { .. } => (
+                    "Installing SpaceTerm 0.4.2…",
+                    Some("SpaceTerm reopens when it’s done."),
+                ),
+                _ => ("Preparing the update…", None),
+            };
+            assert_eq!(presentation.status.as_ref(), status);
+            assert_eq!(presentation.detail.as_deref(), detail);
+            assert_eq!(presentation.progress, None);
             let text = format!(
                 "{} {:?} {} {:?}",
                 presentation.title, presentation.message, presentation.status, presentation.detail

@@ -291,6 +291,19 @@ mod tests {
                 family: "Fixture Mono".into()
             },
         );
+        assert_eq!(
+            preview.document().preferences.terminal.typography.base_size,
+            22.0
+        );
+        assert_eq!(
+            preview
+                .document()
+                .preferences
+                .terminal
+                .typography
+                .line_height,
+            1.35
+        );
         preview.set_alternate_typography(false).unwrap();
 
         assert!(!preview.alternate_typography(&preview.document()));

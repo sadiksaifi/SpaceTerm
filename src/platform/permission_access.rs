@@ -230,6 +230,8 @@ pub(crate) mod testing {
         screen_recording: Cell<Authorization>,
         accessibility: Cell<Authorization>,
         pub(crate) setup_failure: Cell<Option<PermissionAccessError>>,
+        pub(crate) defer_preparation: Cell<bool>,
+        pending_preparations: RefCell<Vec<PermissionSetupCompletion>>,
         pub(crate) open_failure: Cell<Option<PermissionAccessError>>,
         pub(crate) resettable: Cell<bool>,
         pub(crate) reset_failure: Cell<Option<PermissionAccessError>>,
@@ -266,6 +268,8 @@ pub(crate) mod testing {
                 screen_recording: Cell::new(screen_recording),
                 accessibility: Cell::new(accessibility),
                 setup_failure: Cell::new(None),
+                defer_preparation: Cell::new(false),
+                pending_preparations: RefCell::default(),
                 open_failure: Cell::new(None),
                 resettable: Cell::new(true),
                 reset_failure: Cell::new(None),
@@ -307,6 +311,13 @@ pub(crate) mod testing {
             }
         }
 
+        pub(crate) fn take_preparation(&self) -> PermissionSetupCompletion {
+            self.pending_preparations
+                .borrow_mut()
+                .pop()
+                .expect("a preparation is pending")
+        }
+
         pub(crate) fn take_reset(&self) -> PermissionResetCompletion {
             self.pending_resets
                 .borrow_mut()
@@ -336,7 +347,7 @@ pub(crate) mod testing {
             })
         }
 
-        /// Completes at once with what the scripted authorization reports.
+        /// Completes with scripted authorization unless the test defers completion.
         fn prepare_setup(
             &self,
             permission: SystemPermission,
@@ -348,6 +359,10 @@ pub(crate) mod testing {
             }
             let (preparation, cancellation) = PermissionSetupPreparation::new();
             self.preparations.borrow_mut().push(cancellation);
+            if self.defer_preparation.get() {
+                self.pending_preparations.borrow_mut().push(completion);
+                return Ok(preparation);
+            }
             completion(
                 self.authorization(permission)
                     .map(|authorization| match authorization {

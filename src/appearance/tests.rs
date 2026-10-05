@@ -1508,7 +1508,7 @@ fn invalid_bounds_and_protocol_alpha_are_rejected() {
 }
 
 #[test]
-fn catalog_batch_install_is_atomic_and_revision_checked() {
+fn successful_catalog_install_advances_revision_and_rejects_stale_revision() {
     let theme = TerminalTheme {
         id: ThemeId::new("custom.blue").unwrap(),
         name: String::from("Blue"),

@@ -147,8 +147,27 @@ mod tests {
     use crate::appearance::{Appearance, builtin_chrome_base};
     use spaceterm_ui::ListRowPaint;
 
-    #[test]
-    fn menu_trigger_focus_follows_the_chrome_focus_ring() {
+    #[gpui::test]
+    fn menu_trigger_focus_follows_the_chrome_focus_ring(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        struct Fixture;
+        impl gpui::Render for Fixture {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div().p(px(16.0)).child(
+                    spaceterm_ui::Menu::new(
+                        "focus-menu",
+                        "Actions",
+                        vec![spaceterm_ui::MenuEntry::action("Open", ())],
+                    )
+                    .debug_selector("focus-menu")
+                    .on_activate(|_, _, _| {}),
+                )
+            }
+        }
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
             assert!(
@@ -160,6 +179,30 @@ mod tests {
                 ..colors.clone()
             };
             assert_ne!(theme(&colors), theme(&different_focus));
+            for colors in [colors, different_focus] {
+                cx.set_global(theme(&colors));
+                let (_, visual) = cx.add_window_view(|_, _| Fixture);
+                visual.update(|window, _| window.activate_window());
+                visual.run_until_parked();
+                visual.update(|window, cx| window.focus_next(cx));
+                visual
+                    .executor()
+                    .advance_clock(std::time::Duration::from_secs(1));
+                visual.update(|window, cx| window.simulate_next_frame(cx));
+                visual.run_until_parked();
+                let ring = visual
+                    .debug_bounds("focus-menu-keyboard-focus")
+                    .expect("focused trigger ring paints");
+                visual.update(|window, _| {
+                    assert!(
+                        window
+                            .painted_quads()
+                            .iter()
+                            .any(|quad| quad.bounds == ring.scale(window.scale_factor())
+                                && quad.border_color == gpui_color(colors.focus_ring).into())
+                    );
+                });
+            }
         }
     }
 

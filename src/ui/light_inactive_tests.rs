@@ -181,17 +181,22 @@ fn builtin_light_active_segments_use_the_elevated_selection_material_on_every_ho
             );
         }
 
-        let floating_host =
-            active.floating_surface(active.floating_colors.elevated_surface_background);
-        assert_active_segment_uses_elevated_surface(
-            "Floating",
-            transparency,
-            &active,
-            &active.floating_colors,
-            &active.floating_segmented_colors,
-            floating_host,
-            true,
-        );
+        let shell = active
+            .floating_surfaces()
+            .shell(spaceterm_ui::FloatingRole::Popover);
+        for underlay in [Color::BLACK, Color::WHITE] {
+            let floating_host = Color::rgba(u32::from(shell.material()))
+                .source_over(Color::rgba(u32::from(shell.backdrop_tone())).source_over(underlay));
+            assert_active_segment_uses_elevated_surface(
+                "Floating",
+                transparency,
+                &active,
+                &active.floating_colors,
+                &active.floating_segmented_colors,
+                floating_host,
+                true,
+            );
+        }
 
         for (name, host, reference, paint) in [
             (

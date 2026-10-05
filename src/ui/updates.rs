@@ -1133,19 +1133,20 @@ mod tests {
 
     #[test]
     fn stopping_update_should_block_further_commands() {
-        let presentation = ControlPresentation::resolve(
-            &UpdateState::Downloading {
+        for state in [
+            UpdateState::Downloading {
                 version: version(),
                 received: 1,
                 total: 2,
             },
-            PENDING,
-            true,
-        )
-        .expect("a stopping update stays visible until the service settles");
-        assert_eq!(presentation.label.as_ref(), "Stopping 0.4.2");
-        assert_eq!(presentation.command, None);
-        assert_eq!(presentation.glyph, ControlGlyph::Activity);
+            UpdateState::Verifying { version: version() },
+        ] {
+            let presentation = ControlPresentation::resolve(&state, PENDING, true)
+                .expect("a stopping update stays visible until the service settles");
+            assert_eq!(presentation.label.as_ref(), "Stopping 0.4.2");
+            assert_eq!(presentation.command, None);
+            assert_eq!(presentation.glyph, ControlGlyph::Activity);
+        }
     }
 
     /// Delivers one service change as GPUI may: observers first, or the notice first.
@@ -1281,6 +1282,8 @@ mod tests {
             UpdateState::Ready { version: version() },
             Some(UpdateStage::Overdue),
         );
+        assert!(overdue.prominent);
+        assert!(overdue.tooltip.starts_with("This update is overdue. "));
         assert_eq!(overdue.label.as_ref(), "Install 0.4.2");
         assert_eq!(overdue.reminder, Some(ControlReminder::Overdue));
         assert_eq!(overdue.glyph, ControlGlyph::Warning);
@@ -1296,6 +1299,7 @@ mod tests {
                 total: 2,
             },
             UpdateState::Checking,
+            UpdateState::Verifying { version: version() },
         ] {
             let working = resolve(state.clone()).expect("a pending update shows the control");
             assert_eq!(

@@ -652,7 +652,7 @@ fn interactive_floating_roles_share_one_material() {
 }
 
 #[test]
-fn settings_separators_remain_visible_on_their_final_hosts() {
+fn resting_chrome_separators_meet_final_host_policy() {
     use spaceterm_ui::ControlHost;
 
     for appearance in [Appearance::Light, Appearance::Dark] {
@@ -985,7 +985,7 @@ fn disabled_segmented_content_remains_readable_on_both_activity_tracks() {
 }
 
 #[test]
-fn final_disabled_control_paints_are_identical_across_window_activity() {
+fn disabled_control_paints_share_activity_variants_when_feasible() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
             for transparency in [0.0, 0.35, 1.0] {
@@ -2988,10 +2988,18 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
                 colors.text_accent.source_over(host).contrast_ratio(host) >= 4.5,
                 "{appearance:?} bare-button accent must read over the host"
             );
-            let progress_track = colors.toggle_off_background.source_over(host);
+            let toggle_track = colors.toggle_off_background.source_over(host);
             assert!(
                 colors
                     .text_accent
+                    .source_over(toggle_track)
+                    .contrast_ratio(toggle_track)
+                    >= 4.5
+            );
+            let progress_track = colors.progress_track.source_over(host);
+            assert!(
+                colors
+                    .progress_indicator
                     .source_over(progress_track)
                     .contrast_ratio(progress_track)
                     >= 4.5,
@@ -3599,6 +3607,7 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
         standard.input_background.a < 255,
         "a Standard field must preserve its floating material"
     );
+    assert_ne!(standard.input_text, bare.input_text);
     assert_ne!(
         super::text_input_theme::theme(bare),
         super::text_input_theme::themed(standard, bare),

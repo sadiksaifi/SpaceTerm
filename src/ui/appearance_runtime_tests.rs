@@ -241,7 +241,10 @@ fn initial_fonts_match_the_complete_catalog_when_settings_requests_it() {
         let initial = cx.global::<AppearanceRuntime>().fonts.clone();
         complete_font_catalog(cx);
         let complete = available_fonts(cx);
-        assert!(initial.installed.len() < complete.installed.len());
+        for family in ["Arial", "lucide"] {
+            assert!(!initial.installed.iter().any(|font| font.family == family));
+            assert!(complete.installed.iter().any(|font| font.family == family));
+        }
         assert_eq!(complete, capture_fonts(cx));
         assert!(Arc::ptr_eq(&before, &current(cx)));
     });
@@ -267,6 +270,14 @@ fn a_new_named_font_is_classified_before_appearance_resolution() {
                 .iter()
                 .any(|font| font.family == "Arial")
         );
+        let fonts = &cx.global::<AppearanceRuntime>().fonts;
+        let selected = fonts
+            .installed
+            .iter()
+            .find(|font| font.family == "Arial")
+            .unwrap();
+        assert_eq!(selected.class, crate::appearance::FontClass::Monospace);
+        assert_eq!(before.terminal.typography.regular.primary_family, "Arial");
         complete_font_catalog(cx);
         let complete = available_fonts(cx);
         assert_eq!(complete, capture_fonts(cx));
@@ -813,6 +824,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
         );
     });
 
+    let mut comfortable_positions = Vec::new();
     for (role, owner, compact_height) in [
         ("workspace", WindowTrafficLightOwner::workspace(), px(41.0)),
         (
@@ -877,6 +889,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             compact.expect("compact anchor"),
             comfortable.expect("comfortable position"),
         );
+        comfortable_positions.push(comfortable_point);
         assert_eq!(
             comfortable_point.x, compact_point.x,
             "{role} growth must not drift sideways"
@@ -887,44 +900,10 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             "{role} traffic lights should move by half the height delta, got {compact_point:?} to {comfortable_point:?} for {compact_height:?} to {comfortable_height:?}"
         );
     }
-}
 
-/// The workspace anchor carries the window's own edge above its band while the settings anchor
-/// does not, so the two windows keep distinct rows at every density.
-#[gpui::test]
-fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut TestAppContext) {
-    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
-    use gpui::{point, px};
-
-    let _ = start(cx);
-    cx.update(|cx| {
-        cx.set_global(
-            WindowFrameGeometry::new(Some(16.0))
-                .with_outer_edge_width(1.0)
-                .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
-                ),
-        );
-        cx.set_global(InstalledChrome::single(std::sync::Arc::new(
-            crate::ui::appearance::ChromeAppearance {
-                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
-                    crate::appearance::ChromeDensity::Comfortable,
-                ),
-                ..crate::ui::appearance::ChromeAppearance::default()
-            },
-        )));
-    });
-    let (workspace, settings) = cx.update(|cx| {
-        (
-            WindowTrafficLightOwner::workspace().desired_position(cx),
-            WindowTrafficLightOwner::sidebar_window().desired_position(cx),
-        )
-    });
-    let (workspace, settings) = (
-        workspace.expect("workspace anchor"),
-        settings.expect("settings anchor"),
-    );
+    let [workspace, settings] = comfortable_positions.as_slice() else {
+        panic!("both window positions are required")
+    };
     assert_ne!(
         workspace, settings,
         "the two windows must not share one traffic-light row"
@@ -934,7 +913,6 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
         "workspace chrome carries the window edge, got {workspace:?} and {settings:?}"
     );
 }
-
 #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
     include!("../platform/macos_adapter_tests/appearance_runtime.rs");

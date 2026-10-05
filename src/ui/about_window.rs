@@ -1,4 +1,4 @@
-//! The About window: SpaceTerm's own About panel for hosts without a native one.
+//! The About Operating-System Window presents SpaceTerm's application information.
 //!
 //! It reproduces AppKit's standard About panel: a small, fixed, modeless window presenting the
 //! application icon, the name in bold, the version in secondary text, the description, and the

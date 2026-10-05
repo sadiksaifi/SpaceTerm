@@ -217,7 +217,7 @@ fn the_guide_follows_system_settings_and_hides_while_it_is_covered(cx: &mut Test
 }
 
 #[gpui::test]
-fn a_grant_read_while_guiding_completes_the_setup(cx: &mut TestAppContext) {
+fn polling_reports_grant_and_final_guide_close_releases_setup(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
@@ -246,7 +246,9 @@ fn a_grant_read_while_guiding_completes_the_setup(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_reported_change_completes_the_setup_at_once(cx: &mut TestAppContext) {
+fn authorization_notification_reports_granted_step_without_waiting_for_poll(
+    cx: &mut TestAppContext,
+) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[Accessibility], cx);
     fixture.show_settings(settings_frame(), cx);
@@ -445,6 +447,26 @@ fn cancelling_a_setup_cancels_its_preparation(cx: &mut TestAppContext) {
     fixture.setup.update(cx, |setup, cx| setup.cancel(cx));
 
     assert_eq!(cancelled(&fixture), [true]);
+
+    let pending = install(NotGranted, NotGranted, cx);
+    pending.access.defer_preparation.set(true);
+    pending.start(&[ScreenRecording], cx);
+    assert_eq!(
+        pending.current(cx),
+        Some((ScreenRecording, SetupStep::Preparing))
+    );
+    assert_eq!(cancelled(&pending), [false]);
+    assert!(pending.access.opened.borrow().is_empty());
+    pending.setup.update(cx, |setup, cx| setup.cancel(cx));
+    assert_eq!(cancelled(&pending), [true]);
+    pending.access.take_preparation()(Ok(
+        crate::platform::permission_access::PermissionSetupReadiness::Ready { cleared: true },
+    ));
+    cx.run_until_parked();
+    assert!(pending.access.opened.borrow().is_empty());
+    assert_eq!(pending.current(cx), None);
+    assert!(pending.setup.read_with(cx, |setup, _| setup.run.is_none()));
+    assert!(guide(cx).is_none());
 }
 
 /// Dragging the application out of the guide hands its bundle to the system, which is what a
@@ -551,7 +573,7 @@ fn a_guide_busy_with_an_event_is_not_replaced(cx: &mut TestAppContext) {
 /// The guide says when the setup removed an earlier entry, and otherwise says to turn on an entry
 /// the list may still hold.
 #[gpui::test]
-fn the_guide_reports_whether_the_setup_cleared_an_entry(cx: &mut TestAppContext) {
+fn preparation_cleared_fact_reaches_guide_presentation(cx: &mut TestAppContext) {
     for resettable in [true, false] {
         let fixture = install(NotGranted, NotGranted, cx);
         fixture.access.resettable.set(resettable);
@@ -625,6 +647,12 @@ fn a_failed_preparation_still_guides(cx: &mut TestAppContext) {
         fixture.current(cx),
         Some((ScreenRecording, SetupStep::Opening))
     );
+    fixture.show_settings(settings_frame(), cx);
+    assert_eq!(
+        fixture.current(cx),
+        Some((ScreenRecording, SetupStep::Guiding))
+    );
+    assert!(guide(cx).is_some());
 }
 
 /// The setup names the Accessibility permission as System Settings does on the running system,

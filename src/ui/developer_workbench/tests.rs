@@ -95,47 +95,83 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
         workbench.apply(|preview| preview.set_blur(false), "Fixture blur", cx);
     });
     cx.run_until_parked();
-    for (transparency, blur) in [(false, false), (true, false), (false, true)] {
-        platform.set_native_window_transparency_supported(transparency);
-        platform.set_native_window_blur_supported(blur);
+    for show_borders in [false, true] {
+        platform.set_show_borders(show_borders);
         cx.run_until_parked();
-        let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
-        let before_status = status(&workbench, cx);
-        let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
-        let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
-        assert!(
-            thumb.center().x > track.center().x,
-            "Blur must show its effective default"
-        );
-        // The disabled selected segment still presents the effective Default stop.
-        let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
-        let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
-        cx.update(|window, _| {
-            let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
-                    .map(|quad| quad.background)
-            };
-            assert_ne!(
-                fill(default_bounds),
-                fill(maximum_bounds),
-                "Default must be the selected stop"
+        for (transparency, blur) in [(false, false), (true, false), (false, true)] {
+            platform.set_native_window_transparency_supported(transparency);
+            platform.set_native_window_blur_supported(blur);
+            cx.run_until_parked();
+            let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
+            let before_status = status(&workbench, cx);
+            let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+            let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+            assert!(
+                thumb.center().x > track.center().x,
+                "Blur must show its effective default"
             );
-        });
-        for selector in [
-            "workbench-transparency-opaque",
-            "workbench-transparency-maximum",
-            "workbench-blur",
-        ] {
-            click(selector, cx);
+            // The disabled selected segment still presents the effective Default stop.
+            let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
+            let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
+            cx.update(|window, cx| {
+                let surface = crate::ui::appearance::settings::shared(cx);
+                let appearance = &surface.chrome;
+                let theme = crate::ui::segmented_control_theme::prepared(
+                    &appearance.card_controls.segmented,
+                    &appearance.typography,
+                    appearance.capabilities.show_borders,
+                );
+                let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
+                    window
+                        .painted_quads()
+                        .iter()
+                        .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                        .map(|quad| quad.background)
+                };
+                assert_eq!(
+                    fill(default_bounds).expect("the selected segment must paint"),
+                    theme.paint(true, false, false, false).background().into()
+                );
+                if show_borders {
+                    let unselected =
+                        fill(maximum_bounds).expect("Show Borders paints the unselected segment");
+                    let actual = gpui::Rgba::from(
+                        unselected
+                            .as_solid()
+                            .expect("the segment uses a solid fill"),
+                    );
+                    let expected = theme.paint(false, false, false, false).background();
+                    assert_eq!(actual.a, expected.a);
+                    // Transparent RGB channels contribute no paint; compare both endpoint compositions.
+                    for underlay in [gpui::black(), gpui::white()] {
+                        assert_eq!(
+                            underlay.blend(actual.into()),
+                            underlay.blend(expected.into())
+                        );
+                    }
+                } else {
+                    assert_eq!(theme.paint(false, false, false, false).background().a, 0.0);
+                    assert!(fill(maximum_bounds).is_none());
+                }
+                assert_ne!(
+                    fill(default_bounds),
+                    fill(maximum_bounds),
+                    "Default must be the selected stop"
+                );
+            });
+            for selector in [
+                "workbench-transparency-opaque",
+                "workbench-transparency-maximum",
+                "workbench-blur",
+            ] {
+                click(selector, cx);
+            }
+            assert_eq!(
+                workbench.read_with(cx, |workbench, _| workbench.preview.document()),
+                before
+            );
+            assert_eq!(status(&workbench, cx), before_status);
         }
-        assert_eq!(
-            workbench.read_with(cx, |workbench, _| workbench.preview.document()),
-            before
-        );
-        assert_eq!(status(&workbench, cx), before_status);
     }
     // Once both effects return, the controls present and edit the retained choices again.
     platform.set_native_window_transparency_supported(true);
@@ -439,7 +475,7 @@ fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
+fn differentiate_without_color_renders_two_status_cues_and_the_failed_glyph(
     cx: &mut TestAppContext,
 ) {
     install(cx);
@@ -820,6 +856,16 @@ fn default_window_separates_groups_and_keeps_row_labels_on_one_line(cx: &mut Tes
         menus.size.height, picker.size.height,
         "the menu fixtures must leave their row label one line"
     );
+
+    let line_height = cx.update(|_, cx| {
+        crate::ui::appearance::settings::shared(cx)
+            .chrome
+            .typography
+            .style(crate::ui::chrome_typography::TextRole::Body)
+            .line_height
+    });
+    assert_eq!(menus.size.height, line_height);
+    assert_eq!(picker.size.height, line_height);
 }
 
 #[gpui::test]
