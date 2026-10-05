@@ -27,7 +27,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restored_history_preserves_find_and_selection() {
+    fn compression_pass_preserves_find_and_selection() {
         let geometry = TerminalGeometry::from_grid(
             CellGridSize::new(120, 40),
             LogicalCellSize::new(10.0, 20.0),
@@ -60,14 +60,17 @@ mod tests {
             .total_matches;
         assert_eq!(found_before, 1);
 
-        let compress = |emulator: &mut TerminalEmulator| loop {
-            match emulator.compress_scrollback().unwrap() {
-                CompressionResult::Pending => continue,
-                result => break result,
+        let compress = |emulator: &mut TerminalEmulator| {
+            for _ in 0..128 {
+                match emulator.compress_scrollback().unwrap() {
+                    CompressionResult::Pending => continue,
+                    result => return result,
+                }
             }
+            panic!("bounded native compression pass did not complete");
         };
         assert_eq!(compress(&mut emulator), CompressionResult::Complete);
-        // Search older retained history before selection copying restores cold pages.
+        // Search older retained history before selection copying.
         emulator.set_find_query(FindQueryGeneration::test(2), "NEEDLE".to_owned());
         let found_after = emulator
             .snapshot()
@@ -79,7 +82,7 @@ mod tests {
             .total_matches;
         assert_eq!(found_after, found_before);
 
-        // Find restores history too, so compress again before testing selection copying.
+        // Complete another compression pass before testing selection copying.
         assert_eq!(compress(&mut emulator), CompressionResult::Complete);
         assert_eq!(emulator.selection_text().unwrap().unwrap(), selected_before);
     }

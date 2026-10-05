@@ -324,7 +324,8 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///
     /// Changes the number of columns and rows in the terminal. The primary
     /// screen will reflow content if wraparound mode is enabled; the alternate
-    /// screen does not reflow. If the dimensions are unchanged, this is a no-op.
+    /// screen does not reflow. At unchanged grid dimensions, the SpaceTerm prompt
+    /// patch still applies prompt redraw policy for the requested winsize change.
     ///
     /// This also updates the terminal's pixel dimensions (used for image
     /// protocols and size reports), disables synchronized output mode (allowed
