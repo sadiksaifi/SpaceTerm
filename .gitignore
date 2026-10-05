@@ -29,7 +29,7 @@ __pycache__/
 .idea/
 .DS_Store
 
-# ai slop
+# Local agent state and migration reports
 
 .snap
 .codex
@@ -38,5 +38,5 @@ __pycache__/
 .pi
 .agents
 
-# others
+# Editor temporary files
 *.swp
