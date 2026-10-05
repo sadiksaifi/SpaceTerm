@@ -971,6 +971,15 @@ fn mounted_surface_without_host_catalog_should_keep_root_control_presentation(
             .iter()
             .all(|(_, fill)| *fill == Some(ROOT_FIELD.into()))
     );
+    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+        assert!(
+            phases
+                .borrow()
+                .iter()
+                .any(|(observed, fill)| *observed == phase && *fill == Some(ROOT_FIELD.into())),
+            "{phase:?} must resolve the root field"
+        );
+    }
 }
 
 #[gpui::test]
@@ -1438,6 +1447,14 @@ fn resting_host_metrics_scale_once_with_the_complete_catalog() {
         assert_eq!(
             scaled.hosted_controls(host),
             Some(&original.clone().scale_metrics(1.5, 1.25))
+        );
+        assert_eq!(
+            scaled
+                .hosted_controls(host)
+                .unwrap()
+                .regular_button_extent_for_test(),
+            px(38.0),
+            "{host:?}"
         );
     }
     assert!(scaled.hosted_controls(ControlHost::Window).is_none());

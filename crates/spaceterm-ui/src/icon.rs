@@ -565,7 +565,91 @@ mod tests {
 
     use gpui::{Context, InteractiveElement as _, Render, TestAppContext, Window, size};
 
-    struct IconTestRoot;
+    type IconBounds = std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<&'static str, gpui::Bounds<Pixels>>>,
+    >;
+
+    struct IconTestRoot(IconBounds);
+
+    struct MeasuredIcon {
+        icon: gpui::AnyElement,
+        id: &'static str,
+        path: &'static str,
+        artwork_size: Pixels,
+        bounds: IconBounds,
+    }
+
+    impl IntoElement for MeasuredIcon {
+        type Element = Self;
+        fn into_element(self) -> Self {
+            self
+        }
+    }
+
+    impl gpui::Element for MeasuredIcon {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+        fn id(&self) -> Option<gpui::ElementId> {
+            None
+        }
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+        fn request_layout(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (gpui::LayoutId, ()) {
+            (self.icon.request_layout(window, cx), ())
+        }
+        fn prepaint(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            bounds: gpui::Bounds<Pixels>,
+            _: &mut (),
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            self.bounds.borrow_mut().insert(self.id, bounds);
+            self.icon.prepaint(window, cx);
+        }
+        fn paint(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            bounds: gpui::Bounds<Pixels>,
+            _: &mut (),
+            _: &mut (),
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            // TestAppContext has an empty asset source. Supply the real embedded asset to its
+            // atlas with transparent paint; only the Icon's own paint can emit a visible sprite.
+            let bytes = EmbeddedAssets
+                .load(self.path)
+                .expect("asset lookup")
+                .expect("the fixture asset is embedded");
+            let extent = size(self.artwork_size, self.artwork_size);
+            window
+                .paint_svg(
+                    gpui::Bounds::new(
+                        bounds.center()
+                            - gpui::point(self.artwork_size / 2.0, self.artwork_size / 2.0),
+                        extent,
+                    ),
+                    self.path.into(),
+                    Some(&bytes),
+                    Default::default(),
+                    gpui::rgba(0).into(),
+                    cx,
+                )
+                .expect("the asset rasterizes");
+            self.icon.paint(window, cx);
+        }
+    }
 
     impl Render for IconTestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -574,14 +658,25 @@ mod tests {
                     ("icon-10", IconName::Pin, 10.0),
                     ("icon-12", IconName::Search, 12.0),
                     ("icon-14", IconName::Folder, 14.0),
+                    ("icon-pin-off", IconName::PinOff, 16.0),
                 ]
                 .map(|(id, name, logical_size)| {
                     let logical_size = gpui::px(logical_size);
-                    div()
-                        .id(id)
-                        .debug_selector(move || id.to_owned())
-                        .size(logical_size)
-                        .child(Icon::new(name, logical_size, gpui::rgba(0x8f9aafff)))
+                    let (path, artwork_size) = match id {
+                        "icon-10" => ("spaceterm-ui/lucide/pin/10/1.svg", gpui::px(10.0)),
+                        "icon-12" => ("spaceterm-ui/lucide/search/12/1.svg", gpui::px(12.0)),
+                        "icon-14" => ("spaceterm-ui/lucide/folder/14/1.svg", gpui::px(14.0)),
+                        "icon-pin-off" => ("spaceterm-ui/lucide/pin-off/14/1.svg", gpui::px(14.0)),
+                        _ => unreachable!(),
+                    };
+                    MeasuredIcon {
+                        icon: Icon::new(name, logical_size, gpui::rgba(0x8f9aafff))
+                            .into_any_element(),
+                        id,
+                        path,
+                        artwork_size,
+                        bounds: std::rc::Rc::clone(&self.0),
+                    }
                 }),
             )
         }
@@ -643,7 +738,7 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn lucide_font_registration_should_succeed_once(cx: &mut TestAppContext) {
+    fn successful_font_registration_is_cached_per_app(cx: &mut TestAppContext) {
         let mut registrations = 0;
 
         cx.update(|cx| {
@@ -816,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn optical_correction_preserves_the_nominal_layout_box() {
+    fn optical_artwork_size_corrects_the_selected_glyphs() {
         for (name, corrected) in [
             (IconName::PinOff, 14.0),
             (IconName::Maximize2, 13.0),
@@ -854,23 +949,10 @@ mod tests {
         assert!(svg.contains("stroke-width=\"3.200000\""));
         assert_eq!(normalized_stroke_width(gpui::px(17.0)), 1.0);
         assert_eq!(normalized_stroke_width(gpui::px(18.0)), 2.0);
-
-        // Product roles can produce artwork from 7 through 36 points after the text-role clamp,
-        // glyph offsets, PinOff optical correction, and the compact search clear mark. The
-        // embedded sources' nearest geometry is two view-box units from an edge. The normalized
-        // stroke keeps a positive geometric margin at both extremes; an antialiased outer raster
-        // pixel is therefore not evidence of clipping.
-        let edge_margin = |artwork_size: f32, stroke_width: f32| {
-            let source_width = stroke_width * 24.0 / artwork_size;
-            (2.0 - source_width / 2.0) * artwork_size / 24.0
-        };
-        assert!(edge_margin(7.0, 1.0) > 0.0);
-        assert!(edge_margin(6.0, 1.0) <= 0.0);
-        assert!(edge_margin(36.0, 2.0) > 0.0);
     }
 
     #[test]
-    fn compact_clear_mark_glyph_paints_prepared_vector_artwork() {
+    fn compact_clear_mark_resolves_a_prepared_vector_asset() {
         // The Lucide font fallback places its glyph by text metrics rather than centering its
         // artwork, which strikes the clear mark off its disc.
         let path = lucide_asset_path(IconName::X, gpui::px(7.0), gpui::px(7.0))
@@ -1013,17 +1095,46 @@ mod tests {
     fn representative_icons_should_render_at_compact_logical_sizes(cx: &mut TestAppContext) {
         cx.update(register_font)
             .expect("bundled Lucide font registration should succeed");
-        let (_, cx) = cx.add_window_view(|_, _| IconTestRoot);
+        let observations = IconBounds::default();
+        let bounds = std::rc::Rc::clone(&observations);
+        let (_, cx) = cx.add_window_view(move |_, _| IconTestRoot(bounds));
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
-        for (id, logical_size) in [("icon-10", 10.0), ("icon-12", 12.0), ("icon-14", 14.0)] {
-            let bounds = cx
-                .debug_bounds(id)
+        for (id, logical_size) in [
+            ("icon-10", 10.0),
+            ("icon-12", 12.0),
+            ("icon-14", 14.0),
+            ("icon-pin-off", 16.0),
+        ] {
+            let bounds = *observations
+                .borrow()
+                .get(id)
                 .unwrap_or_else(|| panic!("{id} should be painted"));
             assert_eq!(
                 bounds.size,
                 size(gpui::px(logical_size), gpui::px(logical_size))
+            );
+            let scale = cx.update(|window, _| window.scale_factor());
+            let sprites = cx.update(|window, _| {
+                window
+                    .painted_monochrome_sprites()
+                    .into_iter()
+                    .filter(|sprite| {
+                        sprite.bounds.intersects(&bounds.scale(scale))
+                            && !sprite.color.is_transparent()
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(sprites.len(), 1, "{id} must paint its artwork");
+            let artwork = if id == "icon-pin-off" {
+                14.0
+            } else {
+                logical_size
+            };
+            assert_eq!(
+                sprites[0].bounds.size,
+                size(gpui::px(artwork), gpui::px(artwork)).scale(scale)
             );
         }
     }

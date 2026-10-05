@@ -423,6 +423,61 @@ mod tests {
             left: [Some(Close), Some(Minimize), None],
             right: [Some(Maximize), None, None],
         };
+        for (minimize, maximize, left, right) in [
+            (false, true, vec![Close], vec![Maximize]),
+            (true, false, vec![Close, Minimize], vec![]),
+            (false, false, vec![Close], vec![]),
+        ] {
+            let capabilities = gpui::WindowControls {
+                minimize,
+                maximize,
+                ..gpui::WindowControls::default()
+            };
+            assert_eq!(
+                buttons(
+                    WindowControlSide::Left,
+                    Some(layout),
+                    capabilities,
+                    true,
+                    true
+                ),
+                left
+            );
+            assert_eq!(
+                buttons(
+                    WindowControlSide::Right,
+                    Some(layout),
+                    capabilities,
+                    true,
+                    true
+                ),
+                right
+            );
+        }
+        let repeated = WindowButtonLayout {
+            left: [Some(Close), Some(Close), Some(Minimize)],
+            right: [Some(Maximize), Some(Maximize), None],
+        };
+        assert_eq!(
+            buttons(
+                WindowControlSide::Left,
+                Some(repeated),
+                gpui::WindowControls::default(),
+                true,
+                true
+            ),
+            vec![Close, Minimize]
+        );
+        assert_eq!(
+            buttons(
+                WindowControlSide::Right,
+                Some(repeated),
+                gpui::WindowControls::default(),
+                true,
+                true
+            ),
+            vec![Maximize]
+        );
         assert_eq!(
             buttons(
                 WindowControlSide::Left,

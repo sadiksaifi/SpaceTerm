@@ -1384,6 +1384,37 @@ mod tests {
         cx.simulate_mouse_up(second, MouseButton::Left, Modifiers::none());
 
         let events = events.borrow();
+        let ResizeHandleEvent::InteractionStarted { interaction, .. } = events[0] else {
+            panic!("a drag must start an interaction");
+        };
+        assert_ne!(interaction.get(), 0);
+        assert_eq!(
+            events.as_slice(),
+            [
+                ResizeHandleEvent::InteractionStarted {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    original_value: 100.0
+                },
+                ResizeHandleEvent::ResizeRequested {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    displacement: 12.0,
+                    requested_value: 112.0
+                },
+                ResizeHandleEvent::ResizeRequested {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    displacement: 25.0,
+                    requested_value: 125.0
+                },
+                ResizeHandleEvent::InteractionFinished {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    reason: ResizeFinishReason::Completed
+                },
+            ]
+        );
         assert!(matches!(
             events[0],
             ResizeHandleEvent::InteractionStarted { .. }
@@ -1831,6 +1862,7 @@ mod tests {
 
     struct PaintlessRoot {
         events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
+        disabled: bool,
     }
 
     impl Render for PaintlessRoot {
@@ -1844,6 +1876,7 @@ mod tests {
                     100.0,
                 )
                 .tab_stop(true)
+                .disabled(self.disabled)
                 .paint_divider(false)
                 .debug_selector("paintless-resize")
                 .on_event(move |event, _, _| events.borrow_mut().push(*event)),
@@ -1858,6 +1891,7 @@ mod tests {
         let root_events = Rc::clone(&events);
         let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1897,8 +1931,9 @@ mod tests {
         cx.set_global(test_theme());
         let events = Rc::new(RefCell::new(Vec::new()));
         let root_events = Rc::clone(&events);
-        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+        let (root, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1906,6 +1941,25 @@ mod tests {
             .debug_bounds("paintless-resize-hitbox")
             .expect("the paintless hitbox was rendered");
         let center = target.center();
+        let assert_paintless = |cx: &mut VisualTestContext| {
+            let scale = cx.update(|window, _| window.scale_factor());
+            let visible = cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| {
+                        quad.bounds.intersects(&target.scale(scale))
+                            && (!quad.background.is_transparent()
+                                || !quad.border_color.is_transparent())
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert!(
+                visible.is_empty(),
+                "a paintless divider must emit no visible quad"
+            );
+        };
+        assert_paintless(cx);
         assert!(
             cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
                 .is_none()
@@ -1918,6 +1972,7 @@ mod tests {
                 .is_none(),
             "pointer hover must remain paintless"
         );
+        assert_paintless(cx);
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -1925,6 +1980,7 @@ mod tests {
                 .is_none(),
             "pointer drag must remain paintless"
         );
+        assert_paintless(cx);
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -1932,6 +1988,17 @@ mod tests {
                 .is_none(),
             "pointer focus must remain paintless after release"
         );
+        assert_paintless(cx);
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none()
+        );
+        assert_paintless(cx);
     }
 
     #[gpui::test]
@@ -1943,6 +2010,7 @@ mod tests {
         let root_events = Rc::clone(&events);
         let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();

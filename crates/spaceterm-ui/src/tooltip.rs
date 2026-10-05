@@ -733,10 +733,11 @@ impl Element for TooltipTargetElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.target.paint(window, cx);
+        // Tooltip capture must precede controls that consume primary pointer presses.
         if let Some(hitbox) = prepaint.hitbox.clone() {
             register_target_handlers(self.state.clone(), hitbox, window, cx);
         }
+        self.target.paint(window, cx);
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.paint(window, cx);
         }
@@ -1627,6 +1628,7 @@ mod tests {
         second_target: bool,
         long_detail: bool,
         focus_handle: FocusHandle,
+        keys: std::rc::Rc<std::cell::RefCell<Vec<gpui::Keystroke>>>,
     }
 
     impl Render for TestRoot {
@@ -1637,10 +1639,12 @@ mod tests {
                 "Secondary detail".into()
             };
             let target_visibility = self.target_visibility;
+            let keys = std::rc::Rc::clone(&self.keys);
             let content = div()
                 .relative()
                 .size_full()
                 .track_focus(&self.focus_handle)
+                .on_key_down(move |event, _, _| keys.borrow_mut().push(event.keystroke.clone()))
                 .when(self.show_target, |root| {
                     // The target sits in scrolled content, as a control in a scrolled list does.
                     root.child(
@@ -1712,6 +1716,7 @@ mod tests {
             second_target: false,
             long_detail: false,
             focus_handle: cx.focus_handle(),
+            keys: std::rc::Rc::default(),
         });
         let focus_handle = root.read_with(cx, |root, _| root.focus_handle.clone());
         cx.update(|window, cx| {
@@ -1801,6 +1806,7 @@ mod tests {
     fn leaving_after_opening_should_dismiss(cx: &mut TestAppContext) {
         let (_, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
 
         cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
         cx.run_until_parked();
@@ -1822,13 +1828,20 @@ mod tests {
 
     #[gpui::test]
     fn keyboard_input_should_dismiss_without_consuming_input(cx: &mut TestAppContext) {
-        let (_, cx) = tooltip_window(cx);
+        let (root, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let focus = root.read_with(cx, |root, _| root.focus_handle.clone());
+        assert!(cx.update(|window, _| focus.is_focused(window)));
 
         cx.simulate_keystrokes("a");
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("test-tooltip").is_none());
+        let keys = root.read_with(cx, |root, _| root.keys.borrow().clone());
+        let mut expected = gpui::Keystroke::parse("a").expect("a parses");
+        expected.key_char = Some("a".into());
+        assert_eq!(keys, [expected]);
     }
 
     #[gpui::test]
@@ -1846,6 +1859,11 @@ mod tests {
     fn removing_the_target_should_cancel_pending_and_visible_state(cx: &mut TestAppContext) {
         let (root, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        assert_eq!(
+            cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len()),
+            1
+        );
 
         root.update(cx, |root, cx| {
             root.show_target = false;
@@ -1854,6 +1872,49 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert_eq!(
+            cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len()),
+            0
+        );
+
+        root.update(cx, |root, cx| {
+            root.show_target = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let pending_owner = cx.update(|window, cx| {
+            cx.global::<TooltipCoordinator>().owners[&window.window_handle().window_id()]
+                .owner
+                .clone()
+        });
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        let center = target_center(cx, "test-tooltip-button");
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert!(
+            pending_owner
+                .read_with(cx, |state, _| state.task.is_some()
+                    && state.hovered
+                    && !state.visible)
+                .expect("the pending target is live")
+        );
+        root.update(cx, |root, cx| {
+            root.show_target = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert_eq!(
+            cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len()),
+            0
+        );
     }
 
     #[gpui::test]
@@ -1934,6 +1995,7 @@ mod tests {
                         second_target: false,
                         long_detail: true,
                         focus_handle: cx.focus_handle(),
+                        keys: std::rc::Rc::default(),
                     })
                 },
             )
@@ -1981,6 +2043,12 @@ mod tests {
         });
         cx.run_until_parked();
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let first_owner = cx.update(|window, cx| {
+            cx.global::<TooltipCoordinator>().owners[&window.window_handle().window_id()]
+                .owner
+                .clone()
+        });
 
         hover_for_show_delay(cx, "second-tooltip-button");
 
@@ -1988,6 +2056,17 @@ mod tests {
 
         assert_eq!(owner_count, 1);
         assert!(cx.debug_bounds("second-tooltip").is_some());
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        let second_bounds = cx.debug_bounds("second-tooltip-button");
+        cx.update(|window, cx| {
+            let owner = &cx.global::<TooltipCoordinator>().owners
+                [&window.window_handle().window_id()]
+                .owner;
+            assert_ne!(owner, &first_owner);
+            let state = owner.upgrade().expect("the second owner is live");
+            assert!(state.read(cx).visible);
+            assert_eq!(state.read(cx).target_bounds, second_bounds);
+        });
     }
 
     #[gpui::test]
@@ -2067,6 +2146,26 @@ mod tests {
         let (_, cx) = tooltip_window(cx);
         let center = target_center(cx, "test-tooltip-button");
 
+        hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let pending_owner = cx.update(|window, cx| {
+            cx.global::<TooltipCoordinator>().owners[&window.window_handle().window_id()]
+                .owner
+                .clone()
+        });
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert!(
+            pending_owner
+                .read_with(cx, |state, _| state.task.is_some()
+                    && state.hovered
+                    && !state.visible)
+                .expect("the pending target is live")
+        );
+
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(
             point(center.x + px(20.0), center.y),
@@ -2078,6 +2177,22 @@ mod tests {
         let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
 
         assert_eq!(owner_count, 0);
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(center.x + px(20.0), center.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len()),
+            0
+        );
+        assert!(cx.debug_bounds("test-tooltip").is_none());
     }
 
     #[gpui::test]
@@ -2120,5 +2235,10 @@ mod tests {
             .unwrap_or_else(|| panic!("tooltip was not repainted"));
 
         assert_ne!(before.origin.x, after.origin.x);
+        assert_eq!(after.origin.x - before.origin.x, px(140.0));
+        let target = cx
+            .debug_bounds("test-tooltip-button")
+            .expect("the moved target renders");
+        assert_eq!(after.top(), target.bottom() + px(6.0));
     }
 }

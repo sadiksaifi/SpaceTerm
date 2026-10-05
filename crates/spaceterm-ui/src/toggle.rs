@@ -1546,12 +1546,24 @@ mod tests {
         });
         let enter = Keystroke::parse("enter").expect("enter should parse");
 
-        cx.simulate_event(KeyDownEvent {
-            keystroke: enter.clone(),
-            prefer_character_input: false,
-            is_held: false,
-        });
-        cx.simulate_event(KeyUpEvent { keystroke: enter });
+        for selector in ["test-checkbox-keyboard-focus", "test-switch-keyboard-focus"] {
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} must own focus"
+            );
+            cx.simulate_event(KeyDownEvent {
+                keystroke: enter.clone(),
+                prefer_character_input: false,
+                is_held: false,
+            });
+            cx.simulate_event(KeyUpEvent {
+                keystroke: enter.clone(),
+            });
+            assert_eq!(checkbox_changes.get(), 0);
+            assert_eq!(switch_changes.get(), 0);
+            cx.update(|window, cx| window.focus_next(cx));
+        }
 
         assert_eq!(checkbox_changes.get(), 0);
         assert_eq!(switch_changes.get(), 0);
@@ -1565,6 +1577,14 @@ mod tests {
             window.focus_next(cx);
         });
         assert!(cx.update(|window, _| other.is_focused(window)));
+
+        for _ in 0..3 {
+            cx.update(|window, cx| window.focus_next(cx));
+            cx.run_until_parked();
+            assert!(cx.update(|window, _| other.is_focused(window)));
+            assert!(cx.debug_bounds("test-checkbox-keyboard-focus").is_none());
+            assert!(cx.debug_bounds("test-switch-keyboard-focus").is_none());
+        }
 
         for selector in ["test-checkbox", "test-switch"] {
             let bounds = cx.debug_bounds(selector).expect("toggle should render");
@@ -1615,14 +1635,62 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let indicator = cx
-            .debug_bounds("test-checkbox-indicator")
-            .expect("checkbox indicator should render");
-        let focus = cx
-            .debug_bounds("test-checkbox-keyboard-focus")
-            .expect("checkbox focus outline should render");
-
-        assert!(focus.left() < indicator.left() && focus.right() > indicator.right());
+        for (selector, indicator_selector, focus_selector) in [
+            (
+                "test-checkbox",
+                "test-checkbox-indicator",
+                "test-checkbox-keyboard-focus",
+            ),
+            (
+                "test-switch",
+                "test-switch-indicator",
+                "test-switch-keyboard-focus",
+            ),
+        ] {
+            crate::focus_ring::settle(cx);
+            let indicator = cx
+                .debug_bounds(indicator_selector)
+                .expect("toggle indicator should render");
+            let focus = cx
+                .debug_bounds(focus_selector)
+                .expect("toggle focus outline should render");
+            assert!(focus.left() < indicator.left() && focus.right() > indicator.right());
+            assert_eq!(focus, indicator.dilate(px(2.0)));
+            let scale = cx.update(|window, _| window.scale_factor());
+            let bands = cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| quad.border_color == gpui::Hsla::from(rgba(0x00aaffff)))
+                    .collect::<Vec<_>>()
+            });
+            let outer = focus.scale(scale);
+            assert!(!bands.is_empty(), "{selector} must paint a ring");
+            assert!(bands.iter().all(|quad| quad.bounds == outer));
+            // GPUI may split a border into strips and clip edges outside the window.
+            let visible_bands = bands
+                .iter()
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                .filter(|bounds| !bounds.is_empty())
+                .collect::<Vec<_>>();
+            assert!(!visible_bands.is_empty());
+            for visible in visible_bands {
+                let sample = visible.center();
+                assert_eq!(
+                    bands
+                        .iter()
+                        .filter(|quad| {
+                            quad.bounds.contains(&sample)
+                                && quad.content_mask.bounds.contains(&sample)
+                        })
+                        .count(),
+                    1,
+                    "{selector} must paint one ring in each visible band"
+                );
+            }
+            cx.update(|window, cx| window.focus_next(cx));
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
@@ -1672,10 +1740,11 @@ mod tests {
         assert!(rtl_thumb.center().x < rtl_track.center().x);
     }
 
-    struct HiddenLabelRoot;
+    struct HiddenLabelRoot(Rc<std::cell::RefCell<Vec<SwitchChange>>>);
 
     impl Render for HiddenLabelRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let changes = Rc::clone(&self.0);
             div()
                 .flex()
                 .flex_row()
@@ -1689,7 +1758,7 @@ mod tests {
                     Switch::new("unlabeled-switch", "Italic text", true)
                         .label_hidden(true)
                         .debug_selector("unlabeled-switch")
-                        .on_change(|_, _, _| {}),
+                        .on_change(move |change, _, _| changes.borrow_mut().push(*change)),
                 )
         }
     }
@@ -1697,7 +1766,10 @@ mod tests {
     #[gpui::test]
     fn a_hidden_label_should_leave_only_the_indicator_and_still_activate(cx: &mut TestAppContext) {
         cx.set_global(test_theme());
-        let (_, cx) = cx.add_window_view(|_, _| HiddenLabelRoot);
+        let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = Rc::clone(&changes);
+        let (_, cx) = cx.add_window_view(move |_, _| HiddenLabelRoot(observed));
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
         let labeled = cx.debug_bounds("labeled-switch").expect("switch renders");
@@ -1708,6 +1780,12 @@ mod tests {
 
         assert!(unlabeled.size.width < labeled.size.width);
         assert_eq!(unlabeled.size.width, indicator.size.width);
+        cx.simulate_click(indicator.center(), Modifiers::none());
+        let requests = changes.borrow();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].previous());
+        assert!(!requests[0].requested());
+        assert_eq!(requests[0].source(), ToggleActivationSource::Pointer);
     }
 
     struct ControlledGeometryRoot {
@@ -1745,25 +1823,32 @@ mod tests {
         }
     }
 
-    fn geometry_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
+    fn geometry_window(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ControlledGeometryRoot>, &mut VisualTestContext) {
         cx.set_global(test_theme());
-        let (_, cx) = cx.add_window_view(|_, _| ControlledGeometryRoot {
+        let (root, cx) = cx.add_window_view(|_, _| ControlledGeometryRoot {
             checkbox_state: CheckboxState::Mixed,
             switch_on: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        cx
+        (root, cx)
     }
 
     #[gpui::test]
     fn checkbox_activation_should_not_reflow_row_or_indicator(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (root, cx) = geometry_window(cx);
         let row_before = cx.debug_bounds("geometry-checkbox").unwrap();
         let indicator_before = cx.debug_bounds("geometry-checkbox-indicator").unwrap();
 
         cx.simulate_click(row_before.center(), Modifiers::none());
         cx.run_until_parked();
+
+        assert_eq!(
+            root.read_with(cx, |root, _| root.checkbox_state),
+            CheckboxState::Checked
+        );
 
         assert_eq!(cx.debug_bounds("geometry-checkbox"), Some(row_before));
         assert_eq!(
@@ -1774,12 +1859,17 @@ mod tests {
 
     #[gpui::test]
     fn switch_activation_should_not_reflow_row_or_track(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (root, cx) = geometry_window(cx);
         let row_before = cx.debug_bounds("geometry-switch").unwrap();
         let track_before = cx.debug_bounds("geometry-switch-indicator").unwrap();
+        let thumb_before = cx.debug_bounds("geometry-switch-thumb").unwrap();
 
         cx.simulate_click(row_before.center(), Modifiers::none());
         cx.run_until_parked();
+
+        assert!(root.read_with(cx, |root, _| root.switch_on));
+        let thumb_after = cx.debug_bounds("geometry-switch-thumb").unwrap();
+        assert!(thumb_after.left() > thumb_before.left());
 
         assert_eq!(cx.debug_bounds("geometry-switch"), Some(row_before));
         assert_eq!(
@@ -1790,7 +1880,7 @@ mod tests {
 
     #[gpui::test]
     fn switch_thumb_should_be_vertically_centered_in_track(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (_, cx) = geometry_window(cx);
         let track = cx.debug_bounds("geometry-switch-indicator").unwrap();
         let thumb = cx.debug_bounds("geometry-switch-thumb").unwrap();
 

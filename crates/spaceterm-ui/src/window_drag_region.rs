@@ -753,13 +753,20 @@ mod tests {
     fn lost_primary_button_should_cancel_and_allow_a_clean_later_generation() {
         let mut state = state();
         let first = state.pointer_down(point(px(10.0), px(10.0)))[0];
-        state.pointer_move(point(px(12.0), px(10.0)), None);
+        let cancelled = state.pointer_move(point(px(12.0), px(10.0)), None);
         let second = state.pointer_down(point(px(20.0), px(20.0)))[0];
 
         let interaction = |event| match event {
             WindowDragRegionEvent::InteractionStarted { interaction } => interaction,
             _ => panic!("expected an interaction-start event"),
         };
+        assert_eq!(
+            cancelled,
+            [WindowDragRegionEvent::InteractionFinished {
+                interaction: interaction(first),
+                reason: WindowDragFinishReason::PointerButtonLost,
+            }]
+        );
         assert_ne!(interaction(first), interaction(second));
     }
 
@@ -1073,6 +1080,7 @@ mod tests {
         let DragWindow {
             events,
             parent_events,
+            parent_moves,
             cx,
             ..
         } = drag_window(cx);
@@ -1104,6 +1112,7 @@ mod tests {
             ]
         ));
         assert!(parent_events.borrow().is_empty());
+        assert_eq!(*parent_moves.borrow(), 0);
     }
 
     #[gpui::test]
