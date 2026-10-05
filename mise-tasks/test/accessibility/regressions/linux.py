@@ -28,8 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-# Loading the smoke module must not write bytecode beside it.
-sys.dont_write_bytecode = True
+from spaceterm_tasks import accessibility_linux
 
 SMOKE = Path(__file__).resolve().parents[1] / "linux.py"
 
@@ -41,13 +40,6 @@ def check(condition, classification):
 
 def save(path, proof):
     path.write_text(json.dumps(proof, indent=2) + "\n")
-
-
-def load_smoke():
-    spec = importlib.util.spec_from_file_location("accessibility_smoke_linux", SMOKE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class FragmentWriter:
@@ -141,7 +133,7 @@ def parser_regression(smoke, directory, proof):
         evidence = {"passed": False, "expected_marker_spoken": expected}
         proof["cases"][name] = evidence
         try:
-            output = smoke.OrcaOutput(output_dir, context)
+            output = smoke.OrcaOutput(output_dir, context, "spaceterm-a11y")
             writer = os.open(output.fifo, os.O_WRONLY)
             fragmenter = FragmentWriter(writer, output.stream, width)
             namespace = {"datetime": datetime, "debugLevel": 0, "debugFile": fragmenter}
@@ -477,7 +469,7 @@ def cleanup_failure_regression(smoke, directory, proof):
 
 
 def storage_regression(smoke, directory, proof):
-    # Copy just the script into a clean checkout with no sibling review folder.
+    # Exercise output locations outside and inside an independent source directory.
     checkout = directory / "checkout"
     script = checkout / "mise-tasks/test/accessibility/linux.py"
     script.parent.mkdir(parents=True)
@@ -566,7 +558,7 @@ def main():
     os.close(descriptor)
     output.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=output))
-    smoke = load_smoke()
+    smoke = accessibility_linux
     proof = {
         "linux": True,
         "passed": False,
