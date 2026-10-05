@@ -1014,6 +1014,9 @@ mod tests {
             .set_dirty(Dirty::Clean)
             .unwrap();
 
-        assert!(state.update(&terminal).unwrap().dirty().is_ok());
+        assert_eq!(
+            state.update(&terminal).unwrap().dirty().unwrap(),
+            Dirty::Clean
+        );
     }
 }

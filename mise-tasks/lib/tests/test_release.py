@@ -141,8 +141,21 @@ class CaskUpdateTests(unittest.TestCase):
         for version, sha256 in (("0.3.0", "cd" * 32), ("0.4.0", "cd" * 32)):
             with self.subTest(version=version):
                 command = self.update(version, sha256).call_args.args[0]
-                self.assertEqual(command[:2], ["brew", "bump-cask-pr"])
-                self.assertIn(self.DIGEST, command)
+                self.assertEqual(
+                    command,
+                    [
+                        "brew",
+                        "bump-cask-pr",
+                        "--write-only",
+                        "--no-audit",
+                        "--no-style",
+                        "--version",
+                        "0.4.0",
+                        "--sha256",
+                        self.DIGEST,
+                        "sadiksaifi/tap/spaceterm",
+                    ],
+                )
 
 
 if __name__ == "__main__":

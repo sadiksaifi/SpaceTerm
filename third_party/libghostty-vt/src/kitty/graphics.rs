@@ -1039,9 +1039,9 @@ pub trait DecodePng: 'static {
 /// A PNG decoder for [`set_png_decoder`] using the [`png`] crate.
 ///
 /// ```rust
-/// use ghostty::kitty::graphics;
+/// use libghostty_vt::kitty::graphics::{self, RustPngDecoder};
 ///
-/// graphics::set_png_decoder(RustPngDecoder::new());
+/// graphics::set_png_decoder(Some(Box::new(RustPngDecoder::new()))).unwrap();
 /// ```
 #[cfg(all(feature = "kitty-graphics", feature = "png"))]
 #[derive(Clone, Copy, Debug)]

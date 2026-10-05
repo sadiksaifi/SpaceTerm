@@ -453,7 +453,8 @@ unsafe extern "C" fn cell_callback(
 
 #[cfg(test)]
 mod tests {
-    use super::{RowId, Screen, TopologyAccumulator};
+    use super::{RowId, Screen, State, TopologyAccumulator, UpdateOptions};
+    use crate::{Terminal, TerminalOptions};
 
     fn row(node_serial: u64, page_row: u16) -> RowId {
         RowId {
@@ -488,17 +489,50 @@ mod tests {
 
     #[test]
     fn screen_switch_does_not_discard_an_incomplete_topology() {
-        let mut accumulators: [TopologyAccumulator; 2] =
-            std::array::from_fn(|_| TopologyAccumulator::default());
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 8,
+            rows: 3,
+            max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
+        })
+        .unwrap();
+        let mut state = State::new().unwrap();
+        let one_row = UpdateOptions {
+            max_cells: 8,
+            max_rows: 1,
+        };
 
-        assert_eq!(accumulators[0].push(1, false, vec![row(10, 0)]), None);
-        assert_eq!(
-            accumulators[1].push(2, true, vec![row(20, 0)]),
-            Some(vec![row(20, 0)])
+        let initial = state.update(&terminal, one_row).unwrap();
+        assert_eq!(initial.screen, Screen::Primary);
+        assert!(initial.more);
+        assert_eq!(initial.topology, None);
+
+        terminal.vt_write(b"\x1b[?1049h");
+        let alternate = state.update(&terminal, UpdateOptions::default()).unwrap();
+        assert_eq!(alternate.screen, Screen::Alternate);
+        let alternate_rows = alternate.topology.unwrap();
+        assert_eq!(alternate_rows.len(), 3);
+        assert!(
+            alternate_rows
+                .iter()
+                .all(|row| row.screen == Screen::Alternate)
         );
+
+        terminal.vt_write(b"\x1b[?1049l");
+        let resumed = state.update(&terminal, one_row).unwrap();
+        assert_eq!(resumed.topology_epoch, initial.topology_epoch);
+        assert_eq!(resumed.topology, None);
+        let completed = state.update(&terminal, one_row).unwrap();
+        assert_eq!(completed.screen, Screen::Primary);
+        let primary_rows = completed.topology.unwrap();
+        assert_eq!(primary_rows.len(), 3);
+        assert!(primary_rows.iter().all(|row| row.screen == Screen::Primary));
         assert_eq!(
-            accumulators[0].push(1, true, vec![row(10, 1)]),
-            Some(vec![row(10, 0), row(10, 1)])
+            primary_rows
+                .iter()
+                .map(|row| row.page_row)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
     }
 }

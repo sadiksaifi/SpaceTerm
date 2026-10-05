@@ -133,11 +133,7 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 ///        }
 ///     })?
 ///    .on_title_changed(|term| {
-///        // Query the cursor position to confirm the terminal processed the
-///        // title change (the title itself is tracked by the embedder via the
-///        // OSC parser or its own state).
-///        let col = term.cursor_x().unwrap();
-///        println!("Title changed! (cursor at col {col})");
+///        println!("Title changed! ({})", term.title().unwrap());
 ///    })?;
 ///
 /// // Feed VT data that triggers effects:
@@ -2404,7 +2400,8 @@ mod tests {
     }
 
     #[test]
-    fn glyph_protocol_enabled_setting_updates() {
+    fn glyph_protocol_enablement_controls_replies_and_clears_registered_glyphs() {
+        let replies = RefCell::new(Vec::new());
         let mut terminal = Terminal::new(Options {
             cols: 80,
             rows: 24,
@@ -2412,12 +2409,34 @@ mod tests {
             max_scrollback_bytes: 50_000_000,
         })
         .expect("terminal should initialize");
-
+        terminal
+            .on_pty_write(|_, data| replies.borrow_mut().extend_from_slice(data))
+            .unwrap();
+        let register = b"\x1b_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1b\\";
+        let query = b"\x1b_25a1;q;cp=e0a0\x1b\\";
+        terminal.vt_write(register);
+        terminal.vt_write(query);
+        assert_eq!(
+            replies.take(),
+            b"\x1b_25a1;r;cp=e0a0;status=0\x1b\\\x1b_25a1;q;cp=e0a0;status=glossary\x1b\\"
+        );
         terminal
             .set_glyph_protocol_enabled(false)
-            .expect("glyph protocol should disable")
+            .expect("glyph protocol should disable");
+        terminal.vt_write(register);
+        terminal.vt_write(query);
+        assert!(replies.borrow().is_empty());
+        terminal
             .set_glyph_protocol_enabled(true)
             .expect("glyph protocol should enable");
+        terminal.vt_write(query);
+        assert_eq!(replies.take(), b"\x1b_25a1;q;cp=e0a0;status=\x1b\\");
+        terminal.vt_write(register);
+        terminal.vt_write(query);
+        assert_eq!(
+            replies.take(),
+            b"\x1b_25a1;r;cp=e0a0;status=0\x1b\\\x1b_25a1;q;cp=e0a0;status=glossary\x1b\\"
+        );
     }
 
     /// Explicitly relocate the Terminal into distinct storage, then verify the

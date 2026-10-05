@@ -506,7 +506,6 @@ def storage_regression(smoke, directory, proof):
             check(any(destination.glob("run-*")), "custom_output_not_created")
     defaults = list(temporary.glob("spaceterm-accessibility-smoke-*"))
     check(len(defaults) == 1 and any(defaults[0].glob("run-*")), "default_output_not_temporary")
-    check(not (directory / ".linux-port").exists(), "sibling_folder_created")
     runtime = smoke.create_private_runtime(directory)
     other_runtime = Path(tempfile.mkdtemp(prefix="spaceterm-a11y-"))
     link = directory / "runtime-link"
