@@ -479,6 +479,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kitty_releases_each_shift_key_as_the_side_it_pressed_with() {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        let mut emulator =
+            crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(80, 24),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        emulator.feed(b"\x1b[>15u");
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        // grp:shifts_toggle, as GPUI reports it: with right Shift held, left Shift switches
+        // layouts and acts as no modifier key, and right Shift releases with its press's role.
+        let right_shift = Some(ModifierRole::ShiftRight);
+        let mut bytes = Vec::new();
+        for (scancode, role, pressed, modifiers) in [
+            (54, right_shift, true, Modifiers::shift()),
+            (42, None, true, Modifiers::shift()),
+            (54, right_shift, false, Modifiers::none()),
+            (42, None, false, Modifiers::none()),
+        ] {
+            let input = modifier_transition(adapter.as_mut(), scancode, role, pressed, modifiers);
+            bytes.extend(emulator.key(input).unwrap().bytes);
+        }
+        assert_eq!(
+            bytes,
+            b"\x1b[57447;2u\x1b[57441;2u\x1b[57447;1:3u\x1b[57441;1:3u"
+        );
+    }
+
     #[gpui::test]
     fn native_window_facts_reach_the_pane_owned_terminal_session(cx: &mut gpui::TestAppContext) {
         use crate::terminal::testing::{
