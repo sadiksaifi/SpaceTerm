@@ -1,5 +1,8 @@
 //! Linux terminal keys preserve the XKB facts available during window input dispatch.
-use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, NativeKeyEvent};
+use gpui::{
+    KeyDownEvent, KeyUpEvent, Keystroke, ModifierRole, Modifiers, ModifiersChangedEvent,
+    NativeKeyEvent,
+};
 
 use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::{
@@ -32,7 +35,44 @@ impl TerminalKeyInputAdapterFactory for LinuxTerminalKeyInputAdapterFactory {
 
 struct LinuxTerminalKeyInputAdapter {
     gpui: GpuiTerminalKeyInputAdapter,
-    pressed_modifiers: Vec<(u16, Modifiers)>,
+    pressed_modifiers: Vec<PressedModifierKey>,
+}
+
+/// A held modifier key, by the role the active keymap gives it.
+struct PressedModifierKey {
+    scancode: u16,
+    /// The ordinary modifier the key holds, kept only when XKB actually reported it.
+    active: Modifiers,
+    right: bool,
+}
+
+impl PressedModifierKey {
+    fn new(scancode: u16, role: Option<ModifierRole>, reported: Modifiers) -> Self {
+        let (sets, right) = match role {
+            Some(ModifierRole::ShiftLeft) => (Modifiers::shift(), false),
+            Some(ModifierRole::ShiftRight) => (Modifiers::shift(), true),
+            Some(ModifierRole::ControlLeft) => (Modifiers::control(), false),
+            Some(ModifierRole::ControlRight) => (Modifiers::control(), true),
+            Some(ModifierRole::AltLeft) => (Modifiers::alt(), false),
+            Some(ModifierRole::AltRight) => (Modifiers::alt(), true),
+            Some(ModifierRole::PlatformLeft) => (Modifiers::super_key(), false),
+            Some(ModifierRole::PlatformRight) => (Modifiers::super_key(), true),
+            Some(ModifierRole::CapsLock | ModifierRole::NumLock) | None => {
+                (Modifiers::none(), false)
+            }
+        };
+        Self {
+            scancode,
+            active: Modifiers {
+                shift: sets.shift && reported.shift,
+                control: sets.control && reported.control,
+                alt: sets.alt && reported.alt,
+                platform: sets.platform && reported.platform,
+                ..Modifiers::none()
+            },
+            right,
+        }
+    }
 }
 
 impl LinuxTerminalKeyInputAdapter {
@@ -43,9 +83,13 @@ impl LinuxTerminalKeyInputAdapter {
         action: KeyAction,
         kind: TerminalKeyInputEventKind,
     ) -> KeyTranslation {
+        let physical_key = match native.modifier_role {
+            Some(role) => super::linux_keycodes::modifier_role_key(role),
+            None => super::linux_keycodes::terminal_key(native.scancode, &keystroke.key),
+        };
         let mut input = KeyInput {
             action,
-            physical_key: super::linux_keycodes::terminal_key(native.scancode, &keystroke.key),
+            physical_key,
             native_key_code: Some(native.scancode),
             logical_key: keystroke.key.clone(),
             text: layout_text(keystroke, &native),
@@ -58,15 +102,16 @@ impl LinuxTerminalKeyInputAdapter {
         };
         input.modifiers.caps_lock = native.caps_lock;
         input.modifiers.num_lock = native.num_lock;
-        let held = |scancode| {
+        let right = |modifier: fn(&Modifiers) -> bool| {
             self.pressed_modifiers
                 .iter()
-                .any(|(key, _)| *key == scancode)
+                .any(|key| key.right && modifier(&key.active))
         };
-        input.modifiers.shift_right = native.modifiers.shift && held(54);
-        input.modifiers.control_right = native.modifiers.control && held(97);
-        input.modifiers.alt_right = native.modifiers.alt && held(100);
-        input.modifiers.platform_right = native.modifiers.platform && held(126);
+        input.modifiers.shift_right = native.modifiers.shift && right(|active| active.shift);
+        input.modifiers.control_right = native.modifiers.control && right(|active| active.control);
+        input.modifiers.alt_right = native.modifiers.alt && right(|active| active.alt);
+        input.modifiers.platform_right =
+            native.modifiers.platform && right(|active| active.platform);
         if input.validate().is_ok() {
             return KeyTranslation::Encoded(input);
         }
@@ -170,12 +215,13 @@ impl TerminalKeyInputAdapter for LinuxTerminalKeyInputAdapter {
     }
 
     fn modifiers_changed(&mut self, event: &ModifiersChangedEvent) -> Option<KeyTranslation> {
-        self.pressed_modifiers.retain(|(_, active)| {
-            (active.shift && event.modifiers.shift)
-                || (active.control && event.modifiers.control)
-                || (active.alt && event.modifiers.alt)
-                || (active.platform && event.modifiers.platform)
-        });
+        self.pressed_modifiers
+            .retain(|PressedModifierKey { active, .. }| {
+                (active.shift && event.modifiers.shift)
+                    || (active.control && event.modifiers.control)
+                    || (active.alt && event.modifiers.alt)
+                    || (active.platform && event.modifiers.platform)
+            });
         self.gpui.modifiers_changed(event)
     }
 
@@ -194,27 +240,22 @@ impl TerminalKeyInputAdapter for LinuxTerminalKeyInputAdapter {
         let previous = self
             .pressed_modifiers
             .iter()
-            .position(|(key, _)| *key == scancode);
+            .position(|key| key.scancode == scancode);
         if pressed {
             if previous.is_some() {
                 return None;
             }
-            // Keep only the physical key's ordinary modifier when XKB actually reported it.
-            // This also handles remapped modifier keys without inventing an aggregate flag.
-            let active = Modifiers {
-                shift: matches!(scancode, 42 | 54) && native.modifiers.shift,
-                control: matches!(scancode, 29 | 97) && native.modifiers.control,
-                alt: matches!(scancode, 56 | 100) && native.modifiers.alt,
-                platform: matches!(scancode, 125 | 126) && native.modifiers.platform,
-                ..Modifiers::none()
-            };
-            self.pressed_modifiers.push((scancode, active));
+            self.pressed_modifiers.push(PressedModifierKey::new(
+                scancode,
+                native.modifier_role,
+                native.modifiers,
+            ));
         } else if let Some(previous) = previous {
             self.pressed_modifiers.remove(previous);
         }
         // XKB's predicted release clears the whole modifier bit. Another physical key may
         // still hold it until the following aggregate state arrives.
-        for (_, active) in &self.pressed_modifiers {
+        for PressedModifierKey { active, .. } in &self.pressed_modifiers {
             native.modifiers.shift |= active.shift;
             native.modifiers.control |= active.control;
             native.modifiers.alt |= active.alt;
@@ -263,32 +304,44 @@ mod tests {
     use crate::terminal::PhysicalKey;
     use gpui::Keystroke;
 
+    /// One modifier key transition as GPUI's XKB dispatch reports it: the modifiers include the
+    /// transition, and the role is the modifier key the keymap makes the physical key act as.
+    fn modifier_transition(
+        adapter: &mut dyn TerminalKeyInputAdapter,
+        scancode: u16,
+        role: Option<ModifierRole>,
+        pressed: bool,
+        modifiers: Modifiers,
+    ) -> KeyInput {
+        let event = ModifiersChangedEvent {
+            modifiers,
+            capslock: gpui::Capslock::default(),
+        };
+        let native = NativeKeyEvent {
+            scancode,
+            modifiers,
+            modifier_key: Some((scancode, pressed)),
+            modifier_role: role,
+            ..Default::default()
+        };
+        let Some(KeyTranslation::Encoded(input)) =
+            adapter.modifiers_changed_with_native(&event, Some(native))
+        else {
+            panic!("expected physical modifier")
+        };
+        input
+    }
+
     #[test]
     fn modifier_sides_transitions_aggregate_updates_and_reset_stay_distinct() {
         let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
-        let transition =
-            |adapter: &mut dyn TerminalKeyInputAdapter, scancode, pressed, modifiers| {
-                let event = ModifiersChangedEvent {
-                    modifiers,
-                    capslock: gpui::Capslock::default(),
-                };
-                let native = NativeKeyEvent {
-                    scancode,
-                    modifiers,
-                    modifier_key: Some((scancode, pressed)),
-                    ..Default::default()
-                };
-                let Some(KeyTranslation::Encoded(input)) =
-                    adapter.modifiers_changed_with_native(&event, Some(native))
-                else {
-                    panic!("expected physical modifier")
-                };
-                input
-            };
-        let left = transition(adapter.as_mut(), 42, true, Modifiers::shift());
+        let left_shift = Some(ModifierRole::ShiftLeft);
+        let right_shift = Some(ModifierRole::ShiftRight);
+        let left = modifier_transition(adapter.as_mut(), 42, left_shift, true, Modifiers::shift());
         assert_eq!(left.physical_key, PhysicalKey::ShiftLeft);
         assert_eq!(left.action, KeyAction::Press);
-        let right = transition(adapter.as_mut(), 54, true, Modifiers::shift());
+        let right =
+            modifier_transition(adapter.as_mut(), 54, right_shift, true, Modifiers::shift());
         assert_eq!(right.physical_key, PhysicalKey::ShiftRight);
         assert!(right.modifiers.shift_right);
         assert_eq!(
@@ -301,16 +354,162 @@ mod tests {
             ),
             None
         );
-        let released = transition(adapter.as_mut(), 54, false, Modifiers::none());
+        let released =
+            modifier_transition(adapter.as_mut(), 54, right_shift, false, Modifiers::none());
         assert_eq!(released.action, KeyAction::Release);
         assert!(released.modifiers.shift);
         assert!(!released.modifiers.shift_right);
-        let released = transition(adapter.as_mut(), 42, false, Modifiers::none());
+        let released =
+            modifier_transition(adapter.as_mut(), 42, left_shift, false, Modifiers::none());
         assert!(!released.modifiers.shift);
-        transition(adapter.as_mut(), 54, true, Modifiers::shift());
+        modifier_transition(adapter.as_mut(), 54, right_shift, true, Modifiers::shift());
         adapter.reset();
-        let reset = transition(adapter.as_mut(), 42, true, Modifiers::shift());
+        let reset = modifier_transition(adapter.as_mut(), 42, left_shift, true, Modifiers::shift());
         assert!(!reset.modifiers.shift_right);
+    }
+
+    #[test]
+    fn remapped_modifier_keys_report_their_modifier_role() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let control = Modifiers::control();
+        // caps:ctrl_modifier: Caps Lock keeps its keysym but acts as left Control.
+        let caps = modifier_transition(
+            adapter.as_mut(),
+            58,
+            Some(ModifierRole::ControlLeft),
+            true,
+            control,
+        );
+        assert_eq!(caps.physical_key, PhysicalKey::ControlLeft);
+        assert_eq!(caps.native_key_code, Some(58));
+        assert!(
+            caps.modifiers.control && !caps.modifiers.control_right && !caps.modifiers.caps_lock
+        );
+        let caps = modifier_transition(
+            adapter.as_mut(),
+            58,
+            Some(ModifierRole::ControlLeft),
+            false,
+            Modifiers::none(),
+        );
+        assert_eq!(caps.physical_key, PhysicalKey::ControlLeft);
+        assert!(!caps.modifiers.control);
+
+        // ctrl:swap_ralt_rctl: the right Alt position holds right Control.
+        let right_control = modifier_transition(
+            adapter.as_mut(),
+            100,
+            Some(ModifierRole::ControlRight),
+            true,
+            control,
+        );
+        assert_eq!(right_control.physical_key, PhysicalKey::ControlRight);
+        assert!(right_control.modifiers.control_right && !right_control.modifiers.alt_right);
+        let right_alt = modifier_transition(
+            adapter.as_mut(),
+            97,
+            Some(ModifierRole::AltRight),
+            true,
+            Modifiers {
+                alt: true,
+                ..control
+            },
+        );
+        assert_eq!(right_alt.physical_key, PhysicalKey::AltRight);
+        assert!(right_alt.modifiers.alt_right && right_alt.modifiers.control_right);
+        let released = modifier_transition(
+            adapter.as_mut(),
+            100,
+            Some(ModifierRole::ControlRight),
+            false,
+            Modifiers::alt(),
+        );
+        assert!(!released.modifiers.control_right && released.modifiers.alt_right);
+    }
+
+    #[test]
+    fn modifier_keys_without_a_role_keep_their_physical_key() {
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        // German AltGr shifts levels without acting as Alt.
+        let altgr = modifier_transition(adapter.as_mut(), 100, None, true, Modifiers::none());
+        assert_eq!(altgr.physical_key, PhysicalKey::AltRight);
+        assert!(!altgr.modifiers.alt && !altgr.modifiers.alt_right);
+    }
+
+    /// Kitty's report of one modifier key's press and release.
+    fn kitty_modifier_report(scancode: u16, role: ModifierRole, held: Modifiers) -> Vec<u8> {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        let mut emulator =
+            crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(80, 24),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        emulator.feed(b"\x1b[>15u");
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        let mut bytes = Vec::new();
+        for (pressed, modifiers) in [(true, held), (false, Modifiers::none())] {
+            let input =
+                modifier_transition(adapter.as_mut(), scancode, Some(role), pressed, modifiers);
+            bytes.extend(emulator.key(input).unwrap().bytes);
+        }
+        bytes
+    }
+
+    #[test]
+    fn kitty_reports_remapped_modifier_keys_as_the_modifier_they_act_as() {
+        let control = Modifiers::control();
+        let left_control = kitty_modifier_report(29, ModifierRole::ControlLeft, control);
+        assert_eq!(left_control, b"\x1b[57442;5u\x1b[57442;1:3u");
+        // caps:ctrl_modifier and ctrl:swap_lalt_lctl.
+        assert_eq!(
+            kitty_modifier_report(58, ModifierRole::ControlLeft, control),
+            left_control
+        );
+        assert_eq!(
+            kitty_modifier_report(56, ModifierRole::ControlLeft, control),
+            left_control
+        );
+        assert_eq!(
+            kitty_modifier_report(29, ModifierRole::AltLeft, Modifiers::alt()),
+            kitty_modifier_report(56, ModifierRole::AltLeft, Modifiers::alt())
+        );
+    }
+
+    #[test]
+    fn kitty_releases_each_shift_key_as_the_side_it_pressed_with() {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        let mut emulator =
+            crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(80, 24),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        emulator.feed(b"\x1b[>15u");
+        let mut adapter = LinuxTerminalKeyInputAdapterFactory::new().create();
+        // grp:shifts_toggle, as GPUI reports it: with right Shift held, left Shift switches
+        // layouts and acts as no modifier key, and right Shift releases with its press's role.
+        let right_shift = Some(ModifierRole::ShiftRight);
+        let mut bytes = Vec::new();
+        for (scancode, role, pressed, modifiers) in [
+            (54, right_shift, true, Modifiers::shift()),
+            (42, None, true, Modifiers::shift()),
+            (54, right_shift, false, Modifiers::none()),
+            (42, None, false, Modifiers::none()),
+        ] {
+            let input = modifier_transition(adapter.as_mut(), scancode, role, pressed, modifiers);
+            bytes.extend(emulator.key(input).unwrap().bytes);
+        }
+        assert_eq!(
+            bytes,
+            b"\x1b[57447;2u\x1b[57441;2u\x1b[57447;1:3u\x1b[57441;1:3u"
+        );
     }
 
     #[gpui::test]

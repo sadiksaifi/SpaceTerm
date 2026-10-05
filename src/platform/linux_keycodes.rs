@@ -159,6 +159,26 @@ pub(super) fn physical_key(scancode: u16) -> PhysicalKey {
     }
 }
 
+/// The key a modifier key reports: the role the active keymap gives it, not its position.
+/// Ghostty's GTK runtime reports a modifier's keysym, so `ctrl:swap_lalt_lctl` turns the physical
+/// left Alt key into left Control. The role also covers `caps:ctrl_modifier`, whose key keeps the
+/// Caps Lock keysym while it acts as Control.
+pub(super) fn modifier_role_key(role: gpui::ModifierRole) -> PhysicalKey {
+    use gpui::ModifierRole;
+    match role {
+        ModifierRole::ShiftLeft => PhysicalKey::ShiftLeft,
+        ModifierRole::ShiftRight => PhysicalKey::ShiftRight,
+        ModifierRole::ControlLeft => PhysicalKey::ControlLeft,
+        ModifierRole::ControlRight => PhysicalKey::ControlRight,
+        ModifierRole::AltLeft => PhysicalKey::AltLeft,
+        ModifierRole::AltRight => PhysicalKey::AltRight,
+        ModifierRole::PlatformLeft => PhysicalKey::MetaLeft,
+        ModifierRole::PlatformRight => PhysicalKey::MetaRight,
+        ModifierRole::CapsLock => PhysicalKey::CapsLock,
+        ModifierRole::NumLock => PhysicalKey::NumLock,
+    }
+}
+
 /// The key Ghostty's GTK runtime reports for a key event, given GPUI's layout-resolved key name.
 ///
 /// The key the layout produces replaces the physical key when either one is functional, so an
