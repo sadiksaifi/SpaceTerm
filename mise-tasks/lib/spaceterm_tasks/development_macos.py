@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import TaskError
+from spaceterm_tasks import TaskError, developer_environment
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 
@@ -84,4 +84,9 @@ def launch():
     # is for an installed SpaceTerm. Executing the binary from here would attribute those checks
     # to the terminal that ran this task, so System Permissions would follow that terminal.
     output = os.ttyname(0) if os.isatty(0) else os.devnull
-    os.execvp("open", ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)])
+    # open passes its environment to the application.
+    os.execvpe(
+        "open",
+        ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)],
+        developer_environment(os.environ),
+    )

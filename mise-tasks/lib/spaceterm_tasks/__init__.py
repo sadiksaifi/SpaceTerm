@@ -1,15 +1,37 @@
 """Shared code for SpaceTerm's mise file tasks. Standard library only."""
 
 import errno
+import os
 import signal
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
+# .mise.toml puts this directory on PYTHONPATH so file tasks can import spaceterm_tasks.
+LIBRARY = Path(__file__).resolve().parent.parent
 
 
 class TaskError(Exception):
     """A content-free failure a task reports without a traceback."""
+
+
+def developer_environment(environment):
+    """Return `environment` without the task library mise adds to PYTHONPATH.
+
+    SpaceTerm Development and its shells inherit the environment of the task that launches them,
+    and task internals must not reach programs a developer runs inside them.
+    """
+    result = dict(environment)
+    entries = [
+        entry
+        for entry in result.get("PYTHONPATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() != LIBRARY
+    ]
+    if entries:
+        result["PYTHONPATH"] = os.pathsep.join(entries)
+    else:
+        result.pop("PYTHONPATH", None)
+    return result
 
 
 def main(entry):

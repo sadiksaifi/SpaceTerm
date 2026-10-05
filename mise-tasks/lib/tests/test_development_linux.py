@@ -27,6 +27,9 @@ executable = pathlib.Path.cwd() / "target" / "debug" / "spaceterm"
 executable.parent.mkdir(parents=True, exist_ok=True)
 executable.write_text(
     "#!/bin/sh\\n"
+    "if [ -n \\"${SPACETERM_TEST_PYTHONPATH:-}\\" ]; then\\n"
+    "printf '%s\\\\n' \\"${PYTHONPATH-unset}\\" > \\"$SPACETERM_TEST_PYTHONPATH\\"\\n"
+    "fi\\n"
     "printf '%s\\\\n' \\"$0\\" \\"${SPACETERM_DEVELOPER_WORKBENCH:-}\\" \\"$#\\" \\"$@\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
 )
 executable.chmod(0o755)
@@ -275,6 +278,20 @@ assert app.launch([], None)
             self.record.read_text().splitlines(),
             [str(prefix / "bin" / "spaceterm"), "controls", "1", "--new-instance"],
         )
+
+    def test_development_launch_removes_only_the_task_library_from_pythonpath(self):
+        library = str(self.root / "mise-tasks" / "lib")
+        observed = self.private / "pythonpath"
+        for pythonpath, expected in (
+            (library, "unset"),
+            (os.pathsep.join(["/developer", library]), "/developer"),
+        ):
+            with self.subTest(pythonpath=pythonpath):
+                result = self.run_profile(
+                    overrides={"PYTHONPATH": pythonpath, "SPACETERM_TEST_PYTHONPATH": str(observed)}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(observed.read_text(), expected + "\n")
 
     def test_sigterm_exits_after_removing_the_staging_prefix(self):
         ready = self.private / "tic-ready"

@@ -15,7 +15,7 @@ import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import ROOT, TaskError, developer_environment
 from spaceterm_tasks.cargo import build_executable
 
 APPLICATION_ID = "io.github.sadiksaifi.spaceterm-development"
@@ -254,7 +254,7 @@ def launch(backend: str | None = None) -> None:
     backend is None to let GPUI choose (Wayland when WAYLAND_DISPLAY is set), or
     "wayland" or "x11" to require that display server.
     """
-    environment = dict(os.environ)
+    environment = developer_environment(os.environ)
     if backend == "wayland" and not environment.get("WAYLAND_DISPLAY"):
         raise TaskError("Wayland requires WAYLAND_DISPLAY")
     if backend == "x11":

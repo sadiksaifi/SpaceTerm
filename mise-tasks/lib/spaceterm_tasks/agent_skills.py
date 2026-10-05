@@ -1,13 +1,14 @@
 """Share the installed agent skills with Claude Code.
 
 `skills experimental_install` restores skills into `.agents/skills`. Claude Code reads
-`.claude/skills`, so that path links to the shared directory.
+`.claude/skills`, so that path links to the shared directory. `mise run setup:skills` runs this
+module after the install.
 """
 
 import os
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import ROOT, TaskError, main
 
 TARGET = Path("..") / ".agents" / "skills"
 
@@ -27,3 +28,7 @@ def link_claude_code(root=ROOT):
     except OSError:
         # Windows creates symbolic links only with Developer Mode or elevation.
         raise TaskError("could not link .claude/skills; allow symbolic links and retry") from None
+
+
+if __name__ == "__main__":
+    main(link_claude_code)

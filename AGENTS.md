@@ -45,9 +45,10 @@ Put task plans and validation reports in issues or PRs.
   `unittest` tests in `mise-tasks/lib`. Prefer a maintained external tool to new task code.
 - Name tasks `<entry>[:<narrowing>...][:<platform>]`. The entry is the first word a developer
   types, each segment is a `CONTEXT.md` term or the wrapped tool's name, and there are no aliases.
-- A mode picked by name is its own task (`development:x11:linux`); a value is a `usage` argument
-  or flag. A platform-only task ends with its platform segment. When several platforms implement
-  a task, the unsuffixed name dispatches to `<task>:{{ os() }}`.
+- A way to run SpaceTerm Development is its own task (`development:x11:linux`); any other choice,
+  such as a test's display backend, is a `usage` argument or flag. A platform-only task ends with
+  its platform segment. When several platforms implement a task, the unsuffixed name dispatches
+  to `<task>:{{ os() }}`.
 - Set environment variables with `env`, guard destructive tasks with `confirm`, and `hide` only
   internal tasks.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.
