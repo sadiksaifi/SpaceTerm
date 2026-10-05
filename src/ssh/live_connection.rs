@@ -91,7 +91,7 @@ impl LiveConnectionAuthority {
         LiveConnectionState::from_raw(self.state.load(Ordering::Acquire))
     }
 
-    pub(crate) fn observe_lifecycle(&self) -> ControlConnectionLifecycleObserver {
+    pub(crate) fn observe_lifecycle(&self) -> ControlConnectionObserver {
         self.lifecycle.observe()
     }
 }
@@ -174,7 +174,7 @@ struct ControlConnectionLifecycleAuthority {
 }
 
 impl ControlConnectionLifecycleAuthority {
-    fn observe(&self) -> ControlConnectionLifecycleObserver {
+    fn observe(&self) -> ControlConnectionObserver {
         let (sender, receiver) = async_channel::bounded(1);
         let terminal = self.terminal.load(Ordering::Acquire);
         if let Some(terminal) = ControlConnectionTerminalState::from_raw(terminal) {
@@ -189,7 +189,7 @@ impl ControlConnectionLifecycleAuthority {
         } else {
             let _ = sender.try_send(ControlConnectionTerminalState::Failed);
         }
-        ControlConnectionLifecycleObserver { receiver }
+        ControlConnectionObserver { receiver }
     }
 
     fn publish(&self, terminal: ControlConnectionTerminalState) {
@@ -211,13 +211,11 @@ impl ControlConnectionLifecycleAuthority {
 /// One-shot observer for the first terminal state of its exact connection instance.
 ///
 /// The observer carries no destination, remote output, authentication state, or live capability.
-pub(crate) struct ControlConnectionLifecycleObserver {
+pub(crate) struct ControlConnectionObserver {
     receiver: async_channel::Receiver<ControlConnectionTerminalState>,
 }
 
-pub(crate) type ControlConnectionObserver = ControlConnectionLifecycleObserver;
-
-impl ControlConnectionLifecycleObserver {
+impl ControlConnectionObserver {
     /// Waits for the first terminal state, treating lost authority as `Closed`.
     pub(crate) async fn terminal(&self) -> ControlConnectionTerminalState {
         self.receiver
@@ -353,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_observer_should_not_treat_nonterminal_transitions_as_events() {
+    fn lifecycle_observer_waits_until_terminal_publication() {
         let authority = ControlConnectionLifecycleAuthority::default();
         let observer = authority.observe();
 

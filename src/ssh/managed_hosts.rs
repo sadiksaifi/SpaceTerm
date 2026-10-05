@@ -142,15 +142,6 @@ impl<'a> ManagedHostsStore<'a> {
         Self { paths }
     }
 
-    /// Loads only the bounded canonical app-owned format.
-    #[cfg(test)]
-    pub(crate) fn load(&self) -> Result<Vec<ManagedSshHost>, ManagedHostsError> {
-        let Some(snapshot) = self.read_snapshot()? else {
-            return Ok(Vec::new());
-        };
-        parse_managed_hosts(&snapshot.bytes).map_err(|_| ManagedHostsError::NonCanonical)
-    }
-
     /// Ensures OpenSSH's explicit `-F` target exists in the canonical app-owned format.
     ///
     /// Read-only aliases discovered from user or system configuration still execute through this
@@ -551,6 +542,7 @@ mod tests {
         directories: BTreeSet<PathBuf>,
         files: BTreeMap<(PathBuf, String), (Vec<u8>, u64)>,
         conflicts_remaining: usize,
+        concurrent_bytes: Option<Vec<u8>>,
         prepare_collisions_remaining: usize,
         preparation_nonces: Vec<[u8; 16]>,
         next_identity: u64,
@@ -577,6 +569,15 @@ mod tests {
 
         fn set_conflicts(&self, conflicts: usize) {
             self.state.lock().unwrap().conflicts_remaining = conflicts;
+        }
+
+        fn file_bytes(&self, path: &Path) -> Vec<u8> {
+            self.state.lock().unwrap().files[&(
+                path.parent().unwrap().to_path_buf(),
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+            )]
+                .0
+                .clone()
         }
 
         fn set_prepare_collisions(&self, collisions: usize) {
@@ -707,11 +708,16 @@ mod tests {
                 .transpose()?;
             let mut state = self.state.lock().unwrap();
             state.events.push("commit");
+            let key = (path, name);
             if state.conflicts_remaining > 0 {
                 state.conflicts_remaining -= 1;
+                if let Some(concurrent_bytes) = state.concurrent_bytes.take() {
+                    state.next_identity += 1;
+                    let identity = state.next_identity;
+                    state.files.insert(key, (concurrent_bytes, identity));
+                }
                 return Ok(SecureCommitResult::conflict());
             }
-            let key = (path, name);
             if state.files.get(&key).map(|(_, identity)| *identity) != expected {
                 return Ok(SecureCommitResult::conflict());
             }
@@ -792,7 +798,7 @@ mod tests {
     #[test]
     fn store_should_insert_hosts_and_reject_duplicate_aliases() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = paths(filesystem);
+        let paths = paths(filesystem.clone());
         let store = ManagedHostsStore::new(&paths);
         store.insert(host("zeta", "zeta.example"), &[]).unwrap();
         store.insert(host("alpha", "alpha.example"), &[]).unwrap();
@@ -801,8 +807,8 @@ mod tests {
 
         assert!(matches!(duplicate, Err(ManagedHostsError::AliasCollision)));
         assert_eq!(
-            store.load().unwrap(),
-            vec![host("alpha", "alpha.example"), host("zeta", "zeta.example")]
+            filesystem.file_bytes(&paths.managed_ssh_config()),
+            b"# This file is managed by SpaceTerm.\n\nHost alpha\n  HostName alpha.example\n\nHost zeta\n  HostName zeta.example\n\nHost *\n  Include ~/.ssh/config\nHost *\n  Include /etc/ssh/ssh_config\n"
         );
     }
 
@@ -810,11 +816,18 @@ mod tests {
     fn mutation_should_retry_a_concurrent_conflict_from_a_fresh_snapshot() {
         let filesystem = Arc::new(RecordingFilesystem::default());
         filesystem.set_conflicts(2);
+        filesystem.state.lock().unwrap().concurrent_bytes = Some(
+            b"# This file is managed by SpaceTerm.\n\nHost concurrent\n  HostName concurrent.example\n\nHost *\n  Include ~/.ssh/config\nHost *\n  Include /etc/ssh/ssh_config\n".to_vec(),
+        );
         let paths = paths(filesystem.clone());
         let store = ManagedHostsStore::new(&paths);
 
         store.insert(host("work", "work.example"), &[]).unwrap();
 
+        assert_eq!(
+            filesystem.file_bytes(&paths.managed_ssh_config()),
+            b"# This file is managed by SpaceTerm.\n\nHost concurrent\n  HostName concurrent.example\n\nHost work\n  HostName work.example\n\nHost *\n  Include ~/.ssh/config\nHost *\n  Include /etc/ssh/ssh_config\n"
+        );
         let state = filesystem.state.lock().unwrap();
         assert_eq!(
             state
@@ -868,12 +881,15 @@ mod tests {
     #[test]
     fn ensure_exists_should_publish_the_canonical_empty_file() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = paths(filesystem);
+        let paths = paths(filesystem.clone());
         let store = ManagedHostsStore::new(&paths);
 
         store.ensure_exists().unwrap();
 
-        assert!(store.load().unwrap().is_empty());
+        assert_eq!(
+            filesystem.file_bytes(&paths.managed_ssh_config()),
+            b"# This file is managed by SpaceTerm.\n\nHost *\n  Include ~/.ssh/config\nHost *\n  Include /etc/ssh/ssh_config\n"
+        );
     }
 
     #[test]

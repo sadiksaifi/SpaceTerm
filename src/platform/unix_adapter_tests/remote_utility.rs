@@ -2,8 +2,8 @@
 use super::*;
 use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_ssh_process::UnixSshProcessAdapter;
+use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::command::SshCommandSpec;
-use crate::ssh::control_connection::SshCancellationToken;
 use crate::ssh::process::SshProcessEnvironment;
 use std::fs;
 use std::future::Future;

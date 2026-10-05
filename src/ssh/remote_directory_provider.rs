@@ -537,7 +537,14 @@ mod tests {
             .block_test(provider.list_directories(directory("/srv")))
             .unwrap();
 
-        assert_eq!(listing.rows()[0].name(), "safe");
+        assert_eq!(
+            listing
+                .rows()
+                .iter()
+                .map(|row| row.name())
+                .collect::<Vec<_>>(),
+            ["safe"]
+        );
         assert!(listing.is_truncated());
     }
 

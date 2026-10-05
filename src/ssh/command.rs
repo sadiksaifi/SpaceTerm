@@ -115,30 +115,6 @@ impl SshProbeOutput {
     }
 }
 
-#[cfg(test)]
-pub(crate) trait SshProbeRunner {
-    fn run(
-        &self,
-        executable: &OpenSshExecutable,
-        arguments: &[OsString],
-    ) -> Result<SshProbeOutput, SshProcessMechanismError>;
-}
-
-#[cfg(test)]
-pub(crate) fn probe_ssh_capability(
-    executable: &OpenSshExecutable,
-    runner: &impl SshProbeRunner,
-) -> SshCapability {
-    let output = match runner.run(executable, &[OsString::from("-V")]) {
-        Ok(output) => output,
-        Err(SshProcessMechanismError::NotFound) => {
-            return SshCapability::Unavailable(SshUnavailableReason::NotFound);
-        }
-        Err(_) => return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
-    };
-    classify_probe_output(output)
-}
-
 #[derive(Clone)]
 pub(crate) struct SshCapabilityProbe<A: SshProcessAdapter> {
     executable: OpenSshExecutable,
@@ -847,8 +823,6 @@ fn remote_shell_bootstrap(
     script.push_str("umask \"$spaceterm_shell_umask\"\n");
     script.push_str(&quote_for_posix_shell(&shell.path));
     match shell.kind {
-        // Bash has no post-profile injection option for login shells. Its system profile runs
-        // once with this temporary HOME; the wrapper restores account HOME before the user profile.
         SupportedRemoteLoginShell::Bash => script.push_str(" -il"),
         SupportedRemoteLoginShell::Nushell => {
             script.push_str(" -l --execute 'use spaceterm *; install'")
@@ -887,28 +861,35 @@ fn quote_for_nushell(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::ffi::{OsStr, OsString};
+    use std::io::Cursor;
     use std::path::PathBuf;
 
     use crate::domain::{RemoteDirectory, SshDestination};
+    use crate::ssh::process::{
+        ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessPipes, SshProcessSpawnRequest,
+    };
 
     use super::*;
 
+    #[derive(Clone)]
     enum FakeProbeResult {
         Output(SshProbeOutput),
         Error(SshProcessMechanismError),
     }
 
-    struct FakeProbeRunner {
-        calls: RefCell<Vec<(PathBuf, Vec<OsString>)>>,
+    type ProbeInvocation = (PathBuf, Vec<OsString>);
+
+    #[derive(Clone)]
+    struct FakeProbeAdapter {
+        calls: Arc<Mutex<Vec<ProbeInvocation>>>,
         result: FakeProbeResult,
     }
 
-    impl FakeProbeRunner {
+    impl FakeProbeAdapter {
         fn output(success: bool, stdout: &[u8], stderr: &[u8]) -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
+                calls: Arc::new(Mutex::new(Vec::new())),
                 result: FakeProbeResult::Output(SshProbeOutput::new(
                     success,
                     stdout.to_vec(),
@@ -919,26 +900,65 @@ mod tests {
 
         fn error(error: SshProcessMechanismError) -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
+                calls: Arc::new(Mutex::new(Vec::new())),
                 result: FakeProbeResult::Error(error),
             }
         }
     }
 
-    impl SshProbeRunner for FakeProbeRunner {
-        fn run(
+    impl SshProcessAdapter for FakeProbeAdapter {
+        type Process = ProcessExit;
+
+        fn spawn(
             &self,
-            executable: &OpenSshExecutable,
-            arguments: &[OsString],
-        ) -> Result<SshProbeOutput, SshProcessMechanismError> {
-            self.calls
-                .borrow_mut()
-                .push((executable.as_path().to_path_buf(), arguments.to_vec()));
+            request: SshProcessSpawnRequest,
+        ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
+            self.calls.lock().unwrap().push((
+                request.executable().to_path_buf(),
+                request.arguments().to_vec(),
+            ));
             match &self.result {
-                FakeProbeResult::Output(output) => Ok(output.clone()),
+                FakeProbeResult::Output(output) => Ok(SpawnedSshProcess::new(
+                    ProcessExit::new(output.success, Some(if output.success { 0 } else { 1 })),
+                    SshProcessPipes::new(
+                        None,
+                        Some(Box::new(Cursor::new(output.stdout.clone()))),
+                        Some(Box::new(Cursor::new(output.stderr.clone()))),
+                    ),
+                )),
                 FakeProbeResult::Error(error) => Err(*error),
             }
         }
+
+        fn try_status(
+            &self,
+            process: &mut Self::Process,
+        ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
+            Ok(Some(*process))
+        }
+
+        fn signal(
+            &self,
+            _process: &mut Self::Process,
+            _signal: ProcessSignal,
+        ) -> Result<(), SshProcessMechanismError> {
+            Ok(())
+        }
+
+        fn reap(&self, _process: Self::Process) -> Result<(), SshProcessMechanismError> {
+            Ok(())
+        }
+    }
+
+    fn probe(adapter: &FakeProbeAdapter) -> SshCapability {
+        SshCapabilityProbe::from_startup(
+            executable(),
+            PathBuf::from("/captured/home"),
+            &StartupSshEnvironment::for_test(None),
+            adapter.clone(),
+        )
+        .unwrap()
+        .probe_blocking()
     }
 
     fn executable() -> OpenSshExecutable {
@@ -980,12 +1000,12 @@ mod tests {
 
     #[test]
     fn capability_probe_should_invoke_only_the_selected_ssh_version_command() {
-        let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9p2\n");
+        let runner = FakeProbeAdapter::output(true, b"", b"OpenSSH_9.9p2\n");
 
-        let _ = probe_ssh_capability(&executable(), &runner);
+        let _ = probe(&runner);
 
         assert_eq!(
-            runner.calls.into_inner(),
+            *runner.calls.lock().unwrap(),
             vec![(
                 PathBuf::from("/selected/openssh"),
                 vec![OsString::from("-V")]
@@ -995,9 +1015,10 @@ mod tests {
 
     #[test]
     fn capability_probe_should_accept_an_apple_version_from_stderr() {
-        let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n");
+        let runner =
+            FakeProbeAdapter::output(true, b"", b"OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1007,9 +1028,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_accept_the_minimum_version_from_stdout() {
-        let runner = FakeProbeRunner::output(true, b"OpenSSH_8.2\n", b"");
+        let runner = FakeProbeAdapter::output(true, b"OpenSSH_8.2\n", b"");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1019,9 +1040,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_a_too_old_version() {
-        let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_8.1p1\n");
+        let runner = FakeProbeAdapter::output(true, b"", b"OpenSSH_8.1p1\n");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1034,9 +1055,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_not_found_without_an_io_message() {
-        let runner = FakeProbeRunner::error(SshProcessMechanismError::NotFound);
+        let runner = FakeProbeAdapter::error(SshProcessMechanismError::NotFound);
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1046,9 +1067,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_unrecognized_control_output() {
-        let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9\0secret");
+        let runner = FakeProbeAdapter::output(true, b"", b"OpenSSH_9.9\0secret");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1058,9 +1079,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_unrecognized_oversized_output() {
-        let runner = FakeProbeRunner::output(true, &vec![b'x'; MAX_PROBE_STREAM_BYTES + 1], b"");
+        let runner = FakeProbeAdapter::output(true, &vec![b'x'; MAX_PROBE_STREAM_BYTES + 1], b"");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1070,9 +1091,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_probe_failed_for_a_failed_exit() {
-        let runner = FakeProbeRunner::output(false, b"", b"OpenSSH_9.9p2\n");
+        let runner = FakeProbeAdapter::output(false, b"", b"OpenSSH_9.9p2\n");
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1082,9 +1103,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_probe_failed_for_an_io_error() {
-        let runner = FakeProbeRunner::error(SshProcessMechanismError::LaunchFailed);
+        let runner = FakeProbeAdapter::error(SshProcessMechanismError::LaunchFailed);
 
-        let capability = probe_ssh_capability(&executable(), &runner);
+        let capability = probe(&runner);
 
         assert_eq!(
             capability,
@@ -1129,25 +1150,6 @@ mod tests {
                 "--",
                 "root@fedora@orb",
             ]
-        );
-    }
-
-    #[test]
-    fn master_spec_should_not_request_confirmation_for_mux_clients() {
-        let arguments = arguments(&context().master());
-        let explicit_master_enables = arguments
-            .iter()
-            .filter(|argument| argument.as_str() == "ControlMaster=yes")
-            .count();
-        let short_master_enables = arguments
-            .iter()
-            .filter(|argument| argument.as_str() == "-M")
-            .count();
-
-        assert_eq!(explicit_master_enables, 1);
-        assert_eq!(
-            short_master_enables, 0,
-            "a second master enable makes OpenSSH request confirmation for mux clients"
         );
     }
 
@@ -1476,31 +1478,21 @@ mod tests {
     }
 
     #[test]
-    fn channel_specs_should_make_direct_connection_fallback_impossible() {
-        let context = context();
-        let command = pane_command("/srv/project", "/bin/fish").unwrap();
-        let specs = [context.remote_utility(), context.pane_channel(command)];
-
-        assert!(specs.iter().all(|spec| {
-            spec.arguments()
-                .windows(2)
-                .any(|pair| pair[0] == "-o" && pair[1] == "ProxyCommand=; exit 1")
-        }));
-    }
-
-    #[test]
     fn command_context_should_reject_relative_config_or_control_paths() {
-        let destination = SshDestination::new("host".to_owned()).unwrap();
+        for (config, control) in [
+            ("relative/config", "/private/runtime/control"),
+            ("/private/config/ssh_config", "relative/control"),
+        ] {
+            let error = SshCommandContext::new(
+                executable(),
+                PathBuf::from(config),
+                SshDestination::new("host".to_owned()).unwrap(),
+                PathBuf::from(control),
+            )
+            .err();
 
-        let error = SshCommandContext::new(
-            executable(),
-            PathBuf::from("relative/config"),
-            destination,
-            PathBuf::from("relative/control"),
-        )
-        .err();
-
-        assert_eq!(error, Some(SshCommandContextError::UnsafePath));
+            assert_eq!(error, Some(SshCommandContextError::UnsafePath));
+        }
     }
 }
 

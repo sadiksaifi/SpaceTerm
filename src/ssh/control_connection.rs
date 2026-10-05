@@ -8,14 +8,13 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-pub(crate) use super::cancellation::SshCancellationToken;
+use super::cancellation::SshCancellationToken;
 use super::command::{
     OpenSshExecutable, PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
     ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
-    ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionBinding,
-    LiveConnectionState,
+    ControlConnectionObserver, LiveConnectionAuthority, LiveConnectionBinding, LiveConnectionState,
 };
 use super::process::{
     ProcessCleanupCallback, ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend,
@@ -260,7 +259,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     /// Creates a content-free observer for the first terminal `Failed` or `Closed` transition.
     pub(crate) fn lifecycle_observer(
         &self,
-    ) -> Result<ControlConnectionLifecycleObserver, ControlConnectionError> {
+    ) -> Result<ControlConnectionObserver, ControlConnectionError> {
         self.authority
             .as_ref()
             .map(|authority| authority.observe_lifecycle())
@@ -1442,9 +1441,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ready_connection_should_prepare_utility_and_single_use_pane_commands(
-        cx: &mut TestAppContext,
-    ) {
+    fn ready_connection_prepares_commands_and_rejects_shutting_down(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::with_readiness(
@@ -1611,6 +1608,7 @@ mod tests {
                     && output.as_str() == "bad  config"
                     && !format!("{error:?}").contains("bad")
         ));
+        assert_eq!(backend.reap_count(), 1);
     }
 
     #[gpui::test]
