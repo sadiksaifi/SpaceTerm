@@ -804,6 +804,52 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
     .find(|forbidden| source.contains(forbidden))
 }
 
+/// Exclude only complete, rustfmt-aligned inline modules with an exact test gate.
+/// Other test-gated items and production after a test module remain in the scan.
+fn shared_presentation_source(source: &str) -> String {
+    let lines: Vec<_> = source.lines().collect();
+    let mut production = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let test_module_end = source_attribute(&lines, index).and_then(|(attribute, length)| {
+            if attribute != "#[cfg(test)]" {
+                return None;
+            }
+            let declaration_index = index + length;
+            let line = *lines.get(declaration_index)?;
+            let declaration = line.trim_start();
+            let declaration = if let Some(public) = declaration.strip_prefix("pub ") {
+                public
+            } else if let Some(restricted) = declaration.strip_prefix("pub(") {
+                restricted.split_once(')')?.1.trim_start()
+            } else {
+                declaration
+            };
+            let name = declaration.strip_prefix("mod ")?.strip_suffix('{')?.trim();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                return None;
+            }
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let closing_line = format!("{indent}}}");
+            let closing_index = lines[declaration_index + 1..]
+                .iter()
+                .position(|line| line.trim_end() == closing_line)?;
+            Some(declaration_index + 1 + closing_index + 1)
+        });
+        if let Some(end) = test_module_end {
+            index = end;
+        } else {
+            production.push(lines[index]);
+            index += 1;
+        }
+    }
+    production.join("\n")
+}
+
 #[test]
 fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -821,8 +867,8 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-        if let Some(forbidden) = shared_presentation_violation(production) {
+        let production = shared_presentation_source(&source);
+        if let Some(forbidden) = shared_presentation_violation(&production) {
             panic!("{} contains host presentation {forbidden}", path.display());
         }
     }
@@ -830,7 +876,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let reusable =
         std::fs::read_to_string(root.join("../crates/spaceterm-ui/src/command_palette.rs"))
             .unwrap();
-    let production = reusable.split("#[cfg(test)]\nmod tests").next().unwrap();
+    let production = shared_presentation_source(&reusable);
     let profile_start = production
         .find("/// A platform-selected complete Command Palette keybinding set")
         .unwrap();
@@ -869,6 +915,40 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
     }
     assert!(shared_presentation_violation("profile.shortcut(&CreateTab)").is_none());
     assert!(shared_presentation_violation("KeyBinding::new(\"ctrl-alt-n\", Next, None)").is_none());
+
+    for visibility in ["pub(super) ", "", "pub(crate) ", "pub ", "pub(in crate) "] {
+        let tests = format!(
+            "#[cfg(test)]\n{visibility}mod tests {{\n    const FAMILY: &str = \"Menlo\";\n}}\n"
+        );
+        assert_eq!(
+            shared_presentation_violation(&shared_presentation_source(&tests)),
+            None,
+            "scanned {visibility}test-module fixture as production"
+        );
+        for production in [
+            format!("const FAMILY: &str = \"Menlo\";\n{tests}"),
+            format!("{tests}const FAMILY: &str = \"Menlo\";\n"),
+            format!(
+                "#[cfg(test)]\nfn fixture_only() {{}}\nconst FAMILY: &str = \"Menlo\";\n{tests}"
+            ),
+        ] {
+            assert_eq!(
+                shared_presentation_violation(&shared_presentation_source(&production)),
+                Some("Menlo"),
+                "missed production font around {visibility}test module"
+            );
+        }
+    }
+    for production in [
+        "pub(super) mod tests {\n    const FAMILY: &str = \"Menlo\";\n}\n",
+        "#[cfg(not(test))]\npub(super) mod tests {\n    const FAMILY: &str = \"Menlo\";\n}\n",
+    ] {
+        assert_eq!(
+            shared_presentation_violation(&shared_presentation_source(production)),
+            Some("Menlo"),
+            "excluded an ordinary production module"
+        );
+    }
 }
 
 #[test]
