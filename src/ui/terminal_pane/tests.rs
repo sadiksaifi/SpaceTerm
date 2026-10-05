@@ -12,7 +12,9 @@ use gpui::{
 use super::*;
 use crate::appearance::{Color, TerminalColors};
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
-use crate::terminal::native_services::clipboard::ClipboardRead;
+use crate::terminal::native_services::clipboard::{
+    ClipboardError, ClipboardRead, SelectionClipboard,
+};
 use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -2206,9 +2208,39 @@ fn connected_terminal_pane_with_key_propagation(
     (pane, cx, records, propagated_key_downs)
 }
 
+struct FailOnceSelectionClipboard {
+    fail_next: Cell<bool>,
+}
+
+impl SelectionClipboard for FailOnceSelectionClipboard {
+    fn publish(&self, copy: &SelectionCopy, cx: &mut App) -> Result<(), ClipboardError> {
+        if self.fail_next.replace(false) {
+            return Err(ClipboardError::Unavailable);
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.plain_text.clone()));
+        Ok(())
+    }
+}
+
 fn terminal_pane_with_selection_copy(
     cx: &mut TestAppContext,
     copy: SelectionCopy,
+) -> (
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+    TestTerminalSessionRecords,
+) {
+    terminal_pane_with_selection_clipboard(
+        cx,
+        copy,
+        crate::terminal::native_services::testing::adapters().selection_clipboard,
+    )
+}
+
+fn terminal_pane_with_selection_clipboard(
+    cx: &mut TestAppContext,
+    copy: SelectionCopy,
+    clipboard: Rc<dyn SelectionClipboard>,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
@@ -2227,8 +2259,16 @@ fn terminal_pane_with_selection_copy(
             "/tmp/spaceterm-terminal-pane-copy-test",
         )),
     );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+    let mut adapters = crate::terminal::native_services::testing::adapters();
+    adapters.selection_clipboard = clipboard;
+    let prepared_launch = session_factory.prepare_child_launch().ok();
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        TerminalPane::new_with_services(
+            session_factory, prepared_launch, crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+            adapters, PaneLifecycleDependencies::testing(), window, cx,
+        )
+    });
     cx.update(|window, cx| {
         window.activate_window();
         pane.update(cx, |pane, cx| pane.focus(window, cx));
@@ -7061,16 +7101,16 @@ fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(cx: &mut
 fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records) = terminal_pane_with_selection_copy(
+    let (pane, cx, records) = terminal_pane_with_selection_clipboard(
         cx,
         SelectionCopy {
             plain_text: "recovered selection".to_owned(),
             html: None,
         },
+        Rc::new(FailOnceSelectionClipboard {
+            fail_next: Cell::new(true),
+        }),
     );
-    pane.update(cx, |pane, _| {
-        pane.selection_pasteboard.fail_next_write();
-    });
 
     cx.simulate_keystrokes("cmd-c");
     cx.run_until_parked();
@@ -7117,16 +7157,16 @@ fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
 fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records) = terminal_pane_with_selection_copy(
+    let (pane, cx, records) = terminal_pane_with_selection_clipboard(
         cx,
         SelectionCopy {
             plain_text: "recovered selection".to_owned(),
             html: None,
         },
+        Rc::new(FailOnceSelectionClipboard {
+            fail_next: Cell::new(true),
+        }),
     );
-    pane.update(cx, |pane, _| {
-        pane.selection_pasteboard.fail_next_write();
-    });
     cx.simulate_keystrokes("cmd-c");
     cx.run_until_parked();
 

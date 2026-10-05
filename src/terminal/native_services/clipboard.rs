@@ -138,17 +138,11 @@ pub(crate) trait PrimarySelection {
 
 pub(crate) struct SelectionPublication {
     clipboard: Rc<dyn SelectionClipboard>,
-    #[cfg(test)]
-    fail_next_write: bool,
 }
 
 impl SelectionPublication {
     pub(crate) fn new(clipboard: Rc<dyn SelectionClipboard>) -> Self {
-        Self {
-            clipboard,
-            #[cfg(test)]
-            fail_next_write: false,
-        }
+        Self { clipboard }
     }
 
     pub(crate) fn write(
@@ -159,16 +153,7 @@ impl SelectionPublication {
         if copy.plain_text.is_empty() {
             return Ok(());
         }
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_write) {
-            return Err(ClipboardError::Unavailable);
-        }
         self.clipboard.publish(&copy, cx)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_write(&mut self) {
-        self.fail_next_write = true;
     }
 }
 
@@ -291,7 +276,12 @@ mod tests {
             true,
             TerminalLocalFileCapabilities::Enabled,
         ));
-        assert!(result.is_err());
+        assert_eq!(
+            result,
+            Err(PasteIntakeError::InvalidFiles(
+                "clipboard files are unavailable"
+            ))
+        );
     }
 
     struct RecordingClipboard(RefCell<Vec<SelectionCopy>>);
@@ -304,7 +294,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn publication_preserves_both_representations_and_completes_before_paste(
+    fn publication_forwards_representations_synchronously_and_skips_empty_selection(
         cx: &mut TestAppContext,
     ) {
         let clipboard = Rc::new(RecordingClipboard(RefCell::new(Vec::new())));

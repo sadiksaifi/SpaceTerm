@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_growth_never_evicts_live_images_when_screens_have_unequal_usage() {
+    fn storage_limits_preserve_residency_and_bound_growth() {
         assert_eq!(storage_limits([100, 4], 0), [100, 4]);
         assert_eq!(storage_limits([100, 4], 16), [108, 12]);
         assert_eq!(storage_limits([0, 0], 0), [1, 1]);

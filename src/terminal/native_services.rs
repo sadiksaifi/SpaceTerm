@@ -31,8 +31,6 @@ use crate::domain::{PaneId, TabId, WorkspaceId};
 
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
 use super::metadata::TerminalLocalFileCapabilities;
-#[cfg(test)]
-use super::selection::SelectionCopy;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeContextActions {
@@ -217,19 +215,6 @@ impl NativeContextActions {
                 && link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn from_state(
-        local_file_capabilities: TerminalLocalFileCapabilities,
-        selection: Option<&SelectionCopy>,
-        link: Option<&HyperlinkTarget>,
-    ) -> Self {
-        Self::from_presence(
-            local_file_capabilities,
-            selection.is_some_and(|selection| !selection.plain_text.is_empty()),
-            link,
-        )
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -310,14 +295,10 @@ mod tests {
 
     #[test]
     fn context_actions_follow_selection_and_validated_link_state() {
-        let selection = SelectionCopy {
-            plain_text: "selected".to_owned(),
-            html: None,
-        };
         let url = HyperlinkTarget::url("https://example.test").unwrap();
 
         assert_eq!(
-            NativeContextActions::from_state(LOCAL_FILES, Some(&selection), Some(&url)),
+            NativeContextActions::from_presence(LOCAL_FILES, true, Some(&url)),
             NativeContextActions {
                 copy: true,
                 open_link: true,
@@ -325,7 +306,7 @@ mod tests {
             }
         );
         assert_eq!(
-            NativeContextActions::from_state(LOCAL_FILES, None, None),
+            NativeContextActions::from_presence(LOCAL_FILES, false, None),
             NativeContextActions::default()
         );
     }
@@ -339,12 +320,12 @@ mod tests {
             "printf 'ok'\n"
         );
         assert_eq!(
-            PastePayload::dropped_files(
+            PastePayload::prepare_dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[PathBuf::from("/tmp/a b")],
-                true,
                 LOCAL_FILES
             )
+            .unwrap()
             .unwrap()
             .text(),
             "'/tmp/a b'"
@@ -353,14 +334,13 @@ mod tests {
             PastePayload::service_text("ignored", false),
             Err(PasteIntakeError::TerminalUnfocused)
         );
-        assert!(
-            PastePayload::dropped_files(
+        assert_eq!(
+            PastePayload::prepare_dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[PathBuf::from("relative")],
-                true,
                 LOCAL_FILES
-            )
-            .is_err()
+            ),
+            Err("file paths must be absolute")
         );
     }
 
@@ -446,14 +426,13 @@ mod tests {
         );
         assert!(NativeContextActions::from_presence(REMOTE_FILES, false, Some(&web)).open_link);
         assert!(PastePayload::service_text("ordinary text", true).is_ok());
-        assert!(
-            PastePayload::dropped_files(
+        assert_eq!(
+            PastePayload::prepare_dropped_files(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 &[file],
-                true,
                 REMOTE_FILES
-            )
-            .is_err()
+            ),
+            Ok(None)
         );
         fs::remove_dir_all(directory).unwrap();
     }

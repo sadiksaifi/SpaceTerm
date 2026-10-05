@@ -1,39 +1,24 @@
-#[cfg(target_os = "macos")]
-#[path = "../src/platform/macos_quick_look_window.rs"]
-mod macos_quick_look_window;
+#![allow(dead_code, unused_imports, unused_variables)]
+
+include!("../src/application_modules.rs");
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use macos_quick_look_window::OwnedQuickLookWindow;
-    use objc2::MainThreadMarker;
-    use objc2::rc::{Weak, autoreleasepool};
+    use objc2::rc::autoreleasepool;
 
-    let mtm = MainThreadMarker::new().expect("native ownership test must run on the main thread");
-    let (first_panel, first_preview, second_panel, second_preview, current) =
-        autoreleasepool(|_| {
-            let first = OwnedQuickLookWindow::new(mtm).expect("first preview should initialize");
-            let first_panel = Weak::from_retained(&first.panel);
-            let first_preview = Weak::from_retained(&first.preview);
-            let second = OwnedQuickLookWindow::new(mtm).expect("second preview should initialize");
-            let second_panel = Weak::from_retained(&second.panel);
-            let second_preview = Weak::from_retained(&second.preview);
-            let mut current = Some(first);
-            drop(current.replace(second));
-            (
-                first_panel,
-                first_preview,
-                second_panel,
-                second_preview,
-                current,
-            )
-        });
-    assert!(first_panel.load().is_none());
-    assert!(first_preview.load().is_none());
-    assert!(second_panel.load().is_some());
-    assert!(second_preview.load().is_some());
-    autoreleasepool(|_| drop(current));
-    assert!(second_panel.load().is_none());
-    assert!(second_preview.load().is_none());
+    let dispatcher = gpui::TestDispatcher::new(0);
+    let mut cx = gpui::TestAppContext::build(dispatcher.clone(), Some("native-preview-ownership"));
+    autoreleasepool(|_| {
+        platform::macos_quick_look::ownership_tests::preview_replacement_and_teardown_release_native_objects(&mut cx);
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        cx.background_executor().forbid_parking();
+        cx.quit();
+    });
+    cx.run_until_parked();
+    drop(cx);
+    dispatcher.drain_tasks();
     println!("1 native Quick Look ownership test passed");
 }
 

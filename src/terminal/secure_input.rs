@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_input_focus_loss_deactivation_and_session_completion_release() {
+    fn ordinary_input_focus_loss_deactivation_and_retirement_release() {
         let (handle, recording) = recording();
         let pane = handle.register_pane();
         handle.update_application_activation(true);

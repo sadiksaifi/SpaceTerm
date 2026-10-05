@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_urls_map_each_token_without_cloning_cell_text() {
+    fn repeated_url_tokens_map_each_occurrence() {
         let cells = [
             "https://example.test".to_owned(),
             " ".to_owned(),
@@ -378,10 +378,9 @@ mod tests {
 
         assert_eq!(target.kind, HyperlinkKind::LocalPath);
         assert_eq!(target.value, canonical);
-        assert_eq!(
-            target.identity,
-            stable_identity(HyperlinkKind::LocalPath, canonical.as_bytes())
-        );
+        let absolute =
+            HyperlinkTarget::osc8(&file_url(canonical), &directory, None, LOCAL_FILES).unwrap();
+        assert_eq!(target.identity, absolute.identity);
         assert_eq!(
             target.activation_url(LOCAL_FILES),
             Some(file_url(canonical))
@@ -432,16 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn osc8_does_not_treat_arbitrary_detected_text_as_a_local_file() {
-        let directory = temporary_directory("not-detected");
-        let file = directory.join("preview.txt");
-        fs::write(&file, b"preview").unwrap();
-
+    fn detected_plain_filenames_do_not_grant_local_authority() {
         let cells = ["preview.txt".to_owned()];
         let detected = detect_url_cells(cells.iter().map(String::as_str));
-
         assert_eq!(detected, vec![None]);
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -522,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    pub(super) fn stable_identity_does_not_depend_on_wrapping_or_scrollback_position() {
+    fn equal_url_targets_have_equal_identity() {
         let first = HyperlinkTarget::url("https://example.test/path").unwrap();
         let second = HyperlinkTarget::url("https://example.test/path").unwrap();
         assert_eq!(first.identity, second.identity);

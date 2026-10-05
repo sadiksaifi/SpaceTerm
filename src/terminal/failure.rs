@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_failure_keeps_last_valid_generation() {
+    fn resource_failure_state_retains_generation_and_recovery_guidance() {
         let state = PaneTerminalState::failed(
             TerminalFailure::resource("atlas"),
             Some(PresentationGeneration::test(42)),
@@ -365,23 +365,53 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_are_bounded_local_and_exported_only_explicitly() {
+    fn diagnostic_ring_is_bounded_and_export_writes_schema() {
         let mut bundle = DiagnosticBundle::default();
         for _ in 0..200 {
             bundle.record(&TerminalFailure::platform("native-event"));
         }
-        assert!(bundle.record_count() <= DiagnosticBundle::MAX_RECORDS);
-        assert!(bundle.encoded_len() <= DiagnosticBundle::MAX_BYTES);
-
-        let directory =
-            std::env::temp_dir().join(format!("spaceterm-diagnostics-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
+        assert_eq!(bundle.record_count(), 128);
+        assert!(bundle.encoded_len() <= 65_536);
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-diagnostics-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
         let path = directory.join("diagnostics.txt");
         assert!(!path.exists());
         bundle.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
-        assert!(exported.contains("network_telemetry=false"));
-        assert!(!exported.contains("terminal text"));
+        let header = "SpaceTerm diagnostics\nnetwork_telemetry=false\nterminal_content=false\n";
+        let record = "class=Platform recoverability=Recoverable operation=native-event\n";
+        assert_eq!(exported, format!("{header}{}", record.repeat(128)));
+
+        static LONG_OPERATION: [u8; 1024] = [b'x'; 1024];
+        let long_operation = std::str::from_utf8(&LONG_OPERATION).unwrap();
+        let mut bytes = DiagnosticBundle::default();
+        for _ in 0..128 {
+            bytes.record(&TerminalFailure::platform(long_operation));
+        }
+        let long_record = format!(
+            "class=Platform recoverability=Recoverable operation={}\n",
+            "x".repeat(1024)
+        );
+        let retained = (65_536 - header.len()) / long_record.len();
+        assert!(retained < 128);
+        assert_eq!(bytes.record_count(), retained);
+        assert_eq!(
+            bytes.encoded_len(),
+            header.len() + retained * long_record.len()
+        );
+        assert!(bytes.encoded_len() <= 65_536);
+        bytes.export(&path).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{header}{}", long_record.repeat(retained))
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

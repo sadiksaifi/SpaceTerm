@@ -247,19 +247,24 @@ mod tests {
     }
 
     #[test]
-    fn packaged_terminfo_selects_spaceterm_identity_and_missing_resources_fall_back() {
-        let resources = temporary_resources();
-        let terminfo = resources.join("terminfo/78/xterm-spaceterm");
-        std::fs::create_dir_all(terminfo.parent().unwrap()).unwrap();
-        std::fs::write(&terminfo, b"compiled").unwrap();
-
-        assert_eq!(
-            launch_identity(&resources),
-            LaunchIdentity {
-                term: TERM_NAME,
-                terminfo: Some(resources.join("terminfo")),
-            }
-        );
+    fn terminfo_entry_presence_selects_launch_identity() {
+        for entry in ["78", "x"] {
+            let resources = temporary_resources();
+            let terminfo = resources
+                .join("terminfo")
+                .join(entry)
+                .join("xterm-spaceterm");
+            std::fs::create_dir_all(terminfo.parent().unwrap()).unwrap();
+            std::fs::write(&terminfo, b"compiled").unwrap();
+            assert_eq!(
+                launch_identity(&resources),
+                LaunchIdentity {
+                    term: TERM_NAME,
+                    terminfo: Some(resources.join("terminfo")),
+                }
+            );
+            std::fs::remove_dir_all(resources).unwrap();
+        }
         assert_eq!(
             launch_identity(Path::new("/definitely/missing")),
             LaunchIdentity {
@@ -267,7 +272,6 @@ mod tests {
                 terminfo: None,
             }
         );
-        std::fs::remove_dir_all(resources).unwrap();
     }
 
     #[test]
@@ -306,5 +310,35 @@ mod tests {
         assert!(source.contains("use=xterm-256color"));
         assert!(!source.to_ascii_lowercase().contains("ghostty"));
         assert!(!XTVERSION.to_ascii_lowercase().contains("ghostty"));
+        for (name, expected) in [
+            (b"524742".as_slice(), b"8".as_slice()),
+            (b"4D73", b"\x1b]52;%p1%s;%p2%s\x07"),
+            (b"5373", b"\x1b[%p1%d q"),
+            (b"5365", b"\x1b[2 q"),
+        ] {
+            let mut observer = XtGetTcapObserver::new(TERM_NAME);
+            let mut reply = Vec::new();
+            observer.feed(
+                &[b"\x1bP+q".as_slice(), name, b"\x1b\\"].concat(),
+                &mut reply,
+            );
+            let encoded = reply
+                .strip_prefix(b"\x1bP1+r")
+                .unwrap()
+                .strip_suffix(b"\x1b\\")
+                .unwrap();
+            let separator = encoded.iter().position(|byte| *byte == b'=').unwrap();
+            let returned_name = &encoded[..separator];
+            let value = &encoded[separator + 1..];
+            assert_eq!(returned_name, name);
+            assert_eq!(value.len(), expected.len() * 2);
+            let decoded = value
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(decoded, expected);
+        }
     }
 }

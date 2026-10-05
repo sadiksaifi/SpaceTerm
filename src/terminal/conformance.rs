@@ -1607,13 +1607,13 @@ fn check_native_services() -> Result<(), String> {
             file_preview: false,
         },
     )?;
-    let insertion = PastePayload::dropped_files(
+    let insertion = PastePayload::prepare_dropped_files(
         crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
         &[PathBuf::from("/tmp/a b")],
-        true,
         local_files,
     )
-    .map_err(|error| format!("native insertion failed: {error:?}"))?;
+    .map_err(|error| format!("native insertion failed: {error:?}"))?
+    .ok_or_else(|| "local file insertion was not prepared".to_owned())?;
     require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
     require_eq(
         "native-focus-gate",

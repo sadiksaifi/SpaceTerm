@@ -246,13 +246,15 @@ mod tests {
     }
 
     #[test]
-    fn paste_confirmation_schedule_expires_without_exposing_payload() {
+    fn confirmation_expiry_consumes_pending_payload() {
         let now = Instant::now();
         let mut schedule = PasteConfirmationSchedule::default();
         let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
         let confirmation = schedule.create(payload, now).unwrap();
-
-        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
+        let deadline = now + Duration::from_secs(30);
+        assert_eq!(schedule.deadline(), Some(deadline));
+        assert!(!schedule.expire(deadline - Duration::from_nanos(1)));
+        assert!(schedule.expire(deadline));
         assert_eq!(schedule.take(confirmation.id, now), None);
     }
 
@@ -275,11 +277,24 @@ mod tests {
 
     #[test]
     fn preparation_classifies_and_trusts_every_control_replaced_by_the_ghostty_encoder() {
-        for byte in STRIPPED_CONTROLS {
+        for byte in [
+            0x00, 0x08, 0x05, 0x04, 0x1b, 0x7f, 0x03, 0x1c, 0x15, 0x1a, 0x11, 0x13, 0x17, 0x16,
+            0x12, 0x0f,
+        ] {
             let prepared = PreparedPaste::prepare(String::from_utf8(vec![b'a', byte]).unwrap())
                 .expect("control-bearing input remains encodable after sanitization");
             assert!(prepared.risk.control_bytes, "control byte {byte:#04x}");
             assert!(!prepared.requires_confirmation(false));
+            assert!(!prepared.requires_confirmation(true));
+            for (bracketed, expected) in [
+                (false, b"a ".as_slice()),
+                (true, b"\x1b[200~a \x1b[201~".as_slice()),
+            ] {
+                let mut source = prepared.clone().into_text().into_bytes();
+                let mut output = [0; 32];
+                let written = paste::encode(&mut source, bracketed, &mut output).unwrap();
+                assert_eq!(&output[..written], expected, "control byte {byte:#04x}");
+            }
         }
     }
 
@@ -293,16 +308,20 @@ mod tests {
     }
 
     #[test]
-    fn oversized_and_empty_payloads_are_rejected_without_retaining_content() {
+    fn empty_and_oversized_paste_payloads_are_rejected() {
         assert_eq!(
             PreparedPaste::prepare(String::new()),
             Err(PasteRejection::Empty)
         );
         assert_eq!(
-            PreparedPaste::prepare("x".repeat(MAX_PASTE_BYTES + 1)),
-            Err(PasteRejection::TooLarge {
-                limit: MAX_PASTE_BYTES,
-            })
+            PreparedPaste::prepare("x".repeat(1_048_576))
+                .unwrap()
+                .into_text(),
+            "x".repeat(1_048_576)
+        );
+        assert_eq!(
+            PreparedPaste::prepare("x".repeat(1_048_577)),
+            Err(PasteRejection::TooLarge { limit: 1_048_576 })
         );
     }
 
@@ -339,23 +358,6 @@ impl PastePayload {
             return Err(PasteIntakeError::TerminalUnfocused);
         }
         Ok(Self { text: text.into() })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn dropped_files(
-        policy: file_insertion::FileInsertionPolicy,
-        paths: &[PathBuf],
-        terminal_input_focused: bool,
-        local_file_capabilities: TerminalLocalFileCapabilities,
-    ) -> Result<Self, PasteIntakeError> {
-        if !terminal_input_focused {
-            return Err(PasteIntakeError::TerminalUnfocused);
-        }
-        Self::prepare_dropped_files(policy, paths, local_file_capabilities)
-            .and_then(|payload| {
-                payload.ok_or("local file insertion is disabled for this Terminal Session")
-            })
-            .map_err(PasteIntakeError::InvalidFiles)
     }
 
     pub(crate) fn prepare_dropped_files(

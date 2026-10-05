@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_failure_is_closed_and_content_free() {
+    fn settings_failure_records_classification_and_suppresses_submission() {
         let adapter = Arc::new(RecordingAdapter::default());
         let mut notifications = AttentionNotifications::new(adapter.clone());
         notifications.deliver(NotificationDelivery { aggregate_count: 1 });
