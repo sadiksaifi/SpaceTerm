@@ -963,9 +963,7 @@ impl WorkspaceManager {
             Self::report_workspace_error("pin", error);
         }
         if let Some(name) = name
-            && let Err(error) = self
-                .workspaces
-                .name_workspace_for_creation(workspace_id, name)
+            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }
@@ -1587,9 +1585,7 @@ impl WorkspaceManager {
             Self::report_workspace_error("pin", error);
         }
         if let Some(name) = self.remote_workspace_name.take()
-            && let Err(error) = self
-                .workspaces
-                .name_workspace_for_creation(workspace_id, name)
+            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }

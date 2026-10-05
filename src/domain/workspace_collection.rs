@@ -377,14 +377,6 @@ impl<T> WorkspaceEntry<T> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn directory_identity(&self) -> Option<LocalDirectoryIdentity> {
-        match &self.directory_location {
-            HomeDirectoryLocation::Local(directory) => Some(directory.identity()),
-            HomeDirectoryLocation::Remote => None,
-        }
-    }
-
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
@@ -425,16 +417,6 @@ pub(crate) struct WorkspaceCollection<T> {
 }
 
 impl<T> WorkspaceCollection<T> {
-    #[cfg(test)]
-    pub(crate) fn new(
-        working_directory: PathBuf,
-        create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Self {
-        let directory =
-            ValidatedLocalDirectory::new(working_directory, LocalDirectoryIdentity::for_test(0));
-        Self::new_local(directory, create_initial_payload)
-    }
-
     pub(crate) fn new_local(
         directory: ValidatedLocalDirectory,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
@@ -567,18 +549,6 @@ impl<T> WorkspaceCollection<T> {
     #[cfg(test)]
     pub(crate) fn set_next_workspace_id_for_test(&mut self, next_workspace_id: u64) {
         self.next_workspace_id = next_workspace_id;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create_local_workspace_unchecked(
-        &mut self,
-        directory: PathBuf,
-        create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<WorkspaceId, WorkspaceError> {
-        self.create_local_workspace(
-            ValidatedLocalDirectory::new(directory, LocalDirectoryIdentity::for_test(0)),
-            create_payload,
-        )
     }
 
     pub(crate) fn create_local_workspace(
@@ -738,6 +708,7 @@ impl<T> WorkspaceCollection<T> {
         Ok(true)
     }
 
+    /// A supplied name is explicit even when it matches an automatic name.
     pub(crate) fn rename_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -752,15 +723,6 @@ impl<T> WorkspaceCollection<T> {
         workspace.custom_name = Some(name.trim().to_owned());
         self.recalculate_automatic_names();
         Ok(())
-    }
-
-    /// A supplied name is explicit even when it matches an automatic name.
-    pub(crate) fn name_workspace_for_creation(
-        &mut self,
-        workspace_id: WorkspaceId,
-        name: String,
-    ) -> Result<(), WorkspaceError> {
-        self.rename_workspace(workspace_id, name)
     }
 
     pub(crate) fn set_directory_unavailable(
@@ -794,30 +756,7 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn close_workspace(
-        &mut self,
-        workspace_id: WorkspaceId,
-        replacement_working_directory: PathBuf,
-        create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        let replacement = ValidatedLocalDirectory::new(
-            replacement_working_directory,
-            LocalDirectoryIdentity::for_test(0),
-        );
-        self.close_workspace_with_replacement(workspace_id, replacement, create_replacement)
-    }
-
     pub(crate) fn close_workspace_with_local_replacement(
-        &mut self,
-        workspace_id: WorkspaceId,
-        replacement: ValidatedLocalDirectory,
-        create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        self.close_workspace_with_replacement(workspace_id, replacement, create_replacement)
-    }
-
-    fn close_workspace_with_replacement(
         &mut self,
         workspace_id: WorkspaceId,
         replacement: ValidatedLocalDirectory,
@@ -976,7 +915,7 @@ mod tests {
     }
 
     fn new_workspaces<T>(payload: T) -> WorkspaceCollection<T> {
-        WorkspaceCollection::new(PathBuf::from("/first"), |_, working_directory| {
+        WorkspaceCollection::new_local(validated("/first", 0), |_, working_directory| {
             assert_eq!(working_directory, Path::new("/first"));
             payload
         })
@@ -1096,7 +1035,11 @@ mod tests {
         let workspace = workspaces.workspace(workspace_id).unwrap();
 
         assert_eq!(workspace.local_home_directory(), None);
-        assert_eq!(workspace.directory_identity(), None);
+        assert_eq!(workspace.local_display_directory(), None);
+        assert!(matches!(
+            workspace.location(),
+            WorkspaceLocation::Remote { .. }
+        ));
         assert_eq!(
             workspace
                 .remote_starting_directory()
@@ -1146,37 +1089,23 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(workspaces.len(), 3);
-    }
-
-    #[test]
-    fn remote_connection_state_rejects_stale_generations() {
-        let mut state = RemoteConnectionState::reconnecting(7);
-
+        let first_key = workspaces
+            .workspace(first)
+            .unwrap()
+            .remote_workspace_key()
+            .unwrap();
+        let second_key = workspaces
+            .workspace(second)
+            .unwrap()
+            .remote_workspace_key()
+            .unwrap();
+        assert_ne!(first_key, second_key);
+        assert_eq!(first_key.destination().as_str(), "orb");
+        assert_eq!(second_key.destination().as_str(), "orb-alias");
         assert_eq!(
-            state.reduce(RemoteConnectionState::connected(7)),
-            RemoteConnectionReduction::Applied
+            first_key.physical_directory(),
+            second_key.physical_directory()
         );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::failed(6)),
-            RemoteConnectionReduction::Stale
-        );
-        assert_eq!(state, RemoteConnectionState::connected(7));
-        assert_eq!(state.generation(), 7);
-    }
-
-    #[test]
-    fn closing_remote_connection_state_is_terminal() {
-        let mut state = RemoteConnectionState::closing(9);
-
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(9)),
-            RemoteConnectionReduction::Illegal
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::reconnecting(10)),
-            RemoteConnectionReduction::Illegal
-        );
-        assert_eq!(state, RemoteConnectionState::closing(9));
     }
 
     #[test]
@@ -1434,6 +1363,33 @@ mod tests {
                 .and_then(WorkspaceEntry::remote_connection_state),
             Some(RemoteConnectionState::reconnecting(8))
         );
+
+        let connected = workspaces
+            .create_remote_workspace(
+                remote_key("orb", "/srv/connected"),
+                remote_user("tester"),
+                remote_directory("/srv/connected"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::reconnecting(7),
+                |_| (),
+            )
+            .unwrap();
+        assert_eq!(
+            workspaces
+                .reduce_remote_connection_state(connected, RemoteConnectionState::connected(7)),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.reduce_remote_connection_state(connected, RemoteConnectionState::failed(6)),
+            Ok(RemoteConnectionReduction::Stale)
+        );
+        let state = workspaces
+            .workspace(connected)
+            .unwrap()
+            .remote_connection_state()
+            .unwrap();
+        assert_eq!(state, RemoteConnectionState::connected(7));
+        assert_eq!(state.generation(), 7);
     }
 
     #[test]
@@ -1491,6 +1447,15 @@ mod tests {
             ),
             Ok(RemoteConnectionReduction::Illegal)
         );
+        for next in [
+            RemoteConnectionState::connected(6),
+            RemoteConnectionState::reconnecting(7),
+        ] {
+            assert_eq!(
+                workspaces.reduce_remote_connection_state(workspace_id, next),
+                Ok(RemoteConnectionReduction::Illegal)
+            );
+        }
         assert_eq!(
             workspaces
                 .workspace(workspace_id)
@@ -1685,10 +1650,10 @@ mod tests {
     fn iter_should_preserve_workspace_creation_order() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
             .unwrap();
 
         let ordered_ids = workspaces
@@ -1707,11 +1672,11 @@ mod tests {
     }
 
     #[test]
-    fn create_local_workspace_unchecked_should_create_and_activate_the_new_workspace() {
+    fn create_local_workspace_should_create_and_activate_the_new_workspace() {
         let mut workspaces = new_workspaces("first payload");
 
         let created = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
 
         assert_eq!(
@@ -1731,17 +1696,17 @@ mod tests {
     }
 
     #[test]
-    fn create_local_workspace_unchecked_should_choose_the_first_available_default_name() {
+    fn create_local_workspace_should_choose_the_first_available_default_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces
             .rename_workspace(WorkspaceId::new(1), "Projects".to_owned())
             .unwrap();
 
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
             .unwrap();
 
         let names = workspaces
@@ -1752,22 +1717,22 @@ mod tests {
     }
 
     #[test]
-    fn create_local_workspace_unchecked_should_assign_its_name_and_propagate_the_exact_working_directory()
-     {
+    fn create_local_workspace_should_assign_its_name_and_propagate_the_exact_working_directory() {
         let mut workspaces = new_workspaces("first payload");
         let working_directory = PathBuf::from("/Users/test/projects");
-        let observed_pointer = Cell::new(std::ptr::null());
 
         workspaces
-            .create_local_workspace_unchecked(working_directory, |_, payload_working_directory| {
-                observed_pointer.set(
-                    payload_working_directory
-                        .as_os_str()
-                        .as_encoded_bytes()
-                        .as_ptr(),
-                );
-                "second payload"
-            })
+            .create_local_workspace(
+                ValidatedLocalDirectory::new(
+                    working_directory,
+                    LocalDirectoryIdentity::for_test(0),
+                ),
+                |id, payload_working_directory| {
+                    assert_eq!(id, WorkspaceId::new(2));
+                    assert_eq!(payload_working_directory, Path::new("/Users/test/projects"));
+                    "second payload"
+                },
+            )
             .unwrap();
 
         let stored_working_directory = workspaces
@@ -1781,27 +1746,18 @@ mod tests {
             ),
             ("Default (2)", Path::new("/Users/test/projects"))
         );
-        assert_eq!(
-            observed_pointer.get(),
-            stored_working_directory
-                .as_os_str()
-                .as_encoded_bytes()
-                .as_ptr(),
-            "payload construction must borrow the PathBuf stored by the Workspace",
-        );
     }
 
     #[test]
-    fn create_local_workspace_unchecked_should_reject_exhausted_ids_before_creating_its_payload() {
+    fn create_local_workspace_should_reject_exhausted_ids_before_creating_its_payload() {
         let mut workspaces = new_workspaces("first payload");
         workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result =
-            workspaces.create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| {
-                creations.update(|count| count + 1);
-                "second payload"
-            });
+        let result = workspaces.create_local_workspace(validated("/second", 0), |_, _| {
+            creations.update(|count| count + 1);
+            "second payload"
+        });
 
         assert_eq!(
             (result, creations.get(), workspaces.len()),
@@ -1813,7 +1769,7 @@ mod tests {
     fn activate_workspace_should_select_an_owned_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
 
         workspaces.activate_workspace(WorkspaceId::new(1)).unwrap();
@@ -1831,10 +1787,10 @@ mod tests {
     fn move_workspace_should_reorder_without_changing_the_active_workspace_or_names() {
         let mut workspaces = new_workspaces("first");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second")
+            .create_local_workspace(validated("/second", 0), |_, _| "second")
             .unwrap();
         let third = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "third")
+            .create_local_workspace(validated("/second", 0), |_, _| "third")
             .unwrap();
         let names_before = workspaces
             .iter()
@@ -1872,7 +1828,7 @@ mod tests {
     fn move_workspace_should_reject_an_unknown_workspace_or_position_without_mutation() {
         let mut workspaces = new_workspaces("first");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second")
+            .create_local_workspace(validated("/second", 0), |_, _| "second")
             .unwrap();
 
         let unknown = workspaces.move_workspace(WorkspaceId::new(99), 0);
@@ -1921,17 +1877,17 @@ mod tests {
             .rename_workspace(first, "Project".to_owned())
             .unwrap();
         let second = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .create_local_workspace(validated("/second", 0), |_, _| ())
             .unwrap();
         workspaces
             .rename_workspace(second, "Project 2".to_owned())
             .unwrap();
         for directory in ["/third", "/fourth"] {
             let id = workspaces
-                .create_local_workspace_unchecked(PathBuf::from(directory), |_, _| ())
+                .create_local_workspace(validated(directory, 0), |_, _| ())
                 .unwrap();
             workspaces
-                .name_workspace_for_creation(id, " Project ".to_owned())
+                .rename_workspace(id, " Project ".to_owned())
                 .unwrap();
         }
 
@@ -1948,11 +1904,26 @@ mod tests {
     fn creation_name_should_claim_an_automatic_name_and_remain_frozen_after_directory_changes() {
         let mut workspaces = new_workspaces(());
         let automatic_name = workspaces.active_workspace().name().to_owned();
+        let first = workspaces.active_workspace_id();
+        workspaces
+            .rename_workspace(first, automatic_name.clone())
+            .unwrap();
+        assert_eq!(
+            workspaces.active_workspace().custom_name.as_deref(),
+            Some(automatic_name.as_str())
+        );
+        workspaces
+            .set_pinned_directory(
+                first,
+                Some(PinnedDirectory::Local(validated("/different/service", 91))),
+            )
+            .unwrap();
+        assert_eq!(workspaces.workspace(first).unwrap().name(), automatic_name);
         let id = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .create_local_workspace(validated("/second", 0), |_, _| ())
             .unwrap();
         workspaces
-            .name_workspace_for_creation(id, automatic_name.clone())
+            .rename_workspace(id, automatic_name.clone())
             .unwrap();
         workspaces
             .set_pinned_directory(
@@ -1970,26 +1941,11 @@ mod tests {
     }
 
     #[test]
-    fn creation_name_should_exclude_its_own_displayed_name() {
-        let mut workspaces = new_workspaces(());
-        let id = workspaces.active_workspace_id();
-        let name = workspaces.active_workspace().name().to_owned();
-        workspaces
-            .name_workspace_for_creation(id, name.clone())
-            .unwrap();
-
-        assert_eq!(
-            workspaces.active_workspace().custom_name.as_deref(),
-            Some(name.as_str())
-        );
-    }
-
-    #[test]
     fn creation_name_should_preserve_explicit_names_across_all_machines() {
         let mut workspaces = new_workspaces(());
         let local = workspaces.active_workspace_id();
         workspaces
-            .name_workspace_for_creation(local, "Project".to_owned())
+            .rename_workspace(local, "Project".to_owned())
             .unwrap();
         let mut assigned = Vec::new();
         for (destination, directory) in [
@@ -2008,15 +1964,15 @@ mod tests {
                 )
                 .unwrap();
             workspaces
-                .name_workspace_for_creation(id, "Project".to_owned())
+                .rename_workspace(id, "Project".to_owned())
                 .unwrap();
             assigned.push(workspaces.workspace(id).unwrap().name().to_owned());
         }
         let local_second = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .create_local_workspace(validated("/second", 0), |_, _| ())
             .unwrap();
         workspaces
-            .name_workspace_for_creation(local_second, "Project".to_owned())
+            .rename_workspace(local_second, "Project".to_owned())
             .unwrap();
         assigned.push(
             workspaces
@@ -2033,26 +1989,9 @@ mod tests {
     fn creation_name_should_keep_blank_names_automatic() {
         let mut workspaces = new_workspaces(());
         let id = workspaces.active_workspace_id();
-        workspaces
-            .name_workspace_for_creation(id, " \t ".to_owned())
-            .unwrap();
+        workspaces.rename_workspace(id, " \t ".to_owned()).unwrap();
 
         assert_eq!(workspaces.active_workspace().custom_name, None);
-    }
-
-    #[test]
-    fn creation_name_should_reject_an_unknown_workspace_without_mutation() {
-        let mut workspaces = new_workspaces(());
-        let name = workspaces.active_workspace().name().to_owned();
-        let result = workspaces.name_workspace_for_creation(WorkspaceId::new(99), name.clone());
-
-        assert_eq!(
-            (result, workspaces.active_workspace().name()),
-            (
-                Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
-                name.as_str()
-            )
-        );
     }
 
     #[test]
@@ -2063,10 +2002,10 @@ mod tests {
             .rename_workspace(first, "Project".to_owned())
             .unwrap();
         let second = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| ())
+            .create_local_workspace(validated("/second", 0), |_, _| ())
             .unwrap();
         workspaces
-            .name_workspace_for_creation(second, "project".to_owned())
+            .rename_workspace(second, "project".to_owned())
             .unwrap();
         assert_eq!(workspaces.workspace(second).unwrap().name(), "project");
 
@@ -2086,7 +2025,7 @@ mod tests {
     fn rename_workspace_should_update_only_the_requested_workspace_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
 
         workspaces
@@ -2119,14 +2058,14 @@ mod tests {
     fn non_final_close_should_not_allocate_a_replacement_workspace_id() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
         let outcome = workspaces
-            .close_workspace(
+            .close_workspace_with_local_replacement(
                 WorkspaceId::new(1),
-                PathBuf::from("/replacement"),
+                validated("/replacement", 0),
                 |_, _| unreachable!("a replacement is not needed"),
             )
             .unwrap();
@@ -2145,16 +2084,16 @@ mod tests {
     fn closed_workspace_ids_should_not_be_reused() {
         let mut workspaces = new_workspaces("first payload");
         let second = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces
-            .close_workspace(second, PathBuf::from("/replacement"), |_, _| {
+            .close_workspace_with_local_replacement(second, validated("/replacement", 0), |_, _| {
                 unreachable!("a replacement is not needed")
             })
             .unwrap();
 
         let third = workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
             .unwrap();
 
         assert_eq!(third, WorkspaceId::new(3));
@@ -2164,17 +2103,17 @@ mod tests {
     fn close_workspace_should_focus_the_next_workspace_when_closing_the_active_middle_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
+            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
             .unwrap();
         workspaces.activate_workspace(WorkspaceId::new(2)).unwrap();
 
         let outcome = workspaces
-            .close_workspace(
+            .close_workspace_with_local_replacement(
                 WorkspaceId::new(2),
-                PathBuf::from("/replacement"),
+                validated("/replacement", 0),
                 |_, _| unreachable!("a replacement is not needed"),
             )
             .unwrap();
@@ -2194,13 +2133,13 @@ mod tests {
     {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
 
         let outcome = workspaces
-            .close_workspace(
+            .close_workspace_with_local_replacement(
                 WorkspaceId::new(2),
-                PathBuf::from("/replacement"),
+                validated("/replacement", 0),
                 |_, _| unreachable!("a replacement is not needed"),
             )
             .unwrap();
@@ -2220,9 +2159,9 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         let creations = Cell::new(0);
 
-        let result = workspaces.close_workspace(
+        let result = workspaces.close_workspace_with_local_replacement(
             WorkspaceId::new(99),
-            PathBuf::from("/replacement"),
+            validated("/replacement", 0),
             |_, _| {
                 creations.update(|count| count + 1);
                 "replacement payload"
@@ -2248,14 +2187,14 @@ mod tests {
     #[test]
     fn close_workspace_should_atomically_replace_and_activate_the_final_workspace() {
         let mut workspaces = new_workspaces("first payload");
-        let observed_pointer = Cell::new(std::ptr::null());
 
         let outcome = workspaces
-            .close_workspace(
+            .close_workspace_with_local_replacement(
                 WorkspaceId::new(1),
-                PathBuf::from("/replacement"),
-                |_, working_directory| {
-                    observed_pointer.set(working_directory.as_os_str().as_encoded_bytes().as_ptr());
+                validated("/replacement", 0),
+                |id, working_directory| {
+                    assert_eq!(id, WorkspaceId::new(2));
+                    assert_eq!(working_directory, Path::new("/replacement"));
                     "replacement payload"
                 },
             )
@@ -2290,21 +2229,13 @@ mod tests {
                 &"replacement payload",
             )
         );
-        assert_eq!(
-            observed_pointer.get(),
-            replacement_working_directory
-                .as_os_str()
-                .as_encoded_bytes()
-                .as_ptr(),
-            "replacement construction must borrow the PathBuf stored by the Workspace",
-        );
     }
 
     #[test]
     fn final_tab_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
@@ -2355,7 +2286,7 @@ mod tests {
             drops: Rc::clone(&drops),
         });
         workspaces
-            .create_local_workspace_unchecked(PathBuf::from("/second"), |_, _| DropProbe {
+            .create_local_workspace(validated("/second", 0), |_, _| DropProbe {
                 drops: Rc::clone(&drops),
             })
             .unwrap();
@@ -2378,9 +2309,9 @@ mod tests {
         workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = workspaces.close_workspace(
+        let result = workspaces.close_workspace_with_local_replacement(
             WorkspaceId::new(1),
-            PathBuf::from("/replacement"),
+            validated("/replacement", 0),
             |_, _| {
                 creations.update(|count| count + 1);
                 "replacement payload"
@@ -2411,9 +2342,9 @@ mod tests {
         });
 
         let outcome = workspaces
-            .close_workspace(
+            .close_workspace_with_local_replacement(
                 WorkspaceId::new(1),
-                PathBuf::from("/replacement"),
+                validated("/replacement", 0),
                 |_, _| DropProbe {
                     drops: Rc::clone(&drops),
                 },

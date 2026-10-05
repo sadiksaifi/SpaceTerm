@@ -1305,13 +1305,26 @@ mod runtime_tests {
     }
     #[test]
     fn invalid_composition_has_only_closed_failure_classification() {
-        let mut parts = parts(Rc::default(), Rc::default());
-        parts.home_directory = "sensitive-relative-value".into();
-        let error = HostComposition::new(parts).err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "desktop policy and capabilities disagree"
-        );
+        let mut invalid_directory = parts(Rc::default(), Rc::default());
+        invalid_directory.home_directory = "sensitive-relative-value".into();
+        let mut invalid_titlebar = parts(Rc::default(), Rc::default());
+        invalid_titlebar.window_chrome =
+            crate::platform::window_chrome::WindowChrome::native(Some(gpui::TitlebarOptions {
+                traffic_light_position: Some(gpui::point(gpui::px(1.0), gpui::px(1.0))),
+                appears_transparent: false,
+                ..gpui::TitlebarOptions::default()
+            }));
+        for parts in [invalid_directory, invalid_titlebar] {
+            let error = HostComposition::new(parts).err().unwrap();
+            assert_eq!(
+                error,
+                crate::desktop_profile::DesktopProfileError::InvalidCombination
+            );
+            assert_eq!(
+                error.to_string(),
+                "desktop policy and capabilities disagree"
+            );
+        }
     }
     #[gpui::test]
     fn runtime_registers_once_and_installs_distinct_exact_window_endpoints(
@@ -1413,6 +1426,7 @@ mod runtime_tests {
         });
         cx.run_until_parked();
 
+        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
         cx.update(|cx| cx.dispatch_action(&NewWorkspace));
         cx.run_until_parked();
 
@@ -1429,27 +1443,6 @@ mod runtime_tests {
             ),
             (1, 2, vec!["register", "install", "install"])
         );
-    }
-
-    #[gpui::test]
-    fn new_workspace_menu_actions_should_remain_available_when_headless(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let host = Rc::new(HostComposition::new(parts(Rc::default(), Rc::default())).unwrap());
-        let original = cx.update(|cx| {
-            let original = start_application(cx, &host).unwrap();
-            install_headless_window_actions(cx, Rc::clone(&host));
-            original
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            original
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-
-        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
     }
 
     #[gpui::test]
@@ -1591,6 +1584,7 @@ mod runtime_tests {
 
     #[gpui::test]
     fn settings_recovery_can_be_declined_without_changing_the_file(cx: &mut gpui::TestAppContext) {
+        use crate::settings::storage::SettingsStorage as _;
         let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
@@ -1602,6 +1596,11 @@ mod runtime_tests {
 
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         assert_eq!(storage.backup(), None);
+        assert_eq!(
+            storage.read().unwrap().unwrap().bytes,
+            crate::ui::settings_window::test_support::CORRUPT_DOCUMENT
+        );
+        assert_eq!(storage.writes(), 0);
         let status = cx.update(|_, cx| {
             cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
                 .settings
@@ -2048,7 +2047,11 @@ mod runtime_tests {
 
     #[gpui::test]
     fn a_settings_only_window_leaves_application_quit_unblocked(cx: &mut gpui::TestAppContext) {
-        let host = host_with_settings();
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
@@ -2058,6 +2061,7 @@ mod runtime_tests {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0);
 
         cx.update(|cx| {
             workspace
@@ -2069,9 +2073,16 @@ mod runtime_tests {
         // Only Settings remains. A window that presents no Workspace has no work to confirm, so
         // quit must proceed rather than wait on it.
         assert_eq!(cx.update(|cx| cx.windows().len()), 1);
-        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        // TestAppContext does not deliver another App action with only Settings open. The native
+        // adapter invokes the same installed quit coordinator and records its deferred decision.
+        assert_eq!(
+            quit.simulate_native_request(),
+            ApplicationQuitDecision::Cancel
+        );
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.requests(), 2);
+        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]
@@ -2166,7 +2177,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn application_quit_checks_inactive_windows_and_discards_removed_roots(
+    fn application_quit_counts_inactive_windows_and_discards_removed_roots(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
