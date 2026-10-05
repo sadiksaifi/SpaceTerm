@@ -4152,8 +4152,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn renderer_should_reach_selected_hovered_row_paint() {
+    #[gpui::test]
+    fn renderer_should_reach_selected_hovered_row_paint(cx: &mut TestAppContext) {
         let normal = row_paint(10);
         let hovered = row_paint(20);
         let selected = row_paint(30);
@@ -4172,6 +4172,52 @@ mod tests {
             resolve_row_paint(Some(rows), true, true, true, true),
             Some(selected_hovered)
         );
+
+        let (_root, _events, cx) = menu_window(cx);
+        let mut theme = test_theme();
+        theme.paint = theme.paint.rows(rows);
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("menu-trigger")
+            .expect("mounted menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let row = cx.debug_bounds("open-entry").expect("mounted selected row");
+        let assert_row_paint = |expected: crate::ListRowPaint,
+                                row: Bounds<Pixels>,
+                                cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                let background = quads
+                    .iter()
+                    .filter(|quad| quad.background == gpui::Background::from(expected.background))
+                    .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                    .reduce(|bounds, next| bounds.union(&next));
+                let border = quads
+                    .iter()
+                    .filter(|quad| quad.border_color == expected.border.into())
+                    .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                    .reduce(|bounds, next| bounds.union(&next));
+                let painted_row = Some(row.scale(window.scale_factor()));
+                assert_eq!(
+                    background, painted_row,
+                    "the mounted row must paint the authored background"
+                );
+                assert_eq!(
+                    border, painted_row,
+                    "the mounted row must paint the authored border"
+                );
+            });
+        };
+        assert_row_paint(selected, row, cx);
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_row_paint(selected_hovered, row, cx);
     }
 
     #[test]
