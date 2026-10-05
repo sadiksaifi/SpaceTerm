@@ -307,6 +307,14 @@ flag "--features <features>" help="Upstream VT feature selection" default="all"
 '''
 run = "zig build --build-file {{usage.source | quote}}/build.zig -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline -Doptimize=Debug -Dvt-features={{usage.features | quote}}"
 
+[tasks."engine:upstream:test"]
+description = "Run upstream native VT tests in a prepared Ghostty source copy"
+usage = '''
+arg "<source>" help="Prepared Ghostty source directory"
+flag "--filter <filter>" help="Run Zig tests whose names contain this text"
+'''
+run = "cd {{usage.source | quote}} && zig build test-lib-vt -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none -Dcpu=baseline{% if usage.filter %} -Dtest-filter={{usage.filter | quote}}{% endif %}"
+
 [tasks."artifacts:sweep"]
 description = "Remove Cargo build artifacts unused for 14 days"
 run = "cargo sweep --time 14"
