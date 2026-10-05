@@ -365,17 +365,23 @@ mod tests {
     }
 
     #[test]
-    fn preflight_bundle_template_should_differ_from_production_only_by_identity() {
+    fn preflight_bundle_template_should_differ_from_production_only_by_identity_and_updates() {
+        // Only release packages use the production template, and only they carry Sparkle (ADR 0009).
         let without_identity = |plist| {
             plist_entries(plist)
                 .into_iter()
-                .filter(|(key, _)| !IDENTITY_KEYS.contains(key))
+                .filter(|(key, _)| !IDENTITY_KEYS.contains(key) && !key.starts_with("SU"))
                 .collect::<Vec<_>>()
         };
 
         assert_eq!(
             without_identity(PREFLIGHT_INFO_PLIST),
             without_identity(PRODUCTION_INFO_PLIST)
+        );
+        assert!(
+            plist_entries(PREFLIGHT_INFO_PLIST)
+                .iter()
+                .all(|(key, _)| !key.starts_with("SU"))
         );
     }
 }

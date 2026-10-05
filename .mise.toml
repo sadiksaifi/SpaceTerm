@@ -112,7 +112,7 @@ description = "Download locked Rust dependencies"
 run = "cargo fetch --locked"
 
 [tasks."setup:skills"]
-description = "Install the agent skills pinned in skills-lock.json"
+description = "Install the agent skills listed in skills-lock.json"
 env = { DISABLE_TELEMETRY = "1" }
 run = "skills experimental_install"
 
