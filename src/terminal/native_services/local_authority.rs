@@ -15,11 +15,14 @@ impl LocalFileAccess {
         capabilities.are_enabled().then_some(Self(()))
     }
 
-    pub(super) fn clipboard(
+    pub(super) async fn clipboard<Read>(
         self,
-        clipboard: impl FnOnce() -> Result<Vec<PathBuf>, ClipboardError>,
-    ) -> Result<Vec<PathBuf>, ClipboardError> {
-        clipboard()
+        clipboard: impl FnOnce() -> Read,
+    ) -> Result<Vec<PathBuf>, ClipboardError>
+    where
+        Read: Future<Output = Result<Vec<PathBuf>, ClipboardError>>,
+    {
+        clipboard().await
     }
 
     pub(super) fn insertion(

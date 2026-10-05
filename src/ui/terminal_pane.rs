@@ -441,22 +441,21 @@ impl PaneSessionLifecycle {
         let clipboard_receiver = started.clipboard;
         self._clipboard_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(request) = clipboard_receiver.recv().await {
-                if cx
-                    .update_window(window_handle, |_, window, cx| {
-                        this.update(cx, |pane, cx| {
-                            let focused = pane.terminal_session.session_epoch == session_epoch
-                                && pane.synchronize_terminal_input_focus(window, cx);
-                            let preferences = cx
-                                .try_global::<super::appearance_runtime::AppearanceRuntime>()
-                                .map(|runtime| runtime.settings.snapshot().candidate.clipboard)
-                                .unwrap_or_default();
-                            request.perform(preferences, pane.text_clipboard.as_ref(), focused, cx);
-                        })
+                let Ok(Ok(performed)) = cx.update_window(window_handle, |_, window, cx| {
+                    this.update(cx, |pane, cx| {
+                        let focused = pane.terminal_session.session_epoch == session_epoch
+                            && pane.synchronize_terminal_input_focus(window, cx);
+                        let preferences = cx
+                            .try_global::<super::appearance_runtime::AppearanceRuntime>()
+                            .map(|runtime| runtime.settings.snapshot().candidate.clipboard)
+                            .unwrap_or_default();
+                        request.perform(preferences, pane.text_clipboard.as_ref(), focused, cx)
                     })
-                    .is_err()
-                {
+                }) else {
                     break;
-                }
+                };
+                // Replies stay in request order; a read is bounded by its request deadline.
+                performed.await;
             }
         }));
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -628,6 +627,9 @@ pub(crate) struct TerminalPane {
     marked_revision: u64,
     delivered_key_presses: DeliveredKeyPresses,
     pending_file_insertion: Option<PastePayload>,
+    /// The newest Paste whose Clipboard or PRIMARY read has not completed. Replacing or dropping it
+    /// discards that read.
+    pending_paste_read: Option<Task<()>>,
     pending_paste: Option<PasteConfirmation>,
     /// Permissions a Permission Request asked for that the person has not answered. The Pane
     /// keeps them while granted, so it offers a setup again if a grant is later withdrawn.
@@ -928,6 +930,7 @@ impl TerminalPane {
             marked_revision: 0,
             delivered_key_presses: DeliveredKeyPresses::default(),
             pending_file_insertion: None,
+            pending_paste_read: None,
             pending_paste: None,
             requested_permissions: Vec::new(),
             permission_request: Vec::new(),
@@ -3041,31 +3044,53 @@ impl TerminalPane {
     /// Pastes the PRIMARY selection through the same confirmation and bracketed paste as the
     /// Clipboard, for both middle-click and Paste Selection.
     fn paste_primary_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self
-            .primary_selection
-            .as_ref()
-            .and_then(|primary| primary.read(cx))
-            && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
-            && !payload.text().is_empty()
-        {
-            self.request_paste_text(payload, cx);
-        }
+        let Some(primary) = &self.primary_selection else {
+            return;
+        };
+        let read = primary.read(cx);
+        let guard = self.paste_request_guard();
+        self.pending_paste_read = Some(cx.spawn(async move |this, cx| {
+            let Ok(Some(text)) = read.await else {
+                return;
+            };
+            let _ = this.update(cx, |pane, cx| {
+                if pane.paste_request_guard_is_current(guard)
+                    && let Ok(payload) = PastePayload::service_text(text, pane.terminal_input_focus)
+                    && !payload.text().is_empty()
+                {
+                    pane.request_paste_text(payload, cx);
+                }
+            });
+        }));
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
-        let Ok(Some(insertion)) = PastePayload::clipboard(
-            self.file_insertion,
-            || self.file_clipboard.read_files(cx),
-            || cx.read_from_clipboard().and_then(|item| item.text()),
-            terminal_input_focused,
-            self.terminal_session.local_file_capabilities,
-        ) else {
-            return;
-        };
-        if !insertion.text().is_empty() {
-            self.request_paste_text(insertion, cx);
-        }
+        let guard = self.paste_request_guard();
+        let policy = self.file_insertion;
+        let local = self.terminal_session.local_file_capabilities;
+        let files = self.file_clipboard.clone();
+        self.pending_paste_read = Some(cx.spawn(async move |this, cx| {
+            let Ok(Some(insertion)) = PastePayload::clipboard(
+                policy,
+                || cx.update(|cx| files.read_files(cx)),
+                || {
+                    let read = cx.update(|cx| cx.read_from_clipboard_async());
+                    async move { read.await.ok().flatten().and_then(|item| item.text()) }
+                },
+                terminal_input_focused,
+                local,
+            )
+            .await
+            else {
+                return;
+            };
+            let _ = this.update(cx, |pane, cx| {
+                if pane.paste_request_guard_is_current(guard) && !insertion.text().is_empty() {
+                    pane.request_paste_text(insertion, cx);
+                }
+            });
+        }));
     }
 
     #[cfg_attr(

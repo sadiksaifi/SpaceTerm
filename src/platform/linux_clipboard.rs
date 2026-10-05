@@ -2,12 +2,14 @@
 use super::linux_appearance::LinuxAppearancePlatform;
 use crate::terminal::SelectionCopy;
 use crate::terminal::native_services::clipboard::{
-    ClipboardError, FileClipboard, PrimarySelection, SelectionClipboard, TextClipboard,
-    TextClipboardTarget,
+    ClipboardError, ClipboardRead, FileClipboard, PrimarySelection, SelectionClipboard,
+    TextClipboard, TextClipboardTarget,
 };
 use crate::terminal::native_services::file_insertion::{MAX_FILE_INSERTION_BYTES, MAX_FILE_ITEMS};
 use crate::terminal::osc52::{MAX_OSC52_CONTENT_BYTES, Osc52Target};
-use gpui::{App, ClipboardEntry, ClipboardItem, ClipboardSelection, ClipboardString};
+use gpui::{
+    App, ClipboardEntry, ClipboardItem, ClipboardReadError, ClipboardSelection, ClipboardString,
+};
 use std::{path::PathBuf, rc::Rc};
 
 /// OSC 52 reaches the selected native text buffer after the Session checks focus and policy.
@@ -21,12 +23,9 @@ impl TextClipboard for LinuxTextClipboard {
         }
     }
 
-    fn read(
-        &self,
-        target: TextClipboardTarget,
-        cx: &mut App,
-    ) -> Result<Option<String>, ClipboardError> {
-        Ok(cx.read_selection_text(native_target(target), MAX_OSC52_CONTENT_BYTES))
+    fn read(&self, target: TextClipboardTarget, cx: &mut App) -> ClipboardRead<Option<String>> {
+        let read = cx.read_selection_text(native_target(target), MAX_OSC52_CONTENT_BYTES);
+        Box::pin(async move { read.await.map_err(text_read_error) })
     }
 
     fn write(
@@ -40,6 +39,18 @@ impl TextClipboard for LinuxTextClipboard {
             ClipboardItem::new_string(text.to_owned()),
         )
         .map_err(|gpui::ClipboardWriteError::Unavailable| ClipboardError::Unavailable)
+    }
+}
+
+/// Keeps a native text read failure's classification and none of its detail.
+fn text_read_error(error: ClipboardReadError) -> ClipboardError {
+    match error {
+        ClipboardReadError::TooLarge | ClipboardReadError::UnsupportedContent => {
+            ClipboardError::InvalidText
+        }
+        ClipboardReadError::Unavailable
+        | ClipboardReadError::Denied(_)
+        | ClipboardReadError::TimedOut => ClipboardError::Unavailable,
     }
 }
 
@@ -67,28 +78,36 @@ impl SelectionClipboard for LinuxSelectionClipboard {
 }
 pub(super) struct LinuxFileClipboard;
 impl FileClipboard for LinuxFileClipboard {
-    fn read_files(&self, cx: &App) -> Result<Vec<PathBuf>, ClipboardError> {
-        let Some(item) = cx.read_from_clipboard() else {
-            return Ok(Vec::new());
-        };
-        let mut result = Vec::new();
-        let mut bytes = 0usize;
-        for entry in item.entries() {
-            if let ClipboardEntry::ExternalPaths(paths) = entry {
-                for path in paths.paths() {
-                    bytes = bytes.saturating_add(path.as_os_str().len());
-                    if result.len() >= MAX_FILE_ITEMS
-                        || bytes > MAX_FILE_INSERTION_BYTES
-                        || !path.is_absolute()
-                    {
-                        return Err(ClipboardError::InvalidFiles);
-                    }
-                    result.push(path.clone());
+    fn read_files(&self, cx: &mut App) -> ClipboardRead<Vec<PathBuf>> {
+        let read = cx.read_from_clipboard_async();
+        Box::pin(async move {
+            match read.await {
+                Ok(Some(item)) => clipboard_files(&item),
+                Ok(None) => Ok(Vec::new()),
+                Err(_) => Err(ClipboardError::Unavailable),
+            }
+        })
+    }
+}
+
+fn clipboard_files(item: &ClipboardItem) -> Result<Vec<PathBuf>, ClipboardError> {
+    let mut result = Vec::new();
+    let mut bytes = 0usize;
+    for entry in item.entries() {
+        if let ClipboardEntry::ExternalPaths(paths) = entry {
+            for path in paths.paths() {
+                bytes = bytes.saturating_add(path.as_os_str().len());
+                if result.len() >= MAX_FILE_ITEMS
+                    || bytes > MAX_FILE_INSERTION_BYTES
+                    || !path.is_absolute()
+                {
+                    return Err(ClipboardError::InvalidFiles);
                 }
+                result.push(path.clone());
             }
         }
-        Ok(result)
     }
+    Ok(result)
 }
 pub(super) struct LinuxPrimarySelection(pub(super) Rc<LinuxAppearancePlatform>);
 impl PrimarySelection for LinuxPrimarySelection {
@@ -97,16 +116,26 @@ impl PrimarySelection for LinuxPrimarySelection {
             cx.write_to_primary(selection_item(copy));
         }
     }
-    fn read(&self, cx: &App) -> Option<String> {
-        self.0
-            .primary_enabled()
-            .then(|| cx.read_from_primary().and_then(|item| item.text()))
-            .flatten()
+    fn read(&self, cx: &mut App) -> ClipboardRead<Option<String>> {
+        if !self.0.primary_enabled() {
+            return Box::pin(std::future::ready(Ok(None)));
+        }
+        let read = cx.read_from_primary_async();
+        Box::pin(async move {
+            read.await
+                .map(|item| item.and_then(|item| item.text()))
+                .map_err(text_read_error)
+        })
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The test platform answers at once, so each read completes on its first poll.
+    fn read(target: TextClipboardTarget, cx: &mut App) -> Result<Option<String>, ClipboardError> {
+        pollster::block_on(LinuxTextClipboard.read(target, cx))
+    }
 
     #[gpui::test]
     fn linux_osc52_targets_preserve_independent_selections(cx: &mut gpui::TestAppContext) {
@@ -128,25 +157,21 @@ mod tests {
                         ("primary", ClipboardSelection::Clipboard)
                     }
                 };
-                assert_eq!(
-                    LinuxTextClipboard.read(selection, cx),
-                    Ok(Some(expected.into()))
-                );
+                assert_eq!(read(selection, cx), Ok(Some(expected.into())));
                 LinuxTextClipboard
                     .write(selection, "replacement", cx)
                     .unwrap();
+                assert_eq!(read(selection, cx), Ok(Some("replacement".into())));
                 assert_eq!(
-                    LinuxTextClipboard.read(selection, cx),
-                    Ok(Some("replacement".into()))
-                );
-                assert_eq!(
-                    cx.read_selection_text(other, MAX_OSC52_CONTENT_BYTES)
-                        .as_deref(),
-                    Some(if expected == "primary" {
-                        "clipboard"
-                    } else {
-                        "primary"
-                    })
+                    pollster::block_on(cx.read_selection_text(other, MAX_OSC52_CONTENT_BYTES)),
+                    Ok(Some(
+                        if expected == "primary" {
+                            "clipboard"
+                        } else {
+                            "primary"
+                        }
+                        .to_owned()
+                    ))
                 );
             }
         });
@@ -165,23 +190,20 @@ mod tests {
                     },
                 )
                 .unwrap();
-                assert_eq!(LinuxTextClipboard.read(target, cx), Ok(None));
+                assert_eq!(read(target, cx), Ok(None));
                 cx.try_write_selection(
                     native_target(target),
                     ClipboardItem::new_string("a\r\né".into()),
                 )
                 .unwrap();
-                assert_eq!(
-                    LinuxTextClipboard.read(target, cx),
-                    Ok(Some("a\r\né".into()))
-                );
+                assert_eq!(read(target, cx), Ok(Some("a\r\né".into())));
                 cx.try_write_selection(
                     native_target(target),
                     ClipboardItem::new_string("x".repeat(MAX_OSC52_CONTENT_BYTES)),
                 )
                 .unwrap();
                 assert_eq!(
-                    LinuxTextClipboard.read(target, cx).unwrap().unwrap().len(),
+                    read(target, cx).unwrap().unwrap().len(),
                     MAX_OSC52_CONTENT_BYTES
                 );
                 cx.try_write_selection(
@@ -189,7 +211,7 @@ mod tests {
                     ClipboardItem::new_string("x".repeat(MAX_OSC52_CONTENT_BYTES + 1)),
                 )
                 .unwrap();
-                assert_eq!(LinuxTextClipboard.read(target, cx), Ok(None));
+                assert_eq!(read(target, cx), Err(ClipboardError::InvalidText));
             }
         });
     }
@@ -197,22 +219,19 @@ mod tests {
     #[gpui::test]
     fn linux_text_clipboard_reads_and_replaces_system_text(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            assert_eq!(
-                LinuxTextClipboard.read(TextClipboardTarget::Clipboard, cx),
-                Ok(None)
-            );
+            assert_eq!(read(TextClipboardTarget::Clipboard, cx), Ok(None));
             LinuxTextClipboard
                 .write(TextClipboardTarget::Clipboard, "first", cx)
                 .unwrap();
             assert_eq!(
-                LinuxTextClipboard.read(TextClipboardTarget::Clipboard, cx),
+                read(TextClipboardTarget::Clipboard, cx),
                 Ok(Some("first".into()))
             );
             LinuxTextClipboard
                 .write(TextClipboardTarget::Clipboard, "replacement", cx)
                 .unwrap();
             assert_eq!(
-                LinuxTextClipboard.read(TextClipboardTarget::Clipboard, cx),
+                read(TextClipboardTarget::Clipboard, cx),
                 Ok(Some("replacement".into()))
             );
         });
@@ -248,16 +267,35 @@ mod tests {
                 gpui::ExternalPaths(smallvec::smallvec!["/a b".into(), "/c".into()]),
             )));
             assert_eq!(
-                LinuxFileClipboard.read_files(cx).unwrap(),
+                pollster::block_on(LinuxFileClipboard.read_files(cx)).unwrap(),
                 [PathBuf::from("/a b"), PathBuf::from("/c")]
             );
             cx.write_to_clipboard(ClipboardItem::from(ClipboardEntry::ExternalPaths(
                 gpui::ExternalPaths(vec!["/x".into(); MAX_FILE_ITEMS + 1].into()),
             )));
             assert_eq!(
-                LinuxFileClipboard.read_files(cx),
+                pollster::block_on(LinuxFileClipboard.read_files(cx)),
                 Err(ClipboardError::InvalidFiles)
             );
         });
+    }
+
+    #[test]
+    fn native_text_read_failures_keep_only_their_classification() {
+        for (error, expected) in [
+            (ClipboardReadError::TooLarge, ClipboardError::InvalidText),
+            (
+                ClipboardReadError::UnsupportedContent,
+                ClipboardError::InvalidText,
+            ),
+            (ClipboardReadError::TimedOut, ClipboardError::Unavailable),
+            (ClipboardReadError::Unavailable, ClipboardError::Unavailable),
+            (
+                ClipboardReadError::Denied("detail".into()),
+                ClipboardError::Unavailable,
+            ),
+        ] {
+            assert_eq!(text_read_error(error), expected);
+        }
     }
 }

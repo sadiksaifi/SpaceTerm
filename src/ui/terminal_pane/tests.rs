@@ -12,6 +12,7 @@ use gpui::{
 use super::*;
 use crate::appearance::{Color, TerminalColors};
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::terminal::native_services::clipboard::ClipboardRead;
 use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -7594,8 +7595,8 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
         fn publish(&self, copy: &SelectionCopy, _: &mut App) {
             *self.0.borrow_mut() = Some(copy.plain_text.clone());
         }
-        fn read(&self, _: &App) -> Option<String> {
-            self.0.borrow().clone()
+        fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
+            Box::pin(std::future::ready(Ok(self.0.borrow().clone())))
         }
     }
     let primary = Rc::new(std::cell::RefCell::new(None));
@@ -7659,8 +7660,8 @@ fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
     struct Primary;
     impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
         fn publish(&self, _: &SelectionCopy, _: &mut App) {}
-        fn read(&self, _: &App) -> Option<String> {
-            Some("primary selection".into())
+        fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
+            Box::pin(std::future::ready(Ok(Some("primary selection".into()))))
         }
     }
     let (pane, cx, records) = terminal_pane_with_selection_copy(
@@ -7708,8 +7709,8 @@ fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_i
     struct Primary;
     impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
         fn publish(&self, _: &SelectionCopy, _: &mut App) {}
-        fn read(&self, _: &App) -> Option<String> {
-            Some("primary selection".into())
+        fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
+            Box::pin(std::future::ready(Ok(Some("primary selection".into()))))
         }
     }
     let (pane, cx, records) = terminal_pane_with_selection_copy(
@@ -7753,6 +7754,114 @@ fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_i
         pane.shift_selection = ShiftSelectionPolicy::ReportToApplication
     });
     assert_eq!(shift_middle_click(cx), (false, true));
+}
+
+/// A PRIMARY owner that answers only when the test sends its contents.
+struct SlowPrimary(async_channel::Receiver<String>);
+
+impl crate::terminal::native_services::clipboard::PrimarySelection for SlowPrimary {
+    fn publish(&self, _: &SelectionCopy, _: &mut App) {}
+    fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
+        let answer = self.0.clone();
+        Box::pin(async move { Ok(answer.recv().await.ok()) })
+    }
+}
+
+fn terminal_pane_with_slow_primary(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+    TestTerminalSessionRecords,
+    async_channel::Sender<String>,
+) {
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "unused".into(),
+            html: None,
+        },
+    );
+    let (owner, answer) = async_channel::unbounded();
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(SlowPrimary(answer)));
+    });
+    (pane, cx, records, owner)
+}
+
+fn requested_pastes(records: &TestTerminalSessionRecords) -> Vec<RecordedSessionCommand> {
+    records
+        .commands()
+        .into_iter()
+        .map(|record| record.command)
+        .filter(|command| matches!(command, RecordedSessionCommand::RequestPaste(_)))
+        .collect()
+}
+
+#[gpui::test]
+fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answered(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+
+    cx.dispatch_action(crate::ui::PasteSelection);
+    cx.run_until_parked();
+    assert_eq!(requested_pastes(&records), []);
+    assert!(pane.read_with(cx, |pane, _| pane.pending_paste_read.is_some()));
+
+    owner.send_blocking("primary selection".into()).unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        requested_pastes(&records),
+        [RecordedSessionCommand::RequestPaste(
+            "primary selection".into()
+        )]
+    );
+}
+
+#[gpui::test]
+fn paste_reads_completing_after_focus_moved_or_the_session_closed_are_discarded(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+
+    cx.dispatch_action(crate::ui::PasteSelection);
+    cx.run_until_parked();
+    pane.update(cx, |pane, _| pane.advance_native_service_focus_epoch());
+    owner.send_blocking("after focus moved".into()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(requested_pastes(&records), []);
+
+    cx.dispatch_action(crate::ui::PasteSelection);
+    cx.run_until_parked();
+    pane.update(cx, |pane, _| pane.terminal_session.close());
+    owner.send_blocking("after close".into()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(requested_pastes(&records), []);
+}
+
+#[gpui::test]
+fn a_newer_paste_discards_the_read_it_replaces(cx: &mut TestAppContext) {
+    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+
+    cx.dispatch_action(crate::ui::PasteSelection);
+    cx.run_until_parked();
+    cx.dispatch_action(crate::ui::PasteSelection);
+    cx.run_until_parked();
+    owner.send_blocking("newest".into()).unwrap();
+    owner.send_blocking("unclaimed".into()).unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        requested_pastes(&records),
+        [RecordedSessionCommand::RequestPaste("newest".into())]
+    );
+    assert_eq!(
+        owner.len(),
+        1,
+        "the replaced read stops waiting for its owner"
+    );
 }
 
 mod permission_requests {

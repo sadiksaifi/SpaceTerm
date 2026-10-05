@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use super::*;
 use crate::terminal::native_services::clipboard::{ClipboardPreferences, TextClipboard};
 use crate::terminal::osc52::{MAX_OSC52_CONTENT_BYTES, Osc52Operation};
+use gpui::FutureExt as _;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -67,39 +68,62 @@ impl fmt::Debug for ClipboardRequest {
 }
 
 impl ClipboardRequest {
-    /// Consults the native clipboard only while the originating focus grant is current.
+    /// Consults the native clipboard only while the originating focus grant is current. A write
+    /// completes before this returns. A read completes when the native clipboard answers or the
+    /// request deadline passes, whichever comes first, so a slow owner cannot hold the UI or the
+    /// next request. The worker revalidates the grant before replying, and dropping the returned
+    /// task replies as denied.
     pub(crate) fn perform(
         mut self,
         preferences: ClipboardPreferences,
         clipboard: &dyn TextClipboard,
         focused: bool,
         cx: &mut gpui::App,
-    ) {
-        let completion =
-            if !focused || !self.authority.permits(self.epoch) || Instant::now() >= self.deadline {
-                ClipboardCompletion::Denied
-            } else {
-                match &self.operation {
-                    Osc52Operation::Write { target, text } if preferences.allow_write => clipboard
-                        .write(clipboard.resolve(*target), text, cx)
-                        .map_or(ClipboardCompletion::Denied, |()| {
-                            ClipboardCompletion::Written
-                        }),
-                    Osc52Operation::Read { target, .. } if preferences.allow_read => {
-                        match clipboard.read(clipboard.resolve(*target), cx) {
-                            Ok(text)
-                                if text
-                                    .as_ref()
-                                    .is_none_or(|text| text.len() <= MAX_OSC52_CONTENT_BYTES) =>
-                            {
-                                ClipboardCompletion::Text(text.unwrap_or_default())
-                            }
-                            _ => ClipboardCompletion::Denied,
-                        }
-                    }
-                    _ => ClipboardCompletion::Denied,
+    ) -> gpui::Task<()> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero());
+        let Some(remaining) = remaining.filter(|_| focused && self.authority.permits(self.epoch))
+        else {
+            self.complete(ClipboardCompletion::Denied);
+            return gpui::Task::ready(());
+        };
+        let target = match &self.operation {
+            Osc52Operation::Write { target, text } if preferences.allow_write => {
+                let completion = clipboard
+                    .write(clipboard.resolve(*target), text, cx)
+                    .map_or(ClipboardCompletion::Denied, |()| {
+                        ClipboardCompletion::Written
+                    });
+                self.complete(completion);
+                return gpui::Task::ready(());
+            }
+            Osc52Operation::Read { target, .. } if preferences.allow_read => *target,
+            _ => {
+                self.complete(ClipboardCompletion::Denied);
+                return gpui::Task::ready(());
+            }
+        };
+        let read = clipboard
+            .read(clipboard.resolve(target), cx)
+            .with_timeout(remaining, cx.background_executor());
+        cx.foreground_executor().spawn(async move {
+            let completion = match read.await {
+                Ok(Ok(text))
+                    if text
+                        .as_ref()
+                        .is_none_or(|text| text.len() <= MAX_OSC52_CONTENT_BYTES) =>
+                {
+                    ClipboardCompletion::Text(text.unwrap_or_default())
                 }
+                _ => ClipboardCompletion::Denied,
             };
+            self.complete(completion);
+        })
+    }
+
+    fn complete(&mut self, completion: ClipboardCompletion) {
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Command::CompleteClipboard(self.id, completion));
         }
@@ -108,12 +132,7 @@ impl ClipboardRequest {
 
 impl Drop for ClipboardRequest {
     fn drop(&mut self) {
-        if let Some(commands) = self.commands.take() {
-            let _ = commands.send(Command::CompleteClipboard(
-                self.id,
-                ClipboardCompletion::Denied,
-            ));
-        }
+        self.complete(ClipboardCompletion::Denied);
     }
 }
 
@@ -252,7 +271,9 @@ impl WorkerClipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::native_services::clipboard::{ClipboardError, TextClipboardTarget};
+    use crate::terminal::native_services::clipboard::{
+        ClipboardError, ClipboardRead, TextClipboardTarget,
+    };
     use crate::terminal::osc52::{Osc52Target, Osc52Terminator};
     use std::cell::{Cell, RefCell};
 
@@ -269,17 +290,13 @@ mod tests {
             self.resolutions.set(self.resolutions.get() + 1);
             TextClipboardTarget::Clipboard
         }
-        fn read(
-            &self,
-            _: TextClipboardTarget,
-            _: &mut gpui::App,
-        ) -> Result<Option<String>, ClipboardError> {
+        fn read(&self, _: TextClipboardTarget, _: &mut gpui::App) -> ClipboardRead<Option<String>> {
             self.reads.set(self.reads.get() + 1);
-            if self.unavailable.get() {
+            Box::pin(std::future::ready(if self.unavailable.get() {
                 Err(ClipboardError::Unavailable)
             } else {
                 Ok(self.text.borrow().clone())
-            }
+            }))
         }
         fn write(
             &self,
@@ -295,6 +312,19 @@ mod tests {
             }
         }
     }
+    /// Starts a request's native effect and runs it until the test clipboard answers.
+    fn perform(
+        request: ClipboardRequest,
+        preferences: ClipboardPreferences,
+        clipboard: &dyn TextClipboard,
+        focused: bool,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| request.perform(preferences, clipboard, focused, cx))
+            .detach();
+        cx.run_until_parked();
+    }
+
     fn read() -> Osc52Operation {
         Osc52Operation::Read {
             target: Osc52Target::Primary,
@@ -338,15 +368,15 @@ mod tests {
             &self,
             target: TextClipboardTarget,
             _: &mut gpui::App,
-        ) -> Result<Option<String>, ClipboardError> {
+        ) -> ClipboardRead<Option<String>> {
             self.accesses.borrow_mut().push(target);
-            match target {
+            Box::pin(std::future::ready(match target {
                 TextClipboardTarget::Clipboard => Ok(Some(self.clipboard.borrow().clone())),
                 TextClipboardTarget::Primary if self.primary_available => {
                     Ok(Some(self.primary.borrow().clone()))
                 }
                 TextClipboardTarget::Primary => Err(ClipboardError::Unavailable),
-            }
+            }))
         }
         fn write(
             &self,
@@ -413,12 +443,13 @@ mod tests {
                         Osc52Operation::Read { target, terminator },
                         worker.authority.grant(),
                     );
-                    cx.update(|cx| {
-                        requests
-                            .try_recv()
-                            .unwrap()
-                            .perform(preferences, &clipboard, true, cx)
-                    });
+                    perform(
+                        requests.try_recv().unwrap(),
+                        preferences,
+                        &clipboard,
+                        true,
+                        cx,
+                    );
                     let unavailable =
                         selected == TextClipboardTarget::Primary && !primary_available;
                     let encoded = if unavailable { "" } else { encoded };
@@ -437,12 +468,13 @@ mod tests {
                         },
                         worker.authority.grant(),
                     );
-                    cx.update(|cx| {
-                        requests
-                            .try_recv()
-                            .unwrap()
-                            .perform(preferences, &clipboard, true, cx)
-                    });
+                    perform(
+                        requests.try_recv().unwrap(),
+                        preferences,
+                        &clipboard,
+                        true,
+                        cx,
+                    );
                     let Command::CompleteClipboard(id, completion) = commands.try_recv().unwrap()
                     else {
                         panic!("clipboard completion expected");
@@ -481,14 +513,13 @@ mod tests {
         let clipboard = RecordingClipboard::default();
         *clipboard.text.borrow_mut() = Some("secret".into());
         worker.begin(read(), worker.authority.grant());
-        cx.update(|cx| {
-            requests.try_recv().unwrap().perform(
-                ClipboardPreferences::default(),
-                &clipboard,
-                true,
-                cx,
-            )
-        });
+        perform(
+            requests.try_recv().unwrap(),
+            ClipboardPreferences::default(),
+            &clipboard,
+            true,
+            cx,
+        );
         assert_eq!(clipboard.reads.get(), 0);
         assert_eq!(clipboard.resolutions.get(), 0);
         assert_eq!(
@@ -503,29 +534,27 @@ mod tests {
             },
             worker.authority.grant(),
         );
-        cx.update(|cx| {
-            requests.try_recv().unwrap().perform(
-                ClipboardPreferences::default(),
-                &clipboard,
-                true,
-                cx,
-            )
-        });
+        perform(
+            requests.try_recv().unwrap(),
+            ClipboardPreferences::default(),
+            &clipboard,
+            true,
+            cx,
+        );
         complete(&mut worker, &commands);
         assert_eq!(&*clipboard.writes.borrow(), &["copied"]);
 
         worker.begin(read(), worker.authority.grant());
-        cx.update(|cx| {
-            requests.try_recv().unwrap().perform(
-                ClipboardPreferences {
-                    allow_read: true,
-                    ..ClipboardPreferences::default()
-                },
-                &clipboard,
-                true,
-                cx,
-            )
-        });
+        perform(
+            requests.try_recv().unwrap(),
+            ClipboardPreferences {
+                allow_read: true,
+                ..ClipboardPreferences::default()
+            },
+            &clipboard,
+            true,
+            cx,
+        );
         assert_eq!(
             complete(&mut worker, &commands).unwrap(),
             b"\x1b]52;p;c2VjcmV0\x1b\\"
@@ -555,7 +584,7 @@ mod tests {
                 allow_write: case != 3,
                 ..ClipboardPreferences::default()
             };
-            cx.update(|cx| request.perform(preferences, &clipboard, case != 2, cx));
+            perform(request, preferences, &clipboard, case != 2, cx);
             complete(&mut worker, &commands);
             assert!(clipboard.writes.borrow().is_empty());
             assert_eq!(clipboard.resolutions.get(), 0);
@@ -570,17 +599,16 @@ mod tests {
             clipboard.unavailable.set(unavailable);
             *clipboard.text.borrow_mut() = Some("x".repeat(MAX_OSC52_CONTENT_BYTES + 1));
             worker.begin(read(), worker.authority.grant());
-            cx.update(|cx| {
-                requests.try_recv().unwrap().perform(
-                    ClipboardPreferences {
-                        allow_read: true,
-                        ..ClipboardPreferences::default()
-                    },
-                    &clipboard,
-                    true,
-                    cx,
-                )
-            });
+            perform(
+                requests.try_recv().unwrap(),
+                ClipboardPreferences {
+                    allow_read: true,
+                    ..ClipboardPreferences::default()
+                },
+                &clipboard,
+                true,
+                cx,
+            );
             assert_eq!(
                 complete(&mut worker, &commands).unwrap(),
                 b"\x1b]52;p;\x1b\\"
@@ -602,5 +630,128 @@ mod tests {
         drop(request);
         assert!(complete(&mut worker, &commands).is_none());
         assert!(!worker.pending());
+    }
+
+    /// A clipboard owner that answers each read only when the test does.
+    #[derive(Default)]
+    struct SlowClipboard {
+        answers: RefCell<VecDeque<async_channel::Sender<Option<String>>>>,
+    }
+    impl SlowClipboard {
+        /// Reports whether a pending read was still waiting for this answer.
+        fn answer(&self, text: &str) -> bool {
+            let sender = self.answers.borrow_mut().pop_front().unwrap();
+            sender.try_send(Some(text.to_owned())).is_ok()
+        }
+    }
+    impl TextClipboard for SlowClipboard {
+        fn resolve(&self, _: Osc52Target) -> TextClipboardTarget {
+            TextClipboardTarget::Clipboard
+        }
+        fn read(&self, _: TextClipboardTarget, _: &mut gpui::App) -> ClipboardRead<Option<String>> {
+            let (sender, receiver) = async_channel::bounded(1);
+            self.answers.borrow_mut().push_back(sender);
+            Box::pin(async move {
+                receiver
+                    .recv()
+                    .await
+                    .map_err(|_| ClipboardError::Unavailable)
+            })
+        }
+        fn write(
+            &self,
+            _: TextClipboardTarget,
+            _: &str,
+            _: &mut gpui::App,
+        ) -> Result<(), ClipboardError> {
+            Ok(())
+        }
+    }
+    const ALLOW_READ: ClipboardPreferences = ClipboardPreferences {
+        allow_write: true,
+        allow_read: true,
+    };
+
+    #[gpui::test]
+    fn slow_owner_reads_leave_the_ui_free_and_reply_when_answered(cx: &mut gpui::TestAppContext) {
+        let (mut worker, requests, commands) = connected();
+        let clipboard = SlowClipboard::default();
+        worker.begin(read(), worker.authority.grant());
+        perform(
+            requests.try_recv().unwrap(),
+            ALLOW_READ,
+            &clipboard,
+            true,
+            cx,
+        );
+        // Performing returned while the owner has not answered, and nothing has replied yet.
+        assert!(commands.try_recv().is_err());
+        assert!(worker.pending());
+
+        assert!(clipboard.answer("slow"));
+        cx.run_until_parked();
+        assert_eq!(
+            complete(&mut worker, &commands).unwrap(),
+            b"\x1b]52;p;c2xvdw==\x1b\\"
+        );
+    }
+
+    #[gpui::test]
+    fn reads_past_the_request_deadline_reply_empty_and_discard_late_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut worker, requests, commands) = connected();
+        let clipboard = SlowClipboard::default();
+        worker.begin(read(), worker.authority.grant());
+        perform(
+            requests.try_recv().unwrap(),
+            ALLOW_READ,
+            &clipboard,
+            true,
+            cx,
+        );
+        cx.executor().advance_clock(REQUEST_TIMEOUT);
+        cx.run_until_parked();
+        let Command::CompleteClipboard(id, completion) = commands.try_recv().unwrap() else {
+            panic!("clipboard completion expected");
+        };
+        assert!(matches!(completion, ClipboardCompletion::Denied));
+        assert_eq!(
+            worker.complete(Some(id), completion).1.unwrap(),
+            b"\x1b]52;p;\x1b\\"
+        );
+
+        assert!(!clipboard.answer("late"), "the timed-out read is discarded");
+        cx.run_until_parked();
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn reads_whose_owner_is_gone_are_discarded_and_reply_once(cx: &mut gpui::TestAppContext) {
+        let (mut worker, requests, commands) = connected();
+        let clipboard = SlowClipboard::default();
+        worker.begin(read(), worker.authority.grant());
+        let request = requests.try_recv().unwrap();
+        let effect = cx.update(|cx| request.perform(ALLOW_READ, &clipboard, true, cx));
+        // The terminal or Session that awaited the read closed.
+        drop(effect);
+        cx.run_until_parked();
+        assert!(
+            !clipboard.answer("late"),
+            "the read is discarded with its owner"
+        );
+        assert_eq!(
+            complete(&mut worker, &commands).unwrap(),
+            b"\x1b]52;p;\x1b\\"
+        );
+        assert!(commands.try_recv().is_err());
+
+        // A Session that closed first receives nothing at all.
+        worker.begin(read(), worker.authority.grant());
+        let request = requests.try_recv().unwrap();
+        drop((worker, commands));
+        perform(request, ALLOW_READ, &clipboard, true, cx);
+        assert!(clipboard.answer("late"));
+        cx.run_until_parked();
     }
 }
