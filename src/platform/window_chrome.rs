@@ -84,6 +84,8 @@ pub(crate) fn frame_inset(style: spaceterm_ui::DesktopWindowStyle) -> f32 {
 pub(crate) enum WindowRole {
     Workspace,
     SidebarWindow,
+    /// A small fixed modeless window such as About.
+    Panel,
     Launch,
 }
 
@@ -141,7 +143,7 @@ impl WindowChrome {
         _cx: &App,
     ) -> WindowOptions {
         options.app_id = crate::app::window_application_id();
-        if matches!(role, WindowRole::SidebarWindow) {
+        if matches!(role, WindowRole::SidebarWindow | WindowRole::Panel) {
             options.kind = WindowKind::Normal;
         }
         if self.client {

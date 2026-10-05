@@ -95,6 +95,7 @@ mod tests {
             Command::MoveTabRight,
             Command::MoveTabLeft,
             Command::KeyboardShortcuts,
+            Command::About,
         ];
         for command in Command::ALL {
             assert_eq!(

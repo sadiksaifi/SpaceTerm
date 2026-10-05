@@ -135,9 +135,11 @@ Keybindings. Unshifted Ctrl+2, Ctrl+6, Ctrl+slash, Ctrl+[ and Ctrl+] retain thei
 characters. Super belongs to the desktop. Ctrl+click opens Terminal Hyperlinks and is not a
 secondary click; middle-click and Shift+Insert paste PRIMARY Selection. Right-click empty titlebar
 space for the desktop window menu. Application Chrome uses bundled Inter, closing the last window
-quits, and quit confirmation uses an in-app Alert. Linux has no application Command Palette or About
-entry point. Hide, Hide Others, Show All, Bring All to Front, the character palette, Services,
-Secure Input, System Permissions, and microphone controls are absent.
+quits, and quit confirmation uses an in-app Alert. Linux has no application Command Palette. About,
+at the foot of the Settings sidebar, opens SpaceTerm's own About window; the About SpaceTerm
+Command has no default Shortcut, and one can be assigned in Settings > Keybindings. Hide, Hide
+Others, Show All, Bring All to Front, the character palette, Services, Secure Input, System
+Permissions, and microphone controls are absent.
 Linux currently supports source builds only, with no packaging, distribution, or updates.
 
 `mise run validate:linux` includes the native adapters and SpaceTerm accessibility tests.

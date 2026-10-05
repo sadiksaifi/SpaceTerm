@@ -20,8 +20,8 @@ outside it that Linux terminals also leave to the application, as ADR 0010 lists
 Ctrl+Alt+digit for Workspaces, Ctrl+Page Up and Ctrl+Page Down for Tab navigation, Ctrl+`=`, Ctrl+`-`,
 and Ctrl+0 for font size, and Shift with the paging keys for Scrollback. Unshifted xterm Control
 forms remain available to the terminal;
-Super belongs to the desktop. Shortcut labels use text. Linux has no application Command Palette
-or About entry point. Ctrl+click activates Terminal Hyperlinks and is not a secondary click.
+Super belongs to the desktop. Shortcut labels use text. Linux has no application Command Palette;
+About opens SpaceTerm's own About window in the same client-drawn chrome. Ctrl+click activates Terminal Hyperlinks and is not a secondary click.
 PRIMARY Selection and middle-click paste follow Linux conventions. Right-clicking empty titlebar
 space opens the desktop window menu. macOS retains its existing pointer gestures.
 

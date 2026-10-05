@@ -10,7 +10,9 @@ use gpui::{
 
 use crate::platform::app_directories::AppDirectoryEnvironment;
 use crate::platform::app_paths::AppPaths;
-use crate::platform::application_menu::{ApplicationMenuAdapter, ApplicationMenuCommand};
+use crate::platform::application_menu::{
+    ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError,
+};
 use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
 };
@@ -216,7 +218,12 @@ fn install_application_menu_actions(
 ) {
     let about = Rc::clone(&application_menu);
     cx.on_action(move |_: &ShowAboutApplication, cx| {
-        perform_application_menu_command(about.as_ref(), ApplicationMenuCommand::ShowAbout, cx);
+        // A host without a native About panel presents SpaceTerm's own.
+        match about.perform(ApplicationMenuCommand::ShowAbout, cx) {
+            Err(ApplicationMenuError::Unavailable) => crate::ui::about_window::open_or_activate(cx),
+            Err(error) => eprintln!("failed to perform an application menu command: {error}"),
+            Ok(()) => {}
+        }
     });
     let help = Rc::clone(&application_menu);
     cx.on_action(move |_: &OpenApplicationHelp, cx| {
@@ -1130,6 +1137,7 @@ pub(crate) fn initialize_application(
     }
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     if let (Some(access), Some(guide)) =
         (&host.adapters.permission_access, &host.adapters.setup_guide)
     {

@@ -29,6 +29,7 @@ pub enum CommandGroup {
     Pane,
     Terminal,
     View,
+    Help,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +53,7 @@ macro_rules! commands {
         pub enum Command { $($command),+ }
 
         impl Command {
-            pub const ALL: [Self; 54] = [$(Self::$command),+];
+            pub const ALL: [Self; 55] = [$(Self::$command),+];
             pub const fn id(self) -> &'static str {
                 match self { $(Self::$command => $id),+ }
             }
@@ -130,6 +131,7 @@ commands! {
     ToggleSidebar => ("toggle_sidebar", "Toggle Sidebar", View, Workspace, crate::ui::ToggleSidebar),
     ToggleSidebarFocus => ("toggle_sidebar_focus", "Toggle Sidebar Focus", View, Workspace, crate::ui::ToggleSidebarFocus),
     KeyboardShortcuts => ("keyboard_shortcuts", "Keyboard Shortcuts", View, Application, crate::ui::settings_window::OpenKeyboardShortcuts),
+    About => ("about", "About SpaceTerm", Help, Application, crate::app::ShowAboutApplication),
 }
 
 impl Command {

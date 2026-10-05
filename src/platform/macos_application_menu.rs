@@ -443,7 +443,6 @@ mod native {
         MenuItemIcon, NativeKeyEquivalent,
     };
 
-    const ABOUT_DESCRIPTION: &str = "A native, keyboard-first desktop terminal multiplexer.";
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
     pub(super) fn decorate(
@@ -481,7 +480,7 @@ mod native {
     ) -> Result<(), ApplicationMenuError> {
         let name = NSString::from_str(application_name);
         let version = NSString::from_str(env!("SPACETERM_VERSION"));
-        let description = NSString::from_str(ABOUT_DESCRIPTION);
+        let description = NSString::from_str(crate::about::DESCRIPTION);
         let credits = NSMutableAttributedString::initWithString(
             NSMutableAttributedString::alloc(),
             &description,

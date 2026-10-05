@@ -307,7 +307,8 @@ impl WindowMovement {
         }
     }
 
-    fn region(
+    /// Wraps `content` as window-movement space whose uncovered area behaves as the titlebar.
+    pub(super) fn region(
         &self,
         id: String,
         content: impl IntoElement,
@@ -441,12 +442,13 @@ pub(crate) fn navigation_chip_paint(
     }
 }
 
-/// The sidebar column: the traffic-light strip, an optional header such as a search field, and the
-/// navigation list.
+/// The sidebar column: the traffic-light strip, an optional header such as a search field, the
+/// navigation list, and an optional footer at the bottom edge.
 pub(crate) struct Sidebar<'a, T: SidebarOwner> {
     prefix: &'static str,
     entries: Vec<NavigationEntry<T::Section>>,
     header: Option<AnyElement>,
+    footer: Option<AnyElement>,
     movement: &'a WindowMovement,
     close: Option<WindowCloseHandler>,
 }
@@ -462,6 +464,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             prefix,
             entries,
             header: None,
+            footer: None,
             movement,
             close: None,
         }
@@ -474,6 +477,12 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
 
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
         self.header = Some(header.into_any_element());
+        self
+    }
+
+    /// Quiet items that sit apart from the sections, at the bottom of the column.
+    pub(crate) fn footer(mut self, footer: impl IntoElement) -> Self {
+        self.footer = Some(footer.into_any_element());
         self
     }
 
@@ -575,12 +584,97 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                         // between them is wider than the spacing inside the list.
                         div().w_full().mb(appearance.spacing(12.0)).child(header)
                     }))
-                    .child(list),
+                    .child(list)
+                    .children(self.footer.map(|footer| {
+                        div()
+                            .debug_selector(move || format!("{prefix}-sidebar-footer"))
+                            .flex()
+                            .items_center()
+                            .flex_none()
+                            .w_full()
+                            .h(footer_height(appearance))
+                            .mt_auto()
+                            .child(footer)
+                    })),
             );
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)
             .into_any_element()
     }
+}
+
+/// A quiet command at the foot of the sidebar, such as About. It shares a section row's shape and
+/// hover but reads in secondary text, and it dispatches its action instead of selecting a section.
+pub(crate) fn render_footer_action(
+    selector: String,
+    label: SharedString,
+    icon: IconName,
+    action: Box<dyn gpui::Action>,
+    appearance: &ChromeAppearance,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    let fade = HoverFade::new(SharedString::from(format!("{selector}-hover")), window, cx);
+    let hover = if appearance.active {
+        fade.level(window, cx)
+    } else {
+        0.0
+    };
+    let chip = navigation_chip(false, true, false, appearance, colors);
+    let foreground = colors
+        .text_secondary
+        .fade(colors.row_hover_foreground, f64::from(hover));
+    let icon_color = colors
+        .row_icon
+        .fade(colors.row_hover_icon, f64::from(hover));
+    let clicked = action.boxed_clone();
+    let chip_selector = format!("{selector}-chip");
+    let row_selector = selector.clone();
+    div()
+        .id(SharedString::from(selector))
+        .debug_selector(move || row_selector)
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+            window.dispatch_action(action.boxed_clone(), cx)
+        })
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(appearance.spacing(7.0))
+        .w_full()
+        .h(appearance
+            .typography
+            .style(TextRole::Navigation)
+            .line_height
+            + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
+        .px(appearance.spacing(8.0))
+        .cursor_default()
+        .chrome_text(appearance.typography.style(TextRole::Secondary))
+        .text_color(gpui_color(foreground))
+        .child(chip.render(chip_selector, hover))
+        .child(fade.tracker())
+        .on_click(move |_, window, cx| window.dispatch_action(clicked.boxed_clone(), cx))
+        .child(
+            div()
+                .flex_none()
+                .text_color(gpui_color(icon_color))
+                .child(Icon::inherited(
+                    icon,
+                    appearance.icons.metrics(IconRole::Row).glyph_size,
+                )),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label),
+        )
+        .into_any_element()
 }
 
 fn render_navigation_list<T: SidebarOwner>(
@@ -860,6 +954,13 @@ impl<'a> DetailHeading<'a> {
 /// The strip belongs to the content column alone, so the sidebar runs unbroken to the window's
 /// bottom edge. Its content ends on the content gutter, the line the title, the group headings, and
 /// every row label already sit on.
+/// The height of the content column's footer, which a sidebar footer shares so the two read as one
+/// band across the window.
+fn footer_height(appearance: &ChromeAppearance) -> Pixels {
+    appearance.typography.style(TextRole::Secondary).line_height
+        + appearance.spacing(FOOTER_HEIGHT - 15.0)
+}
+
 pub(crate) fn render_footer(
     prefix: &'static str,
     surface: &SettingsAppearance,
@@ -872,8 +973,7 @@ pub(crate) fn render_footer(
         .flex_row()
         .flex_none()
         .w_full()
-        .h(appearance.typography.style(TextRole::Secondary).line_height
-            + appearance.spacing(FOOTER_HEIGHT - 15.0))
+        .h(footer_height(appearance))
         .border_t_1()
         .border_color(gpui_color(surface.separator(SettingsSurfaceRole::Canvas)))
         .bg(gpui_color(
