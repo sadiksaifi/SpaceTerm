@@ -13,8 +13,6 @@ use super::workspace_sidebar::{
     remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
-#[cfg(test)]
-use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
 use crate::ui::appearance::gpui_color;
@@ -56,8 +54,6 @@ use crate::appearance::Color;
 use crate::close_confirmation::{
     ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
 };
-#[cfg(test)]
-use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
@@ -71,8 +67,6 @@ use crate::platform::window_movement::{
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
 use crate::ssh::process::TransientSshErrorOutput;
-#[cfg(test)]
-use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
@@ -285,86 +279,6 @@ pub(crate) struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    #[cfg(test)]
-    fn new_with_remote_workspace_backend_factory(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
-    #[cfg(test)]
-    fn new_with_directory_selection(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        directory_selection: Rc<dyn SystemDirectorySelection>,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection,
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
-    #[cfg(test)]
-    fn new_with_operating_system_window_drag_platform(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: operating_system_window_drag_platform,
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
     pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,

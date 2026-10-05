@@ -1,5 +1,7 @@
+use crate::directory_selection::GpuiDirectorySelection;
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -1066,14 +1068,8 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services,
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
+                ..workspace_adapters(test_remote_backend_factory())
             },
             window,
             cx,
@@ -1115,14 +1111,8 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: factory.clone(),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
+                ..workspace_adapters(test_remote_backend_factory())
             },
             window,
             cx,
@@ -1153,6 +1143,23 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     );
 }
 
+fn workspace_adapters(
+    remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+) -> WorkspaceManagerAdapters {
+    WorkspaceManagerAdapters {
+        local_filesystem: LocalFilesystemAuthority::testing(),
+        key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+        accessibility: Rc::new(
+            crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+        ),
+        native_services: crate::terminal::native_services::testing::adapters(),
+        lifecycle: PaneLifecycleDependencies::testing(),
+        directory_selection: Rc::new(GpuiDirectorySelection),
+        window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+        remote_workspace,
+    }
+}
+
 fn workspace_manager(
     cx: &mut TestAppContext,
 ) -> (
@@ -1166,10 +1173,10 @@ fn workspace_manager(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1214,10 +1221,10 @@ fn workspace_manager_with_application_actions(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1246,10 +1253,10 @@ fn workspace_manager_with_remote_backend(
     let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
         Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )
@@ -1352,11 +1359,13 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let injected_platform = Rc::clone(&platform);
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_operating_system_window_drag_platform(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            injected_platform,
-            test_remote_backend_factory(),
+            WorkspaceManagerAdapters {
+                window_drag: injected_platform,
+                ..workspace_adapters(test_remote_backend_factory())
+            },
             window,
             cx,
         )
@@ -1386,11 +1395,13 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_directory_selection(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            directory_selection,
-            test_remote_backend_factory(),
+            WorkspaceManagerAdapters {
+                directory_selection: directory_selection,
+                ..workspace_adapters(test_remote_backend_factory())
+            },
             window,
             cx,
         )
@@ -1561,10 +1572,10 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1821,19 +1832,19 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let second_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             first_factory,
             PathBuf::from("/Users/first"),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
     });
     let second = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             second_factory,
             PathBuf::from("/Users/second"),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -2237,10 +2248,10 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )
@@ -2543,10 +2554,10 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )

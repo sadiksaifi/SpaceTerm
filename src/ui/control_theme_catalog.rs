@@ -166,9 +166,7 @@ pub(super) fn catalog(
         ),
     )
     .typography(prepared_control_typography(&appearance.typography))
-    // Role sizes already include the additive base-size and density policy. Only structural
-    // spacing still uses the legacy scaling seam while the reusable catalog migrates family by
-    // family.
+    // Typography already includes base-size and density changes. Scale structural spacing once.
     .scale_metrics(1.0, appearance.spacing_scale);
 
     let shadow_opacity = if appearance.active { 89 } else { 53 };

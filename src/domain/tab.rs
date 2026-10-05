@@ -213,7 +213,7 @@ enum FocusHistoryStep {
     Next,
 }
 
-pub(crate) struct TerminalTab<T> {
+pub(crate) struct Tab<T> {
     id: TabId,
     root: PaneNode,
     terminals: BTreeMap<PaneId, T>,
@@ -226,7 +226,7 @@ pub(crate) struct TerminalTab<T> {
     next_split_id: u64,
 }
 
-impl<T> TerminalTab<T> {
+impl<T> Tab<T> {
     pub(crate) fn new(
         id: TabId,
         minimum_pane_size: PaneSize,
@@ -1021,11 +1021,11 @@ mod tests {
         PaneSize::new(width, height).unwrap()
     }
 
-    fn tab<T>(terminal: T) -> TerminalTab<T> {
-        TerminalTab::new(TabId::new(7), size(100.0, 50.0), |_| terminal)
+    fn tab<T>(terminal: T) -> Tab<T> {
+        Tab::new(TabId::new(7), size(100.0, 50.0), |_| terminal)
     }
 
-    fn four_pane_tab() -> TerminalTab<()> {
+    fn four_pane_tab() -> Tab<()> {
         let mut tab = tab(());
         tab.split_pane(
             PaneId::new(1),
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn new_should_create_one_focused_pane() {
         let created_id = Cell::new(None);
-        let tab = TerminalTab::new(TabId::new(7), size(100.0, 50.0), |pane_id| {
+        let tab = Tab::new(TabId::new(7), size(100.0, 50.0), |pane_id| {
             created_id.set(Some(pane_id));
         });
 

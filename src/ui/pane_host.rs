@@ -46,7 +46,7 @@ pub(crate) struct PreparedPaneHostRemoteRestart {
 }
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneTreeRef,
-    SplitAxis, SplitId, TabId, TerminalTab, WorkspaceId, ZoomState,
+    SplitAxis, SplitId, Tab, TabId, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
@@ -348,7 +348,7 @@ struct PaneDrag {
 }
 
 pub(crate) struct PaneHost {
-    terminal_tab: TerminalTab<Entity<TerminalPane>>,
+    tab: Tab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
@@ -409,7 +409,7 @@ impl PaneHost {
                 unreachable!("fixed minimum Pane dimensions must be valid: {error}")
             }
         };
-        let terminal_tab = TerminalTab::new(tab_id, minimum_pane_size, |pane_id| {
+        let tab = Tab::new(tab_id, minimum_pane_size, |pane_id| {
             Self::create_terminal(
                 pane_id,
                 session_factory.clone(),
@@ -419,15 +419,15 @@ impl PaneHost {
                 cx,
             )
         });
-        let initial_pane_id = terminal_tab.focused_pane_id();
-        let Some(initial_terminal) = terminal_tab.terminal(initial_pane_id) else {
+        let initial_pane_id = tab.focused_pane_id();
+        let Some(initial_terminal) = tab.terminal(initial_pane_id) else {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
         let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
 
         Self {
-            terminal_tab,
+            tab,
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
@@ -466,7 +466,7 @@ impl PaneHost {
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
-                        tab_id: host.terminal_tab.id(),
+                        tab_id: host.tab.id(),
                     });
                     cx.notify();
                 }
@@ -474,11 +474,11 @@ impl PaneHost {
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if host.pane_captions.get(&pane_id) != Some(&caption) {
                         host.pane_captions.insert(pane_id, caption);
-                        if pane_id == host.terminal_tab.root_pane_id()
-                            || pane_id == host.terminal_tab.focused_pane_id()
+                        if pane_id == host.tab.root_pane_id()
+                            || pane_id == host.tab.focused_pane_id()
                         {
                             cx.emit(PaneHostEvent::PresentationChanged {
-                                tab_id: host.terminal_tab.id(),
+                                tab_id: host.tab.id(),
                             });
                         }
                         cx.notify();
@@ -487,7 +487,7 @@ impl PaneHost {
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
                     cx.emit(PaneHostEvent::PresentationChanged {
-                        tab_id: host.terminal_tab.id(),
+                        tab_id: host.tab.id(),
                     });
                     cx.notify();
                 }
@@ -499,10 +499,7 @@ impl PaneHost {
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let Some(terminal) = self
-            .terminal_tab
-            .terminal(self.terminal_tab.focused_pane_id())
-        else {
+        let Some(terminal) = self.tab.terminal(self.tab.focused_pane_id()) else {
             return;
         };
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -522,10 +519,10 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> NativeServiceStatus {
         self.sync_terminal_focus(cx);
-        let pane_id = self.terminal_tab.focused_pane_id();
-        let tab_id = self.terminal_tab.id();
+        let pane_id = self.tab.focused_pane_id();
+        let tab_id = self.tab.id();
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let Some(terminal) = self.terminal_tab.terminal(pane_id) else {
+        let Some(terminal) = self.tab.terminal(pane_id) else {
             return NativeServiceStatus::default();
         };
         terminal.update(cx, |terminal, cx| {
@@ -551,29 +548,29 @@ impl PaneHost {
         &self,
         origin: NativeServiceOrigin,
     ) -> Option<Entity<TerminalPane>> {
-        if self.terminal_tab.id() != origin.tab_id()
-            || self.terminal_tab.focused_pane_id() != origin.pane_id()
+        if self.tab.id() != origin.tab_id()
+            || self.tab.focused_pane_id() != origin.pane_id()
             || self.native_service_hierarchy_generation != origin.hierarchy_generation()
         {
             return None;
         }
-        self.terminal_tab.terminal(origin.pane_id()).cloned()
+        self.tab.terminal(origin.pane_id()).cloned()
     }
 
     pub(crate) const fn tab_id(&self) -> TabId {
-        self.terminal_tab.id()
+        self.tab.id()
     }
 
     pub(crate) fn pane_count(&self) -> usize {
-        self.terminal_tab.pane_count()
+        self.tab.pane_count()
     }
 
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
-        self.current_directory(self.terminal_tab.root_pane_id(), cx)
+        self.current_directory(self.tab.root_pane_id(), cx)
     }
 
     pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {
-        self.terminal_tab
+        self.tab
             .terminal(pane_id)
             .and_then(|terminal| terminal.read(cx).current_directory())
     }
@@ -582,7 +579,7 @@ impl PaneHost {
         &'a self,
         cx: &'a App,
     ) -> impl Iterator<Item = (PaneId, &'a TerminalPane)> {
-        self.terminal_tab
+        self.tab
             .terminals_with_ids()
             .map(|(id, terminal)| (id, terminal.read(cx)))
     }
@@ -598,12 +595,12 @@ impl PaneHost {
     pub(crate) fn tab_identity(&self) -> TabIdentity {
         let caption = self
             .pane_captions
-            .get(&self.terminal_tab.focused_pane_id())
+            .get(&self.tab.focused_pane_id())
             .cloned()
             .unwrap_or_default();
         let title = self
             .pane_titles
-            .get(&self.terminal_tab.focused_pane_id())
+            .get(&self.tab.focused_pane_id())
             .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
             .unwrap_or_else(|| "Terminal".into());
         TabIdentity::resolve(
@@ -616,7 +613,7 @@ impl PaneHost {
     #[cfg(test)]
     pub(crate) fn cached_focused_progress(&self) -> TerminalProgress {
         self.pane_captions
-            .get(&self.terminal_tab.focused_pane_id())
+            .get(&self.tab.focused_pane_id())
             .map_or(TerminalProgress::None, |caption| caption.progress)
     }
 
@@ -630,7 +627,7 @@ impl PaneHost {
     ) {
         self.pane_attention.insert(pane_id, unread_count);
         cx.emit(PaneHostEvent::PresentationChanged {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
         });
         cx.notify();
     }
@@ -643,7 +640,7 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) const fn zoom_state(&self) -> ZoomState {
-        self.terminal_tab.zoom_state()
+        self.tab.zoom_state()
     }
 
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -675,7 +672,7 @@ impl PaneHost {
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.sync_terminal_focus(cx);
-        for terminal in self.terminal_tab.terminals() {
+        for terminal in self.tab.terminals() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
     }
@@ -690,7 +687,7 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> Result<(), RemotePaneHostLifecycleError> {
         self.can_disconnect_remote(generation, cx)?;
-        for (_, terminal) in self.terminal_tab.terminals_with_ids() {
+        for (_, terminal) in self.tab.terminals_with_ids() {
             terminal.update(cx, |terminal, cx| {
                 terminal
                     .disconnect_remote(generation, cx)
@@ -708,7 +705,7 @@ impl PaneHost {
         generation: u64,
         cx: &App,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        for (pane_id, terminal) in self.terminal_tab.terminals_with_ids() {
+        for (pane_id, terminal) in self.tab.terminals_with_ids() {
             terminal
                 .read(cx)
                 .can_disconnect_remote(generation)
@@ -728,16 +725,14 @@ impl PaneHost {
         prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
     ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
-        if self.terminal_tab.pane_count() != prepared_launches.len() {
+        if self.tab.pane_count() != prepared_launches.len() {
             return Err(RemotePaneHostLifecycleError::PaneChanged(
-                self.terminal_tab.focused_pane_id(),
+                self.tab.focused_pane_id(),
             ));
         }
-        let mut panes = Vec::with_capacity(self.terminal_tab.pane_count());
-        for ((pane_id, terminal), prepared_launch) in self
-            .terminal_tab
-            .terminals_with_ids()
-            .zip(prepared_launches)
+        let mut panes = Vec::with_capacity(self.tab.pane_count());
+        for ((pane_id, terminal), prepared_launch) in
+            self.tab.terminals_with_ids().zip(prepared_launches)
         {
             let prepared = terminal
                 .read(cx)
@@ -746,7 +741,7 @@ impl PaneHost {
             panes.push((pane_id, terminal.clone(), prepared));
         }
         Ok(PreparedPaneHostRemoteRestart {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
             panes: RemoteRestartBatch::new(panes),
         })
     }
@@ -757,15 +752,15 @@ impl PaneHost {
         prepared: &PreparedPaneHostRemoteRestart,
         cx: &App,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        if self.terminal_tab.id() != prepared.tab_id {
+        if self.tab.id() != prepared.tab_id {
             return Err(RemotePaneHostLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
-                current: self.terminal_tab.id(),
+                current: self.tab.id(),
             });
         }
         prepared.panes.validate(
-            self.terminal_tab.pane_count(),
-            || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
+            self.tab.pane_count(),
+            || RemotePaneHostLifecycleError::PaneChanged(self.tab.focused_pane_id()),
             |(pane_id, terminal, pane_restart)| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
             },
@@ -779,7 +774,7 @@ impl PaneHost {
         pane_restart: &PreparedRemotePaneRestart,
         cx: &App,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        let Some(current) = self.terminal_tab.terminal(pane_id) else {
+        let Some(current) = self.tab.terminal(pane_id) else {
             return Err(RemotePaneHostLifecycleError::PaneChanged(pane_id));
         };
         if current.entity_id() != terminal.entity_id() {
@@ -804,15 +799,15 @@ impl PaneHost {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        if self.terminal_tab.id() != prepared.tab_id {
+        if self.tab.id() != prepared.tab_id {
             return Err(RemotePaneHostLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
-                current: self.terminal_tab.id(),
+                current: self.tab.id(),
             });
         }
         prepared.panes.commit(
-            self.terminal_tab.pane_count(),
-            || RemotePaneHostLifecycleError::PaneChanged(self.terminal_tab.focused_pane_id()),
+            self.tab.pane_count(),
+            || RemotePaneHostLifecycleError::PaneChanged(self.tab.focused_pane_id()),
             cx,
             |(pane_id, terminal, pane_restart), cx| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
@@ -831,19 +826,19 @@ impl PaneHost {
         self.remote_lifecycle.restarted();
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
         });
         cx.notify();
         Ok(())
     }
 
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
-        self.terminal_tab.focused_pane_id()
+        self.tab.focused_pane_id()
     }
 
     #[cfg(test)]
     pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
-        self.terminal_tab
+        self.tab
             .terminals_with_ids()
             .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
             .collect()
@@ -873,7 +868,7 @@ impl PaneHost {
         }
 
         let mut signature = String::new();
-        encode(self.terminal_tab.root(), &mut signature);
+        encode(self.tab.root(), &mut signature);
         signature
     }
 
@@ -884,8 +879,8 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
-        self.terminal_tab
-            .terminal(self.terminal_tab.focused_pane_id())
+        self.tab
+            .terminal(self.tab.focused_pane_id())
             .map(|terminal| {
                 let terminal = terminal.read(cx);
                 terminal.remote_session_state()
@@ -898,7 +893,7 @@ impl PaneHost {
         &self,
         cx: &App,
     ) -> Vec<(PaneId, bool, Option<&'static str>)> {
-        self.terminal_tab
+        self.tab
             .terminals_with_ids()
             .map(|(pane_id, terminal)| {
                 let terminal = terminal.read(cx);
@@ -910,15 +905,15 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_tab
-            .terminal(self.terminal_tab.focused_pane_id())
+        self.tab
+            .terminal(self.tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).is_focused(window))
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_tab
-            .terminal(self.terminal_tab.focused_pane_id())
+        self.tab
+            .terminal(self.tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
@@ -928,16 +923,16 @@ impl PaneHost {
     }
 
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.terminal_tab.focused_pane_id() == pane_id {
+        if self.tab.focused_pane_id() == pane_id {
             return;
         }
-        if let Err(error) = self.terminal_tab.focus_pane(pane_id) {
+        if let Err(error) = self.tab.focus_pane(pane_id) {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
         });
         cx.notify();
     }
@@ -948,7 +943,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.terminal_tab.focus_pane_in_direction(direction) else {
+        let Some(pane_id) = self.tab.focus_pane_in_direction(direction) else {
             return;
         };
         self.finish_keyboard_focus_change(pane_id, window, cx);
@@ -962,10 +957,10 @@ impl PaneHost {
     ) {
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
         });
         cx.notify();
-        if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
+        if let Some(terminal) = self.tab.terminal(pane_id) {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
     }
@@ -976,7 +971,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focused_pane_id = self.terminal_tab.focused_pane_id();
+        let focused_pane_id = self.tab.focused_pane_id();
         self.split_pane(focused_pane_id, axis, window, cx);
     }
 
@@ -1092,17 +1087,14 @@ impl PaneHost {
     }
 
     fn split_target_size(&self, pane_id: PaneId, gap: f32) -> Option<PaneSize> {
-        match self.terminal_tab.zoom_state() {
+        match self.tab.zoom_state() {
             ZoomState::Restored => self
                 .pane_bounds
                 .get(&pane_id)
                 .and_then(|bounds| pane_size(*bounds).ok()),
-            ZoomState::Zoomed(_) => restored_leaf_size(
-                self.terminal_tab.root(),
-                pane_id,
-                self.pane_layout_size?,
-                gap,
-            ),
+            ZoomState::Zoomed(_) => {
+                restored_leaf_size(self.tab.root(), pane_id, self.pane_layout_size?, gap)
+            }
         }
     }
 
@@ -1162,7 +1154,7 @@ impl PaneHost {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
+        let Some(terminal) = self.tab.terminal(pane_id).cloned() else {
             return div().into_any_element();
         };
         let appearance = super::appearance::chrome(cx);
@@ -1175,7 +1167,7 @@ impl PaneHost {
             let caption_style = appearance.typography.style(TextRole::Body);
             reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
         });
-        let focused = self.terminal_tab.focused_pane_id() == pane_id;
+        let focused = self.tab.focused_pane_id() == pane_id;
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let background = terminal.read(cx).surface_background();
         let paint = appearance.colors.caption(background, focused);
@@ -1267,7 +1259,7 @@ impl PaneHost {
             return;
         };
         match self
-            .terminal_tab
+            .tab
             .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
         {
             Ok(true) => {
@@ -1275,9 +1267,9 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
-                    tab_id: self.terminal_tab.id(),
+                    tab_id: self.tab.id(),
                 });
-                if let Some(terminal) = self.terminal_tab.terminal(drag.pane_id) {
+                if let Some(terminal) = self.tab.terminal(drag.pane_id) {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
@@ -1296,11 +1288,11 @@ impl PaneHost {
         pointer: Point<Pixels>,
         gap: f32,
     ) -> Option<(PaneId, PaneEdge)> {
-        if matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_)) {
+        if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
             return None;
         }
         let mut panes = Vec::new();
-        collect_pane_order(self.terminal_tab.root(), &mut panes);
+        collect_pane_order(self.tab.root(), &mut panes);
         let (target_pane_id, bounds) = panes
             .into_iter()
             .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
@@ -1310,7 +1302,7 @@ impl PaneHost {
         }
         let edge = drop_edge(bounds, pointer);
         let target_size = self.split_target_size(target_pane_id, gap)?;
-        self.terminal_tab
+        self.tab
             .can_receive_pane(target_pane_id, edge, target_size, gap)
             .then_some((target_pane_id, edge))
     }
@@ -1327,23 +1319,23 @@ impl PaneHost {
         let session_factory = self.session_factory.clone();
         let pane_construction = self.pane_construction.clone();
         let gap = pane_gap(cx);
-        let result =
-            self.terminal_tab
-                .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
-                    Self::create_terminal(
-                        new_pane_id,
-                        session_factory,
-                        prepared_launch,
-                        pane_construction,
-                        window,
-                        cx,
-                    )
-                });
+        let result = self
+            .tab
+            .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
+                Self::create_terminal(
+                    new_pane_id,
+                    session_factory,
+                    prepared_launch,
+                    pane_construction,
+                    window,
+                    cx,
+                )
+            });
 
         match result {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
+                if let Some(terminal) = self.tab.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
                         .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
@@ -1352,10 +1344,10 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
-                    tab_id: self.terminal_tab.id(),
+                    tab_id: self.tab.id(),
                 });
                 cx.notify();
-                if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
+                if let Some(terminal) = self.tab.terminal(pane_id) {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
@@ -1365,15 +1357,15 @@ impl PaneHost {
 
     #[cfg(test)]
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_pane(self.terminal_tab.focused_pane_id(), window, cx);
+        self.close_pane(self.tab.focused_pane_id(), window, cx);
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.close_tab_requested || self.terminal_tab.terminal(pane_id).is_none() {
+        if self.close_tab_requested || self.tab.terminal(pane_id).is_none() {
             return;
         }
         cx.emit(PaneHostEvent::UserClosePaneRequested {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
             pane_id,
         });
     }
@@ -1397,7 +1389,7 @@ impl PaneHost {
             return;
         }
 
-        match self.terminal_tab.close_pane(pane_id) {
+        match self.tab.close_pane(pane_id) {
             Ok(ClosePaneOutcome::CloseTab { tab_id }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.close_tab_requested = true;
@@ -1422,11 +1414,11 @@ impl PaneHost {
                 self.pane_attention.remove(&pane_id);
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
-                    tab_id: self.terminal_tab.id(),
+                    tab_id: self.tab.id(),
                 });
                 cx.notify();
                 if self.active
-                    && let Some(terminal) = self.terminal_tab.terminal(focused_pane_id)
+                    && let Some(terminal) = self.tab.terminal(focused_pane_id)
                 {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
@@ -1436,13 +1428,13 @@ impl PaneHost {
     }
 
     pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal_tab.toggle_zoom().is_none() {
+        if self.tab.toggle_zoom().is_none() {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            tab_id: self.terminal_tab.id(),
+            tab_id: self.tab.id(),
         });
         cx.notify();
         self.focus(window, cx);
@@ -1462,7 +1454,7 @@ impl PaneHost {
             return None;
         };
         match self
-            .terminal_tab
+            .tab
             .resize_split(split_id, available_size, gap, requested_ratio)
         {
             Ok(accepted_ratio) => {
@@ -1484,10 +1476,7 @@ impl PaneHost {
             return;
         };
         let gap = pane_gap(cx);
-        match self
-            .terminal_tab
-            .resize_split(split_id, available_size, gap, 0.5)
-        {
+        match self.tab.resize_split(split_id, available_size, gap, 0.5) {
             Ok(_) => cx.notify(),
             Err(error) => eprintln!("failed to reset split: {error}"),
         }
@@ -1535,28 +1524,26 @@ impl PaneHost {
 
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
         let focused_terminal_id = self
-            .terminal_tab
-            .terminal(self.terminal_tab.focused_pane_id())
+            .tab
+            .terminal(self.tab.focused_pane_id())
             .map(Entity::entity_id);
-        let visible_terminal_id = match self.terminal_tab.zoom_state() {
+        let visible_terminal_id = match self.tab.zoom_state() {
             ZoomState::Restored => None,
-            ZoomState::Zoomed(pane_id) => {
-                self.terminal_tab.terminal(pane_id).map(Entity::entity_id)
-            }
+            ZoomState::Zoomed(pane_id) => self.tab.terminal(pane_id).map(Entity::entity_id),
         };
         let blocker = TerminalFocusCoordinator::pane_layout_blocker(
             self.focus_branch_blocker,
             self.resizing_split_id.is_some(),
         );
-        let signature = (self.active, self.terminal_tab.focused_pane_id(), blocker);
+        let signature = (self.active, self.tab.focused_pane_id(), blocker);
         if self.native_service_focus_signature != Some(signature) {
             self.advance_native_service_hierarchy_generation(cx);
             self.native_service_focus_signature = Some(signature);
         }
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let mut panes = Vec::with_capacity(self.terminal_tab.pane_count());
-        collect_pane_order(self.terminal_tab.root(), &mut panes);
-        let presented_panes = match self.terminal_tab.zoom_state() {
+        let mut panes = Vec::with_capacity(self.tab.pane_count());
+        collect_pane_order(self.tab.root(), &mut panes);
+        let presented_panes = match self.tab.zoom_state() {
             ZoomState::Zoomed(pane_id) => vec![pane_id],
             ZoomState::Restored => panes.clone(),
         };
@@ -1566,7 +1553,7 @@ impl PaneHost {
             .map(|(order, pane_id)| (pane_id, order))
             .collect::<BTreeMap<_, _>>();
         for pane_id in panes {
-            let Some(terminal) = self.terminal_tab.terminal(pane_id) else {
+            let Some(terminal) = self.tab.terminal(pane_id) else {
                 continue;
             };
             let product_focus = TerminalProductFocus {
@@ -1598,7 +1585,7 @@ impl PaneHost {
         self.native_service_hierarchy_generation =
             self.native_service_hierarchy_generation.wrapping_add(1);
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        for terminal in self.terminal_tab.terminals() {
+        for terminal in self.tab.terminals() {
             terminal.update(cx, |terminal, _| {
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
             });
@@ -1612,7 +1599,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal_tab.terminal(pane_id).is_none() {
+        if self.tab.terminal(pane_id).is_none() {
             return;
         }
         self.focus_pane(pane_id, cx);
@@ -1683,7 +1670,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.terminal_tab.focus_previous_pane() else {
+        let Some(pane_id) = self.tab.focus_previous_pane() else {
             return;
         };
         self.finish_keyboard_focus_change(pane_id, window, cx);
@@ -1695,7 +1682,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.terminal_tab.focus_next_pane() else {
+        let Some(pane_id) = self.tab.focus_next_pane() else {
             return;
         };
         self.finish_keyboard_focus_change(pane_id, window, cx);
@@ -1706,7 +1693,7 @@ impl PaneHost {
     }
 
     fn on_close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_pane(self.terminal_tab.focused_pane_id(), cx);
+        self.request_close_pane(self.tab.focused_pane_id(), cx);
     }
 
     fn render_tree(
@@ -1742,7 +1729,7 @@ impl PaneHost {
 
     /// Each Pane's hover, read once per frame.
     fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
-        self.terminal_tab
+        self.tab
             .terminals_with_ids()
             .map(|(pane_id, _)| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
@@ -1760,7 +1747,7 @@ impl PaneHost {
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
+        let Some(terminal) = self.tab.terminal(pane_id).cloned() else {
             // A Pane without its Terminal still occupies a Pane's place, so it keeps a Pane's
             // material rather than punching an opaque block through a translucent window.
             return div()
@@ -1771,9 +1758,9 @@ impl PaneHost {
                 )))
                 .into_any_element();
         };
-        let focused = self.terminal_tab.focused_pane_id() == pane_id;
-        let has_multiple_panes = self.terminal_tab.pane_count() > 1;
-        let zoomed = matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_));
+        let focused = self.tab.focused_pane_id() == pane_id;
+        let has_multiple_panes = self.tab.pane_count() > 1;
+        let zoomed = matches!(self.tab.zoom_state(), ZoomState::Zoomed(_));
         let text = self
             .pane_captions
             .get(&pane_id)
@@ -2018,30 +2005,26 @@ impl Render for PaneHost {
             minimum_pane_width(&appearance),
             f32::from(appearance.caption_height() + radius) + 4.0,
         ) {
-            self.terminal_tab.set_minimum_pane_size(minimum);
+            self.tab.set_minimum_pane_size(minimum);
         }
         self.sync_terminal_focus(cx);
         let host = cx.entity().downgrade();
-        let zoom_state = self.terminal_tab.zoom_state();
+        let zoom_state = self.tab.zoom_state();
         let minimum_size = match zoom_state {
-            ZoomState::Zoomed(_) => self.terminal_tab.minimum_pane_size(),
-            ZoomState::Restored => match self.terminal_tab.minimum_size(pane_gap(cx)) {
+            ZoomState::Zoomed(_) => self.tab.minimum_pane_size(),
+            ZoomState::Restored => match self.tab.minimum_size(pane_gap(cx)) {
                 Ok(size) => size,
                 Err(error) => {
                     eprintln!("failed to calculate minimum Pane layout size: {error}");
-                    self.terminal_tab.minimum_pane_size()
+                    self.tab.minimum_pane_size()
                 }
             },
         };
         let hovers = self.pane_hovers(window, cx);
         let content = match zoom_state {
-            ZoomState::Restored => self.render_tree(
-                self.terminal_tab.root(),
-                &hovers,
-                host.clone(),
-                &appearance,
-                cx,
-            ),
+            ZoomState::Restored => {
+                self.render_tree(self.tab.root(), &hovers, host.clone(), &appearance, cx)
+            }
             ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, host, &appearance, cx),
         };
 
@@ -2057,7 +2040,7 @@ impl Render for PaneHost {
                     });
                 }
             })
-            .id(("pane-host", self.terminal_tab.id().get()))
+            .id(("pane-host", self.tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
@@ -3713,7 +3696,7 @@ mod tests {
     ) -> [PaneId; N] {
         shortcuts.map(|shortcut| {
             cx.simulate_keystrokes(shortcut);
-            host.read_with(cx, |host, _| host.terminal_tab.focused_pane_id())
+            host.read_with(cx, |host, _| host.tab.focused_pane_id())
         })
     }
 
@@ -4718,7 +4701,7 @@ mod tests {
         });
         cx.run_until_parked();
         let first_pane = host.read_with(cx, |host, _| {
-            host.terminal_tab
+            host.tab
                 .terminal(PaneId::new(1))
                 .cloned()
                 .expect("the original Pane should still exist")
@@ -4973,8 +4956,8 @@ mod tests {
 
         let state = host.read_with(cx, |host, _| {
             (
-                host.terminal_tab.pane_count(),
-                host.terminal_tab.focused_pane_id(),
+                host.tab.pane_count(),
+                host.tab.focused_pane_id(),
                 records.dropped_session_ids(),
             )
         });
@@ -5110,7 +5093,7 @@ mod tests {
         cx.run_until_parked();
 
         let state = host.read_with(cx, |host, _| {
-            (host.terminal_tab.zoom_state(), records.pointer_count())
+            (host.tab.zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
     }
@@ -5152,7 +5135,7 @@ mod tests {
 
         let state = cx.update(|window, cx| {
             let host = host.read(cx);
-            let ratio = match host.terminal_tab.root().node() {
+            let ratio = match host.tab.root().node() {
                 PaneNodeRef::Split { ratio, .. } => ratio,
                 PaneNodeRef::Leaf { .. } => 0.0,
             };
@@ -5388,7 +5371,7 @@ mod tests {
     }
 
     fn split_ratio(host: &Entity<PaneHost>, cx: &mut VisualTestContext) -> f32 {
-        host.read_with(cx, |host, _| match host.terminal_tab.root().node() {
+        host.read_with(cx, |host, _| match host.tab.root().node() {
             PaneNodeRef::Split { ratio, .. } => ratio,
             PaneNodeRef::Leaf { .. } => f32::NAN,
         })
@@ -5482,9 +5465,9 @@ mod tests {
             }
 
             let (minimum, expected) = host.read_with(cx, |host, _| {
-                let leaf = host.terminal_tab.minimum_pane_size();
+                let leaf = host.tab.minimum_pane_size();
                 (
-                    host.terminal_tab.minimum_size(gap).unwrap(),
+                    host.tab.minimum_size(gap).unwrap(),
                     (leaf.width() * 2.0 + gap, leaf.height() * 2.0 + gap),
                 )
             });
@@ -5575,7 +5558,7 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            host.read_with(cx, |host, _| host.terminal_tab.zoom_state()),
+            host.read_with(cx, |host, _| host.tab.zoom_state()),
             ZoomState::Zoomed(PaneId::new(2)),
             "the focused Pane should be zoomed before its rendered geometry is inspected"
         );

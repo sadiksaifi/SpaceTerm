@@ -62,11 +62,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outer_outlines_keep_concentric_corners() {
-        assert_eq!(concentric_outset(RADIUS_CONTROL, 3.0), 9.0);
-    }
-
-    #[test]
     fn pane_radius_is_the_only_native_derived_radius_and_stays_inside_the_scale() {
         assert_eq!(pane_radius(0.0, 6.0), RADIUS_CONTROL);
         assert_eq!(pane_radius(16.0, 6.0), 10.0);

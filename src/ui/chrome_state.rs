@@ -279,12 +279,6 @@ fn inactive(c: &mut ChromeColors, host: Color) {
     c.selection_border = c.element_border;
     c.selection_hover_border = c.element_border;
     c.selection_pressed_border = c.element_border;
-    // The window variant now owns the inactive selection. Legacy Tab consumers remain equivalent
-    // until they switch to the common active-state roles.
-    c.tab_inactive_selected_background = c.tab_active_background;
-    c.tab_inactive_selected_foreground = c.tab_active_foreground;
-    c.tab_inactive_selected_icon = c.tab_active_icon;
-    c.tab_inactive_selected_border = c.tab_active_border;
 }
 
 fn control_edges(c: &mut ChromeColors, host: Color) {

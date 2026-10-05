@@ -1,16 +1,16 @@
 pub(crate) mod remote_workspace;
+mod tab;
 mod tab_collection;
-mod terminal_tab;
 mod workspace_collection;
 
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,
 };
-pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
-pub(crate) use terminal_tab::{
+pub(crate) use tab::{
     FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef, SplitAxis,
-    SplitId, TabId, TerminalTab, ZoomState,
+    SplitId, Tab, TabId, ZoomState,
 };
+pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
 pub(crate) use workspace_collection::{
     CurrentDirectory, DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory,
     RemoteDirectory, RemoteDirectoryIdentity, RemoteUser, RemoteWorkspaceTarget, SshDestination,

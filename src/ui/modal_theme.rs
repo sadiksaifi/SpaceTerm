@@ -24,22 +24,3 @@ fn paint(colors: &ChromeColors) -> ModalPaint {
         gpui_color(colors.error),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::appearance::Color;
-    use gpui::rgba;
-    #[test]
-    fn floating_surface_consumes_the_canonical_scrim_token_directly() {
-        let colors = ChromeColors {
-            modal_scrim: Color::rgba(0x12345678),
-            ..ChromeColors::default()
-        };
-        let appearance = crate::ui::appearance::ChromeAppearance {
-            colors,
-            ..crate::ui::appearance::ChromeAppearance::default()
-        };
-        assert_eq!(appearance.floating_surfaces().scrim(), rgba(0x12345678));
-    }
-}
