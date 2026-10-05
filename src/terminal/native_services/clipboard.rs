@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use gpui::App;
@@ -33,15 +34,15 @@ pub(crate) enum TextClipboardTarget {
     Primary,
 }
 
+/// A native clipboard read that completes when the selection owner answers or the host's read
+/// deadline passes, without blocking the UI thread. Dropping it discards the result.
+pub(crate) type ClipboardRead<T> = Pin<Box<dyn Future<Output = Result<T, ClipboardError>>>>;
+
 /// Plain text only. Target resolution follows the Session's focus and Settings checks.
 /// This Interface carries no local file authority and never falls back to another selection.
 pub(crate) trait TextClipboard {
     fn resolve(&self, target: super::osc52::Osc52Target) -> TextClipboardTarget;
-    fn read(
-        &self,
-        target: TextClipboardTarget,
-        cx: &mut App,
-    ) -> Result<Option<String>, ClipboardError>;
+    fn read(&self, target: TextClipboardTarget, cx: &mut App) -> ClipboardRead<Option<String>>;
     fn write(
         &self,
         target: TextClipboardTarget,
@@ -126,13 +127,13 @@ pub(crate) trait SelectionClipboard {
 
 /// Discovers ordered file paths without granting authority to insert them.
 pub(crate) trait FileClipboard {
-    fn read_files(&self, cx: &App) -> Result<Vec<PathBuf>, ClipboardError>;
+    fn read_files(&self, cx: &mut App) -> ClipboardRead<Vec<PathBuf>>;
 }
 
 /// The host's optional PRIMARY selection, independent of explicit Copy.
 pub(crate) trait PrimarySelection {
     fn publish(&self, copy: &SelectionCopy, cx: &mut App);
-    fn read(&self, cx: &App) -> Option<String>;
+    fn read(&self, cx: &mut App) -> ClipboardRead<Option<String>>;
 }
 
 pub(crate) struct SelectionPublication {
@@ -172,20 +173,26 @@ impl SelectionPublication {
 }
 
 impl PastePayload {
-    /// Focus and local authority are checked before consulting either clipboard source.
-    pub(crate) fn clipboard(
+    /// Focus and local authority are checked before consulting either clipboard source, and text
+    /// is read only when no file was found.
+    pub(crate) async fn clipboard<Files, Text>(
         policy: super::file_insertion::FileInsertionPolicy,
-        files: impl FnOnce() -> Result<Vec<PathBuf>, ClipboardError>,
-        text: impl FnOnce() -> Option<String>,
+        files: impl FnOnce() -> Files,
+        text: impl FnOnce() -> Text,
         focused: bool,
         local: TerminalLocalFileCapabilities,
-    ) -> Result<Option<Self>, PasteIntakeError> {
+    ) -> Result<Option<Self>, PasteIntakeError>
+    where
+        Files: Future<Output = Result<Vec<PathBuf>, ClipboardError>>,
+        Text: Future<Output = Option<String>>,
+    {
         if !focused {
             return Err(PasteIntakeError::TerminalUnfocused);
         }
         if let Some(access) = super::LocalFileAccess::authorize(local) {
             let paths = access
                 .clipboard(files)
+                .await
                 .map_err(|_| PasteIntakeError::InvalidFiles("clipboard files are unavailable"))?;
             if !paths.is_empty() {
                 return access
@@ -195,6 +202,7 @@ impl PastePayload {
             }
         }
         text()
+            .await
             .map(|text| Self::service_text(text, focused))
             .transpose()
     }
@@ -212,13 +220,13 @@ mod tests {
         fail: bool,
     }
     impl Files {
-        fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
+        fn read_files(&self) -> std::future::Ready<Result<Vec<PathBuf>, ClipboardError>> {
             self.reads.set(self.reads.get() + 1);
-            if self.fail {
+            std::future::ready(if self.fail {
                 Err(ClipboardError::InvalidFiles)
             } else {
                 Ok(self.paths.clone())
-            }
+            })
         }
     }
 
@@ -232,37 +240,37 @@ mod tests {
         let text_reads = Cell::new(0);
         let text = || {
             text_reads.set(text_reads.get() + 1);
-            Some("fixture".to_owned())
+            std::future::ready(Some("fixture".to_owned()))
         };
         assert!(
-            PastePayload::clipboard(
+            pollster::block_on(PastePayload::clipboard(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
                 || files.read_files(),
                 text,
                 false,
                 TerminalLocalFileCapabilities::Enabled
-            )
+            ))
             .is_err()
         );
         assert_eq!((files.reads.get(), text_reads.get()), (0, 0));
-        let remote = PastePayload::clipboard(
+        let remote = pollster::block_on(PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Disabled,
-        )
+        ))
         .unwrap()
         .unwrap();
         assert!(remote.text() == "fixture");
         assert_eq!((files.reads.get(), text_reads.get()), (0, 1));
-        let local = PastePayload::clipboard(
+        let local = pollster::block_on(PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Enabled,
-        )
+        ))
         .unwrap()
         .unwrap();
         assert!(local.text() == "'/a b' '/c'");
@@ -276,13 +284,13 @@ mod tests {
             paths: Vec::new(),
             fail: true,
         };
-        let result = PastePayload::clipboard(
+        let result = pollster::block_on(PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             || files.read_files(),
-            || panic!("unexpected clipboard read"),
+            || -> std::future::Ready<Option<String>> { panic!("unexpected clipboard read") },
             true,
             TerminalLocalFileCapabilities::Enabled,
-        );
+        ));
         assert!(result.is_err());
     }
 

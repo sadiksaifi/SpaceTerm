@@ -6,8 +6,8 @@ use std::path::PathBuf;
 #[cfg(all(test, feature = "native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
-    ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard, TextClipboard,
-    TextClipboardTarget, selection_representations,
+    ClipboardError, ClipboardRead, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard,
+    TextClipboard, TextClipboardTarget, selection_representations,
 };
 use crate::terminal::native_services::file_insertion::{
     MAX_FILE_INSERTION_BYTES, MAX_FILE_ITEMS, parse_file_urls,
@@ -25,16 +25,13 @@ impl TextClipboard for MacosTextClipboard {
         }
     }
 
+    /// The general pasteboard answers on the main thread, so the read completes at once.
     fn read(
         &self,
         target: TextClipboardTarget,
         _: &mut gpui::App,
-    ) -> Result<Option<String>, ClipboardError> {
-        if target != TextClipboardTarget::Clipboard {
-            return Err(ClipboardError::Unavailable);
-        }
-        MainThreadMarker::new().ok_or(ClipboardError::Unavailable)?;
-        read_text_from_pasteboard(&NSPasteboard::generalPasteboard())
+    ) -> ClipboardRead<Option<String>> {
+        Box::pin(std::future::ready(read_general_text(target)))
     }
 
     fn write(
@@ -48,6 +45,14 @@ impl TextClipboard for MacosTextClipboard {
         }
         write_selection(text, None).map_err(|_| ClipboardError::Unavailable)
     }
+}
+
+fn read_general_text(target: TextClipboardTarget) -> Result<Option<String>, ClipboardError> {
+    if target != TextClipboardTarget::Clipboard {
+        return Err(ClipboardError::Unavailable);
+    }
+    MainThreadMarker::new().ok_or(ClipboardError::Unavailable)?;
+    read_text_from_pasteboard(&NSPasteboard::generalPasteboard())
 }
 
 fn read_text_from_pasteboard(pasteboard: &NSPasteboard) -> Result<Option<String>, ClipboardError> {
@@ -88,8 +93,9 @@ pub(crate) struct MacosFileClipboard {
     pub(crate) paths: crate::local_path::LocalPathSemantics,
 }
 impl FileClipboard for MacosFileClipboard {
-    fn read_files(&self, _: &gpui::App) -> Result<Vec<PathBuf>, ClipboardError> {
-        read_file_urls(self.paths)
+    /// The general pasteboard answers on the main thread, so the read completes at once.
+    fn read_files(&self, _: &mut gpui::App) -> ClipboardRead<Vec<PathBuf>> {
+        Box::pin(std::future::ready(read_file_urls(self.paths)))
     }
 }
 
