@@ -311,13 +311,13 @@ impl FormRow {
         }
     }
 
-    /// Adds one line of guidance below the control.
+    /// Adds guidance under the label for Beside, or below the content for Above and Full.
     pub(crate) fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
         self
     }
 
-    /// Adds one line below the control in the color its tone selects.
+    /// Adds a caption in the same position as guidance, with the color its tone selects.
     pub(crate) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
         self.description = Some(message.into());
         self.tone = tone;

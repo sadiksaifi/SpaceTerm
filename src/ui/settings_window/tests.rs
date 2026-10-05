@@ -668,7 +668,7 @@ fn malformed_settings_reset_keeps_a_backup_and_resumes_editing(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn only_malformed_settings_offer_a_reset(cx: &mut TestAppContext) {
+fn unsafe_settings_do_not_offer_a_reset(cx: &mut TestAppContext) {
     let storage = Arc::new(MemoryStorage::default());
     storage.fail_reads(Some(StorageError::Unsafe));
     let (window, _harness, cx) = open_settings_with(cx, storage);
@@ -732,7 +732,7 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
 // Appearance Mode ----------------------------------------------------------------------------
 
 #[gpui::test]
-fn appearance_mode_switches_both_surfaces_without_changing_any_theme_slot(cx: &mut TestAppContext) {
+fn appearance_mode_preserves_window_and_terminal_preferences(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
     let before = document_of(&window, cx).preferences;
@@ -1497,12 +1497,12 @@ fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppConte
         select_section(section, cx);
 
         assert!(
-            cx.debug_bounds(leaked(section.selector())).is_some(),
+            cx.debug_bounds(section.selector()).is_some(),
             "{section:?} should render"
         );
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
             assert!(
-                cx.debug_bounds(leaked(row.descriptor().selector)).is_some(),
+                cx.debug_bounds(row.descriptor().selector).is_some(),
                 "{row:?} should render"
             );
         }
@@ -1781,22 +1781,22 @@ fn the_terminal_font_list_hides_the_private_default_and_keeps_system_choices() {
 
 #[gpui::test]
 fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
-    let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.base_size = 8.0;
-    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    select_section(SettingsSectionId::Font, cx);
+    for (size, selector) in [
+        (8.0, "settings-terminal-base-size-decrease"),
+        (32.0, "settings-terminal-base-size-increase"),
+    ] {
+        let mut document = SettingsDocument::default();
+        document.preferences.terminal.typography.base_size = size;
+        let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+        select_section(SettingsSectionId::Font, cx);
 
-    // The decrement is disabled at the bottom of the range, so it cannot request a rejected value.
-    click("settings-terminal-base-size-decrease", cx);
+        click(selector, cx);
+        settle(cx);
 
-    assert_eq!(
-        document_of(&window, cx)
-            .preferences
-            .terminal
-            .typography
-            .base_size,
-        8.0
-    );
+        assert_eq!(document_of(&window, cx), document);
+        assert_eq!(harness.storage.document().unwrap(), document);
+        assert_eq!(harness.storage.writes(), 0);
+    }
 }
 
 #[gpui::test]
@@ -2046,7 +2046,7 @@ fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) 
 
 /// Nothing is wrong by default, and a warning that says so is noise rather than information.
 #[gpui::test]
-fn the_themes_page_warns_only_when_something_could_not_be_resolved(cx: &mut TestAppContext) {
+fn the_default_themes_page_has_no_warning(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
 
@@ -2080,7 +2080,7 @@ fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext)
                 .debug_bounds(leaked_owned(group.clone()))
                 .unwrap_or_else(|| panic!("{group} should render"));
             let bounds = cx
-                .debug_bounds(leaked(row.descriptor().selector))
+                .debug_bounds(row.descriptor().selector)
                 .unwrap_or_else(|| panic!("{row:?} should render"));
 
             // Half a pixel of slack, because the group's height and its rows' heights are each
@@ -2141,10 +2141,10 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
         .filter(|pair| pair[0].descriptor().group == pair[1].descriptor().group)
         .map(|pair| {
             let top = cx
-                .debug_bounds(leaked(pair[0].descriptor().selector))
+                .debug_bounds(pair[0].descriptor().selector)
                 .expect("row bounds");
             let bottom = cx
-                .debug_bounds(leaked(pair[1].descriptor().selector))
+                .debug_bounds(pair[1].descriptor().selector)
                 .expect("row bounds");
             bottom.top() - top.bottom()
         })
@@ -2498,13 +2498,46 @@ fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     }
 }
 
-/// One alignment rule for the whole form: labels share a left edge, controls share a right edge.
-///
-/// This is the property that makes a settings page look designed rather than assembled. It is
-/// asserted numerically because it is the kind of thing that decays one row at a time. A row's own
-/// box reaches past its text on both sides, because the fill Settings Search leaves on a revealed
-/// row has to clear the text rather than run against it, so what has to agree is the inset every
-/// row keeps, not the box edge itself.
+/// The rendered control's selector, independent from the enclosing form row.
+fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
+    Some(
+        match row {
+            SettingsRowId::AppearanceMode => "settings-appearance-mode",
+            SettingsRowId::Transparency => "settings-transparency",
+            SettingsRowId::Blur => "settings-blur",
+            SettingsRowId::Density => "settings-density",
+            SettingsRowId::TerminalTheme => "settings-current-theme",
+            SettingsRowId::TerminalFontFamily => "settings-terminal-font-family",
+            SettingsRowId::TerminalBaseSize => "settings-terminal-base-size",
+            SettingsRowId::TerminalLineHeight => "settings-terminal-line-height",
+            SettingsRowId::TerminalRegularWeight => "settings-row-terminal-regular-weight-control",
+            SettingsRowId::TerminalBoldWeight => "settings-row-terminal-bold-weight-control",
+            SettingsRowId::TerminalItalic => "settings-terminal-italic",
+            SettingsRowId::TerminalBoldAsBright => "settings-terminal-bold-as-bright",
+            SettingsRowId::InstalledThemes => "settings-installed-themes",
+            SettingsRowId::MicrophoneAccess => "settings-microphone-access-control",
+            SettingsRowId::ScreenRecordingAccess => "settings-screen-recording-access-control",
+            SettingsRowId::AccessibilityAccess => "settings-accessibility-access-control",
+            SettingsRowId::ClipboardWrites => "settings-clipboard-writes",
+            SettingsRowId::ClipboardReads => "settings-clipboard-reads",
+            // The fixture installs no update service, so this row presents no action control.
+            SettingsRowId::UpdateStatus => return None,
+            SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
+            SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
+            SettingsRowId::UpdateReminderInterval => "settings-update-reminder-interval",
+            SettingsRowId::SettingsFile => "settings-file-frame",
+            SettingsRowId::ExportSettings => "settings-document-export",
+            SettingsRowId::ImportSettings => "settings-import",
+            SettingsRowId::ResetAllSettings => "settings-reset-all",
+            SettingsRowId::Shortcut(_) => {
+                return Some(format!("{}-control", row.descriptor().selector));
+            }
+        }
+        .to_owned(),
+    )
+}
+
+/// Labels share a left edge, rendered controls share a right edge, and row boxes keep one inset.
 #[gpui::test]
 fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     cx: &mut TestAppContext,
@@ -2516,10 +2549,11 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
 
         let mut left: Option<(SettingsRowId, gpui::Pixels)> = None;
         let mut right: Option<(SettingsRowId, gpui::Pixels)> = None;
+        let mut control_right: Option<(SettingsRowId, gpui::Pixels)> = None;
         let mut inset: Option<(SettingsRowId, gpui::Pixels)> = None;
         for row in window.read_with(cx, |window, _| window.rows_for(section)) {
             let bounds = cx
-                .debug_bounds(leaked(row.descriptor().selector))
+                .debug_bounds(row.descriptor().selector)
                 .unwrap_or_else(|| panic!("{row:?} should render"));
             if let Some(label) =
                 cx.debug_bounds(leaked_owned(format!("{}-label", row.descriptor().selector)))
@@ -2556,10 +2590,40 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
             } else {
                 right = Some((row, bounds.right()));
             }
+            if let Some(selector) = rendered_control_selector(row) {
+                let control = cx
+                    .debug_bounds(leaked_owned(selector))
+                    .unwrap_or_else(|| panic!("{row:?} should render its control"));
+                if let Some((first, edge)) = control_right {
+                    assert_eq!(
+                        control.right(),
+                        edge,
+                        "{row:?} ends its control at a different edge than {first:?}"
+                    );
+                } else {
+                    control_right = Some((row, control.right()));
+                }
+            } else {
+                assert_eq!(
+                    window.read_with(cx, |settings, cx| settings.update_status(cx).action),
+                    None
+                );
+                for selector in [
+                    "settings-update-check-now",
+                    "settings-update-download",
+                    "settings-update-restart",
+                ] {
+                    assert!(cx.debug_bounds(selector).is_none());
+                }
+            }
         }
         // The library's rows carry no label of their own: their group title names them. Every
         // section still shares the one right edge, which is what the loop above checked.
         assert!(right.is_some(), "{section:?} should present a row");
+        assert!(
+            control_right.is_some(),
+            "{section:?} should present a control"
+        );
     }
 }
 
@@ -2576,6 +2640,9 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
     let label = cx
         .debug_bounds("settings-row-appearance-mode-label")
         .expect("the appearance label should render");
+    let description = cx
+        .debug_bounds("settings-row-appearance-mode-description")
+        .expect("the appearance guidance should render");
     let control = cx
         .debug_bounds("settings-appearance-mode")
         .expect("the appearance control should render");
@@ -2586,8 +2653,18 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
         .debug_bounds("settings-row-terminal-theme")
         .expect("the theme in use should render under the appearance row");
 
-    // The caption is the only thing in this row under the label, so the label column's own extent
-    // is what the assertions below measure.
+    assert!(
+        description.top() >= label.bottom(),
+        "guidance should start below its label, got {description:?} after {label:?}"
+    );
+    assert!(
+        description.right() <= control.left(),
+        "guidance should stop before the control, got {description:?} against {control:?}"
+    );
+    assert!(
+        description.bottom() <= row.bottom(),
+        "guidance should stay inside its row, got {description:?} in {row:?}"
+    );
     assert!(
         label.bottom() < control.bottom(),
         "guidance should sit under the label, got {label:?} against {control:?}"
@@ -2602,11 +2679,7 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
     );
 }
 
-/// Grouping survives without a rule between every pair of rows.
-///
-/// Nothing is ruled off, so space is the only thing telling a reader where one group ends. Rows
-/// inside a group must therefore sit closer together than a group sits to the one after it, or the
-/// page becomes one undifferentiated list.
+/// Group cards keep their inset row separators and leave more space between cards than rows.
 #[gpui::test]
 fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
     cx: &mut TestAppContext,
@@ -2620,7 +2693,7 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
         .map(|row| {
             let descriptor = row.descriptor();
             let bounds = cx
-                .debug_bounds(leaked(descriptor.selector))
+                .debug_bounds(descriptor.selector)
                 .unwrap_or_else(|| panic!("{row:?} should render"));
             (descriptor.group, bounds)
         })
@@ -2649,12 +2722,9 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
     );
 }
 
-/// A selector is bezeled like the steppers and segmented controls beside it.
-///
-/// A ghost trigger occupies the same width but draws no edge, so it reads as ending short of its
-/// neighbours even when the geometry agrees. The page has one control treatment or it has none.
+/// A selector shares the right edge and height of the stepper beside it.
 #[gpui::test]
-fn a_selector_carries_the_same_bezel_as_the_controls_beside_it(cx: &mut TestAppContext) {
+fn a_selector_aligns_with_the_stepper_beside_it(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Font, cx);
 
@@ -2759,7 +2829,7 @@ fn a_switch_row_presents_the_switch_without_repeating_the_label(cx: &mut TestApp
 fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
 
-    // The controls live on three pages, so each page is visited before its own are measured.
+    // Visit Interface and Font before measuring the controls each section contains.
     let mut heights = Vec::new();
     for (section, selectors) in [
         (
@@ -2779,7 +2849,7 @@ fn every_selector_and_stepper_shares_one_control_height(cx: &mut TestAppContext)
         select_section(section, cx);
         for selector in selectors {
             heights.push(
-                cx.debug_bounds(leaked(selector))
+                cx.debug_bounds(selector)
                     .unwrap_or_else(|| panic!("{selector} should render"))
                     .size
                     .height,
@@ -2894,15 +2964,7 @@ fn installed_count(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) 
     })
 }
 
-/// `debug_bounds` takes a `'static` selector, and section and row selectors are already static
-/// strings behind accessors.
-fn leaked(selector: &'static str) -> &'static str {
-    selector
-}
-
-/// A composed selector with the lifetime `debug_bounds` asks for.
-///
-/// A test builds a handful of these and then ends, so leaking them costs nothing worth managing.
+/// Leaks a composed selector for GPUI's static debug_bounds argument.
 fn leaked_owned(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
 }
@@ -3214,8 +3276,21 @@ fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut Te
 
 #[gpui::test]
 fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestAppContext) {
-    let (window, _, cx) = open_settings(cx);
+    let (window, harness, cx) = open_settings(cx);
     set_query(&window, "terminal", cx);
+    let mut expected = document_of(&window, cx);
+    expected.preferences.terminal.typography.base_size = 21.0;
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.edit(
+                |document| document.preferences.terminal.typography.base_size = 21.0,
+                cx,
+            );
+        });
+    });
+    assert_eq!(document_of(&window, cx), expected);
+    expected.preferences.mode = AppearanceMode::Light;
+    assert_eq!(harness.storage.writes(), 0);
     cx.update(|native, cx| {
         window.update(cx, |settings, cx| {
             settings.search.read(cx).focus_handle().focus(native, cx);
@@ -3227,6 +3302,12 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
         assert_eq!(settings.search.read(cx).value(), "terminal");
         assert!(settings.search.read(cx).is_focused());
     });
+    assert_eq!(document_of(&window, cx), expected);
+    assert_eq!(harness.storage.writes(), 0);
+    assert_eq!(
+        cx.update(|_, cx| appearance_runtime::current(cx).chrome.appearance),
+        Appearance::Light
+    );
 }
 
 /// A described row beside a tall control keeps its label and guidance inside the row at the

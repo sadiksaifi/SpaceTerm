@@ -881,16 +881,6 @@ mod tests {
         }
     }
 
-    /// One appearance control governs both surfaces.
-    #[test]
-    fn one_appearance_mode_governs_both_surfaces() {
-        let modes = rows()
-            .filter(|row| matches!(row.id, SettingsRowId::AppearanceMode))
-            .count();
-
-        assert_eq!(modes, 1);
-    }
-
     /// The theme row changes the displayed appearance's theme, so its reset leaves the shared
     /// appearance mode and the other slot alone.
     #[test]

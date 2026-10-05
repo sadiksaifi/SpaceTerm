@@ -1158,7 +1158,7 @@ impl SettingsWindow {
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
-            SettingsRowId::Density => self.render_density(appearance, cx),
+            SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
             SettingsRowId::TerminalLineHeight => self.render_line_height(appearance, cx),
@@ -1314,12 +1314,7 @@ impl SettingsWindow {
         );
     }
 
-    fn render_density(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let _ = appearance;
+    fn render_density(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.editor.document().preferences.window.density;
         let owner = cx.weak_entity();
         SegmentedControl::new(
@@ -1392,9 +1387,7 @@ impl SettingsWindow {
         )
         .disabled(!self.editor.editable())
         .on_accept(move |acceptance, _, cx| {
-            let Some(choice) = Some(acceptance.item_id().clone()) else {
-                return;
-            };
+            let choice = acceptance.item_id().clone();
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
