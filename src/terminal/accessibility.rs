@@ -924,13 +924,6 @@ impl TerminalAccessibilityModel {
             .unwrap_or_else(|| self.data.cursor.clone())
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only a native accessibility Adapter answers text queries"
-        )
-    )]
     pub(crate) fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
         self.data.document.range_for_line(line)
     }
@@ -965,13 +958,6 @@ impl TerminalAccessibilityModel {
         self.data.document.text_for_range(range)
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only a native accessibility Adapter answers text queries"
-        )
-    )]
     pub(crate) fn selection_request(
         &self,
         range: Range<usize>,

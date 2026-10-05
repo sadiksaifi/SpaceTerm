@@ -140,6 +140,15 @@ mod tests {
     #[gpui::test]
     fn linux_osc52_targets_preserve_independent_selections(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
+            for selection in [TextClipboardTarget::Clipboard, TextClipboardTarget::Primary] {
+                assert_eq!(read(selection, cx), Ok(None));
+                LinuxTextClipboard.write(selection, "first", cx).unwrap();
+                assert_eq!(read(selection, cx), Ok(Some("first".into())));
+                LinuxTextClipboard
+                    .write(selection, "replacement", cx)
+                    .unwrap();
+                assert_eq!(read(selection, cx), Ok(Some("replacement".into())));
+            }
             for target in [
                 Osc52Target::Default,
                 Osc52Target::Standard,
@@ -217,27 +226,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn linux_text_clipboard_reads_and_replaces_system_text(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            assert_eq!(read(TextClipboardTarget::Clipboard, cx), Ok(None));
-            LinuxTextClipboard
-                .write(TextClipboardTarget::Clipboard, "first", cx)
-                .unwrap();
-            assert_eq!(
-                read(TextClipboardTarget::Clipboard, cx),
-                Ok(Some("first".into()))
-            );
-            LinuxTextClipboard
-                .write(TextClipboardTarget::Clipboard, "replacement", cx)
-                .unwrap();
-            assert_eq!(
-                read(TextClipboardTarget::Clipboard, cx),
-                Ok(Some("replacement".into()))
-            );
-        });
-    }
-
-    #[gpui::test]
     fn selection_clipboards_keep_plain_text_and_html_alternates(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let copy = SelectionCopy {
@@ -277,6 +265,27 @@ mod tests {
                 pollster::block_on(LinuxFileClipboard.read_files(cx)),
                 Err(ClipboardError::InvalidFiles)
             );
+            let half_budget = format!("/{}", "x".repeat(MAX_FILE_INSERTION_BYTES / 2 - 1));
+            let at_budget = vec![PathBuf::from(&half_budget), PathBuf::from(&half_budget)];
+            cx.write_to_clipboard(ClipboardItem::from(ClipboardEntry::ExternalPaths(
+                gpui::ExternalPaths(at_budget.clone().into()),
+            )));
+            assert_eq!(
+                pollster::block_on(LinuxFileClipboard.read_files(cx)).unwrap(),
+                at_budget
+            );
+            for paths in [
+                vec![half_budget.clone().into(), half_budget.into(), "/x".into()],
+                vec!["relative".into()],
+            ] {
+                cx.write_to_clipboard(ClipboardItem::from(ClipboardEntry::ExternalPaths(
+                    gpui::ExternalPaths(paths.into()),
+                )));
+                assert_eq!(
+                    pollster::block_on(LinuxFileClipboard.read_files(cx)),
+                    Err(ClipboardError::InvalidFiles)
+                );
+            }
         });
     }
 

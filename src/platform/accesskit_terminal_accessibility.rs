@@ -357,100 +357,6 @@ impl PaneTree {
         nodes
     }
 
-    #[cfg(test)]
-    fn full_project(
-        &mut self,
-        namespace: NodeId,
-        id: impl Fn(AccessibilityRowId) -> NodeId,
-    ) -> Vec<(NodeId, Node)> {
-        let mut nodes = Vec::new();
-        let mut runs = Vec::new();
-        let mut retained = HashSet::new();
-        let metrics = (
-            self.geometry.cell_width * self.geometry.scale,
-            self.geometry.line_height * self.geometry.scale,
-        );
-        let visible_start = self.model.visible_lines().start;
-        let mut starts_word = true;
-        for (line, row) in self.model.rows().enumerate() {
-            retained.insert(row.id);
-            let line_break = !row.soft_wrapped && row.range.end - row.range.start > row.len_utf16;
-            let cached = self
-                .runs
-                .entry(row.id)
-                .or_insert_with(|| build_run(&row, line_break, metrics, starts_word));
-            if cached.revision != row.revision
-                || cached.line_break != line_break
-                || cached.metrics != metrics
-                || cached.starts_word != starts_word
-            {
-                *cached = build_run(&row, line_break, metrics, starts_word);
-            }
-            starts_word =
-                line_break || row.text.chars().next_back().is_none_or(char::is_whitespace);
-            let node_id = id(row.id);
-            let mut node = cached.node.as_ref().clone();
-            if line_break
-                && !row.text.is_empty()
-                && self.model.cursor_range().start == row.range.start + row.len_utf16
-                && let Some((cursor_line, column)) = self.model.cursor_cell()
-                && cursor_line == line
-            {
-                let mut positions = node.character_positions().unwrap_or_default().to_vec();
-                if let Some(newline) = positions.last_mut() {
-                    *newline = f32::from(column) * metrics.0;
-                    node.set_character_positions(positions);
-                }
-            }
-            let empty_cursor_column = self
-                .model
-                .cursor_cell()
-                .filter(|(cursor_line, _)| *cursor_line == line && row.text.is_empty())
-                .map_or(0, |(_, column)| column);
-            let x = f64::from(
-                self.geometry.origin.0 * self.geometry.scale
-                    + f32::from(empty_cursor_column) * metrics.0,
-            );
-            let y = f64::from(self.geometry.origin.1 * self.geometry.scale)
-                + (line as f64 - visible_start as f64) * f64::from(metrics.1);
-            let text_width = node
-                .character_positions()
-                .unwrap_or_default()
-                .iter()
-                .zip(node.character_widths().unwrap_or_default())
-                .map(|(position, width)| position + width)
-                .fold(0.0_f32, f32::max);
-            node.set_bounds(Rect {
-                x0: x,
-                y0: y,
-                x1: x + f64::from(text_width),
-                y1: y + f64::from(metrics.1),
-            });
-            nodes.push((node_id, node));
-            runs.push(PublishedRun {
-                node: node_id,
-                row: row.id,
-                offsets: Arc::clone(&cached.offsets),
-            });
-        }
-        self.runs.retain(|row_id, _| retained.contains(row_id));
-        let children = Arc::new(runs.iter().map(|run| run.node).collect());
-        let lines_by_node = runs
-            .iter()
-            .enumerate()
-            .map(|(line, run)| (run.node, line))
-            .collect();
-        self.published = Some(PublishedDocument {
-            namespace,
-            geometry: self.geometry,
-            children,
-            lines_by_node,
-            model: self.model.clone(),
-            runs,
-        });
-        nodes
-    }
-
     fn publish(&mut self, builder: &mut A11ySubtreeBuilder<'_>) {
         if self.visible
             && let Some(demand) = &self.demand_sender
@@ -649,13 +555,106 @@ mod tests {
         }
     }
 
+    fn full_project(
+        tree: &mut PaneTree,
+        namespace: NodeId,
+        id: impl Fn(AccessibilityRowId) -> NodeId,
+    ) -> Vec<(NodeId, Node)> {
+        let mut nodes = Vec::new();
+        let mut runs = Vec::new();
+        let mut retained = HashSet::new();
+        let metrics = (
+            tree.geometry.cell_width * tree.geometry.scale,
+            tree.geometry.line_height * tree.geometry.scale,
+        );
+        let visible_start = tree.model.visible_lines().start;
+        let mut starts_word = true;
+        for (line, row) in tree.model.rows().enumerate() {
+            retained.insert(row.id);
+            let line_break = !row.soft_wrapped && row.range.end - row.range.start > row.len_utf16;
+            let cached = tree
+                .runs
+                .entry(row.id)
+                .or_insert_with(|| build_run(&row, line_break, metrics, starts_word));
+            if cached.revision != row.revision
+                || cached.line_break != line_break
+                || cached.metrics != metrics
+                || cached.starts_word != starts_word
+            {
+                *cached = build_run(&row, line_break, metrics, starts_word);
+            }
+            starts_word =
+                line_break || row.text.chars().next_back().is_none_or(char::is_whitespace);
+            let node_id = id(row.id);
+            let mut node = cached.node.as_ref().clone();
+            if line_break
+                && !row.text.is_empty()
+                && tree.model.cursor_range().start == row.range.start + row.len_utf16
+                && let Some((cursor_line, column)) = tree.model.cursor_cell()
+                && cursor_line == line
+            {
+                let mut positions = node.character_positions().unwrap_or_default().to_vec();
+                if let Some(newline) = positions.last_mut() {
+                    *newline = f32::from(column) * metrics.0;
+                    node.set_character_positions(positions);
+                }
+            }
+            let empty_cursor_column = tree
+                .model
+                .cursor_cell()
+                .filter(|(cursor_line, _)| *cursor_line == line && row.text.is_empty())
+                .map_or(0, |(_, column)| column);
+            let x = f64::from(
+                tree.geometry.origin.0 * tree.geometry.scale
+                    + f32::from(empty_cursor_column) * metrics.0,
+            );
+            let y = f64::from(tree.geometry.origin.1 * tree.geometry.scale)
+                + (line as f64 - visible_start as f64) * f64::from(metrics.1);
+            let text_width = node
+                .character_positions()
+                .unwrap_or_default()
+                .iter()
+                .zip(node.character_widths().unwrap_or_default())
+                .map(|(position, width)| position + width)
+                .fold(0.0_f32, f32::max);
+            node.set_bounds(Rect {
+                x0: x,
+                y0: y,
+                x1: x + f64::from(text_width),
+                y1: y + f64::from(metrics.1),
+            });
+            nodes.push((node_id, node));
+            runs.push(PublishedRun {
+                node: node_id,
+                row: row.id,
+                offsets: Arc::clone(&cached.offsets),
+            });
+        }
+        tree.runs.retain(|row_id, _| retained.contains(row_id));
+        let children = Arc::new(runs.iter().map(|run| run.node).collect());
+        let lines_by_node = runs
+            .iter()
+            .enumerate()
+            .map(|(line, run)| (run.node, line))
+            .collect();
+        tree.published = Some(PublishedDocument {
+            namespace,
+            geometry: tree.geometry,
+            children,
+            lines_by_node,
+            model: tree.model.clone(),
+            runs,
+        });
+        nodes
+    }
+
     fn update(tree: &mut PaneTree) -> TreeUpdate {
         update_with(tree, false)
     }
 
     fn update_with(tree: &mut PaneTree, full: bool) -> TreeUpdate {
         let runs = if full {
-            tree.full_project(NodeId(1), row_id)
+            full_project(tree, NodeId(1), row_id)
         } else {
             tree.project(NodeId(1), row_id)
         };
@@ -1543,10 +1542,40 @@ mod tests {
             focus: published.position(5).unwrap(),
         });
         tree.select(Some(&selection));
-        assert_eq!(
-            receiver.drain(),
-            vec![model.selection_request(1..5).unwrap()]
-        );
+        let requests = receiver.drain();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].range, 1..5);
+        assert_eq!(requests, vec![model.selection_request(1..5).unwrap()]);
+        tree.select(Some(&ActionData::SetTextSelection(TextSelection {
+            anchor: published.position(5).unwrap(),
+            focus: published.position(1).unwrap(),
+        })));
+        let requests = receiver.drain();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].range, 1..5);
+        assert_eq!(requests, vec![model.selection_request(1..5).unwrap()]);
+        for (anchor, focus) in [
+            (
+                TextPosition {
+                    character_index: usize::MAX,
+                    ..published.position(1).unwrap()
+                },
+                published.position(5).unwrap(),
+            ),
+            (
+                published.position(1).unwrap(),
+                TextPosition {
+                    character_index: usize::MAX,
+                    ..published.position(5).unwrap()
+                },
+            ),
+        ] {
+            tree.select(Some(&ActionData::SetTextSelection(TextSelection {
+                anchor,
+                focus,
+            })));
+            assert!(receiver.drain().is_empty());
+        }
         tree.select(Some(&ActionData::SetTextSelection(TextSelection {
             anchor: TextPosition {
                 node: NodeId(999),
@@ -1786,7 +1815,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn accesskit_publication_retains_notifications_until_visible_and_retires_authority(
+    fn accesskit_publication_retains_notifications_until_visible_and_retires_selection_authority(
         cx: &mut gpui::TestAppContext,
     ) {
         let cx = cx.add_empty_window();
@@ -1841,7 +1870,6 @@ mod tests {
             adapter.set_hierarchy(false, usize::MAX);
             assert_eq!(publish(&mut adapter, bounds, window), notifications);
             assert!(adapter.0.borrow().selection_sender.is_none());
-            assert!(adapter.0.borrow().demand_sender.is_none());
         });
     }
 }

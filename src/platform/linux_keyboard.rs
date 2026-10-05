@@ -348,6 +348,22 @@ mod tests {
             adapter.modifiers_changed_with_native(
                 &ModifiersChangedEvent {
                     modifiers: Modifiers::shift(),
+                    capslock: gpui::Capslock::default(),
+                },
+                Some(NativeKeyEvent {
+                    scancode: 54,
+                    modifiers: Modifiers::shift(),
+                    modifier_key: Some((54, true)),
+                    modifier_role: right_shift,
+                    ..Default::default()
+                }),
+            ),
+            None
+        );
+        assert_eq!(
+            adapter.modifiers_changed_with_native(
+                &ModifiersChangedEvent {
+                    modifiers: Modifiers::shift(),
                     capslock: gpui::Capslock::default()
                 },
                 None
@@ -473,9 +489,11 @@ mod tests {
             kitty_modifier_report(56, ModifierRole::ControlLeft, control),
             left_control
         );
+        let left_alt = kitty_modifier_report(56, ModifierRole::AltLeft, Modifiers::alt());
+        assert_eq!(left_alt, b"\x1b[57443;3u\x1b[57443;1:3u");
         assert_eq!(
             kitty_modifier_report(29, ModifierRole::AltLeft, Modifiers::alt()),
-            kitty_modifier_report(56, ModifierRole::AltLeft, Modifiers::alt())
+            left_alt
         );
     }
 

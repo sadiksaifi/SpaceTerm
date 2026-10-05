@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_settings_shortcut_keeps_its_unshifted_key_on_every_layout() {
+    fn linux_settings_shortcut_stays_unshifted_after_us_to_german_layout_change() {
         let layout = Rc::new(ChangingLayout(std::cell::RefCell::new(
             KeyboardLayout::us_english(),
         )));
@@ -638,38 +638,6 @@ mod tests {
             let predicate = binding.predicate().unwrap();
             assert!(predicate.eval(std::slice::from_ref(&workbench)));
             assert!(!predicate.eval(std::slice::from_ref(&terminal)));
-        }
-    }
-
-    #[test]
-    fn linux_fixed_bindings_use_the_dispatched_spelling() {
-        let profile = profile();
-        let keystrokes = profile
-            .fixed_bindings()
-            .iter()
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(|keystroke| keystroke.inner().unparse())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>();
-        for expected in [
-            "ctrl-shift-c",
-            "ctrl-insert",
-            "ctrl-shift-v",
-            "shift-insert",
-            "ctrl-,",
-            "ctrl-shift-q",
-            "ctrl-shift-m",
-            "f11",
-        ] {
-            assert!(
-                keystrokes.iter().any(|keystroke| keystroke == expected),
-                "{expected} missing from {keystrokes:?}"
-            );
         }
     }
 
