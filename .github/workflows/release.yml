@@ -47,15 +47,6 @@ jobs:
       - name: Install the Xcode Metal toolchain
         timeout-minutes: 10
         run: mise run setup:metal:macos
-      - name: Restore Rust build cache
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            target/debug
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/git/db
-          key: validate-macos-26-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'mise.lock', 'third_party/libghostty-vt-sys/build.rs', 'third_party/libghostty-vt-sys/patches/*.patch') }}
       - name: Validate
         timeout-minutes: 60
         run: mise run validate:macos
