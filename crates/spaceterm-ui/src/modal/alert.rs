@@ -349,8 +349,6 @@ impl<A> Alert<A> {
             ModalKind::Alert,
             PreparedModalRequest::erase_actions(actions),
             PreparedModalSemantics::Alert {
-                #[cfg(test)]
-                accessibility_title: self.accessibility_title,
                 visible_title: self.title,
                 message: self.message,
                 detail: self.detail,

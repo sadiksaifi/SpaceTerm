@@ -93,8 +93,8 @@ pub(super) fn init(cx: &mut App) {
 /// leading and trailing sentinels contain the complete current-frame GPUI tab-stop order.
 ///
 /// This layer does not yet exclude the underlay from native accessibility traversal. Private
-/// logical semantic snapshots and debug selectors test retained facts and observable modality;
-/// they provide no native accessibility evidence.
+/// render snapshots and debug selectors support behavior tests; they provide no native
+/// accessibility evidence.
 #[derive(IntoElement)]
 pub struct ModalLayer {
     content: AnyElement,

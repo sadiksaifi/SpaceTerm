@@ -58,8 +58,8 @@
 //! # Accessibility status
 //!
 //! These controls do not yet publish native Alert, Dialog, or progress nodes, associated action
-//! state, progress values, live announcements, or modal underlay exclusion. Private logical
-//! semantic snapshots and stable debug selectors support behavior tests, but provide no native
+//! state, progress values, live announcements, or modal underlay exclusion. Private render
+//! snapshots and stable debug selectors support behavior tests, but provide no native
 //! accessibility evidence. This module makes no VoiceOver, Narrator, or Orca conformance claim.
 //! Accessibility-sensitive production workflows remain on native system prompts. SpaceTerm's
 //! existing `Window::prompt` call sites remain native.

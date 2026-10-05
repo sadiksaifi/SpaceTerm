@@ -27,26 +27,6 @@ pub enum TextDirection {
     RightToLeft,
 }
 
-/// Direction-independent edge used by desktop placement policy tests.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogicalEdge {
-    /// Start edge in the current logical direction.
-    Leading,
-    /// End edge in the current logical direction.
-    Trailing,
-}
-
-/// Resolved viewport edge used by desktop placement policy tests.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PhysicalEdge {
-    /// Physical left edge.
-    Left,
-    /// Physical right edge.
-    Right,
-}
-
 /// Adaptive action-area direction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionAxis {
@@ -63,13 +43,6 @@ pub enum ModalInitialFocus {
     Action(usize),
     /// Focus the modal surface when no safe action is available.
     Surface,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DesktopShape {
-    MacOs,
-    #[cfg(test)]
-    WinUi,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,11 +84,9 @@ impl ArrangementActionFacts for super::core::ModalRenderAction {
 /// Callers keep typed identity and logical order; physical order never changes result identity.
 ///
 /// The application must explicitly install one policy with [`install_modal_policy`]. Production
-/// uses [`Self::mac_os`]. An alternate WinUI-shaped profile exists only inside pure tests to prove
-/// that public semantics do not depend on macOS ordering.
+/// uses [`Self::mac_os`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModalDesktopPolicy {
-    shape: DesktopShape,
     text_direction: TextDirection,
     maximum_programmatic_only_deadline: Duration,
 }
@@ -131,7 +102,6 @@ impl ModalDesktopPolicy {
     /// progress is capped at thirty minutes.
     pub const fn mac_os() -> Self {
         Self {
-            shape: DesktopShape::MacOs,
             text_direction: TextDirection::LeftToRight,
             maximum_programmatic_only_deadline: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
         }
@@ -148,15 +118,6 @@ impl ModalDesktopPolicy {
 
     pub(super) const fn text_direction(self) -> TextDirection {
         self.text_direction
-    }
-
-    #[cfg(test)]
-    pub(super) const fn win_ui_for_tests() -> Self {
-        Self {
-            shape: DesktopShape::WinUi,
-            text_direction: TextDirection::LeftToRight,
-            maximum_programmatic_only_deadline: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
-        }
     }
 
     pub(super) fn validate_alert<A: Eq>(
@@ -281,23 +242,15 @@ impl ModalDesktopPolicy {
             .iter()
             .copied()
             .find(|index| actions[*index].arrangement_role() == ModalActionRole::Cancel);
-        let traversal = match (self.shape, axis) {
-            (DesktopShape::MacOs, ActionAxis::Horizontal) => ordered_indices(
+        let traversal = match axis {
+            ActionAxis::Horizontal => ordered_indices(
                 cancel,
                 row.iter()
                     .copied()
                     .filter(|index| Some(*index) != cancel && Some(*index) != default),
                 default,
             ),
-            (DesktopShape::MacOs, ActionAxis::Vertical) => ordered_indices(
-                default,
-                row.iter()
-                    .copied()
-                    .filter(|index| Some(*index) != default && Some(*index) != cancel),
-                cancel,
-            ),
-            #[cfg(test)]
-            (DesktopShape::WinUi, _) => ordered_indices(
+            ActionAxis::Vertical => ordered_indices(
                 default,
                 row.iter()
                     .copied()
@@ -327,7 +280,7 @@ impl ModalDesktopPolicy {
         &self,
         action: &super::core::ModalRenderAction,
     ) -> DefaultActionPresentation {
-        if action.is_default && self.shape == DesktopShape::MacOs {
+        if action.is_default {
             DefaultActionPresentation::Emphasized
         } else {
             DefaultActionPresentation::None
@@ -576,16 +529,6 @@ fn ordered_indices(
     last: Option<usize>,
 ) -> Vec<usize> {
     first.into_iter().chain(middle).chain(last).collect()
-}
-
-#[cfg(test)]
-pub(super) const fn physical_edge(edge: LogicalEdge, direction: TextDirection) -> PhysicalEdge {
-    match (edge, direction) {
-        (LogicalEdge::Leading, TextDirection::LeftToRight)
-        | (LogicalEdge::Trailing, TextDirection::RightToLeft) => PhysicalEdge::Left,
-        (LogicalEdge::Trailing, TextDirection::LeftToRight)
-        | (LogicalEdge::Leading, TextDirection::RightToLeft) => PhysicalEdge::Right,
-    }
 }
 
 pub(super) fn select_action_axis(
@@ -1013,39 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn alternate_policy_arranges_shared_typed_facts_and_preserves_identity() {
-        let policy = ModalDesktopPolicy::win_ui_for_tests();
-        let actions = vec![
-            action("cancel", ModalActionRole::Cancel, "cancel"),
-            action("help", ModalActionRole::Help, "help"),
-            action("options", ModalActionRole::Auxiliary, "options"),
-            action("save", ModalActionRole::Affirmative, "save").default_action(true),
-        ];
-
-        let arrangement = policy.action_arrangement(&actions, ActionAxis::Horizontal);
-        let physical_ids = arrangement
-            .physical
-            .iter()
-            .map(|index| *actions[*index].id())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
-            (
-                vec!["save", "options", "cancel"],
-                vec![3, 2, 0],
-                vec![3, 2, 0],
-                vec![1],
-            )
-        );
-    }
-
-    #[test]
     fn return_activates_only_explicit_enabled_default() {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
@@ -1209,17 +1119,6 @@ mod tests {
         assert_eq!(
             select_action_axis(px(320.0), px(288.0), &[px(80.0)], metrics),
             ActionAxis::Vertical
-        );
-    }
-
-    #[test]
-    fn logical_edges_mirror_in_right_to_left_layout() {
-        assert_eq!(
-            (
-                physical_edge(LogicalEdge::Leading, TextDirection::RightToLeft),
-                physical_edge(LogicalEdge::Trailing, TextDirection::RightToLeft),
-            ),
-            (PhysicalEdge::Right, PhysicalEdge::Left)
         );
     }
 }

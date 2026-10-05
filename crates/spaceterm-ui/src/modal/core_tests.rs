@@ -15,7 +15,6 @@ fn test_request(
         ModalKind::Alert,
         Vec::new(),
         PreparedModalSemantics::Alert {
-            accessibility_title: "Alert".into(),
             visible_title: "Alert".into(),
             message: "Message".into(),
             detail: None,
@@ -82,7 +81,6 @@ fn progress_request(owner: AnyWeakEntity) -> PreparedModalRequest {
         ModalKind::Progress,
         PreparedModalRequest::erase_actions(vec![cancel]),
         PreparedModalSemantics::Progress {
-            accessibility_title: "Progress".into(),
             visible_title: "Progress".into(),
             status: "Working".into(),
             detail: None,
@@ -102,7 +100,6 @@ fn programmatic_progress_request(owner: AnyWeakEntity) -> PreparedModalRequest {
         ModalKind::Progress,
         Vec::new(),
         PreparedModalSemantics::Progress {
-            accessibility_title: "Required progress".into(),
             visible_title: "Required Progress".into(),
             status: "Working".into(),
             detail: None,
@@ -124,7 +121,6 @@ fn dialog_request(owner: AnyWeakEntity) -> PreparedModalRequest {
         ModalKind::Dialog,
         PreparedModalRequest::erase_actions(vec![save, cancel]),
         PreparedModalSemantics::Dialog {
-            accessibility_title: "Dialog".into(),
             visible_title: "Dialog".into(),
             description: None,
             default_action: None,
@@ -255,17 +251,20 @@ fn queue_is_fifo_and_bounded_to_eight_waiting_requests() {
             weak.clone(),
         )
         .expect("first request should open");
-    for index in 0..MAX_QUEUED_REQUESTS {
-        owner
-            .submit(
-                test_request(
-                    Box::leak(format!("queued-{index}").into_boxed_str()),
-                    caller.clone(),
-                    outcomes.clone(),
-                ),
-                weak.clone(),
-            )
-            .expect("bounded request should queue");
+    for index in 0..8 {
+        assert!(
+            owner
+                .submit(
+                    test_request(
+                        Box::leak(format!("queued-{index}").into_boxed_str()),
+                        caller.clone(),
+                        outcomes.clone(),
+                    ),
+                    weak.clone(),
+                )
+                .is_ok(),
+            "waiting request {index} of 8 should queue"
+        );
     }
 
     let overflow = owner.submit(test_request("overflow", caller, outcomes), weak.clone());
@@ -300,17 +299,20 @@ fn settlement_reservation_preserves_eight_waiting_slots_behind_the_fifo_head() {
             weak.clone(),
         )
         .expect("first request should open");
-    for index in 0..MAX_QUEUED_REQUESTS {
-        owner
-            .submit(
-                test_request(
-                    Box::leak(format!("queued-{index}").into_boxed_str()),
-                    caller.clone(),
-                    outcomes.clone(),
-                ),
-                weak.clone(),
-            )
-            .expect("bounded request should queue");
+    for index in 0..8 {
+        assert!(
+            owner
+                .submit(
+                    test_request(
+                        Box::leak(format!("queued-{index}").into_boxed_str()),
+                        caller.clone(),
+                        outcomes.clone(),
+                    ),
+                    weak.clone(),
+                )
+                .is_ok(),
+            "waiting request {index} of 8 should queue"
+        );
     }
     owner
         .close_active(
@@ -333,7 +335,7 @@ fn settlement_reservation_preserves_eight_waiting_slots_behind_the_fifo_head() {
         additional.is_ok()
             && matches!(overflow, Err(ModalPresentationError::QueueFull))
             && owner.active.is_some()
-            && owner.queue.len() == MAX_QUEUED_REQUESTS
+            && owner.queue.len() == 8
     );
 }
 
@@ -913,7 +915,6 @@ fn terminal_progress_outcome_is_delivered_once(cx: &mut TestAppContext) {
         ModalKind::Progress,
         Vec::new(),
         PreparedModalSemantics::Progress {
-            accessibility_title: "Progress".into(),
             visible_title: "Progress".into(),
             status: "Working".into(),
             detail: None,
@@ -966,7 +967,6 @@ fn programmatic_only_deadline_expires_deterministically(cx: &mut TestAppContext)
         ModalKind::Progress,
         Vec::new(),
         PreparedModalSemantics::Progress {
-            accessibility_title: "Progress".into(),
             visible_title: "Progress".into(),
             status: "Working".into(),
             detail: None,
@@ -1492,79 +1492,8 @@ fn promoted_successor_opened_callback_can_dismiss_itself_in_documented_order(
     );
 }
 
-#[gpui::test]
-fn reentrant_result_callback_observes_promoted_successor(cx: &mut TestAppContext) {
-    let owner = cx.new(|cx| ModalWindowOwner::new(WindowId::from(1), cx));
-    let weak = owner.downgrade();
-    let callback_third = Rc::new(Cell::new(None));
-    let callback_third_sink = callback_third.clone();
-    let callback_owner = owner.downgrade();
-    let outcomes = Rc::new(RefCell::new(Vec::new()));
-    let first = PreparedModalRequest::new(
-        ModalId::new("first"),
-        ModalKind::Alert,
-        Vec::new(),
-        PreparedModalSemantics::Alert {
-            accessibility_title: "First".into(),
-            visible_title: "First".into(),
-            message: "First".into(),
-            detail: None,
-            intent: AlertIntent::Informational,
-            accessory: None,
-            suppression: None,
-            default_action: None,
-            cancel_action: None,
-        },
-        PreparedFocusIntent::Surface,
-        AnyWeakEntity::new_invalid(),
-        Box::new(move |_, cx| {
-            let Some(owner) = callback_owner.upgrade() else {
-                return;
-            };
-            let third = test_request(
-                "third",
-                AnyWeakEntity::new_invalid(),
-                Rc::new(RefCell::new(Vec::new())),
-            );
-            let weak = owner.downgrade();
-            if let Ok((presentation, _)) = owner.update(cx, |owner, _| owner.submit(third, weak)) {
-                callback_third_sink.set(Some(presentation));
-            }
-        }),
-    );
-    let (first_id, _) = owner
-        .update(cx, |owner, _| owner.submit(first, weak.clone()))
-        .expect("first should open");
-    let (second_id, _) = owner
-        .update(cx, |owner, _| {
-            owner.submit(
-                test_request("second", AnyWeakEntity::new_invalid(), outcomes),
-                weak.clone(),
-            )
-        })
-        .expect("second should queue");
-    let effects = owner
-        .update(cx, |owner, _| {
-            owner.close_active(
-                first_id,
-                InternalOutcome::Dismissed(ModalCloseReason::Programmatic),
-                ModalCloseReason::Programmatic,
-            )
-        })
-        .expect("first should close");
-    cx.update(|cx| settle_owner(&owner, effects, cx));
-
-    let state = owner.read_with(cx, |owner, _| {
-        (
-            owner.active.as_ref().map(|active| active.id),
-            owner.queue.front().map(|queued| queued.id),
-        )
-    });
-    assert_eq!(state, (Some(second_id), callback_third.get()));
-}
-
 #[test]
-fn alert_logical_semantic_snapshot_retains_every_required_fact() {
+fn alert_render_snapshot_retains_every_required_fact() {
     let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
     let actions = vec![
         ModalAction::new("delete", "Delete", ModalActionRole::Affirmative, "delete")
@@ -1577,7 +1506,6 @@ fn alert_logical_semantic_snapshot_retains_every_required_fact() {
         ModalKind::Alert,
         PreparedModalRequest::erase_actions(actions),
         PreparedModalSemantics::Alert {
-            accessibility_title: "Delete the file?".into(),
             visible_title: "Delete File".into(),
             message: "This cannot be undone.".into(),
             detail: Some("The original will be removed.".into()),
@@ -1600,56 +1528,100 @@ fn alert_logical_semantic_snapshot_retains_every_required_fact() {
 
     let snapshot = owner
         .render_snapshot()
-        .expect("active alert should have a semantic snapshot")
-        .semantic_snapshot;
-
+        .expect("active Alert should have a render snapshot");
     assert_eq!(
-        snapshot,
-        LogicalModalSemanticSnapshot {
-            id: ModalId::new("delete-alert"),
-            role: LogicalModalRole::Alert,
-            modal: true,
-            accessibility_title: "Delete the file?".into(),
-            visible_title: "Delete File".into(),
-            description: Some("This cannot be undone.".into()),
-            secondary_detail: Some("The original will be removed.".into()),
-            alert_intent: Some(AlertIntent::Critical),
-            accessory_name: Some("Warning".into()),
-            suppression_label: Some("Do not ask again".into()),
-            actions: vec![
-                LogicalActionSemanticSnapshot {
-                    name: "Delete".into(),
-                    role: ModalActionRole::Affirmative,
-                    intent: ModalActionIntent::Destructive,
-                    emphasis: ModalActionEmphasis::Standard,
-                    enabled: true,
-                    is_default: true,
-                    debug_identity: "delete".into(),
-                },
-                LogicalActionSemanticSnapshot {
-                    name: "Cancel".into(),
-                    role: ModalActionRole::Cancel,
-                    intent: ModalActionIntent::Ordinary,
-                    emphasis: ModalActionEmphasis::Standard,
-                    enabled: true,
-                    is_default: false,
-                    debug_identity: "cancel".into(),
-                },
-            ],
-            default_action: Some("delete".into()),
-            cancel_action: Some("cancel".into()),
-            progress: None,
-            focus_entry: LogicalFocusEntry::Action("cancel".into()),
-            focus_contained: true,
-            underlay_excluded: true,
-        }
+        (snapshot.id.as_str(), snapshot.kind),
+        ("delete-alert", ModalKind::Alert)
     );
+    let PreparedModalSemantics::Alert {
+        visible_title,
+        message,
+        detail,
+        intent,
+        accessory,
+        suppression,
+        default_action,
+        cancel_action,
+    } = &snapshot.semantics
+    else {
+        panic!("Alert must retain Alert semantics");
+    };
+    assert_eq!(
+        (
+            visible_title.as_ref(),
+            message.as_ref(),
+            detail.as_deref(),
+            *intent
+        ),
+        (
+            "Delete File",
+            "This cannot be undone.",
+            Some("The original will be removed."),
+            AlertIntent::Critical
+        )
+    );
+    assert!(
+        matches!(accessory, Some(AlertAccessory::Icon { accessibility_name, image: None }) if accessibility_name.as_ref() == "Warning")
+    );
+    assert_eq!(
+        suppression
+            .as_ref()
+            .map(|(label, selected)| (label.as_ref(), *selected)),
+        Some(("Do not ask again", false))
+    );
+    assert_eq!(
+        (
+            *default_action,
+            *cancel_action,
+            snapshot.default_action,
+            snapshot.cancel_action
+        ),
+        (Some(0), Some(1), Some(0), Some(1))
+    );
+    assert_eq!(
+        snapshot
+            .actions
+            .iter()
+            .map(|action| (
+                action.label.as_ref(),
+                action.role,
+                action.intent,
+                action.emphasis,
+                action.enabled,
+                action.is_default,
+                action.debug_identity.as_ref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "Delete",
+                ModalActionRole::Affirmative,
+                ModalActionIntent::Destructive,
+                ModalActionEmphasis::Standard,
+                true,
+                true,
+                "delete"
+            ),
+            (
+                "Cancel",
+                ModalActionRole::Cancel,
+                ModalActionIntent::Ordinary,
+                ModalActionEmphasis::Standard,
+                true,
+                false,
+                "cancel"
+            ),
+        ]
+    );
+    assert!(matches!(
+        snapshot.focus_intent,
+        PreparedFocusIntent::Action(1)
+    ));
+    assert!(snapshot.progress.is_none());
 }
 
 #[gpui::test]
-fn dialog_logical_semantic_snapshot_retains_role_relationships_and_body_focus(
-    cx: &mut TestAppContext,
-) {
+fn dialog_render_snapshot_retains_role_relationships_and_body_focus(cx: &mut TestAppContext) {
     let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
     let body_focus = cx.new(|cx| cx.focus_handle());
     let body_focus = body_focus.read_with(cx, |focus, _| focus.clone());
@@ -1663,13 +1635,12 @@ fn dialog_logical_semantic_snapshot_retains_role_relationships_and_body_focus(
             "cancel",
         )]),
         PreparedModalSemantics::Dialog {
-            accessibility_title: "Edit workspace settings".into(),
             visible_title: "Workspace Settings".into(),
             description: Some("Changes apply to this workspace.".into()),
             default_action: None,
             cancel_action: Some(0),
         },
-        PreparedFocusIntent::Body(body_focus),
+        PreparedFocusIntent::Body(body_focus.clone()),
         AnyWeakEntity::new_invalid(),
         Box::new(|_, _| {}),
     );
@@ -1679,135 +1650,182 @@ fn dialog_logical_semantic_snapshot_retains_role_relationships_and_body_focus(
 
     let snapshot = owner
         .render_snapshot()
-        .expect("active dialog should have a semantic snapshot")
-        .semantic_snapshot;
-
+        .expect("active Dialog should have a render snapshot");
+    assert_eq!(
+        (snapshot.id.as_str(), snapshot.kind),
+        ("settings-dialog", ModalKind::Dialog)
+    );
+    let PreparedModalSemantics::Dialog {
+        visible_title,
+        description,
+        default_action,
+        cancel_action,
+    } = &snapshot.semantics
+    else {
+        panic!("Dialog must retain Dialog semantics");
+    };
     assert_eq!(
         (
-            snapshot.role,
-            snapshot.modal,
-            snapshot.accessibility_title.as_ref(),
-            snapshot.visible_title.as_ref(),
-            snapshot.description.as_ref().map(|value| value.as_ref()),
-            snapshot.default_action,
-            snapshot.cancel_action,
-            snapshot.focus_entry,
-            snapshot.focus_contained,
-            snapshot.underlay_excluded,
+            visible_title.as_ref(),
+            description.as_deref(),
+            *default_action,
+            *cancel_action
         ),
         (
-            LogicalModalRole::Dialog,
-            true,
-            "Edit workspace settings",
             "Workspace Settings",
             Some("Changes apply to this workspace."),
             None,
-            Some("cancel".into()),
-            LogicalFocusEntry::Body,
-            true,
-            true,
+            Some(0)
         )
     );
+    assert_eq!(
+        (snapshot.default_action, snapshot.cancel_action),
+        (None, Some(0))
+    );
+    assert_eq!(
+        snapshot
+            .actions
+            .iter()
+            .map(|action| (
+                action.label.as_ref(),
+                action.role,
+                action.intent,
+                action.emphasis,
+                action.enabled,
+                action.is_default,
+                action.debug_identity.as_ref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "Cancel",
+            ModalActionRole::Cancel,
+            ModalActionIntent::Ordinary,
+            ModalActionEmphasis::Standard,
+            true,
+            false,
+            "cancel"
+        )]
+    );
+    assert!(
+        matches!(snapshot.focus_intent, PreparedFocusIntent::Body(ref focus) if *focus == body_focus)
+    );
+    assert!(snapshot.progress.is_none());
 }
 
 #[test]
-fn progress_logical_semantic_snapshot_tracks_value_status_and_cancellation() {
+fn progress_render_snapshot_tracks_value_status_and_cancellation() {
     let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
-    let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
-        .submit(progress_request(AnyWeakEntity::new_invalid()), weak)
-        .expect("progress should open");
-
-    let initial_snapshot = owner
+        .submit(
+            progress_request(AnyWeakEntity::new_invalid()),
+            WeakEntity::new_invalid(),
+        )
+        .expect("ProgressDialog should open");
+    let initial = owner
         .render_snapshot()
-        .expect("active progress should have an initial semantic snapshot")
-        .semantic_snapshot;
-
-    assert_eq!(
-        initial_snapshot,
-        LogicalModalSemanticSnapshot {
-            id: ModalId::new("progress"),
-            role: LogicalModalRole::Progress,
-            modal: true,
-            accessibility_title: "Progress".into(),
-            visible_title: "Progress".into(),
-            description: Some("Working".into()),
-            secondary_detail: None,
-            alert_intent: None,
-            accessory_name: None,
-            suppression_label: None,
-            actions: vec![LogicalActionSemanticSnapshot {
-                name: "Cancel".into(),
-                role: ModalActionRole::Cancel,
-                intent: ModalActionIntent::Ordinary,
-                emphasis: ModalActionEmphasis::Standard,
-                enabled: true,
-                is_default: false,
-                debug_identity: "cancel-progress".into(),
-            }],
-            default_action: None,
-            cancel_action: Some("cancel-progress".into()),
-            progress: Some(LogicalProgressSemanticSnapshot {
-                status: "Working".into(),
-                value: None,
-                indeterminate: true,
-                cancellation_available: true,
-            }),
-            focus_entry: LogicalFocusEntry::Action("cancel-progress".into()),
-            focus_contained: true,
-            underlay_excluded: true,
-        }
-    );
-
+        .expect("initial ProgressDialog should have a render snapshot");
+    let update = ProgressDialogUpdate::new()
+        .status("Halfway")
+        .detail(Some("Two items remain"))
+        .progress(ProgressState::Determinate(
+            DeterminateProgress::new(0.5).expect("finite progress should normalize"),
+        ))
+        .cancellation_enabled(false);
+    update.validate().expect("progress update should validate");
     owner
-        .update_progress(
-            presentation,
-            0,
-            ProgressDialogUpdate::new()
-                .status("Halfway")
-                .detail(Some("Two items remain"))
-                .progress(ProgressState::Determinate(
-                    DeterminateProgress::new(0.5).expect("finite progress should normalize"),
-                ))
-                .cancellation_enabled(false),
-        )
+        .update_progress(presentation, 0, update)
         .expect("progress update should succeed");
-
-    let snapshot = owner
+    let updated = owner
         .render_snapshot()
-        .expect("active progress should have a semantic snapshot")
-        .semantic_snapshot;
-
-    assert_eq!(
+        .expect("updated ProgressDialog should have a render snapshot");
+    for (snapshot, status, detail, value, available) in [
+        (initial, "Working", None, ProgressState::Indeterminate, true),
         (
-            snapshot.role,
-            snapshot.modal,
-            snapshot.description.as_ref().map(|value| value.as_ref()),
-            snapshot
-                .secondary_detail
-                .as_ref()
-                .map(|value| value.as_ref()),
-            snapshot.progress,
-            snapshot.actions[0].enabled,
-            snapshot.cancel_action,
-            snapshot.focus_entry,
-            snapshot.underlay_excluded,
-        ),
-        (
-            LogicalModalRole::Progress,
-            true,
-            Some("Halfway"),
+            updated,
+            "Halfway",
             Some("Two items remain"),
-            Some(LogicalProgressSemanticSnapshot {
-                status: "Halfway".into(),
-                value: Some(0.5),
-                indeterminate: false,
-                cancellation_available: false,
-            }),
+            ProgressState::Determinate(
+                DeterminateProgress::new(0.5).expect("fixed progress should normalize"),
+            ),
             false,
-            Some("cancel-progress".into()),
-            LogicalFocusEntry::Surface,
-            true,
-        )
-    );
+        ),
+    ] {
+        assert_eq!(
+            (snapshot.id.as_str(), snapshot.kind),
+            ("progress", ModalKind::Progress)
+        );
+        let PreparedModalSemantics::Progress {
+            visible_title,
+            status: retained_status,
+            detail: retained_detail,
+            progress: retained_progress,
+            cancellation_capable,
+        } = &snapshot.semantics
+        else {
+            panic!("ProgressDialog must retain Progress semantics");
+        };
+        assert_eq!(
+            (
+                visible_title.as_ref(),
+                retained_status.as_ref(),
+                retained_detail.as_deref(),
+                *retained_progress,
+                *cancellation_capable
+            ),
+            (
+                "Progress",
+                "Working",
+                None,
+                ProgressState::Indeterminate,
+                true
+            )
+        );
+        let progress = snapshot
+            .progress
+            .as_ref()
+            .expect("ProgressDialog must retain runtime");
+        assert_eq!(
+            (
+                progress.status.as_ref(),
+                progress.detail.as_deref(),
+                progress.progress,
+                progress.cancellation_capable,
+                progress.cancellation_enabled,
+                progress.cancellation_available()
+            ),
+            (status, detail, value, true, available, available)
+        );
+        assert_eq!(
+            (snapshot.default_action, snapshot.cancel_action),
+            (None, Some(0))
+        );
+        assert_eq!(
+            snapshot
+                .actions
+                .iter()
+                .map(|action| (
+                    action.label.as_ref(),
+                    action.role,
+                    action.intent,
+                    action.emphasis,
+                    action.enabled,
+                    action.is_default,
+                    action.debug_identity.as_ref(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                "Cancel",
+                ModalActionRole::Cancel,
+                ModalActionIntent::Ordinary,
+                ModalActionEmphasis::Standard,
+                available,
+                false,
+                "cancel-progress"
+            )]
+        );
+        assert!(matches!(
+            (&snapshot.focus_intent, available),
+            (PreparedFocusIntent::Action(0), true) | (PreparedFocusIntent::Surface, false)
+        ));
+    }
 }

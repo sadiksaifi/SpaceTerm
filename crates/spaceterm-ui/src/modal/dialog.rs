@@ -465,8 +465,6 @@ impl<A> Dialog<A> {
             ModalKind::Dialog,
             PreparedModalRequest::erase_actions(self.actions),
             PreparedModalSemantics::Dialog {
-                #[cfg(test)]
-                accessibility_title: self.accessibility_title,
                 visible_title: self.title,
                 description: self.description,
                 default_action,

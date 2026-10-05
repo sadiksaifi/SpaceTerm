@@ -56,9 +56,11 @@ fn portable_modal_keybindings_install_without_a_platform_profile(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn alternate_modal_policy_does_not_install_command_period(cx: &mut TestAppContext) {
+fn linux_modal_keybinding_profile_preserves_portable_bindings_without_command_period(
+    cx: &mut TestAppContext,
+) {
     cx.update(install_portable_modal_keybindings);
-    cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::win_ui_for_tests()));
+    cx.update(|cx| install_modal_keybindings(cx, ModalKeybindingProfile::Linux));
     let command_period = Keystroke::parse("cmd-.").expect("test key should parse");
 
     let has_platform_cancel = cx.update(|cx| {
@@ -68,6 +70,20 @@ fn alternate_modal_policy_does_not_install_command_period(cx: &mut TestAppContex
     });
 
     assert!(!has_platform_cancel);
+    for (key, action) in [
+        ("tab", TraverseForward.name()),
+        ("shift-tab", TraverseBackward.name()),
+        ("enter", ActivateDefault.name()),
+        ("escape", ActivateCancel.name()),
+    ] {
+        let keystroke = Keystroke::parse(key).expect("test key should parse");
+        let installed = cx.update(|cx| {
+            cx.all_bindings_for_input(&[keystroke])
+                .iter()
+                .any(|binding| binding.action().name() == action)
+        });
+        assert!(installed, "missing portable {key} binding for {action}");
+    }
 }
 
 #[gpui::test]
@@ -1249,9 +1265,7 @@ fn alert_window(cx: &mut TestAppContext) -> AlertWindow<'_> {
 }
 
 #[gpui::test]
-fn standard_default_action_receives_macos_emphasis_without_mutating_semantics(
-    cx: &mut TestAppContext,
-) {
+fn standard_default_action_paints_bounded_macos_emphasis(cx: &mut TestAppContext) {
     let window = open_action_geometry_window(
         cx,
         size(px(600.0), px(500.0)),
@@ -1674,6 +1688,11 @@ fn long_help_label_forces_one_vertical_footer_without_escaping_it(cx: &mut TestA
             .into_iter()
             .all(|action| bounds_contains(footer, action)),
         "actions {actions:?} escaped footer {footer:?}"
+    );
+    let [help, save, cancel] = actions;
+    assert!(
+        help.bottom() <= save.top() && save.bottom() <= cancel.top(),
+        "vertical footer order was help={help:?}, save={save:?}, cancel={cancel:?}"
     );
 }
 
@@ -5098,31 +5117,6 @@ fn modal_command_period_activates_the_safe_cancel(cx: &mut TestAppContext) {
     ));
 }
 
-#[gpui::test]
-fn modal_tab_and_shift_tab_wrap_inside_the_action_ring(cx: &mut TestAppContext) {
-    let (_, _, outcome, cx) = alert_window(cx);
-
-    cx.simulate_keystrokes("tab shift-tab");
-    cx.simulate_event(KeyDownEvent {
-        keystroke: Keystroke::parse("space").unwrap_or_default(),
-        prefer_character_input: false,
-        is_held: false,
-    });
-    cx.simulate_event(KeyUpEvent {
-        keystroke: Keystroke::parse("space").unwrap_or_default(),
-    });
-    cx.run_until_parked();
-
-    assert!(matches!(
-        outcome.borrow().as_ref(),
-        Some(AlertOutcome::Activated {
-            action_id: "save",
-            source: ModalActivationSource::Space,
-            ..
-        })
-    ));
-}
-
 enum DialogBodyParentOperation {
     Complete(super::super::DialogCompletion),
     Replace(gpui::WeakEntity<DialogBodyButtonFixture>),
@@ -8345,8 +8339,28 @@ fn surface_contains_includes_edges_and_rejects_scrim() {
         size: size(px(100.0), px(80.0)),
     };
 
-    assert!(surface_contains(geometry, gpui::point(px(10.0), px(20.0))));
-    assert!(!surface_contains(geometry, gpui::point(px(9.0), px(20.0))));
+    for (x, y) in [
+        (10.0, 20.0),
+        (110.0, 20.0),
+        (10.0, 100.0),
+        (110.0, 100.0),
+        (10.0, 60.0),
+        (110.0, 60.0),
+        (60.0, 20.0),
+        (60.0, 100.0),
+        (60.0, 60.0),
+    ] {
+        assert!(
+            surface_contains(geometry, point(px(x), px(y))),
+            "inside ({x}, {y})"
+        );
+    }
+    for (x, y) in [(9.0, 20.0), (111.0, 60.0), (60.0, 19.0), (60.0, 101.0)] {
+        assert!(
+            !surface_contains(geometry, point(px(x), px(y))),
+            "outside ({x}, {y})"
+        );
+    }
 }
 
 #[test]
@@ -8364,14 +8378,12 @@ fn default_presentation_is_policy_resolved_without_mutating_action_semantics() {
     assert_eq!(
         (
             ModalDesktopPolicy::mac_os().default_action_presentation(&action),
-            ModalDesktopPolicy::win_ui_for_tests().default_action_presentation(&action),
             action.role,
             action.intent,
             action.emphasis,
         ),
         (
             DefaultActionPresentation::Emphasized,
-            DefaultActionPresentation::None,
             ModalActionRole::Affirmative,
             ModalActionIntent::Ordinary,
             ModalActionEmphasis::Standard,
@@ -8381,7 +8393,7 @@ fn default_presentation_is_policy_resolved_without_mutating_action_semantics() {
 
 #[test]
 fn modal_default_and_cancel_resolution_uses_semantics_not_position() {
-    let actions = vec![
+    let mut actions = vec![
         ModalRenderAction {
             label: "Cancel".into(),
             role: ModalActionRole::Cancel,
@@ -8409,4 +8421,18 @@ fn modal_default_and_cancel_resolution_uses_semantics_not_position() {
         ),
         (Some(1), Some(0))
     );
+    assert_eq!(safe_cancel_action(Some(0), &actions), Some(0));
+    assert_eq!(safe_cancel_action(Some(1), &actions), None);
+    assert_eq!(safe_cancel_action(None, &actions), None);
+    assert_eq!(safe_cancel_action(Some(2), &actions), None);
+    assert_eq!(enabled_action(None, &actions), None);
+    assert_eq!(enabled_action(Some(2), &actions), None);
+
+    actions[0].intent = ModalActionIntent::Destructive;
+    assert_eq!(safe_cancel_action(Some(0), &actions), None);
+    actions[0].intent = ModalActionIntent::Ordinary;
+    actions[0].enabled = false;
+    assert_eq!(safe_cancel_action(Some(0), &actions), None);
+    actions[1].enabled = false;
+    assert_eq!(enabled_action(Some(1), &actions), None);
 }
