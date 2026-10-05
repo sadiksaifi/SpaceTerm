@@ -15,12 +15,12 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
-use super::microphone::{
+use super::super::microphone::{
     CHECK_AGAIN_SELECTOR, CONTROL_SELECTOR, MicrophoneAccessAction, MicrophoneAccessStatus,
     OPEN_SETTINGS_SELECTOR, REQUEST_SELECTOR,
 };
-use super::test_support::MemoryStorage;
-use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::test_support::MemoryStorage;
+use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
 
@@ -93,9 +93,9 @@ fn open_settings(
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            super::PermissionCapabilities {
+            super::super::PermissionCapabilities {
                 microphone: access,
-                ..super::PermissionCapabilities::default()
+                ..super::super::PermissionCapabilities::default()
             },
             None,
             window,
@@ -128,7 +128,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> MicrophoneAccessStatus {
-    window.read_with(cx, |window, _| window.microphone_access.status())
+    window.read_with(cx, |window, _| window.microphone_access.status)
 }
 
 fn action(
@@ -461,25 +461,29 @@ fn a_rejected_request_reports_failure_instead_of_waiting(cx: &mut TestAppContext
     assert!(cx.debug_bounds(CHECK_AGAIN_SELECTOR).is_some());
 }
 
-/// Every failure explanation is fixed product copy, never a native error's text.
+/// Every typed failure produces its independent fixed product copy.
 #[gpui::test]
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Authorized));
     let (window, cx) = open_settings(Some(access.clone()), cx);
-    let mut explanations = Vec::new();
-    for error in [
-        MicrophoneAccessError::OffMainThread,
-        MicrophoneAccessError::PlatformUnavailable,
-        MicrophoneAccessError::PlatformRejected,
+    for (error, expected) in [
+        (
+            MicrophoneAccessError::OffMainThread,
+            "SpaceTerm could not check microphone access.",
+        ),
+        (
+            MicrophoneAccessError::PlatformUnavailable,
+            "The system did not report microphone access.",
+        ),
+        (
+            MicrophoneAccessError::PlatformRejected,
+            "The system rejected the microphone access request.",
+        ),
     ] {
         access.authorization.set(Err(error));
         cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_microphone_access(cx)));
-        let presented = explanation(&window, cx);
-        assert_ne!(presented, error.to_string());
-        explanations.push(presented);
+        assert_eq!(explanation(&window, cx), expected);
     }
-    explanations.dedup();
-    assert_eq!(explanations.len(), 3);
 }
 
 #[gpui::test]
@@ -523,8 +527,11 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
         Ok(MicrophoneAuthorization::Restricted),
         Err(MicrophoneAccessError::PlatformRejected),
     ];
-    for width in [super::WINDOW_WIDTH, 1100.0, 1400.0] {
-        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(super::WINDOW_HEIGHT)));
+    for width in [super::super::WINDOW_WIDTH, 1100.0, 1400.0] {
+        cx.simulate_resize(gpui::size(
+            gpui::px(width),
+            gpui::px(super::super::WINDOW_HEIGHT),
+        ));
         cx.run_until_parked();
         for state in states {
             access.authorization.set(state);
@@ -566,8 +573,8 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     }
     // The narrowest window wraps the guidance, which is the layout that once stretched.
     cx.simulate_resize(gpui::size(
-        gpui::px(super::WINDOW_WIDTH),
-        gpui::px(super::WINDOW_HEIGHT),
+        gpui::px(super::super::WINDOW_WIDTH),
+        gpui::px(super::super::WINDOW_HEIGHT),
     ));
     access
         .authorization

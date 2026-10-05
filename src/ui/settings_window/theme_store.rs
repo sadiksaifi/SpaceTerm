@@ -114,16 +114,6 @@ impl ThemeStore {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn listing(&self) -> &Listing {
-        &self.listing
-    }
-
-    #[cfg(test)]
-    pub(super) fn status(&self) -> Option<&str> {
-        self.status.as_deref()
-    }
-
     fn search_focus(&self, cx: &App) -> FocusHandle {
         self.search.read(cx).focus_handle()
     }
@@ -857,3 +847,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "theme_store_window_tests.rs"]
+mod window_tests;

@@ -19,11 +19,11 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
-use super::permission_access::{
+use super::super::permission_access::{
     ACCESSIBILITY, PermissionAccessAction, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
 };
-use super::test_support::MemoryStorage;
-use super::{PermissionCapabilities, SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::test_support::MemoryStorage;
+use super::super::{PermissionCapabilities, SettingsRowId, SettingsSectionId, SettingsWindow};
 
 use PermissionAuthorization::{Granted, NotGranted};
 use SystemPermission::{Accessibility, ScreenRecording};
@@ -115,7 +115,7 @@ fn status(
     cx: &mut VisualTestContext,
 ) -> PermissionAccessStatus {
     window.read_with(cx, |window, _| {
-        window.permission_access.row(permission).status()
+        window.permission_access.row(permission).status
     })
 }
 
@@ -168,7 +168,7 @@ fn notice(
     cx: &mut VisualTestContext,
 ) -> Option<RecoveryNotice> {
     window.read_with(cx, |window, _| {
-        window.permission_access.row(permission).notice()
+        window.permission_access.row(permission).notice
     })
 }
 
@@ -660,27 +660,33 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
     assert!(cx.debug_bounds(SCREEN_RECORDING.set_up).is_some());
 }
 
-/// Every failure explanation is fixed product copy, never a native error's text.
+/// Every typed failure produces its independent fixed product copy.
 #[gpui::test]
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
-    let mut explanations = Vec::new();
-    for error in [
-        PermissionAccessError::OffMainThread,
-        PermissionAccessError::PlatformUnavailable,
-        PermissionAccessError::PlatformRejected,
+    let check_failure = match (cfg!(spaceterm_packaged), cfg!(spaceterm_release)) {
+        (false, _) => "SpaceTerm Development could not check Screen Recording access.",
+        (true, false) => "SpaceTerm Preflight could not check Screen Recording access.",
+        (true, true) => "SpaceTerm could not check Screen Recording access.",
+    };
+    for (error, expected) in [
+        (PermissionAccessError::OffMainThread, check_failure),
+        (
+            PermissionAccessError::PlatformUnavailable,
+            "The system did not report Screen Recording access.",
+        ),
+        (
+            PermissionAccessError::PlatformRejected,
+            "The system rejected the Screen Recording access check.",
+        ),
     ] {
         access.set(ScreenRecording, Err(error));
         cx.update(|_, cx| {
             window.update(cx, |settings, cx| settings.refresh_permission_access(cx));
         });
-        let presented = explanation(&window, ScreenRecording, cx);
-        assert_ne!(presented, error.to_string());
-        explanations.push(presented);
+        assert_eq!(explanation(&window, ScreenRecording, cx), expected);
     }
-    explanations.dedup();
-    assert_eq!(explanations.len(), 3);
 }
 
 #[gpui::test]
@@ -724,8 +730,11 @@ fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAp
         Ok(Granted),
         Err(PermissionAccessError::PlatformRejected),
     ];
-    for width in [super::WINDOW_WIDTH, 1100.0, 1400.0] {
-        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(super::WINDOW_HEIGHT)));
+    for width in [super::super::WINDOW_WIDTH, 1100.0, 1400.0] {
+        cx.simulate_resize(gpui::size(
+            gpui::px(width),
+            gpui::px(super::super::WINDOW_HEIGHT),
+        ));
         cx.run_until_parked();
         for state in states {
             access.set(ScreenRecording, state);

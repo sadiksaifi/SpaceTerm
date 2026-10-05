@@ -25,12 +25,6 @@ pub(crate) mod test_support;
 mod control_tests;
 
 #[cfg(test)]
-mod permission_access_tests;
-
-#[cfg(test)]
-mod microphone_tests;
-
-#[cfg(test)]
 mod updates_tests;
 
 #[cfg(test)]
@@ -704,12 +698,6 @@ impl SettingsWindow {
 
     fn edit(&mut self, edit: impl FnOnce(&mut SettingsDocument), cx: &mut Context<Self>) {
         self.editor.edit(edit, cx);
-    }
-
-    /// Whether this row differs from its default, which is when a reset is worth offering.
-    #[cfg(test)]
-    fn differs_from_default(&self, row: SettingsRowId, cx: &App) -> bool {
-        self.pending_reset(row, cx).is_some()
     }
 
     /// How this row returns to its default, when it differs from it.

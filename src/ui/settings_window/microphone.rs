@@ -79,11 +79,6 @@ impl MicrophoneAccessRow {
         row
     }
 
-    #[cfg(test)]
-    pub(super) fn status(&self) -> MicrophoneAccessStatus {
-        self.status
-    }
-
     /// Reads the current authorization, which can change in the system's settings at any time.
     ///
     /// A pending request keeps its status until the system answers it, so a window activation
@@ -301,3 +296,7 @@ impl SettingsWindow {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+#[path = "microphone_tests.rs"]
+mod tests;

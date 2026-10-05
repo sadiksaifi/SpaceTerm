@@ -217,21 +217,6 @@ impl ShortcutRows {
             ShortcutQuery::Text(text)
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn search_input(&self) -> &Entity<TextInput> {
-        &self.search.input
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_searching_by_shortcut(&self) -> bool {
-        self.search.capture.is_some()
-    }
-
-    #[cfg(test)]
-    pub(super) fn recorder(&self, command: Command) -> &Entity<ShortcutRecorder> {
-        &self.recorders[&command]
-    }
 }
 
 /// Accepts a chord the Keymap can assign, and explains a refusal in the host's notation.

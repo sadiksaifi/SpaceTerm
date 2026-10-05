@@ -192,16 +192,6 @@ impl PermissionAccessRow {
         permission_copy(self.permission, self.naming)
     }
 
-    #[cfg(test)]
-    pub(super) fn status(&self) -> PermissionAccessStatus {
-        self.status
-    }
-
-    #[cfg(test)]
-    pub(super) fn notice(&self) -> Option<RecoveryNotice> {
-        self.notice
-    }
-
     /// Reads the current authorization, which can change in System Settings at any time.
     ///
     /// Opening System Settings never changes the status by itself; only a later read does.
@@ -730,3 +720,7 @@ impl SettingsWindow {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+#[path = "permission_access_tests.rs"]
+mod tests;

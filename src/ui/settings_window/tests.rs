@@ -20,7 +20,7 @@ use crate::ui::sidebar_window::SidebarOwner as _;
 
 use super::test_support::MemoryStorage;
 
-struct Harness {
+pub(super) struct Harness {
     storage: Arc<MemoryStorage>,
     settings: crate::settings::Settings,
     platform: RecordingAppearancePlatform,
@@ -227,8 +227,10 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
         // Neither pointer nor reset reaches the retained choices, and nothing is written.
         assert!(
             !window.read_with(cx, |settings, cx| {
-                settings.differs_from_default(SettingsRowId::Transparency, cx)
-                    || settings.differs_from_default(SettingsRowId::Blur, cx)
+                settings
+                    .pending_reset(SettingsRowId::Transparency, cx)
+                    .is_some()
+                    || settings.pending_reset(SettingsRowId::Blur, cx).is_some()
             }),
             "{case}: a row showing its default offers no reset"
         );
@@ -252,8 +254,10 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
         assert_eq!(keyboard_stops(cx), locked_stops + 5, "{case}");
         assert!(
             window.read_with(cx, |settings, cx| {
-                settings.differs_from_default(SettingsRowId::Transparency, cx)
-                    && settings.differs_from_default(SettingsRowId::Blur, cx)
+                settings
+                    .pending_reset(SettingsRowId::Transparency, cx)
+                    .is_some()
+                    && settings.pending_reset(SettingsRowId::Blur, cx).is_some()
             }),
             "{case}"
         );
@@ -357,7 +361,7 @@ fn open_settings_with_drag(
     open_settings_with_capabilities(cx, storage, window_drag, None)
 }
 
-fn open_settings_with_registry(
+pub(super) fn open_settings_with_registry(
     cx: &mut TestAppContext,
     transport: Arc<MemoryTransport>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
@@ -408,7 +412,7 @@ fn press_return(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn click(selector: &'static str, cx: &mut VisualTestContext) {
+pub(super) fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} was not rendered"))
@@ -419,7 +423,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 /// Selects one navigation entry, because each section is its own view.
-fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
+pub(super) fn select_section(section: SettingsSectionId, cx: &mut VisualTestContext) {
     let selector: &'static str = match section {
         SettingsSectionId::Interface => "settings-navigation-settings-section-interface",
         SettingsSectionId::Font => "settings-navigation-settings-section-font",
@@ -1031,13 +1035,13 @@ fn only_installed_themes_offer_removal(cx: &mut TestAppContext) {
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     assert!(!window.read_with(cx, |window, cx| {
-        window.differs_from_default(SettingsRowId::Density, cx)
+        window.pending_reset(SettingsRowId::Density, cx).is_some()
     }));
 
     click("settings-density-comfortable", cx);
 
     assert!(window.read_with(cx, |window, cx| {
-        window.differs_from_default(SettingsRowId::Density, cx)
+        window.pending_reset(SettingsRowId::Density, cx).is_some()
     }));
 
     click("settings-row-density-reset", cx);
@@ -1047,7 +1051,7 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
         ChromeDensity::Compact
     );
     assert!(!window.read_with(cx, |window, cx| {
-        window.differs_from_default(SettingsRowId::Density, cx)
+        window.pending_reset(SettingsRowId::Density, cx).is_some()
     }));
 }
 
@@ -1112,7 +1116,9 @@ fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut
     // A test frame keeps every selector it has ever drawn, so the reset's absence is read from the
     // row's state rather than from its bounds.
     assert!(!window.read_with(cx, |window, cx| {
-        window.differs_from_default(SettingsRowId::TerminalItalic, cx)
+        window
+            .pending_reset(SettingsRowId::TerminalItalic, cx)
+            .is_some()
     }));
     assert_eq!(bounds("settings-terminal-italic", cx), control);
 }
@@ -1192,7 +1198,9 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
     resize(1400.0, cx);
     click(CONTROL, cx);
     assert!(window.read_with(cx, |window, cx| {
-        window.differs_from_default(SettingsRowId::TerminalBoldAsBright, cx)
+        window
+            .pending_reset(SettingsRowId::TerminalBoldAsBright, cx)
+            .is_some()
     }));
     let with_reset = measure(cx);
 
@@ -2954,7 +2962,10 @@ fn a_card_segment_keeps_space_under_its_label(cx: &mut TestAppContext) {
 const PAIRED_FAMILY: &[u8] = br##"{"name":"Paired","themes":[{"name":"Paired Light","appearance":"light","style":{}},{"name":"Paired Dark","appearance":"dark","style":{}}]}"##;
 const IMPORTABLE_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
-fn document_of(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> SettingsDocument {
+pub(super) fn document_of(
+    window: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> SettingsDocument {
     window.read_with(cx, |window, _| window.editor.document().clone())
 }
 
@@ -3375,7 +3386,7 @@ fn appearance_thumbnails_preview_each_terminal_slot(cx: &mut TestAppContext) {
     }
 }
 
-const REGISTRY_LISTING: &str =
+pub(super) const REGISTRY_LISTING: &str =
     "https://api.zed.dev/extensions?provides=themes&max_schema_version=1";
 
 fn registry_listing(version: &str) -> Vec<u8> {
@@ -3410,22 +3421,7 @@ fn registry_archive() -> Vec<u8> {
     )])
 }
 
-fn store_listing(
-    window: &Entity<SettingsWindow>,
-    cx: &mut VisualTestContext,
-) -> super::theme_store::Listing {
-    window.read_with(cx, |window, cx| {
-        window.theme_store.read(cx).listing().clone()
-    })
-}
-
-fn store_status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
-    window.read_with(cx, |window, cx| {
-        window.theme_store.read(cx).status().map(str::to_owned)
-    })
-}
-
-fn open_theme_store(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
+pub(super) fn open_theme_store(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) {
     cx.update(|gpui_window, cx| {
         window.update(cx, |settings, cx| {
             settings.open_theme_store(gpui_window, cx)
@@ -3434,7 +3430,7 @@ fn open_theme_store(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext)
     cx.run_until_parked();
 }
 
-fn sample_registry() -> Arc<MemoryTransport> {
+pub(super) fn sample_registry() -> Arc<MemoryTransport> {
     Arc::new(
         MemoryTransport::default()
             .route(REGISTRY_LISTING, Ok(registry_listing("1.0.0")))
@@ -3443,101 +3439,6 @@ fn sample_registry() -> Arc<MemoryTransport> {
                 Ok(registry_archive()),
             ),
     )
-}
-
-/// Opening Get More Themes is what contacts the registry, once; getting an extension adds its
-/// themes without selecting any, and its row then reads Installed.
-#[gpui::test]
-fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut TestAppContext) {
-    let transport = sample_registry();
-    let (window, _harness, cx) = open_settings_with_registry(cx, transport.clone());
-    select_section(SettingsSectionId::Themes, cx);
-    assert!(transport.requests().is_empty());
-
-    open_theme_store(&window, cx);
-    assert!(matches!(
-        store_listing(&window, cx),
-        super::theme_store::Listing::Loaded(extensions) if extensions.len() == 2
-    ));
-    let preferences = document_of(&window, cx).preferences;
-
-    click("settings-zed-extension-action-sample-themes", cx);
-
-    let document = document_of(&window, cx);
-    let mut names = document
-        .terminal_themes
-        .iter()
-        .map(|theme| theme.name.as_str())
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    assert_eq!(names, ["Sample Dark", "Sample Light"]);
-    assert_eq!(document.preferences, preferences);
-    assert_eq!(
-        store_status(&window, cx).as_deref(),
-        Some("Installed 2 themes from Sample Themes.")
-    );
-    assert!(
-        cx.debug_bounds("settings-zed-extension-action-sample-themes")
-            .is_none(),
-        "the listed version is already installed"
-    );
-    assert!(
-        cx.debug_bounds("settings-zed-extension-installed-sample-themes")
-            .is_some()
-    );
-    assert!(
-        cx.debug_bounds("settings-zed-extension-remove-sample-themes")
-            .is_some()
-    );
-
-    click("modal-action-settings-theme-store-done", cx);
-    open_theme_store(&window, cx);
-    assert_eq!(
-        transport.requests(),
-        [
-            REGISTRY_LISTING,
-            "https://api.zed.dev/extensions/sample-themes/1.0.0/download"
-        ],
-        "reopening the sheet reuses the listing"
-    );
-}
-
-/// Remove in Get More Themes removes every theme the extension installed at once, because the
-/// sheet cannot stack a confirmation, and offers Get again. A slot that used one of them returns
-/// to its built-in theme.
-#[gpui::test]
-fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
-    select_section(SettingsSectionId::Themes, cx);
-    open_theme_store(&window, cx);
-    click("settings-zed-extension-action-sample-themes", cx);
-    let selected = document_of(&window, cx)
-        .terminal_themes
-        .iter()
-        .find(|theme| theme.name == "Sample Dark")
-        .map(|theme| theme.id.clone())
-        .expect("the dark theme is installed");
-    window.update(cx, |settings, cx| {
-        settings.set_theme(Appearance::Dark, selected, cx);
-    });
-    cx.run_until_parked();
-
-    click("settings-zed-extension-remove-sample-themes", cx);
-
-    let document = document_of(&window, cx);
-    assert!(document.terminal_themes.is_empty());
-    assert_eq!(
-        document.preferences.terminal.themes.dark,
-        SettingsDocument::default().preferences.terminal.themes.dark
-    );
-    assert_eq!(
-        store_status(&window, cx).as_deref(),
-        Some("Removed 2 themes from Sample Themes.")
-    );
-    assert!(
-        cx.debug_bounds("settings-zed-extension-action-sample-themes")
-            .is_some()
-    );
 }
 
 /// Removing any theme an extension installed removes every theme it installed, including those
@@ -3621,61 +3522,6 @@ fn reinstalling_an_extension_restores_its_removed_themes_without_changing_select
             "https://api.zed.dev/extensions/sample-themes/1.0.0/download",
         ]
     );
-}
-
-/// While the listing loads, the sheet shows an indeterminate bar with its caption beneath it.
-#[gpui::test]
-fn a_loading_registry_listing_shows_a_bar_above_its_caption(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
-    select_section(SettingsSectionId::Themes, cx);
-
-    // The listing arrives on a background task, so the frame drawn before the executor parks is
-    // the loading state.
-    cx.update(|gpui_window, cx| {
-        window.update(cx, |settings, cx| {
-            settings.open_theme_store(gpui_window, cx)
-        });
-    });
-    assert!(matches!(
-        store_listing(&window, cx),
-        super::theme_store::Listing::Loading
-    ));
-    let bar = cx
-        .debug_bounds("settings-theme-store-loading-track")
-        .expect("the loading listing shows a bar");
-    assert!(
-        cx.debug_bounds("settings-theme-store-loading-activity")
-            .is_some()
-    );
-    let caption = cx
-        .debug_bounds("settings-theme-store-loading-caption")
-        .expect("the loading listing shows its caption");
-    assert!(
-        caption.top() >= bar.bottom(),
-        "the caption sits below the bar"
-    );
-
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("settings-theme-store-loading-track")
-            .is_none()
-    );
-}
-
-#[gpui::test]
-fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
-    let transport = Arc::new(MemoryTransport::default());
-    let (window, _harness, cx) = open_settings_with_registry(cx, transport.clone());
-    select_section(SettingsSectionId::Themes, cx);
-
-    open_theme_store(&window, cx);
-    assert!(matches!(
-        store_listing(&window, cx),
-        super::theme_store::Listing::Failed(crate::theme_registry::RegistryError::Refused)
-    ));
-
-    click("settings-theme-store-retry", cx);
-    assert_eq!(transport.requests().len(), 2);
 }
 
 // Advanced ------------------------------------------------------------------------------------
