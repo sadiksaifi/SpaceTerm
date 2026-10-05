@@ -2572,6 +2572,10 @@ mod tests {
         let records = backend.state.lock().unwrap().save_records.clone();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].alias().as_str(), "work");
+        assert_eq!(
+            backend.state.lock().unwrap().connect_records,
+            vec![SshDestination::new("work".to_owned()).unwrap()]
+        );
     }
 
     #[test]
@@ -2619,7 +2623,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_generation_swap_should_keep_the_workspace_alias_continuously_pinned() {
+    fn workspace_alias_pin_should_survive_replacement_completion_drop() {
         let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
         let alias = alias("work");
         let closes = Arc::new(AtomicUsize::new(0));
@@ -2799,7 +2803,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_error_back_should_retain_host_then_cancel_should_finish_once(
+    fn connection_error_back_should_return_to_host_selection_then_cancel_once(
         cx: &mut TestAppContext,
     ) {
         let backend = FakeBackend::new([
@@ -3127,7 +3131,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn replacing_the_picker_during_activation_should_cancel_and_close_the_connection(
+    fn cancelling_the_picker_during_activation_should_cancel_and_close_the_connection(
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));

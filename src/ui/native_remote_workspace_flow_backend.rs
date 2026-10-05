@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn native_factory_should_gate_missing_openssh_before_askpass_construction() {
+    fn native_factory_should_report_missing_openssh_as_unavailable() {
         let factory =
             factory_with_capability(SshCapability::Unavailable(SshUnavailableReason::NotFound));
 

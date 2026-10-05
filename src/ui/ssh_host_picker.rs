@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_aliases_should_filter_by_case_insensitive_prefix() {
+    fn configured_aliases_should_match_case_insensitive_query() {
         let rows = host_rows_for_query(
             &host_discovery(
                 "Host work\n  HostName work.example\nHost staging\n  HostName staging.example\n",
@@ -967,6 +967,8 @@ mod tests {
             });
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(picker.read_with(cx, |picker, _| picker.discovery_pending));
 
         // Discovery is still pending within the palette's loading grace period, which presents
         // neither the loading state nor a premature empty state.
@@ -1289,6 +1291,10 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(provider.calls(), 2);
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.discovery.clone()),
+            host_discovery("Host second\n", "")
+        );
         assert_eq!(
             picker.read_with(cx, |picker, cx| picker
                 .palette()

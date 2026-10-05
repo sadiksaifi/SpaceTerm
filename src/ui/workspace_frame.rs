@@ -1,25 +1,11 @@
-//! Geometry of the floating Workspace frame: the one negative-space measurement the composition
-//! breathes with, fixed selection geometry, the Pane corner derived from its native container, and
-//! the top chrome height that absorbs the frame's top edge.
+//! Shared Workspace gaps, optical Split trim, native edge insets, and derived Pane radii.
 //!
-//! Every visible gap in the Workspace reads as that one measurement: the Pane stage's perimeter,
-//! the space between Split Panes at any nesting depth, the margin on both sides of a sidebar item's
-//! chip, and the air above and below a Tab's chip. They are literally equal rather than sums that
-//! happen to agree, except the gap between Split Panes, which is two points narrower so it looks
-//! equal. That gap is a lighter band between two darker Panes, and it opens wider where rounded
-//! Pane corners meet, so at the same measurement it reads wider than every other gap.
+//! Perimeter, sidebar, and Tab chip gaps share one measurement. Split gaps are two points
+//! narrower because the lighter band and adjacent rounded corners make them appear wider.
+//! Outer insets include the native window edge width, which covers the content's outer point.
+//! The top chrome height supplies the top gap because the Pane frame paints no top edge.
 //!
-//! The eye measures a gap between two painted edges. Where a surface faces the window's outer edge,
-//! the window paints its own edge over the outermost point of the content, so that inset carries
-//! the edge's width in addition to the gap.
-//!
-//! The frame has no top edge to paint. The space that would sit between the titlebar and the Pane
-//! belongs to the top chrome's height instead, so the Tab strip breathes with the same measurement
-//! and the Pane starts at the chrome's lower edge.
-//!
-//! These are geometry metrics, not color roles. Every consumer reads one resolved [`WorkspaceFrame`]
-//! so the space, fixed selection radius, derived Pane radius, and chrome height cannot drift apart
-//! across WorkspaceManager, TabManager, WorkspaceSidebar, and PaneHost.
+//! Consumers share one resolved [`WorkspaceFrame`] so spacing, radii, and chrome height agree.
 
 use gpui::{App, Bounds, Pixels, point, px};
 

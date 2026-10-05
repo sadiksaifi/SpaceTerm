@@ -613,9 +613,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn password_focuses_obscured_input_and_return_denies_empty_then_submits_once(
-        cx: &mut TestAppContext,
-    ) {
+    fn password_input_focus_and_return_should_deny_empty_then_submit_once(cx: &mut TestAppContext) {
         let (_, presenter, results, cx) = askpass_window(cx);
         present(
             1,

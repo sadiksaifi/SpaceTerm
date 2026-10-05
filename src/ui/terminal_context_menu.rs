@@ -105,7 +105,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_surface_should_use_host_neutral_profile_presentation() {
+    fn terminal_context_presentation_should_resolve_host_neutral_profile_values() {
         assert_eq!(
             terminal_context_presentation(&crate::desktop_profile::testing_presentation()),
             TerminalContextPresentation {

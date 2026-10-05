@@ -1275,6 +1275,17 @@ mod tests {
 
         let records = backend.records();
         assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0],
+            ManagedSshHost::new(
+                "work".to_owned(),
+                "server.example".to_owned(),
+                Some("deploy".to_owned()),
+                std::num::NonZeroU16::new(2222),
+                Some("~/.ssh/id_ed25519".to_owned()),
+            )
+            .unwrap()
+        );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             SshHostFormEvent::SavedAndConnect(host) if host.alias().as_str() == "work"
@@ -1323,6 +1334,13 @@ mod tests {
             (false, Some(SAVE_FAILURE_MESSAGE))
         );
         assert!(cx.debug_bounds("managed-ssh-host-backend-error").is_some());
+        let host_name = form.read_with(cx, |form, _| form.host_name.clone());
+        cx.update(|window, cx| window.focus(&host_name.read(cx).focus_handle(), cx));
+        cx.simulate_input("x");
+        assert_eq!(
+            form.read_with(cx, |form, cx| form.host_name.read(cx).value().to_owned()),
+            "server.examplex"
+        );
     }
 
     #[gpui::test]

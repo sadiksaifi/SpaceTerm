@@ -86,11 +86,6 @@ impl SymbolPrimitive {
             ),
         }
     }
-
-    fn is_cell_local(&self) -> bool {
-        let (left, top, right, bottom) = self.bounds();
-        left >= 0.0 && top >= 0.0 && right.is_finite() && bottom.is_finite()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,8 +146,8 @@ impl SymbolPlanCache {
 
 #[cfg(test)]
 impl SymbolPlan {
-    fn touches_left_and_right_edges(&self) -> bool {
-        let right = f32::from(self.width_device);
+    fn touches_left_and_right_edges(&self, width_device: u16) -> bool {
+        let right = f32::from(width_device);
         self.primitives
             .iter()
             .any(|primitive| primitive.bounds().0 == 0.0)
@@ -162,7 +157,7 @@ impl SymbolPlan {
                 .any(|primitive| primitive.bounds().2 == right)
     }
 
-    fn covers_cell(&self) -> bool {
+    fn covers_cell(&self, width_device: u16, height_device: u16) -> bool {
         self.primitives.iter().any(|primitive| {
             matches!(
                 primitive,
@@ -172,23 +167,10 @@ impl SymbolPlan {
                     width,
                     height,
                     alpha: u8::MAX,
-                } if *width == self.width_device && *height == self.height_device
+                } if *width == width_device && *height == height_device
             )
         })
     }
-}
-
-#[cfg(test)]
-fn build_symbol_plan(
-    symbol: TerminalSymbol,
-    width: u16,
-    height: u16,
-    scale_factor: f32,
-) -> SymbolPlan {
-    let scale_factor = valid_scale_factor(scale_factor);
-    let width_device = scaled_dimension(f32::from(width), scale_factor);
-    let height_device = scaled_dimension(f32::from(height), scale_factor);
-    build_symbol_plan_for_device(symbol, width_device, height_device, scale_factor)
 }
 
 fn build_symbol_plan_for_device(
@@ -220,16 +202,6 @@ fn valid_scale_factor(scale_factor: f32) -> f32 {
     } else {
         1.0
     }
-}
-
-#[cfg(test)]
-fn scaled_dimension(logical: f32, scale_factor: f32) -> u16 {
-    if !logical.is_finite() || logical <= 0.0 {
-        return 1;
-    }
-    (logical * scale_factor)
-        .round()
-        .clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
 fn rect(plan: &mut SymbolPlan, x: u16, y: u16, width: u16, height: u16, alpha: u8) {
@@ -773,6 +745,20 @@ mod tests {
 
     use super::*;
 
+    fn assert_cell_bounds(plan: &SymbolPlan, width: u16, height: u16, scale: f32) {
+        assert_eq!(
+            (plan.width_device, plan.height_device, plan.scale_factor),
+            (width, height, scale)
+        );
+        for primitive in &plan.primitives {
+            let (left, top, right, bottom) = primitive.bounds();
+            assert!(left >= 0.0 && top >= 0.0);
+            assert!(right.is_finite() && bottom.is_finite());
+            assert!(right <= f32::from(width));
+            assert!(bottom <= f32::from(height));
+        }
+    }
+
     #[test]
     fn substitution_requires_exactly_one_supported_terminal_symbol() {
         for text in ["─", "█", "⣿", "", "\u{1fb00}"] {
@@ -786,36 +772,60 @@ mod tests {
 
     #[test]
     fn generated_geometry_reaches_cell_edges_at_one_and_two_x_scale() {
-        for scale in [1.0, 2.0] {
-            let horizontal = build_symbol_plan(terminal_symbol("─").unwrap(), 9, 20, scale);
-            let full_block = build_symbol_plan(terminal_symbol("█").unwrap(), 9, 20, scale);
-            let powerline = build_symbol_plan(terminal_symbol("").unwrap(), 9, 20, scale);
+        let mut cache = SymbolPlanCache::default();
+        for (scale, width, height) in [(1.0, 9, 20), (2.0, 18, 40)] {
+            let horizontal = cache.get(terminal_symbol("─").unwrap(), width, height, scale);
+            let full_block = cache.get(terminal_symbol("█").unwrap(), width, height, scale);
+            let powerline = cache.get(terminal_symbol("").unwrap(), width, height, scale);
 
-            assert!(horizontal.touches_left_and_right_edges());
-            assert!(full_block.covers_cell());
-            assert!(powerline.touches_left_and_right_edges());
+            for plan in [&horizontal, &full_block, &powerline] {
+                assert_cell_bounds(plan, width, height, scale);
+            }
+            assert!(horizontal.touches_left_and_right_edges(width));
+            assert!(full_block.covers_cell(width, height));
+            assert!(powerline.touches_left_and_right_edges(width));
         }
     }
 
     #[test]
     fn braille_and_legacy_plans_map_bits_to_cell_local_regions() {
-        let braille = build_symbol_plan(terminal_symbol("⣿").unwrap(), 10, 20, 2.0);
-        let sextant = build_symbol_plan(terminal_symbol("\u{1fb00}").unwrap(), 10, 20, 2.0);
+        let mut cache = SymbolPlanCache::default();
+        let braille = cache.get(terminal_symbol("⣿").unwrap(), 20, 40, 2.0);
+        let sextant = cache.get(terminal_symbol("\u{1fb00}").unwrap(), 20, 40, 2.0);
 
         assert_eq!(braille.primitives.len(), 8);
         assert_eq!(sextant.primitives.len(), 1);
-        assert!(
-            braille
-                .primitives
-                .iter()
-                .all(SymbolPrimitive::is_cell_local)
-        );
-        assert!(
-            sextant
-                .primitives
-                .iter()
-                .all(SymbolPrimitive::is_cell_local)
-        );
+        for plan in [&braille, &sextant] {
+            assert_cell_bounds(plan, 20, 40, 2.0);
+        }
+        for (bit, bounds) in [
+            (0, (3.0, 3.0, 8.0, 8.0)),
+            (1, (3.0, 13.0, 8.0, 18.0)),
+            (2, (3.0, 23.0, 8.0, 28.0)),
+            (3, (13.0, 3.0, 18.0, 8.0)),
+            (4, (13.0, 13.0, 18.0, 18.0)),
+            (5, (13.0, 23.0, 18.0, 28.0)),
+            (6, (3.0, 33.0, 8.0, 38.0)),
+            (7, (13.0, 33.0, 18.0, 38.0)),
+        ] {
+            let plan = cache.get(TerminalSymbol::Braille(1 << bit), 20, 40, 2.0);
+            assert_eq!(plan.primitives.len(), 1);
+            assert_eq!(plan.primitives[0].bounds(), bounds);
+            assert_cell_bounds(&plan, 20, 40, 2.0);
+        }
+        for (index, bounds) in [
+            (0, (0.0, 0.0, 10.0, 13.0)),
+            (1, (10.0, 0.0, 20.0, 13.0)),
+            (3, (0.0, 13.0, 10.0, 26.0)),
+            (7, (10.0, 13.0, 20.0, 26.0)),
+            (15, (0.0, 26.0, 10.0, 40.0)),
+            (30, (10.0, 26.0, 20.0, 40.0)),
+        ] {
+            let plan = cache.get(TerminalSymbol::LegacySextant(index), 20, 40, 2.0);
+            assert_eq!(plan.primitives.len(), 1);
+            assert_eq!(plan.primitives[0].bounds(), bounds);
+            assert_cell_bounds(&plan, 20, 40, 2.0);
+        }
     }
 
     #[test]
@@ -827,6 +837,9 @@ mod tests {
         let same = cache.get(symbol, 18, 40, 2.0);
         let wide = cache.get(symbol, 36, 40, 2.0);
 
+        assert_cell_bounds(&first, 18, 40, 2.0);
+        assert_cell_bounds(&same, 18, 40, 2.0);
+        assert_cell_bounds(&wide, 36, 40, 2.0);
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &wide));
         assert_eq!(wide.width_device, first.width_device * 2);

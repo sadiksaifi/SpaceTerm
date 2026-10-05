@@ -326,17 +326,6 @@ impl DirectoryRow {
     }
 }
 
-#[cfg(test)]
-pub(super) fn filter_directory_rows(
-    parsed: &ParsedPickerPath,
-    entries: &[DirectoryRow],
-) -> Vec<DirectoryRow> {
-    match_directory_rows(parsed, entries)
-        .into_iter()
-        .map(|matched| matched.row)
-        .collect()
-}
-
 #[derive(Clone)]
 struct DirectoryRowMatch {
     row: DirectoryRow,
@@ -2039,12 +2028,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsupported_login_shell_should_have_an_actionable_account_status() {
+    #[gpui::test]
+    fn unsupported_login_shell_should_have_an_actionable_account_status(cx: &mut TestAppContext) {
         assert_eq!(
             status_for_source_error(DirectorySourceError::UnsupportedLoginShell),
             DirectoryPickerStatus::UnsupportedLoginShell
         );
+        let provider = scripted_provider([], [], [], []);
+        provider.state.lock().unwrap().accounts = [Task::ready(Err(
+            RemoteDirectoryProviderError::UnsupportedLoginShell,
+        ))]
+        .into();
+        let (picker, _, cx) = directory_picker(provider, cx);
+        let empty = picker.read_with(cx, |picker, _| picker.empty_state());
+        assert_eq!(empty.title(), "Unsupported login shell");
+        assert_eq!(
+            empty.description_text(),
+            Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
+        );
+        assert!(cx.debug_bounds("command-palette-empty").is_some());
         assert_eq!(
             UNSUPPORTED_LOGIN_SHELL_MESSAGE,
             "The remote login shell does not support login mode. Choose another account or shell."
@@ -2472,7 +2474,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_open_action_should_show_the_confirm_shortcut(cx: &mut TestAppContext) {
+    fn the_open_action_should_expose_a_shortcut_element(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2576,7 +2578,34 @@ mod tests {
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm_current(window, cx)));
         cx.run_until_parked();
         assert!(picker.read_with(cx, |picker, _| picker.busy.is_some()));
+        let (lifecycle_generation, operation_generation, directory) =
+            picker.read_with(cx, |picker, _| {
+                (
+                    picker.lifecycle_generation,
+                    picker.operation_generation,
+                    picker.parsed.as_ref().unwrap().exact_directory().clone(),
+                )
+            });
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.cancel(window, cx)));
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.finish_validation(
+                    ValidationCompletion {
+                        lifecycle_generation,
+                        operation_generation,
+                        directory,
+                        result: Ok(PinnedDirectory::Remote {
+                            directory: crate::domain::RemoteDirectory::new("~/".to_owned())
+                                .unwrap(),
+                            identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
+                                .unwrap(),
+                        }),
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
         cx.run_until_parked();
         assert_eq!(dropped.load(AtomicOrdering::SeqCst), 1);
         assert!(!picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
@@ -2750,11 +2779,11 @@ mod tests {
         let entries = remote_rows([".config", "SpaceTerm", ".ssh"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&ordinary, &entries)),
+            row_names(match_directory_rows(&ordinary, &entries)),
             vec!["SpaceTerm"]
         );
         assert_eq!(
-            row_names(filter_directory_rows(&dotted, &entries)),
+            row_names(match_directory_rows(&dotted, &entries)),
             vec![".config", ".ssh"]
         );
     }
@@ -2765,7 +2794,7 @@ mod tests {
         let entries = remote_rows(["spaceTerm", "Spatial", "SpaceTerm", "tools"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&parsed, &entries)),
+            row_names(match_directory_rows(&parsed, &entries)),
             vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
@@ -2787,7 +2816,7 @@ mod tests {
         let entries = remote_rows(["Zulu", "Alpha"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&parsed, &entries)),
+            row_names(match_directory_rows(&parsed, &entries)),
             vec!["Alpha", "Zulu"]
         );
     }
@@ -2817,7 +2846,9 @@ mod tests {
             .collect()
     }
 
-    fn row_names(rows: Vec<DirectoryRow>) -> Vec<String> {
-        rows.into_iter().map(|row| row.name().to_owned()).collect()
+    fn row_names(rows: Vec<DirectoryRowMatch>) -> Vec<String> {
+        rows.into_iter()
+            .map(|matched| matched.row.name().to_owned())
+            .collect()
     }
 }

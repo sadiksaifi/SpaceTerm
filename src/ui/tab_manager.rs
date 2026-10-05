@@ -86,7 +86,7 @@ const TAB_ITEM_WIDTH: f32 = 178.2;
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 159.3;
 pub(super) const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 /// The title starts as far inside the chip as a Settings navigation label does inside its own, and
-/// Close keeps the same air to the chip's right edge as it keeps above and below.
+/// Close uses the same inset at the chip's right, top, and bottom edges.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 /// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
@@ -99,8 +99,7 @@ const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 /// - horizontally it faces another chip, so each side carries a share and the visible gap between
 ///   two Tabs is one frame space again.
 ///
-/// The radius comes from the frame's one radius family, so a Tab, a selected sidebar row, and a
-/// floating Pane read as the same shape at three sizes rather than as cousins.
+/// Tab, selected sidebar row, and Pane radii derive from the same frame geometry.
 fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
     let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     ChipShape {
@@ -111,9 +110,9 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
     }
 }
 
-/// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
+/// The leading Terminal glyph every Tab carries, and its gap to the Tab's identity.
 const TAB_ORIGIN_GAP: f32 = 6.0;
-/// The air after the status glyph, and before the close control.
+/// The gap between the status glyph and close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
 /// How much of a Tab's identity the activity may claim when a place beside it needs a share.
 ///
@@ -2360,7 +2359,7 @@ mod tests {
     }
 
     #[test]
-    fn active_window_tab_chrome_should_preserve_the_existing_presentation() {
+    fn active_window_tab_chrome_should_resolve_authored_semantic_roles() {
         let colors = ChromeColors::default();
         let presentation = TabChromePresentation::resolve(true, false, &colors);
 
@@ -3408,7 +3407,7 @@ mod tests {
 
     /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
     ///
-    /// The chip is what carries that reading, and it only works while it keeps air on every side:
+    /// The chip is what carries that reading, and it only works while it keeps an inset on every side:
     /// against its own item, against the chip beside it, and against the bar's lower edge, which
     /// meets the base surface without a seam. The item itself keeps the full height of the bar,
     /// because the inset is paint and must never shrink what a pointer can hit.
@@ -4681,9 +4680,9 @@ mod tests {
     }
 
     /// A narrow Tab gives up its words before it gives up its status glyph or its close control,
-    /// so every Tab stays identifiable and closable at the narrowest width.
+    /// keeping both controls inside the item bounds at the narrowest width.
     #[gpui::test]
-    fn narrow_tabs_should_keep_status_glyph_and_close_reachable(cx: &mut TestAppContext) {
+    fn narrow_tabs_should_keep_status_glyph_and_close_within_item_bounds(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
         let (_manager, records, cx) = tab_manager(cx);
         report_metadata(&records, 1, 1, |metadata| {
@@ -5233,22 +5232,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_single_motion_should_move_a_tab_on_release(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        click("create-tab-button", cx);
-        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
-        let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let release = third.center() + point(px(4.0), px(0.0));
-
-        drag_tab(first.center(), &[release], cx);
-        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
-    }
-
-    #[gpui::test]
     fn a_tab_drag_should_end_on_a_release_of_any_button(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
@@ -5603,6 +5586,11 @@ mod tests {
             )
         });
         assert_eq!(state, (1, TabId::new(1), vec![2]));
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
     }
 
     #[gpui::test]
@@ -5685,6 +5673,10 @@ mod tests {
             manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
+        assert_eq!(provider.preparation_count(), 1);
+        assert_eq!(provider.revalidation_count(), 1);
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -5732,27 +5724,6 @@ mod tests {
         );
         assert_eq!(manager.read_with(cx, hierarchy_identity), before);
         assert_eq!(records.starts().len(), 1);
-    }
-
-    #[gpui::test]
-    fn remote_create_tab_should_not_mutate_when_generation_changes_after_revalidation(
-        cx: &mut TestAppContext,
-    ) {
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
-        let before = manager.read_with(cx, hierarchy_identity);
-        provider.invalidate_next_grant();
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
-        });
-        cx.run_until_parked();
-
-        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(provider.preparation_count(), 1);
-        assert_eq!(provider.revalidation_count(), 1);
     }
 
     #[gpui::test]
@@ -5836,7 +5807,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelled_remote_restart_preparation_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
+    fn dropping_unpolled_remote_restart_task_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
@@ -5867,7 +5838,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn known_remote_master_failure_keeps_pane_and_blocks_new_children(cx: &mut TestAppContext) {
+    fn unavailable_remote_channel_keeps_pane_and_blocks_new_children(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
@@ -5949,7 +5920,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn healthy_remote_shell_exit_keeps_existing_hierarchy_close_behavior(cx: &mut TestAppContext) {
+    fn healthy_remote_shell_exit_should_close_its_tab_and_select_neighbor(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
         click("create-tab-button", cx);
         records

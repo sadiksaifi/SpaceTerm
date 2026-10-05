@@ -683,7 +683,7 @@ mod tests {
         ));
     }
 
-    /// Each status recolors the glyph, a paused one dims it, and a blink shows attention over all.
+    /// Each status recolors the glyph, and a blink shows attention over all.
     #[test]
     fn glyph_should_take_the_color_of_its_status() {
         for (progress, resting) in [

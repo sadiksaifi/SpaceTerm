@@ -3294,7 +3294,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_races_master_death(
+    fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init)
@@ -3593,7 +3593,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn attention_remains_scoped_to_its_owning_pane_and_tab_title(cx: &mut TestAppContext) {
+    fn pane_attention_count_should_decorate_its_tab_title(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -4276,19 +4276,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn single_pane_should_render_a_caption(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("pane-caption-1-focused").is_some());
-    }
-
-    #[gpui::test]
     fn single_pane_should_float_as_one_rounded_surface_holding_its_caption(
         cx: &mut TestAppContext,
     ) {
@@ -4476,9 +4463,9 @@ mod tests {
         assert!(!resolve(controls - 1.0).show_splits);
     }
 
-    /// A Pane Caption keeps its one glyph at any supported width, even without status.
+    /// A narrow Pane Caption without status retains Split controls above their width threshold.
     #[test]
-    fn caption_layout_should_keep_its_glyph_when_narrow_without_status() {
+    fn narrow_caption_without_status_should_keep_split_controls_above_the_control_threshold() {
         let metrics = CaptionMetrics {
             name: px(40.0),
             ..CaptionMetrics::default()
@@ -4971,7 +4958,7 @@ mod tests {
     fn exited_last_terminal_session_should_request_tab_close(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let close_requests = Rc::new(Cell::new(0));
+        let close_requests = Rc::new(RefCell::new(Vec::new()));
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -4984,8 +4971,10 @@ mod tests {
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
-            cx.subscribe(&host, move |_, _, _: &PaneHostEvent, _| {
-                close_requests_for_subscription.update(|count| count + 1);
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                close_requests_for_subscription
+                    .borrow_mut()
+                    .push(event.clone());
             })
             .detach();
         });
@@ -5002,8 +4991,16 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            (close_requests.get(), records.dropped_session_ids()),
-            (1, Vec::new())
+            (
+                close_requests.borrow().clone(),
+                records.dropped_session_ids()
+            ),
+            (
+                vec![PaneHostEvent::CloseTabRequested {
+                    tab_id: TabId::new(1)
+                }],
+                Vec::new()
+            )
         );
     }
 
@@ -5485,7 +5482,18 @@ mod tests {
 
     #[gpui::test]
     fn unpainted_split_gap_should_resize_and_reset_without_terminal_input(cx: &mut TestAppContext) {
-        let (host, cx) = split_gap_host(cx);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(TestTerminalSessionFactory::new(records.clone())),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
                 host.split_focused(SplitAxis::Horizontal, window, cx);
@@ -5515,6 +5523,8 @@ mod tests {
             "dragging the gap should resize"
         );
 
+        assert_eq!(records.pointer_count(), 0);
+
         let center = cx
             .debug_bounds("split-resize-1-hitbox")
             .expect("the moved Split resize hitbox was rendered")
@@ -5539,6 +5549,7 @@ mod tests {
             0.5,
             "double-clicking the gap resets"
         );
+        assert_eq!(records.pointer_count(), 0);
         let focused =
             cx.update(|window, cx| host.read(cx).focused_terminal_has_input_focus(window, cx));
         assert!(
@@ -5548,7 +5559,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn zoomed_split_should_size_new_splits_from_the_gapped_restored_grid(cx: &mut TestAppContext) {
+    fn zoomed_pane_should_preserve_its_gapped_restored_split_allocation(cx: &mut TestAppContext) {
         let (host, cx) = split_gap_host(cx);
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {

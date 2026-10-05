@@ -437,8 +437,8 @@ fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
 }
 
 /// The runtime directory name inside the temporary root. macOS temporary roots are already
-/// per-user. Linux `/tmp` is shared, so the name carries the effective user so another account
-/// cannot pre-create the private runtime directory.
+/// per-user. Linux `/tmp` is shared, so an effective UID suffix separates account namespaces.
+/// Ownership and permissions are checked when creating or opening the runtime directory.
 #[cfg(target_os = "macos")]
 fn temporary_runtime_name(app_name: &str) -> String {
     app_name.to_owned()
