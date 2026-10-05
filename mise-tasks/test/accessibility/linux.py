@@ -740,8 +740,9 @@ def start_orca(processes, probe, output, startup):
     modules = configuration / "modules"
     modules.mkdir()
     (modules / "dummy.conf").write_text("")
+    # Processes owns shutdown, including the idle gap between readiness and Orca.
     (configuration / "speechd.conf").write_text(
-        'LogLevel 0\nCommunicationMethod "unix_socket"\n'
+        'LogLevel 0\nTimeout 0\nCommunicationMethod "unix_socket"\n'
         f'SocketPath "{socket}"\nLogDir "{logs}"\n'
         'AudioOutputMethod "alsa"\nAudioALSADevice "null"\n'
         'AddModule "dummy" "sd_dummy" "dummy.conf"\n'
