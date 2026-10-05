@@ -114,7 +114,8 @@ impl<'alloc> Parser<'alloc> {
         if has_next {
             // This shouldn't really *ever* fail, so the fact it failed
             // suggests we should stop anyways.
-            Ok(Some(Attribute::from_raw(raw_attr)?))
+            // SAFETY: The native attribute borrows this parser until its next mutation.
+            Ok(Some(unsafe { Attribute::from_raw(raw_attr, self)? }))
         } else {
             Ok(None)
         }
@@ -174,12 +175,12 @@ pub enum Attribute<'p> {
     Fg256(PaletteIndex),
 }
 
-impl Attribute<'_> {
-    /// This should never return None, but just to be safe.
-    fn from_raw(value: ffi::SgrAttribute) -> Result<Self> {
+impl<'p> Attribute<'p> {
+    // SAFETY: The attribute and its active union field must come from this parser.
+    unsafe fn from_raw(value: ffi::SgrAttribute, parser: &'p Parser<'_>) -> Result<Self> {
         Ok(match value.tag {
             0 => Self::Unset,
-            1 => Self::Unknown(unsafe { value.value.unknown }.into()),
+            1 => Self::Unknown(unsafe { Unknown::from_raw(value.value.unknown, parser) }),
             2 => Self::Bold,
             3 => Self::ResetBold,
             4 => Self::Italic,
@@ -217,7 +218,27 @@ impl Attribute<'_> {
     }
 }
 
-/// Unknown SGR attribute data.
+/// Unknown SGR attribute data borrowed from a live parser.
+///
+/// Arbitrary foreign pointers cannot be converted through a safe interface.
+///
+/// ```compile_fail,E0277
+/// use libghostty_vt::{ffi, sgr::Unknown};
+/// let _unknown: Unknown<'static> = ffi::SgrUnknown::default().into();
+/// ```
+///
+/// The parser cannot be reset while its unknown parameters are used.
+///
+/// ```compile_fail,E0499
+/// use libghostty_vt::sgr::{Attribute, Parser};
+/// let mut parser = Parser::new().unwrap();
+/// parser.set_params(&[999], None).unwrap();
+/// let attribute = parser.next().unwrap().unwrap();
+/// parser.reset();
+/// if let Attribute::Unknown(unknown) = attribute {
+///     assert_eq!(unknown.full, &[999]);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unknown<'p> {
     /// Full parameter list.
@@ -226,15 +247,47 @@ pub struct Unknown<'p> {
     pub partial: &'p [u16],
 }
 
-impl From<ffi::SgrUnknown> for Unknown<'_> {
-    fn from(value: ffi::SgrUnknown) -> Self {
-        // SAFETY: We trust libghostty to give us two valid slices
-        // of u16s that last at least as long as the current iteration,
-        // which is guaranteed by Rust's mutation XOR sharability property
-        // (e.g. one cannot reset the parser when this object still
-        // borrows the parser mutably).
-        let full = unsafe { std::slice::from_raw_parts(value.full_ptr, value.full_len) };
-        let partial = unsafe { std::slice::from_raw_parts(value.partial_ptr, value.partial_len) };
+impl<'p> Unknown<'p> {
+    // SAFETY: Nonempty slices must be valid and owned by the borrowed parser.
+    unsafe fn from_raw(value: ffi::SgrUnknown, _parser: &'p Parser<'_>) -> Self {
+        let full = if value.full_len == 0 {
+            &[]
+        } else {
+            // SAFETY: The caller guarantees valid storage for the parser borrow.
+            unsafe { std::slice::from_raw_parts(value.full_ptr, value.full_len) }
+        };
+        let partial = if value.partial_len == 0 {
+            &[]
+        } else {
+            // SAFETY: The caller guarantees valid storage for the parser borrow.
+            unsafe { std::slice::from_raw_parts(value.partial_ptr, value.partial_len) }
+        };
         Self { full, partial }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_attributes_preserve_empty_and_unknown_parameters() {
+        let mut parser = Parser::new().unwrap();
+        // SAFETY: Both zero-length slices require no backing storage.
+        let empty = unsafe { Unknown::from_raw(ffi::SgrUnknown::default(), &parser) };
+        assert!(empty.full.is_empty());
+        assert!(empty.partial.is_empty());
+        parser.set_params(&[], None).unwrap();
+        assert_eq!(parser.next().unwrap(), Some(Attribute::Unset));
+        assert_eq!(parser.next().unwrap(), None);
+        parser.set_params(&[1, 999], None).unwrap();
+        assert_eq!(parser.next().unwrap(), Some(Attribute::Bold));
+        let Some(Attribute::Unknown(unknown)) = parser.next().unwrap() else {
+            panic!("expected unknown parameters");
+        };
+        assert_eq!(unknown.full, &[1, 999]);
+        assert_eq!(unknown.partial, &[999]);
+        parser.reset();
+        assert_eq!(parser.next().unwrap(), Some(Attribute::Bold));
     }
 }

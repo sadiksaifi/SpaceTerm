@@ -290,10 +290,6 @@ pub struct RowIterator<'alloc>(Object<'alloc, ffi::RenderStateRowIteratorImpl>);
 #[derive(Debug)]
 pub struct RowIteration<'alloc, 's> {
     iter: &'s mut RowIterator<'alloc>,
-    // NOTE: While in theory the snapshot borrow should have its own
-    // lifetime 'ss where 'rs: 'ss, but it gets very unwieldy and honestly
-    // one wouldn't run into too many situations where this simpler constraint
-    // isn't enough.
     _phan: PhantomData<&'s Snapshot<'alloc, 's>>,
 }
 
@@ -568,10 +564,49 @@ impl<'alloc> RowIterator<'alloc> {
 
     /// Update the row iterator for a snapshot of the render state,
     /// returning a new row iteration.
-    pub fn update(
-        &mut self,
-        snapshot: &'_ Snapshot<'alloc, '_>,
-    ) -> Result<RowIteration<'alloc, '_>> {
+    ///
+    /// Row iteration keeps the snapshot and its render state borrowed.
+    ///
+    /// The snapshot cannot be dropped during iteration.
+    ///
+    /// ```compile_fail,E0505
+    /// use libghostty_vt::{RenderState, Terminal, render::RowIterator};
+    /// fn invalid(state: &mut RenderState<'static>, terminal: &Terminal<'static, 'static>, rows: &mut RowIterator<'static>) {
+    ///     let snapshot = state.update(terminal).unwrap();
+    ///     let mut iteration = rows.update(&snapshot).unwrap();
+    ///     drop(snapshot);
+    ///     iteration.next();
+    /// }
+    /// ```
+    ///
+    /// The state cannot be updated during iteration.
+    ///
+    /// ```compile_fail,E0499
+    /// use libghostty_vt::{RenderState, Terminal, render::RowIterator};
+    /// fn invalid(state: &mut RenderState<'static>, terminal: &Terminal<'static, 'static>, rows: &mut RowIterator<'static>) {
+    ///     let snapshot = state.update(terminal).unwrap();
+    ///     let mut iteration = rows.update(&snapshot).unwrap();
+    ///     state.update(terminal).unwrap();
+    ///     iteration.next();
+    /// }
+    /// ```
+    ///
+    /// The state cannot be dropped during iteration.
+    ///
+    /// ```compile_fail,E0505
+    /// use libghostty_vt::{RenderState, Terminal, render::RowIterator};
+    /// fn invalid(mut state: RenderState<'static>, terminal: &Terminal<'static, 'static>, rows: &mut RowIterator<'static>) {
+    ///     let snapshot = state.update(terminal).unwrap();
+    ///     let mut iteration = rows.update(&snapshot).unwrap();
+    ///     drop(snapshot);
+    ///     drop(state);
+    ///     iteration.next();
+    /// }
+    /// ```
+    pub fn update<'s>(
+        &'s mut self,
+        snapshot: &'s Snapshot<'alloc, '_>,
+    ) -> Result<RowIteration<'alloc, 's>> {
         let result = unsafe {
             ffi::ghostty_render_state_get(
                 snapshot.0.0.as_raw(),
@@ -689,10 +724,22 @@ impl<'alloc> CellIterator<'alloc> {
 
     /// Update the cell iterator for a new row iteration,
     /// returning a new cell iteration.
-    pub fn update(
-        &mut self,
-        row: &'_ RowIteration<'alloc, '_>,
-    ) -> Result<CellIteration<'alloc, '_>> {
+    ///
+    /// Cells keep their row borrowed, preventing advancement during access.
+    ///
+    /// ```compile_fail,E0499
+    /// use libghostty_vt::render::{CellIterator, RowIteration};
+    /// fn invalid(rows: &mut RowIteration<'static, '_>, cells: &mut CellIterator<'static>) {
+    ///     let row = rows.next().unwrap();
+    ///     let mut iteration = cells.update(row).unwrap();
+    ///     rows.next();
+    ///     iteration.next();
+    /// }
+    /// ```
+    pub fn update<'s>(
+        &'s mut self,
+        row: &'s RowIteration<'alloc, '_>,
+    ) -> Result<CellIteration<'alloc, 's>> {
         let result = unsafe {
             ffi::ghostty_render_state_row_get(
                 row.iter.0.as_raw(),
@@ -828,9 +875,15 @@ impl CellIteration<'_, '_> {
 
     /// Write grapheme codepoints into a caller-provided buffer.
     ///
-    /// The buffer must be at least [`CellIteration::graphemes_len`] elements.
+    /// Returns [`Error::OutOfSpace`] with the required element count when the
+    /// buffer is shorter than [`CellIteration::graphemes_len`], without writing.
     /// The base codepoint is written first, followed by any extra codepoints.
     pub fn graphemes_buf(&self, buf: &mut [char]) -> Result<()> {
+        let required = self.graphemes_len()?;
+        if buf.len() < required {
+            return Err(Error::OutOfSpace { required });
+        }
+        // SAFETY: The iterator keeps the row alive and the buffer has enough elements.
         let result = unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.iter.0.as_raw(),
@@ -991,6 +1044,42 @@ pub enum CursorVisualStyle {
 mod tests {
     use super::*;
     use crate::terminal::{Options, Terminal};
+
+    #[test]
+    fn grapheme_buffer_checks_capacity_before_writing() {
+        let mut terminal = Terminal::new(Options {
+            cols: 8,
+            rows: 3,
+            max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
+        })
+        .unwrap();
+        terminal.vt_write("a\u{301}\u{302}".as_bytes());
+        let mut state = RenderState::new().unwrap();
+        let snapshot = state.update(&terminal).unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut row_iter = rows.update(&snapshot).unwrap();
+        let row = row_iter.next().unwrap();
+        let mut cell_iter = cells.update(row).unwrap();
+        let cell = cell_iter.next().unwrap();
+        assert_eq!(cell.graphemes_len().unwrap(), 3);
+        for len in [0, 2] {
+            // Backing storage remains large enough even for the broken C call.
+            let mut buf = ['!'; 4];
+            assert!(matches!(
+                cell.graphemes_buf(&mut buf[..len]),
+                Err(Error::OutOfSpace { required: 3 })
+            ));
+            assert_eq!(buf, ['!'; 4]);
+        }
+        for len in [3, 4] {
+            let mut buf = ['!'; 4];
+            cell.graphemes_buf(&mut buf[..len]).unwrap();
+            assert_eq!(buf, ['a', '\u{301}', '\u{302}', '!']);
+        }
+        assert_eq!(cell.graphemes().unwrap(), ['a', '\u{301}', '\u{302}']);
+    }
 
     /// Guards the `set_dirty` → `update` → `dirty()` round-trip. If
     /// `Snapshot::set(value: &T)` calls `from_ref(&value)`, the result has

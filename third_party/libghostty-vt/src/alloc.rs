@@ -251,13 +251,62 @@ unsafe extern "C" fn _global_remap(
 // Allocator API
 //------------------------------------
 
-/// Adapt a Rust Allocator into a libghostty Allocator.
+/// Adapt a borrowed Rust allocator into a libghostty allocator.
+///
+/// Foreign allocations cannot outlive the borrowed allocator.
+///
+/// ```compile_fail,E0597
+/// use allocator_api2::alloc::Global;
+/// use libghostty_vt::alloc::{Allocator, Bytes};
+/// let adapted = {
+///     let allocator = Global;
+///     Allocator::from(&allocator)
+/// };
+/// let _bytes = Bytes::new_with_alloc(&adapted, 8).unwrap();
+/// ```
+///
+/// Owned allocator conversion cannot leave a pointer to a dropped value.
+///
+/// ```compile_fail,E0277
+/// use allocator_api2::alloc::Global;
+/// use libghostty_vt::alloc::Allocator;
+/// let _adapted = Allocator::from(Global);
+/// ```
+///
+/// Stateful allocator storage remains live through allocation and release.
+///
+/// ```
+/// use std::{cell::Cell, ptr::NonNull};
+/// use allocator_api2::alloc::{AllocError, Allocator as RustAllocator, Global, Layout};
+/// use libghostty_vt::alloc::{Allocator, Bytes};
+/// struct Counting { allocations: Cell<usize>, frees: Cell<usize> }
+/// // SAFETY: Allocation and deallocation delegate matching layouts to Global.
+/// unsafe impl RustAllocator for Counting {
+///     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+///         self.allocations.set(self.allocations.get() + 1);
+///         Global.allocate(layout)
+///     }
+///     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+///         self.frees.set(self.frees.get() + 1);
+///         unsafe { Global.deallocate(ptr, layout); }
+///     }
+/// }
+/// let allocator = Counting { allocations: Cell::new(0), frees: Cell::new(0) };
+/// let adapted = Allocator::from(&allocator);
+/// let mut bytes = Bytes::new_with_alloc(&adapted, 8).unwrap();
+/// bytes.copy_from_slice(b"retained");
+/// assert_eq!(&*bytes, b"retained");
+/// assert_eq!(allocator.allocations.get(), 1);
+/// assert_eq!(allocator.frees.get(), 0);
+/// drop(bytes);
+/// assert_eq!(allocator.frees.get(), 1);
+/// ```
 #[cfg(feature = "allocator_api")]
-impl<'ctx, A: alloc::Allocator + 'ctx> From<A> for Allocator<'ctx> {
-    fn from(value: A) -> Self {
+impl<'ctx, A: alloc::Allocator + 'ctx> From<&'ctx A> for Allocator<'ctx> {
+    fn from(value: &'ctx A) -> Self {
         Self {
             inner: ffi::Allocator {
-                ctx: std::ptr::from_ref(value.by_ref()) as *mut std::ffi::c_void,
+                ctx: std::ptr::from_ref(value) as *mut std::ffi::c_void,
                 vtable: &ffi::AllocatorVtable {
                     alloc: Some(_alloc::<A>),
                     free: Some(_free::<A>),
