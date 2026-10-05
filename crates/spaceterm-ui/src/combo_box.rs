@@ -3717,6 +3717,7 @@ mod tests {
         ];
 
         assert_eq!(match_items(&items, "mac home workspace")[0].0, 0);
+        assert!(match_items(&items, "mac home server").is_empty());
     }
 
     #[test]
@@ -3746,9 +3747,70 @@ mod tests {
     fn duplicate_identities_should_keep_only_the_first_item() {
         let items = unique_items(vec![
             ComboBoxItem::new(1, "First"),
-            ComboBoxItem::new(1, "Later"),
+            ComboBoxItem::new(1, "Later").disabled(true),
         ]);
 
+        assert_eq!(items.len(), 1);
         assert_eq!(items[0].label(), "First");
+        assert!(!items[0].disabled);
+    }
+
+    #[gpui::test]
+    fn caller_owned_status_copy_should_update_an_open_popup(cx: &mut gpui::TestAppContext) {
+        struct StatusCopyRoot {
+            handle: ComboBoxHandle<u8>,
+            copy: ComboBoxCopy,
+        }
+
+        impl gpui::Render for StatusCopyRoot {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    ComboBox::new("status-copy-combo", "Workspace", None, "Choose", Vec::new())
+                        .handle(self.handle.clone())
+                        .copy(self.copy.clone())
+                        .debug_selector("status-copy-trigger")
+                        .on_accept(|_, _, _| {}),
+                )
+            }
+        }
+
+        crate::combo_box_tests::install_themes(cx);
+        let (root, cx) = cx.add_window_view(|_, _| StatusCopyRoot {
+            handle: ComboBoxHandle::default(),
+            copy: ComboBoxCopy::default(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("status-copy-trigger")
+            .expect("the trigger should render");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("combo-box-empty").is_some());
+
+        root.update(cx, |root, cx| {
+            root.copy = ComboBoxCopy::new(
+                "Filter workspaces",
+                "Find a workspace",
+                "Refreshing",
+                "Nothing available",
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let handle = root.read_with(cx, |root, _| root.handle.clone());
+        let state = handle
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .expect("the mounted control should retain its state");
+        let copy = state.read_with(cx, |state, _| state.copy.clone());
+        assert_eq!(copy.filter_name, "Filter workspaces");
+        assert_eq!(copy.filter_placeholder, "Find a workspace");
+        assert_eq!(copy.busy_status, "Refreshing");
+        assert_eq!(copy.empty_status, "Nothing available");
+        assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert!(cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
     }
 }

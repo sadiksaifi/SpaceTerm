@@ -42,7 +42,7 @@ fn density_scales_palette_bounds_but_not_accessory_radius() {
 }
 
 #[test]
-fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
+fn row_text_paints_should_resolve_normal_selected_and_disabled_foregrounds() {
     let paint = test_theme().paint;
 
     assert_eq!(
@@ -184,19 +184,30 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
 }
 
 #[test]
-fn presented_results_should_measure_and_hit_test_every_row_kind() {
+fn presented_results_should_measure_every_row_kind_and_resolve_scroll_offsets() {
     let (results, metrics) = sectioned_results();
 
+    let offset = |y| {
+        let offset = results.offset_at(px(y), metrics);
+        (offset.item_ix, offset.offset_in_item)
+    };
     assert_eq!(
         (
             results.total_height(metrics),
-            results.row_at_y(px(0.0), metrics).map(|(index, _)| index),
-            results.item_at_y(px(22.0), metrics),
-            results.item_at_y(px(105.0), metrics),
-            results.item_at_y(px(133.0), metrics),
-            results.row_at_y(px(253.0), metrics),
+            offset(0.0),
+            offset(22.0),
+            offset(105.0),
+            offset(133.0),
+            offset(253.0),
         ),
-        (px(253.0), Some(0), Some(0), None, Some(2), None)
+        (
+            px(253.0),
+            (0, px(0.0)),
+            (1, px(0.0)),
+            (3, px(3.0)),
+            (5, px(0.0)),
+            (8, px(0.0)),
+        )
     );
 }
 
@@ -345,6 +356,7 @@ struct TestRoot {
     other_focus: FocusHandle,
     intruder_focus: FocusHandle,
     underlay_presses: Rc<RefCell<usize>>,
+    confirm_actions: usize,
 }
 
 impl Render for TestRoot {
@@ -370,6 +382,7 @@ impl Render for TestRoot {
             .child(self.palette.clone())
             .children(self.replacement_palette.clone())
             .on_action(cx.listener(|_, _: &MoveDown, _, _| {}))
+            .on_action(cx.listener(|root, _: &Confirm, _, _| root.confirm_actions += 1))
     }
 }
 
@@ -482,6 +495,7 @@ fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
             other_focus: cx.focus_handle().tab_stop(true),
             intruder_focus: cx.focus_handle().tab_stop(true),
             underlay_presses: root_underlay,
+            confirm_actions: 0,
         }
     });
     let palette = root.read_with(cx, |root, _| root.palette.clone());
@@ -1070,6 +1084,7 @@ fn the_confirm_key_should_stay_unclaimed_without_a_primary_action(cx: &mut TestA
 
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
+    assert_eq!(root.read_with(cx, |root, _| root.confirm_actions), 1);
 
     assert!(
         !events
@@ -1082,6 +1097,16 @@ fn the_confirm_key_should_stay_unclaimed_without_a_primary_action(cx: &mut TestA
         palette.read_with(cx, |palette, _| palette.is_open()),
         "the confirm key closed a palette that had no primary action"
     );
+
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(root.read_with(cx, |root, _| root.confirm_actions), 1);
+    assert_eq!(header_actions(&events), vec![SharedString::from("pin")]);
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 }
 
 fn show_empty_state(
@@ -2106,7 +2131,6 @@ fn pointer_hover_should_stay_suppressed_until_the_pointer_moves(cx: &mut TestApp
 #[gpui::test]
 fn page_navigation_should_move_by_the_visible_result_count(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
     palette.update(cx, |palette, cx| {
         palette.set_items(
             (0u8..32)
@@ -2114,16 +2138,30 @@ fn page_navigation_should_move_by_the_visible_result_count(cx: &mut TestAppConte
                 .collect(),
             cx,
         );
+        palette.set_preferred_item(Some(0), cx);
     });
-    cx.run_until_parked();
+    open_palette(&root, &palette, cx);
 
+    // The 260 px panel budget leaves seven complete 28 px result rows.
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.list.viewport_bounds().size.height),
+        px(196.0)
+    );
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(0)
+    );
     cx.simulate_keystrokes("pagedown");
     cx.run_until_parked();
-
-    assert!(
-        palette
-            .read_with(cx, |palette, _| palette.selected_item_id().copied())
-            .is_some_and(|selected| selected > 0)
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(7)
+    );
+    cx.simulate_keystrokes("pageup");
+    cx.run_until_parked();
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(0)
     );
 }
 
@@ -2202,12 +2240,23 @@ fn tab_navigation_should_reach_header_controls_and_return_to_the_query(cx: &mut 
 #[gpui::test]
 fn preferred_item_should_seed_each_open_transition(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_preferred_item(Some(3), cx);
-    });
-
+    palette.update(cx, |palette, cx| palette.set_preferred_item(Some(3), cx));
     open_palette(&root, &palette, cx);
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(3)
+    );
 
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert_eq!(
+        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        Some(1)
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    open_palette(&root, &palette, cx);
     assert_eq!(
         palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
         Some(3)
@@ -2328,8 +2377,7 @@ fn a_slow_load_should_show_loading_only_after_the_grace_period(cx: &mut TestAppC
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette_loading(&root, &palette, cx);
 
-    cx.executor()
-        .advance_clock(LOADING_GRACE_PERIOD - Duration::from_millis(1));
+    cx.executor().advance_clock(Duration::from_millis(99));
     cx.run_until_parked();
     assert!(!panel_is_visible(&palette, cx));
     assert!(cx.debug_bounds("command-palette-loading").is_none());
@@ -2344,7 +2392,7 @@ fn a_slow_load_should_show_loading_only_after_the_grace_period(cx: &mut TestAppC
 fn a_shown_loading_state_should_stay_for_its_minimum_display_time(cx: &mut TestAppContext) {
     let (root, palette, events, _, cx) = palette_window(cx);
     open_palette_loading(&root, &palette, cx);
-    cx.executor().advance_clock(LOADING_GRACE_PERIOD);
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_millis(50));
     palette.update(cx, |palette, cx| palette.set_items(items(), cx));
@@ -2361,8 +2409,7 @@ fn a_shown_loading_state_should_stay_for_its_minimum_display_time(cx: &mut TestA
             .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
     );
 
-    cx.executor()
-        .advance_clock(LOADING_MINIMUM_DISPLAY - Duration::from_millis(51));
+    cx.executor().advance_clock(Duration::from_millis(349));
     cx.run_until_parked();
     assert!(cx.debug_bounds("command-palette-loading").is_some());
     cx.executor().advance_clock(Duration::from_millis(1));
@@ -2463,10 +2510,27 @@ fn activation_should_restore_focus_then_emit_activation_before_final_close(
     let (root, palette, events, _, cx) = palette_window(cx);
     let prior = open_palette(&root, &palette, cx);
     events.borrow_mut().clear();
+    let activation_observations = Rc::new(RefCell::new(Vec::new()));
+    let observations = Rc::clone(&activation_observations);
+    let callback_focus = prior.clone();
+    let window = cx.update(|window, _| window.window_handle());
+    root.update(cx, |_, cx| {
+        cx.subscribe(&palette, move |_, palette, event, cx| {
+            if matches!(event, CommandPaletteEvent::Activated(_)) {
+                let open = palette.read(cx).is_open();
+                let focused = cx
+                    .update_window(window, |_, window, _| callback_focus.is_focused(window))
+                    .expect("the owning window should remain live during activation");
+                observations.borrow_mut().push((focused, open));
+            }
+        })
+        .detach();
+    });
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
+    assert_eq!(activation_observations.borrow().as_slice(), [(true, false)]);
     assert!(cx.update(|window, _| prior.is_focused(window)));
     assert_eq!(
         events.borrow().as_slice(),
@@ -2602,6 +2666,87 @@ fn pointer_click_should_emit_typed_pointer_activation_for_any_visible_row(cx: &m
                 source: CommandPaletteActivationSource::Pointer,
             }))
     );
+}
+
+#[gpui::test]
+fn pointer_policy_should_classify_and_disarm_mounted_row_gestures(cx: &mut TestAppContext) {
+    use crate::PointerConventions::{ControlClickSecondary, SecondaryButton};
+
+    for (policy, press, release, activates) in [
+        (
+            ControlClickSecondary,
+            Modifiers::none(),
+            Modifiers::none(),
+            true,
+        ),
+        (SecondaryButton, Modifiers::none(), Modifiers::none(), true),
+        (
+            ControlClickSecondary,
+            Modifiers::control(),
+            Modifiers::control(),
+            false,
+        ),
+        (
+            SecondaryButton,
+            Modifiers::control(),
+            Modifiers::control(),
+            true,
+        ),
+        (
+            ControlClickSecondary,
+            Modifiers::none(),
+            Modifiers::control(),
+            false,
+        ),
+        (
+            SecondaryButton,
+            Modifiers::none(),
+            Modifiers::control(),
+            true,
+        ),
+    ] {
+        cx.update(|cx| crate::install_pointer_conventions(cx, policy));
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        events.borrow_mut().clear();
+        let row = cx
+            .debug_bounds("row-close")
+            .expect("enabled row should render")
+            .center();
+
+        cx.simulate_mouse_down(row, MouseButton::Left, press);
+        cx.simulate_mouse_up(row, MouseButton::Left, release);
+        cx.run_until_parked();
+
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            !activates,
+            "policy={policy:?}, press={press:?}, release={release:?}"
+        );
+        if activates {
+            assert_eq!(
+                events.borrow().as_slice(),
+                [
+                    CommandPaletteEvent::Activated(CommandPaletteActivation {
+                        item_id: 3,
+                        source: CommandPaletteActivationSource::Pointer,
+                    }),
+                    CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(
+                        CommandPaletteCloseReason::Activated,
+                    )),
+                ]
+            );
+        } else {
+            assert!(events.borrow().is_empty());
+            cx.simulate_mouse_up(row, MouseButton::Left, Modifiers::none());
+            cx.run_until_parked();
+            assert!(
+                palette.read_with(cx, |palette, _| palette.is_open()),
+                "a secondary release must consume the retained primary press"
+            );
+            assert!(events.borrow().is_empty());
+        }
+    }
 }
 
 #[gpui::test]
@@ -3037,19 +3182,31 @@ fn caller_ranked_item_refresh_should_select_the_new_first_result(cx: &mut TestAp
 
 #[gpui::test]
 fn stale_generation_results_should_be_ignored(cx: &mut TestAppContext) {
-    let (_, palette, _, _, cx) = palette_window(cx);
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
     let first = palette.update(cx, |palette, cx| palette.refresh(cx));
     let second = palette.update(cx, |palette, cx| palette.refresh(cx));
+    let before = palette_state_snapshot(&palette, cx);
 
     let applied = palette.update(cx, |palette, cx| {
         palette.apply_items(first, vec![CommandPaletteItem::new(9, "Stale")], cx)
     });
-
     assert!(!applied);
+    assert_eq!(palette_state_snapshot(&palette, cx), before);
     assert_eq!(
         palette.read_with(cx, |palette, _| palette.generation()),
         second
     );
+
+    assert!(palette.update(cx, |palette, cx| {
+        palette.apply_items(second, vec![CommandPaletteItem::new(9, "Current")], cx)
+    }));
+    let current = palette_state_snapshot(&palette, cx);
+    assert_eq!(current.item_ids, vec![9]);
+    assert_eq!(current.item_labels, vec![String::from("Current")]);
+    assert_eq!(current.match_indexes, vec![0]);
+    assert_eq!(current.selected, Some(9));
+    assert!(!current.loading);
 }
 
 #[gpui::test]
@@ -3063,6 +3220,8 @@ fn closed_palette_should_reject_results_from_the_dismissed_generation(cx: &mut T
         });
     });
 
+    let before = palette_state_snapshot(&palette, cx);
+    assert!(!before.open);
     let applied = palette.update(cx, |palette, cx| {
         palette.apply_items(
             dismissed_generation,
@@ -3072,6 +3231,7 @@ fn closed_palette_should_reject_results_from_the_dismissed_generation(cx: &mut T
     });
 
     assert!(!applied);
+    assert_eq!(palette_state_snapshot(&palette, cx), before);
 }
 
 #[derive(Debug, Eq, PartialEq)]

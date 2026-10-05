@@ -1758,33 +1758,6 @@ mod presented_results {
                 .position(|row| row.item_position() == Some(position))
         }
 
-        #[cfg(test)]
-        pub(super) fn row_at_y(
-            &self,
-            content_y: Pixels,
-            metrics: CommandPaletteMetrics,
-        ) -> Option<(usize, &PaletteRow)> {
-            if content_y < px(0.0) {
-                return None;
-            }
-            let mut row_top = px(0.0);
-            self.rows.iter().enumerate().find(|(_, row)| {
-                let row_bottom = row_top + row.height(metrics);
-                let contains = content_y >= row_top && content_y < row_bottom;
-                row_top = row_bottom;
-                contains
-            })
-        }
-
-        #[cfg(test)]
-        pub(super) fn item_at_y(
-            &self,
-            content_y: Pixels,
-            metrics: CommandPaletteMetrics,
-        ) -> Option<usize> {
-            self.row_at_y(content_y, metrics)?.1.item_position()
-        }
-
         pub(super) fn page_target(
             &self,
             current: Option<usize>,
@@ -4162,7 +4135,8 @@ fn render_row<I: Clone + Eq + 'static>(
                     let down_hitbox = hitbox.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
-                            || event.button != MouseButton::Left
+                            || !crate::PointerConventions::get(cx)
+                                .primary(event.button, event.modifiers)
                             || !down_hitbox.is_hovered(window)
                         {
                             return;
@@ -4179,8 +4153,12 @@ fn render_row<I: Clone + Eq + 'static>(
                             return;
                         }
                         let inside = up_hitbox.is_hovered(window);
+                        let primary = crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers);
                         let activate = up_palette
-                            .update(cx, |palette, _| palette.pointer_up(&up_id, inside))
+                            .update(cx, |palette, _| {
+                                palette.pointer_up(&up_id, primary && inside)
+                            })
                             .unwrap_or(false);
                         if activate {
                             window.prevent_default();
