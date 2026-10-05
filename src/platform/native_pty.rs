@@ -304,15 +304,6 @@ impl NativePtyOwner {
         Self::install_adapter_parts(parts, output, close_handle)
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_adapter_parts(
-        parts: NativePtyAdapterParts,
-        output: Arc<dyn NativePtyOutputSink>,
-        close_handle: &NativePtyCloseHandle,
-    ) -> Result<Self, NativePtyStartupFailure> {
-        Self::install_adapter_parts(parts, output, close_handle)
-    }
-
     fn install_adapter_parts(
         mut parts: NativePtyAdapterParts,
         output: Arc<dyn NativePtyOutputSink>,

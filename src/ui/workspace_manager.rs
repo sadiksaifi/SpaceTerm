@@ -269,8 +269,6 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_activation_task: Option<Task<()>>,
     remote_workspace_focus_restore_pending: bool,
     remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
-    #[cfg(test)]
-    close_focused_pane_before_reconnect_commit: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -404,8 +402,6 @@ impl WorkspaceManager {
             remote_workspace_activation_task: None,
             remote_workspace_focus_restore_pending: false,
             remote_workspace_reconnect: None,
-            #[cfg(test)]
-            close_focused_pane_before_reconnect_commit: false,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(super::updates::UpdateControl::new),
@@ -2093,14 +2089,6 @@ impl WorkspaceManager {
                 else {
                     return;
                 };
-                #[cfg(test)]
-                if self.close_focused_pane_before_reconnect_commit {
-                    self.close_focused_pane_before_reconnect_commit = false;
-                    tab_manager
-                        .read(cx)
-                        .active_pane_host()
-                        .update(cx, |host, cx| host.close_focused_for_test(window, cx));
-                }
                 if let Err(error) = tab_manager.update(cx, |manager, cx| {
                     manager.commit_remote_restart(prepared.restart, window, cx)
                 }) {

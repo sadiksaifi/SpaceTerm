@@ -305,14 +305,6 @@ impl SshCommandContext {
         self.spec(arguments)
     }
 
-    #[cfg(test)]
-    pub(crate) fn prepare_pane_channel(
-        &self,
-        command: ValidatedRemoteShellCommand,
-    ) -> PreparedSshPaneChannelCommand {
-        PreparedSshPaneChannelCommand::new(self.pane_channel(command), None, None)
-    }
-
     fn control_operation(&self, operation: &str) -> SshCommandSpec {
         let mut arguments = self.child_arguments();
         arguments.extend([OsString::from("-O"), OsString::from(operation)]);
@@ -407,43 +399,34 @@ impl SshCommandSpec {
 
     pub(crate) fn into_pane_launch_parts(
         self,
-    ) -> Result<(PathBuf, Vec<OsString>, Option<SshProcessEnvironment>), PreparedSshPaneChannelError>
-    {
-        let environment = match self.pane_execution {
-            Some(execution) => {
-                execution
-                    .capability
-                    .authorize()
-                    .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
-                Some(execution.environment)
-            }
-            None => {
-                #[cfg(test)]
-                {
-                    None
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(PreparedSshPaneChannelError::Unavailable);
-                }
-            }
-        };
-        Ok((self.executable.into_path(), self.arguments, environment))
+    ) -> Result<(PathBuf, Vec<OsString>, SshProcessEnvironment), PreparedSshPaneChannelError> {
+        let execution = self
+            .pane_execution
+            .ok_or(PreparedSshPaneChannelError::Unavailable)?;
+        execution
+            .capability
+            .authorize()
+            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+        Ok((
+            self.executable.into_path(),
+            self.arguments,
+            execution.environment,
+        ))
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct PreparedSshPaneChannelCommand {
     command: Arc<Mutex<Option<SshCommandSpec>>>,
-    capability: Option<LiveConnectionCapability>,
-    environment: Option<SshProcessEnvironment>,
+    capability: LiveConnectionCapability,
+    environment: SshProcessEnvironment,
 }
 
 impl PreparedSshPaneChannelCommand {
     pub(super) fn new(
         command: SshCommandSpec,
-        capability: Option<LiveConnectionCapability>,
-        environment: Option<SshProcessEnvironment>,
+        capability: LiveConnectionCapability,
+        environment: SshProcessEnvironment,
     ) -> Self {
         Self {
             command: Arc::new(Mutex::new(Some(command))),
@@ -453,13 +436,9 @@ impl PreparedSshPaneChannelCommand {
     }
 
     pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshPaneChannelError> {
-        if self
-            .capability
-            .as_ref()
-            .is_some_and(|capability| capability.authorize().is_err())
-        {
-            return Err(PreparedSshPaneChannelError::Unavailable);
-        }
+        self.capability
+            .authorize()
+            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
         let mut command = self
             .command
             .lock()
@@ -467,14 +446,10 @@ impl PreparedSshPaneChannelCommand {
         let mut command = command
             .take()
             .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)?;
-        command.pane_execution = match (&self.capability, &self.environment) {
-            (Some(capability), Some(environment)) => Some(SshPaneExecution {
-                capability: capability.clone(),
-                environment: environment.clone(),
-            }),
-            (None, None) => None,
-            _ => return Err(PreparedSshPaneChannelError::Unavailable),
-        };
+        command.pane_execution = Some(SshPaneExecution {
+            capability: self.capability.clone(),
+            environment: self.environment.clone(),
+        });
         Ok(command)
     }
 }
@@ -1422,8 +1397,14 @@ mod tests {
 
     #[test]
     fn prepared_pane_command_should_preserve_exact_argv_and_be_single_use() {
+        let connection = crate::ssh::testing::SshConnectionFixture::with_environment(
+            SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
+            std::env::temp_dir(),
+            OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
+            &crate::ssh::startup_environment::StartupSshEnvironment::default(),
+        );
         let prepared =
-            context().prepare_pane_channel(pane_command("/srv/project", "/bin/zsh").unwrap());
+            connection.prepare_pane_channel(pane_command("/srv/project", "/bin/zsh").unwrap());
         let duplicate_owner = prepared.clone();
 
         let spec = prepared.take().unwrap();
@@ -1446,7 +1427,13 @@ mod tests {
 
     #[test]
     fn prepared_pane_command_debug_should_redact_command_context() {
-        let prepared = context().prepare_pane_channel(
+        let connection = crate::ssh::testing::SshConnectionFixture::with_environment(
+            SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
+            std::env::temp_dir(),
+            OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
+            &crate::ssh::startup_environment::StartupSshEnvironment::default(),
+        );
+        let prepared = connection.prepare_pane_channel(
             pane_command("/srv/sensitive-project", "/sensitive/shell/zsh").unwrap(),
         );
 

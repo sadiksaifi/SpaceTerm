@@ -408,7 +408,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteDirectory, SshDestination};
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
@@ -419,20 +419,38 @@ mod tests {
         ready: AtomicBool,
         preparations: AtomicUsize,
         revalidations: Mutex<Vec<(RemoteDirectory, Option<RemoteDirectoryIdentity>)>>,
-        results: Mutex<VecDeque<Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>>>,
+        owners: Mutex<Vec<crate::ssh::testing::SshConnectionFixture>>,
+        results: Mutex<
+            VecDeque<
+                Result<
+                    (
+                        crate::ssh::testing::SshConnectionFixture,
+                        PreparedSshPaneChannelCommand,
+                    ),
+                    RemoteChannelUnavailable,
+                >,
+            >,
+        >,
     }
 
     impl TestRemoteChannelProvider {
         fn new(
             ready: bool,
             results: impl IntoIterator<
-                Item = Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>,
+                Item = Result<
+                    (
+                        crate::ssh::testing::SshConnectionFixture,
+                        PreparedSshPaneChannelCommand,
+                    ),
+                    RemoteChannelUnavailable,
+                >,
             >,
         ) -> Self {
             Self {
                 ready: AtomicBool::new(ready),
                 preparations: AtomicUsize::new(0),
                 revalidations: Mutex::new(Vec::new()),
+                owners: Mutex::new(Vec::new()),
                 results: Mutex::new(results.into_iter().collect()),
             }
         }
@@ -469,21 +487,24 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Err(RemoteChannelUnavailable))
+                .map(|(owner, channel)| {
+                    self.owners.lock().unwrap().push(owner);
+                    channel
+                })
         }
     }
 
     fn prepared_channel(
         destination: &SshDestination,
         command: &str,
-    ) -> PreparedSshPaneChannelCommand {
-        SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            destination.clone(),
-            PathBuf::from("/private/runtime/spaceterm/master.sock"),
-        )
-        .unwrap()
-        .prepare_pane_channel(ValidatedRemoteShellCommand::new(command.to_owned()).unwrap())
+    ) -> (
+        crate::ssh::testing::SshConnectionFixture,
+        PreparedSshPaneChannelCommand,
+    ) {
+        let owner = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
+        let channel = owner
+            .prepare_pane_channel(ValidatedRemoteShellCommand::new(command.to_owned()).unwrap());
+        (owner, channel)
     }
 
     fn remote_factory(
@@ -577,8 +598,19 @@ mod tests {
             TerminalLocalFileCapabilities::Disabled
         );
         assert_eq!(factory.fallback_title(), "project on remote");
-        assert!(records.starts().iter().all(|start| {
+        let starts = records.starts();
+        assert_eq!(starts.len(), 2);
+        assert!(
+            starts
+                .iter()
+                .all(|start| start.local_working_directory().is_none())
+        );
+        assert!(starts.iter().all(|start| {
             start.remote_launch_plan().is_some_and(|plan| {
+                assert_eq!(
+                    plan.local_home().path(),
+                    std::path::Path::new("/local/home/used-only-as-process-cwd")
+                );
                 plan.metadata_context()
                     == &RemoteTerminalMetadataContext::new(
                         destination.clone(),
@@ -654,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_factory_should_propagate_master_death_race_during_reservation() {
+    fn remote_factory_propagates_provider_reservation_failure() {
         let records = TestTerminalSessionRecords::default();
         let provider = Arc::new(TestRemoteChannelProvider::new(
             true,

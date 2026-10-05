@@ -42,6 +42,7 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
 ];
+#[cfg(test)]
 const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
     "SPACETERM_BASH_ENV",
     "SPACETERM_BASH_INJECT",
@@ -186,31 +187,15 @@ impl PreparedShellLaunch {
         let (executable, arguments, prepared_environment) = command
             .into_pane_launch_parts()
             .map_err(|_| ShellLaunchFailure::RemoteChannelUnavailable)?;
-        let (working_directory, inherit_environment, environment_removals, mut environment) =
-            if let Some(environment) = prepared_environment {
-                let (home, entries) = environment.into_pane_launch_environment();
-                (home, false, Vec::new(), entries)
-            } else {
-                (
-                    local_home.to_owned(),
-                    true,
-                    FOREIGN_RUNTIME_ENVIRONMENT
-                        .iter()
-                        .chain(SHELL_INTEGRATION_ENVIRONMENT)
-                        .copied()
-                        .chain(["TERMINFO"])
-                        .map(OsString::from)
-                        .collect(),
-                    Vec::new(),
-                )
-            };
+        let (working_directory, mut environment) =
+            prepared_environment.into_pane_launch_environment();
         environment.push(("TERM".into(), identity::TERM_FALLBACK.into()));
         Ok(Self {
             executable,
             arguments,
             working_directory,
-            inherit_environment,
-            environment_removals,
+            inherit_environment: false,
+            environment_removals: Vec::new(),
             environment,
             integration: None,
             terminal_name: identity::TERM_FALLBACK,
@@ -288,8 +273,7 @@ mod tests {
     use crate::domain::{RemoteDirectory, SshDestination};
     use crate::platform::shell_integration::ShellKind;
     use crate::ssh::command::{
-        PreparedSshPaneChannelError, RemotePaneShellCommandBuilder, SshCommandContext,
-        ValidatedRemoteLoginShell,
+        PreparedSshPaneChannelError, RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell,
     };
 
     fn env_value<'a>(launch: &'a PreparedShellLaunch, key: &str) -> Option<&'a OsStr> {
@@ -505,14 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn remote_fallback_preserves_exact_command_consumes_once_and_removes_local_markers() {
-        let context = SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            "/private/config/ssh_config".into(),
+    fn remote_launch_preserves_exact_command_consumes_once_and_excludes_local_markers() {
+        let context = crate::ssh::testing::SshConnectionFixture::new(
             SshDestination::new("user@remote".to_owned()).unwrap(),
-            "/private/runtime/control.sock".into(),
-        )
-        .unwrap();
+        );
         let directory = RemoteDirectory::new("~/private project".to_owned()).unwrap();
         let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         let command = RemotePaneShellCommandBuilder::new(&directory, &shell)
@@ -529,20 +509,22 @@ mod tests {
         assert_eq!(launch.executable(), "/test/ssh");
         assert_eq!(launch.arguments(), expected_arguments);
         assert_eq!(launch.working_directory(), std::env::temp_dir());
-        assert!(launch.inherit_environment());
+        assert!(!launch.inherit_environment());
         assert_eq!(launch.integration, None);
         assert_eq!(
             launch.environment(),
-            [(OsString::from("TERM"), OsString::from("xterm-256color"))]
+            [
+                ("HOME".into(), std::env::temp_dir().into_os_string()),
+                ("PATH".into(), "/fixture/bin".into()),
+                ("TERM".into(), "xterm-256color".into())
+            ]
         );
         assert!(
             FOREIGN_RUNTIME_ENVIRONMENT
                 .iter()
                 .chain(SHELL_INTEGRATION_ENVIRONMENT)
                 .chain([&"TERMINFO"])
-                .all(|name| launch
-                    .environment_removals()
-                    .contains(&OsString::from(name)))
+                .all(|name| !launch.environment().iter().any(|(key, _)| key == name))
         );
         let mut launch = launch;
         launch

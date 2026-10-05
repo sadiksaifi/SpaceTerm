@@ -38,12 +38,11 @@ pub(crate) struct RecordingOperatingSystemWindowDragPlatform {
 
 #[cfg(test)]
 impl RecordingOperatingSystemWindowDragPlatform {
-    pub(crate) fn counts(&self) -> (usize, usize, usize, usize) {
+    pub(crate) fn counts(&self) -> (usize, usize, usize) {
         (
             self.interaction_starts.get(),
             self.move_requests.get(),
             self.interaction_finishes.get(),
-            0,
         )
     }
 }

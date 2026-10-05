@@ -1069,6 +1069,7 @@ mod tests {
     }
 
     struct FakeSessionControl {
+        connection: crate::ssh::testing::SshConnectionFixture,
         shutdowns: Arc<AtomicUsize>,
         preparations: Arc<AtomicUsize>,
         binding: Arc<Mutex<LiveConnectionBinding>>,
@@ -1087,14 +1088,7 @@ mod tests {
         ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
         {
             self.preparations.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::ssh::command::SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                SshDestination::new("work".to_owned()).unwrap(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap()
-            .prepare_pane_channel(command))
+            Ok(self.connection.prepare_pane_channel(command))
         }
 
         fn live_binding(&self) -> Option<LiveConnectionBinding> {
@@ -1487,6 +1481,9 @@ mod tests {
         let binding = Arc::new(Mutex::new(LiveConnectionBinding::for_test(1)));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::clone(&shutdowns),
                 preparations,
                 binding,
@@ -1545,6 +1542,9 @@ mod tests {
         let preparations = Arc::new(AtomicUsize::new(0));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&preparations),
                 binding: Arc::clone(&binding),
@@ -1616,6 +1616,9 @@ mod tests {
         let preparations = Arc::new(AtomicUsize::new(0));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&preparations),
                 binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),
@@ -1656,6 +1659,9 @@ mod tests {
     ) {
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::new(AtomicUsize::new(0)),
                 binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(7))),
@@ -1698,6 +1704,9 @@ mod tests {
         let old_binding = LiveConnectionBinding::for_test(1);
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&old_preparations),
                 binding: Arc::new(Mutex::new(old_binding)),
@@ -1726,6 +1735,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&replacement_preparations),
                 binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),
@@ -1749,6 +1761,9 @@ mod tests {
         let preparations = Arc::new(AtomicUsize::new(0));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                connection: crate::ssh::testing::SshConnectionFixture::new(
+                    SshDestination::new("work".to_owned()).unwrap(),
+                ),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&preparations),
                 binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),

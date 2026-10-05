@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clipboard_requests_use_host_targets_without_unavailable_primary_fallback(
+    fn clipboard_requests_use_injected_target_resolution_without_unavailable_selection_fallback(
         cx: &mut gpui::TestAppContext,
     ) {
         for primary_available in [true, false] {

@@ -377,10 +377,9 @@ impl TerminalSession {
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
-                    StartupReporter::Events(worker_events),
                 );
             })
-            .map_err(SessionError::SpawnWorker)?;
+            .map_err(SessionError::from)?;
 
         Ok((
             Self {
@@ -396,100 +395,5 @@ impl TerminalSession {
             event_rx,
             accessibility_rx,
         ))
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_with(
-        geometry: TerminalGeometry,
-        working_directory: &Path,
-        start_native_pty: impl FnOnce(
-            NativePtySize,
-            Arc<dyn NativePtyOutputSink>,
-            &NativePtyCloseHandle,
-        ) -> Result<NativePtyOwner, NativePtyStartupFailure>,
-    ) -> Result<StartedSession, SessionError> {
-        let worker_directory = working_directory.to_owned();
-        let metadata_context = TerminalMetadataContext::local(
-            crate::local_path::LocalPathSemantics::Posix,
-            &worker_directory.to_string_lossy(),
-            LocalMachine::new(None, Some("fixture.test"), None),
-        );
-        let terminal_name = identity::TERM_FALLBACK;
-        let (command_tx, command_rx) = mpsc::channel();
-        let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
-        let clipboard_authority = Arc::clone(&clipboard.authority);
-        let reader_transport =
-            ReaderTransport::new(command_tx.clone(), Arc::clone(&clipboard_authority));
-        let native_pty_close = NativePtyCloseHandle::default();
-        let native_pty = start_native_pty(
-            pty_size(geometry),
-            reader_transport.output_sink(),
-            &native_pty_close,
-        )
-        .map_err(|error| SessionError::EmulatorStartup(error.to_string()))?;
-        // Two slots retain the latest screen and a final lifecycle event without
-        // allowing sustained PTY output to build an unbounded UI backlog.
-        let (event_tx, event_rx) = async_channel::bounded(2);
-        let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
-        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
-        let schedule_input = ScheduleInput::default();
-        let worker_schedule_input = schedule_input.clone();
-        let metadata_state = SessionMetadataState::default();
-        let worker_metadata_state = metadata_state.clone();
-        let permission_request_state = SessionPermissionRequestState::default();
-        let worker_permission_request_state = permission_request_state.clone();
-
-        let worker = thread::Builder::new()
-            .name("spaceterm-terminal".to_owned())
-            .spawn(move || {
-                TerminalWorker::run(
-                    native_pty,
-                    TerminalWorkerContext {
-                        initial_geometry: geometry,
-                        metadata_context,
-                        fallback_title: "Terminal".to_owned(),
-                        terminal_name,
-                        local_filesystem: LocalFilesystemAuthority::testing(),
-                        initial_appearance: test_terminal_appearance_update(),
-                    },
-                    command_rx,
-                    reader_transport,
-                    worker_schedule_input,
-                    TerminalWorkerPublishers {
-                        clipboard,
-                        metadata_state: worker_metadata_state,
-                        permission_request_state: worker_permission_request_state,
-                        events: event_tx,
-                        accessibility: accessibility_tx,
-                    },
-                    StartupReporter::Blocking(startup_tx),
-                )
-            })
-            .map_err(SessionError::SpawnWorker)?;
-
-        match startup_rx.recv() {
-            Ok(Ok(())) => Ok((
-                Self {
-                    metadata_state,
-                    permission_request_state,
-                    commands: Some(command_tx),
-                    worker: Some(worker),
-                    native_pty_close: Some(native_pty_close),
-                    schedule_input,
-                    clipboard_requests,
-                    clipboard_authority,
-                },
-                event_rx,
-                accessibility_rx,
-            )),
-            Ok(Err(message)) => {
-                join_worker(worker);
-                Err(SessionError::EmulatorStartup(message))
-            }
-            Err(_) => {
-                join_worker(worker);
-                Err(SessionError::StartupChannelClosed)
-            }
-        }
     }
 }

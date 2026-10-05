@@ -1622,7 +1622,7 @@ fn dragging_the_settings_titlebar_blurs_search_without_interrupting_window_movem
             window.read_with(cx, |window, cx| window.search.read(cx).is_focused()),
             records.counts(),
         ),
-        (false, (1, 1, 1, 0))
+        (false, (1, 1, 1))
     );
 }
 
@@ -2414,7 +2414,7 @@ fn settings_window_titlebar_preserves_modal_focus_while_moving(cx: &mut TestAppC
             "{region} must preserve modal focus after movement"
         );
     }
-    assert_eq!(records.counts(), (2, 2, 2, 0));
+    assert_eq!(records.counts(), (2, 2, 2));
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
 }
 
@@ -2452,7 +2452,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
     );
     cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::none());
 
-    assert_eq!(records.counts(), (1, 1, 1, 0));
+    assert_eq!(records.counts(), (1, 1, 1));
 
     let search = cx
         .debug_bounds("settings-search-frame")
@@ -2461,7 +2461,7 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
     cx.simulate_click(search, Modifiers::none());
     assert_eq!(
         records.counts(),
-        (1, 1, 1, 0),
+        (1, 1, 1),
         "Search interaction must remain outside the titlebar drag owner"
     );
 }

@@ -399,8 +399,8 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .map_err(|_| ControlConnectionError::NotReady)?;
         Ok(PreparedSshPaneChannelCommand::new(
             self.commands.pane_channel(command),
-            Some(capability),
-            Some(self.backend.environment().clone()),
+            capability,
+            self.backend.environment().clone(),
         ))
     }
 

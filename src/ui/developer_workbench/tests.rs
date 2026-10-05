@@ -427,7 +427,7 @@ fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut Tes
             });
             assert_eq!(
                 movement.counts(),
-                (0, 0, 0, 0),
+                (0, 0, 0),
                 "toolbar clicks must not move the window"
             );
         }
@@ -598,7 +598,7 @@ fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
     }
 
     assert!(!cx.windows().contains(&window.into()));
-    assert_eq!(movement.counts(), (0, 0, 0, 0));
+    assert_eq!(movement.counts(), (0, 0, 0));
     cx.update(|cx| {
         let current = appearance_runtime::current(cx);
         assert_eq!(current.chrome.appearance, Appearance::Dark);

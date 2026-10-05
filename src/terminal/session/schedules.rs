@@ -492,13 +492,10 @@ mod tests {
         let mut schedule = AccessibilityContinuationSchedule::default();
         schedule.update(true);
 
-        for command in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
+        for command in 0..8 {
             assert!(!schedule.must_continue());
             schedule.note_normal_command();
-            assert_eq!(
-                schedule.must_continue(),
-                command + 1 == ACCESSIBILITY_NORMAL_COMMAND_BURST
-            );
+            assert_eq!(schedule.must_continue(), command + 1 == 8);
         }
 
         assert!(schedule.take());
@@ -740,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_barrier_flushes_visible_work_before_generation_sensitive_input() {
+    fn presentation_barrier_consumes_pending_work_in_visible_and_hidden_states() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
         schedules.mark_presented(start);

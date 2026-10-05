@@ -2949,7 +2949,7 @@ mod tests {
     use crate::domain::PaneId;
     use crate::domain::ZoomState;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -2988,7 +2988,7 @@ mod tests {
         fail_at: Mutex<Option<usize>>,
         revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
         invalidate_grant_after_revalidation: AtomicBool,
-        command_context: SshCommandContext,
+        command_context: crate::ssh::testing::SshConnectionFixture,
     }
 
     impl SequencedRemoteChannelProvider {
@@ -3001,13 +3001,7 @@ mod tests {
                 fail_at: Mutex::new(None),
                 revalidation_error: Mutex::new(None),
                 invalidate_grant_after_revalidation: AtomicBool::new(false),
-                command_context: SshCommandContext::new(
-                    crate::ssh::command::OpenSshExecutable::for_test(),
-                    PathBuf::from("/private/config/spaceterm/ssh_config"),
-                    destination,
-                    PathBuf::from("/private/runtime/spaceterm/master.sock"),
-                )
-                .unwrap(),
+                command_context: crate::ssh::testing::SshConnectionFixture::new(destination),
             }
         }
 
@@ -3264,15 +3258,9 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         let session_factory = remote_session_factory_with_provider(
             records.clone(),
             destination,
@@ -3900,15 +3888,9 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = {
             let preparations = Arc::clone(&preparations);
@@ -5358,7 +5340,7 @@ mod tests {
             click_count: 2,
         });
 
-        assert_eq!(platform.counts(), (1, 1, 1, 0));
+        assert_eq!(platform.counts(), (1, 1, 1));
     }
 
     #[gpui::test]

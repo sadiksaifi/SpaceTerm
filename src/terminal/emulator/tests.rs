@@ -5403,3 +5403,29 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
 mod unix_adapter_tests {
     include!("../../platform/unix_adapter_tests/emulator.rs");
 }
+
+#[test]
+fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
+    let mut emulator = TerminalEmulator::new(geometry(80, 24, 8.0, 20.0)).unwrap();
+    emulator.feed(b"old text");
+    let _ = emulator.snapshot().unwrap();
+    let (mut model, mut more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    while more {
+        (model, more) = emulator.accessibility_snapshot(false).unwrap();
+    }
+    let request = model.unwrap().selection_request(0..3).unwrap();
+
+    emulator.feed(b" changed");
+    let _ = emulator.snapshot().unwrap();
+    let action = emulator.set_accessibility_selection(request).unwrap();
+
+    assert!(!action.screen_changed);
+    assert!(
+        emulator
+            .selection_copy(SelectionCopyOptions::default())
+            .unwrap()
+            .is_none()
+    );
+}

@@ -199,8 +199,7 @@ impl PermissionRequestFilter {
     }
 }
 
-/// Reads `permissions=<list>`. Unknown permission names are ignored, so a newer tool can ask an
-/// older SpaceTerm for what it supports; a request that names nothing supported is dropped.
+/// Reads `permissions=<list>`. Unknown names are ignored; a request with no supported names is dropped.
 fn parse(body: &[u8]) -> Option<PermissionRequest> {
     let list = body.strip_prefix(b"permissions=")?;
     let mut permissions = Vec::new();

@@ -6,7 +6,6 @@ use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
-use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
@@ -454,7 +453,7 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
 }
 
 #[test]
-fn remote_connection_status_should_only_replace_the_path_while_unhealthy() {
+fn remote_connection_phases_have_expected_status_labels() {
     assert_eq!(
         remote_connection_status(RemoteConnectionPhase::Connected),
         None
@@ -488,7 +487,7 @@ type RemoteCompletionFixture = (
 use crate::directory_selection::ScriptedDirectorySelection;
 use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::ssh::command::ValidatedRemoteShellCommand;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::managed_hosts::ManagedSshHost;
@@ -759,12 +758,12 @@ fn test_remote_account() -> RemoteWorkspaceAccount {
 }
 
 struct TestRemoteChannelProvider {
+    connection: crate::ssh::testing::SshConnectionFixture,
     preparations: Arc<AtomicUsize>,
     revalidations: Arc<AtomicUsize>,
     revalidation_tasks:
         Mutex<VecDeque<gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>>>,
     available: Arc<AtomicBool>,
-    destination: crate::domain::SshDestination,
 }
 
 impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvider {
@@ -796,14 +795,7 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
         if !self.available.load(Ordering::Acquire) {
             return Err(crate::terminal::RemoteChannelUnavailable);
         }
-        Ok(SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            self.destination.clone(),
-            PathBuf::from("/private/runtime/spaceterm/master.sock"),
-        )
-        .unwrap()
-        .prepare_pane_channel(
+        Ok(self.connection.prepare_pane_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         ))
     }
@@ -915,11 +907,11 @@ fn remote_completion_with_provider(
     let availability = Arc::new(AtomicBool::new(available));
     let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
         Arc::new(TestRemoteChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
             revalidation_tasks: Mutex::new(VecDeque::from([revalidation])),
             available: Arc::clone(&availability),
-            destination: destination.clone(),
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
@@ -992,11 +984,11 @@ fn remote_completion_with_active_alias_pin_failure(
     let revalidations = Arc::new(AtomicUsize::new(0));
     let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
         Arc::new(TestRemoteChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations,
             revalidations,
             revalidation_tasks: Mutex::new(VecDeque::from([gpui::Task::ready(Ok(()))])),
             available: Arc::new(AtomicBool::new(true)),
-            destination: destination.clone(),
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
@@ -1316,11 +1308,11 @@ fn reconnect_session_with_provider_and_revalidation(
     let revalidations = Arc::new(AtomicUsize::new(0));
     let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
         Arc::new(TestRemoteChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
             revalidation_tasks: Mutex::new(revalidation_tasks),
             available: Arc::new(AtomicBool::new(true)),
-            destination,
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (lifecycle_sender, lifecycle) =
@@ -1647,7 +1639,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
 }
 
 #[gpui::test]
-fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppContext) {
+fn workspace_modal_mount_blocks_and_restores_terminal_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -1677,8 +1669,9 @@ fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppCo
     });
 
     assert!(cx.debug_bounds("spaceterm-modal-root").is_some());
-    assert_eq!(presentation.presentation_id().value(), 1);
-    assert!(cx.debug_bounds("modal-surface-1").is_some());
+    let selector: &'static str =
+        format!("modal-surface-{}", presentation.presentation_id().value()).leak();
+    assert!(cx.debug_bounds(selector).is_some());
     assert_eq!((focused_before, modal_state), (true, (focused_pane, false)));
 
     cx.update(|window, cx| {
@@ -1715,6 +1708,10 @@ fn workspace_switcher_reentry_should_not_steal_focus_from_an_active_modal(cx: &m
     cx.run_until_parked();
     assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(
+        cx.debug_bounds("modal-action-acknowledge-keyboard-focus")
+            .is_some()
+    );
     cx.update(|window, cx| presentation.dismiss(window, cx).unwrap());
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| window_modal_is_open(window, cx)));
@@ -2135,6 +2132,7 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
         }),
         (false, None, true, 2, 2)
     );
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
 }
 
 #[gpui::test]
@@ -3105,6 +3103,14 @@ fn reconnect_should_consume_a_terminal_state_published_before_observer_installat
 fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert(
     cx: &mut TestAppContext,
 ) {
+    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
+    let mut text_context = TestAppContext::build_with_text_system(
+        cx.dispatcher.clone(),
+        cx.test_function_name(),
+        rendered_text.clone(),
+    );
+    let cx = &mut text_context;
+
     let (new_session, new_closes, new_preparations, new_revalidations, _) =
         reconnect_session("work", "/home/tester/replaced");
     let backend =
@@ -3169,12 +3175,26 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
             "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it.".to_owned()
         ))
     );
+    assert_rendered_text(
+        "modal-header-title",
+        "Remote Directory Changed",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[gpui::test]
 fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_alert(
     cx: &mut TestAppContext,
 ) {
+    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
+    let mut text_context = TestAppContext::build_with_text_system(
+        cx.dispatcher.clone(),
+        cx.test_function_name(),
+        rendered_text.clone(),
+    );
+    let cx = &mut text_context;
+
     let (new_session, new_closes, _, _, _) = reconnect_session_with_provider(
         "work",
         Arc::new(TestRemoteProvider::directory_unavailable()),
@@ -3227,6 +3247,12 @@ fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_al
             "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace.".to_owned()
         ))
     );
+    assert_rendered_text(
+        "modal-header-title",
+        "Remote Directory Unavailable",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[test]
@@ -3255,9 +3281,13 @@ fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
 fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (mut new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (pending_sender, pending_receiver) = async_channel::bounded(1);
+    let pending = cx.update(|cx| {
+        cx.background_executor()
+            .spawn(async move { pending_receiver.recv().await.unwrap() })
+    });
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
@@ -3288,14 +3318,81 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
     cx.run_until_parked();
-    manager.update(cx, |manager, _| {
-        manager.close_focused_pane_before_reconnect_commit = true;
-    });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.start_remote_workspace_reconnect(workspace_id, window, cx)
         });
     });
+    cx.run_until_parked();
+    let account = test_remote_account();
+    let channels = new_session
+        .bind_terminal_channels(account.login_shell())
+        .unwrap();
+    let prepared_lifecycle = new_session.take_lifecycle_observer().unwrap();
+    let factory = manager.read_with(cx, |manager, _| {
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::clone(&manager.session_factory),
+            ValidatedLocalDirectory::new(
+                manager.local_home_directory_path.clone(),
+                manager.local_home_identity.clone(),
+            ),
+            RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new("work".into()).unwrap(),
+                RemoteDirectory::new("~/src".into()).unwrap(),
+            )
+            .with_machine(remote_machine(&account)),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".into()).unwrap(),
+            account.login_shell().name().to_owned(),
+            channels,
+        )
+    });
+    let preparation = tab_manager.update(cx, |manager, cx| {
+        manager.prepare_remote_restart(factory, 2, cx)
+    });
+    let prepared = Rc::new(RefCell::new(None));
+    let result = prepared.clone();
+    cx.update(|_, cx| {
+        cx.spawn(async move |_| {
+            *result.borrow_mut() = Some(preparation.await);
+        })
+        .detach()
+    });
+    cx.run_until_parked();
+    let restart = prepared
+        .borrow_mut()
+        .take()
+        .expect("real restart preparation must complete")
+        .unwrap();
+    assert_eq!(
+        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+        (1, 2)
+    );
+    cx.update(|window, cx| {
+        tab_manager
+            .read(cx)
+            .active_pane_host()
+            .update(cx, |host, cx| {
+                host.close_pane_authorized(host.focused_pane_id(), window, cx);
+            })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.finish_remote_workspace_reconnect(
+                workspace_id,
+                2,
+                Ok(PreparedRemoteWorkspaceReconnect {
+                    session: new_session,
+                    lifecycle: prepared_lifecycle,
+                    restart,
+                    remote_user: account.remote_user().clone(),
+                }),
+                window,
+                cx,
+            )
+        })
+    });
+    drop(pending_sender);
     cx.run_until_parked();
     redraw(cx);
 
@@ -3579,6 +3676,14 @@ fn authentication_cancelled_reconnect_should_return_to_disconnected_without_erro
 fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
     cx: &mut TestAppContext,
 ) {
+    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
+    let mut text_context = TestAppContext::build_with_text_system(
+        cx.dispatcher.clone(),
+        cx.test_function_name(),
+        rendered_text.clone(),
+    );
+    let cx = &mut text_context;
+
     let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
         b"ssh: Permission denied (publickey).",
     )
@@ -3608,6 +3713,12 @@ fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
     assert!(
         cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
             .is_some()
+    );
+    assert_rendered_text(
+        "modal-alert-message",
+        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey).",
+        &rendered_text,
+        cx,
     );
 }
 
@@ -3657,7 +3768,7 @@ fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resu
 }
 
 #[gpui::test]
-fn remote_child_identity_failure_should_show_alert_without_changing_connection_or_focus(
+fn remote_child_identity_failure_preserves_connection_and_restores_focus_after_alert(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -4040,7 +4151,7 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
 }
 
 #[gpui::test]
-fn application_teardown_hook_should_close_remote_runtime_exactly_once(cx: &mut TestAppContext) {
+fn repeated_remote_runtime_cleanup_closes_once(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     let (completion, closes, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
     let flow = open_remote_workspace_flow(&manager, cx);
@@ -4635,6 +4746,17 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
         1
     );
     assert_eq!(records.starts().len(), 1);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .active_workspace()
+            .pinned_directory()
+            .is_none()
+    }));
+    assert!(
+        cx.debug_bounds("modal-action-workspace-pin-error-ok")
+            .is_some()
+    );
 }
 
 #[gpui::test]
@@ -5543,7 +5665,14 @@ fn workspace_chrome_should_forward_threshold_crossing_and_double_activation_to_p
         click_count: 2,
     });
 
-    assert_eq!(platform.counts(), (1, 1, 1, 0));
+    assert_eq!(platform.counts(), (1, 1, 1));
+    assert_eq!(
+        cx.window_requests(),
+        vec![gpui::TestWindowRequest::TitlebarDoubleClick {
+            is_resizable: true,
+            is_minimizable: true
+        }]
+    );
 }
 
 #[gpui::test]
@@ -5741,7 +5870,7 @@ fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut 
 }
 
 #[gpui::test]
-fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext) {
+fn workspace_frame_omits_structural_divider_elements(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
 
     for selector in [
@@ -6073,7 +6202,7 @@ fn dragging_sidebar_divider_at_top_chrome_edges_should_not_move_window(cx: &mut 
             manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width),
             platform.counts(),
         ),
-        (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0, 0),)
+        (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0),)
     );
 }
 
@@ -6541,7 +6670,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         1
     );
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert_eq!(platform.counts(), (0, 0, 0, 0));
+    assert_eq!(platform.counts(), (0, 0, 0));
 }
 
 #[gpui::test]
@@ -6779,10 +6908,25 @@ fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut Te
 
 #[gpui::test]
 fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext) {
+    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
+    let mut text_context = TestAppContext::build_with_text_system(
+        cx.dispatcher.clone(),
+        cx.test_function_name(),
+        rendered_text.clone(),
+    );
+    let cx = &mut text_context;
+
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
     cx.simulate_keystrokes("cmd-n");
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "New Active Workspace".into())
+            .unwrap();
+        cx.notify();
+    });
     redraw(cx);
 
     let chip = cx
@@ -6799,6 +6943,12 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     assert!(
         chooser.left() <= chip.left() && chip.right() <= chooser.right(),
         "the chip escaped the Workspace chooser: {chip:?} {chooser:?}"
+    );
+    assert_rendered_text(
+        "workspace-chip-label",
+        "New Active Workspace",
+        &rendered_text,
+        cx,
     );
 }
 
@@ -7100,7 +7250,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
                 .focused_terminal_is_focused(window, cx)
         }));
     }
-    assert_eq!(platform.counts(), (0, 0, 0, 0));
+    assert_eq!(platform.counts(), (0, 0, 0));
 }
 
 #[gpui::test]
@@ -7131,9 +7281,7 @@ fn collapsed_remote_switcher_should_show_the_name_without_a_workspace_icon(
 }
 
 #[gpui::test]
-fn collapsed_chrome_should_keep_the_shared_switcher_border_after_theme_replacement(
-    cx: &mut TestAppContext,
-) {
+fn collapsed_chrome_geometry_survives_combo_box_theme_replacement(cx: &mut TestAppContext) {
     use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
     let (manager, _, cx) = workspace_manager(cx);
@@ -7272,11 +7420,26 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
 
 #[gpui::test]
 fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut TestAppContext) {
+    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
+    let mut text_context = TestAppContext::build_with_text_system(
+        cx.dispatcher.clone(),
+        cx.test_function_name(),
+        rendered_text.clone(),
+    );
+    let cx = &mut text_context;
+
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
     cx.simulate_keystrokes("cmd-n");
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "Surviving Active Workspace".into())
+            .unwrap();
+        cx.notify();
+    });
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
@@ -7298,6 +7461,12 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
         ),
         (WorkspaceId::new(2), chrome.size.width)
     );
+    assert_rendered_text(
+        "workspace-chip-label",
+        "Surviving Active Workspace",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[gpui::test]
@@ -7317,16 +7486,6 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
             )
         }),
         (2, WorkspaceId::new(2), false)
-    );
-}
-
-#[gpui::test]
-fn sidebar_footer_should_have_no_top_divider(cx: &mut TestAppContext) {
-    let (_, _, cx) = workspace_manager(cx);
-    assert!(cx.debug_bounds("workspace-sidebar-footer").is_some());
-    assert!(
-        cx.debug_bounds("workspace-sidebar-footer-divider")
-            .is_none()
     );
 }
 
@@ -7672,6 +7831,9 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let list = cx
         .debug_bounds("workspace-list")
         .expect("the Workspace list was not rendered");
+    let before = manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).scroll_handle().offset().y
+    });
     let start = thumb.center();
     let destination = point(start.x, list.bottom() - thumb.size.height / 2.0);
     cx.simulate_mouse_move(start, None, Modifiers::none());
@@ -7688,6 +7850,10 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let state = manager.read_with(cx, |manager, cx| {
         manager.sidebar.read(cx).scroll_handle().offset().y
     });
+    assert!(
+        before - state > px(0.0),
+        "pointer drag must move the list from its settled offset"
+    );
     assert!(
         state < px(0.0),
         "the Workspace list did not finish a scrollbar drag: {state:?}"
@@ -7712,6 +7878,13 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
         state.0 == 25 && state.1 == WorkspaceId::new(25) && state.2 < px(0.0),
         "the Active Workspace was not revealed; state was {state:?}"
     );
+    redraw(cx);
+    let viewport = cx.debug_bounds("workspace-list").unwrap();
+    let active = cx
+        .debug_bounds("workspace-row-25-active")
+        .expect("the new active row must be mounted");
+    assert!(active.top() >= viewport.top() && active.bottom() <= viewport.bottom());
+    assert!(active.left() >= viewport.left() && active.right() <= viewport.right());
 }
 
 #[gpui::test]
@@ -7881,7 +8054,7 @@ fn a_secondary_click_does_not_emphasize_the_sidebar_it_focuses(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
+fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
     cx.simulate_keystrokes("cmd-n");
@@ -8066,39 +8239,45 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    for resizing in [true, false] {
+    right_click("workspace-row-1-active", cx);
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
+    assert!(!cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
+    assert_eq!(
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                let workspace_id = manager.workspaces.active_workspace_id();
-                manager.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_resizing_for_test(resizing);
-                    sidebar.handle_menu_lifecycle(
-                        workspace_id,
-                        MenuLifecycleEvent::Opened,
-                        window,
-                        cx,
-                    );
-                    sidebar.handle_menu_lifecycle(
-                        workspace_id,
-                        MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
-                        window,
-                        cx,
-                    );
-                });
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            cx.update(|window, cx| manager
-                .read(cx)
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx)),
-            !resizing
-        );
-    }
+            let manager = manager.read(cx);
+            (
+                manager.sidebar.read(cx).is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+                manager.workspaces.active_workspace_id(),
+            )
+        }),
+        (
+            true,
+            Some(TerminalFocusBlocker::Sidebar),
+            WorkspaceId::new(1)
+        )
+    );
+    click("workspace-row-1-active", cx);
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
 }
 
 #[gpui::test]
@@ -8667,16 +8846,39 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace terminal session must have started");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
     inactive_sender
         .try_send(SessionEvent::Exited(SessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    assert!(cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }));
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
@@ -9142,15 +9344,6 @@ fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut 
 }
 
 #[gpui::test]
-fn command_p_should_no_longer_open_workspace_search(cx: &mut TestAppContext) {
-    let (_, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-p");
-    cx.run_until_parked();
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.debug_bounds("command-palette-panel").is_none());
-}
-
-#[gpui::test]
 fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cancel(
     cx: &mut TestAppContext,
 ) {
@@ -9238,6 +9431,16 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("end home");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
+    let local_row = cx.debug_bounds("workspace-switcher-create-local").unwrap();
+    let remote_row = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
+    cx.update(|window, _| {
+        let quads = window.painted_quads();
+        let background = |bounds: gpui::Bounds<Pixels>| quads.iter().find(|quad| quad.bounds == bounds.scale(window.scale_factor())).map(|quad| quad.background);
+        assert_ne!(background(local_row), background(remote_row), "keyboard highlight must visibly distinguish the Local creation row before the Remote shortcut");
+    });
     cx.simulate_keystrokes("cmd-shift-n");
     cx.run_until_parked();
     let flow = manager
@@ -9620,7 +9823,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
 }
 
 #[gpui::test]
-fn collapsed_sidebar_toggle_should_show_its_tooltip_over_the_icon(cx: &mut TestAppContext) {
+fn collapsed_sidebar_toggle_shows_hover_tooltip(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     click("toggle-sidebar-button", cx);
@@ -10002,7 +10205,9 @@ fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mu
 }
 
 #[gpui::test]
-fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &mut TestAppContext) {
+fn client_window_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(
+    cx: &mut TestAppContext,
+) {
     let (_, _, cx) = workspace_manager(cx);
     cx.simulate_decorations(gpui::Decorations::Client {
         tiling: gpui::Tiling::default(),
@@ -10074,5 +10279,83 @@ fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &m
                 }
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct RecordingRenderedText(Mutex<Vec<String>>);
+
+impl gpui::PlatformTextSystem for RecordingRenderedText {
+    fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> anyhow::Result<()> {
+        gpui::NoopTextSystem.add_fonts(fonts)
+    }
+    fn all_font_names(&self) -> Vec<String> {
+        gpui::NoopTextSystem.all_font_names()
+    }
+    fn font_id(&self, font: &gpui::Font) -> anyhow::Result<gpui::FontId> {
+        gpui::NoopTextSystem.font_id(font)
+    }
+    fn font_metrics(&self, id: gpui::FontId) -> gpui::FontMetrics {
+        gpui::NoopTextSystem.font_metrics(id)
+    }
+    fn typographic_bounds(
+        &self,
+        id: gpui::FontId,
+        glyph: gpui::GlyphId,
+    ) -> anyhow::Result<gpui::Bounds<f32>> {
+        gpui::NoopTextSystem.typographic_bounds(id, glyph)
+    }
+    fn advance(&self, id: gpui::FontId, glyph: gpui::GlyphId) -> anyhow::Result<gpui::Size<f32>> {
+        gpui::NoopTextSystem.advance(id, glyph)
+    }
+    fn glyph_for_char(&self, id: gpui::FontId, c: char) -> Option<gpui::GlyphId> {
+        gpui::NoopTextSystem.glyph_for_char(id, c)
+    }
+    fn glyph_raster_bounds(
+        &self,
+        params: &gpui::RenderGlyphParams,
+    ) -> anyhow::Result<gpui::Bounds<gpui::DevicePixels>> {
+        gpui::NoopTextSystem.glyph_raster_bounds(params)
+    }
+    fn rasterize_glyph(
+        &self,
+        params: &gpui::RenderGlyphParams,
+        bounds: gpui::Bounds<gpui::DevicePixels>,
+    ) -> anyhow::Result<(gpui::Size<gpui::DevicePixels>, Vec<u8>)> {
+        gpui::NoopTextSystem.rasterize_glyph(params, bounds)
+    }
+    fn layout_line(&self, text: &str, size: Pixels, runs: &[gpui::FontRun]) -> gpui::LineLayout {
+        self.0.lock().unwrap().push(text.to_owned());
+        gpui::NoopTextSystem.layout_line(text, size, runs)
+    }
+    fn recommended_rendering_mode(
+        &self,
+        id: gpui::FontId,
+        size: Pixels,
+    ) -> gpui::TextRenderingMode {
+        gpui::NoopTextSystem.recommended_rendering_mode(id, size)
+    }
+}
+
+fn assert_rendered_text(
+    selector: &'static str,
+    expected: &str,
+    text: &RecordingRenderedText,
+    cx: &mut VisualTestContext,
+) {
+    text.0.lock().unwrap().clear();
+    // A font reload invalidates GPUI's line cache so this observation belongs to the current mount.
+    cx.update(|_, cx| cx.text_system().add_fonts(Vec::new()).unwrap());
+    redraw(cx);
+    assert!(
+        cx.debug_bounds(selector).is_some(),
+        "the expected text element must be mounted"
+    );
+    let lines = text.0.lock().unwrap();
+    for line in expected.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            lines.iter().any(|rendered| rendered == line),
+            "the current mount must shape the exact expected text: {line:?}"
+        );
     }
 }

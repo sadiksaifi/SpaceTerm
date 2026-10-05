@@ -898,9 +898,6 @@ impl WorkspaceSidebar {
     pub(super) fn rename_input(&self) -> Option<&Entity<TextInput>> {
         self.rename.as_ref().map(|rename| &rename.input)
     }
-    pub(super) fn set_resizing_for_test(&mut self, resizing: bool) {
-        self.resize_origin = resizing.then_some(self.layout);
-    }
 }
 
 #[cfg(test)]

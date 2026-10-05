@@ -250,16 +250,19 @@ impl fmt::Display for SessionStartupStage {
 
 #[derive(Debug, Error)]
 pub(crate) enum SessionError {
-    #[error("failed to start the terminal worker thread: {0}")]
-    SpawnWorker(#[source] std::io::Error),
+    #[error("failed to start the terminal worker thread: {0:?}")]
+    SpawnWorker(std::io::ErrorKind),
     #[error(transparent)]
     PreparedSshPaneChannel(#[from] crate::ssh::command::PreparedSshPaneChannelError),
     #[cfg(test)]
-    #[error("terminal worker stopped before initialization completed")]
-    StartupChannelClosed,
-    #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
+}
+
+impl From<std::io::Error> for SessionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::SpawnWorker(error.kind())
+    }
 }
 
 pub(crate) struct StartedTerminalSession {
@@ -1090,37 +1093,6 @@ impl HeldKeys {
     }
 }
 
-enum StartupReporter {
-    #[cfg(test)]
-    Blocking(mpsc::SyncSender<Result<(), String>>),
-    Events(async_channel::Sender<SessionEvent>),
-}
-
-impl StartupReporter {
-    fn failed(&self, stage: SessionStartupStage, message: String) {
-        match self {
-            #[cfg(test)]
-            Self::Blocking(startup) => {
-                let _ = startup.send(Err(message));
-            }
-            Self::Events(events) => {
-                send_session_event(
-                    events,
-                    SessionEvent::Failed(SessionFailure::Startup { stage, message }),
-                );
-            }
-        }
-    }
-
-    fn succeeded(&self) -> bool {
-        match self {
-            #[cfg(test)]
-            Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
-            Self::Events(_) => true,
-        }
-    }
-}
-
 impl TerminalWorker {
     fn run(
         native_pty: NativePtyOwner,
@@ -1129,7 +1101,6 @@ impl TerminalWorker {
         reader_transport: ReaderTransport,
         schedule_input: ScheduleInput,
         publishers: TerminalWorkerPublishers,
-        startup: StartupReporter,
     ) {
         let TerminalWorkerContext {
             initial_geometry,
@@ -1162,7 +1133,13 @@ impl TerminalWorker {
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
-                startup.failed(SessionStartupStage::Emulator, error.to_string());
+                send_session_event(
+                    &events,
+                    SessionEvent::Failed(SessionFailure::Startup {
+                        stage: SessionStartupStage::Emulator,
+                        message: error.to_string(),
+                    }),
+                );
                 drop(reader_event_rx);
                 drop(native_pty);
                 return;
@@ -1193,11 +1170,6 @@ impl TerminalWorker {
             permission_requests: PermissionRequestFilter::default(),
             clipboard,
         };
-
-        if !startup.succeeded() {
-            worker.finish();
-            return;
-        }
 
         worker.run_commands();
         worker.finish();

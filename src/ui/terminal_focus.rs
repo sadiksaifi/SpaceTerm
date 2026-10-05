@@ -187,6 +187,26 @@ mod tests {
             TerminalFocusCoordinator::workspace_blocker(WorkspaceFocusOwners::default()),
             None
         );
+        for resizing in [true, false] {
+            let mut owners = WorkspaceFocusOwners {
+                sidebar_resize: resizing,
+                context_menu: true,
+                ..Default::default()
+            };
+            owners.context_menu = false;
+            let blocker = TerminalFocusCoordinator::workspace_blocker(owners);
+            assert_eq!(
+                blocker,
+                resizing.then_some(TerminalFocusBlocker::SidebarResize)
+            );
+            assert_eq!(
+                TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
+                    blocker,
+                    ..TerminalFocusFacts::focused()
+                }),
+                !resizing
+            );
+        }
     }
 
     #[test]

@@ -1355,11 +1355,6 @@ impl PaneHost {
         }
     }
 
-    #[cfg(test)]
-    fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_pane(self.tab.focused_pane_id(), window, cx);
-    }
-
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self.close_tab_requested || self.tab.terminal(pane_id).is_none() {
             return;
@@ -1377,11 +1372,6 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         self.close_pane(pane_id, window, cx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn close_focused_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_focused(window, cx);
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -2882,7 +2872,7 @@ mod tests {
 
     use super::*;
     use crate::appearance::Color;
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -2963,7 +2953,7 @@ mod tests {
         revalidations: AtomicUsize,
         preparations: AtomicUsize,
         revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
-        command_context: SshCommandContext,
+        command_context: crate::ssh::testing::SshConnectionFixture,
     }
 
     impl RevalidatingRemoteChannelProvider {
@@ -2973,13 +2963,7 @@ mod tests {
                 revalidations: AtomicUsize::new(0),
                 preparations: AtomicUsize::new(0),
                 revalidation_error: Mutex::new(None),
-                command_context: SshCommandContext::new(
-                    crate::ssh::command::OpenSshExecutable::for_test(),
-                    PathBuf::from("/private/config/spaceterm/ssh_config"),
-                    destination,
-                    PathBuf::from("/private/runtime/spaceterm/master.sock"),
-                )
-                .unwrap(),
+                command_context: crate::ssh::testing::SshConnectionFixture::new(destination),
             }
         }
 
@@ -3036,15 +3020,9 @@ mod tests {
         records: TestTerminalSessionRecords,
     ) -> WorkspaceTerminalSessionFactory {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         remote_test_session_factory_with_provider(
             records,
             destination,
@@ -3301,15 +3279,9 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = {
             let preparations = Arc::clone(&preparations);

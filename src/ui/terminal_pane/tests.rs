@@ -11,7 +11,7 @@ use gpui::{
 
 use super::*;
 use crate::appearance::{Color, TerminalColors};
-use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::ssh::command::ValidatedRemoteShellCommand;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, SelectionClipboard,
 };
@@ -859,7 +859,7 @@ fn remote_workspace_session_factory(
 
 struct ToggleRemoteChannelProvider {
     ready: Arc<AtomicBool>,
-    command_context: Arc<SshCommandContext>,
+    command_context: Arc<crate::ssh::testing::SshConnectionFixture>,
 }
 
 impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
@@ -899,15 +899,9 @@ fn remote_workspace_session_factory_with_readiness(
     ready: Arc<AtomicBool>,
 ) -> WorkspaceTerminalSessionFactory {
     let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-    let command_context = Arc::new(
-        SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            destination.clone(),
-            PathBuf::from("/private/runtime/spaceterm/master.sock"),
-        )
-        .unwrap(),
-    );
+    let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+        destination.clone(),
+    ));
     let channel_provider = Arc::new(ToggleRemoteChannelProvider {
         ready,
         command_context,
