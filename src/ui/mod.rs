@@ -198,13 +198,7 @@ pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
         &settings.inactive.chrome,
         motion,
     ));
-    spaceterm_ui::init_scoped_control_theme_catalogs(
-        cx,
-        active,
-        inactive,
-        settings_active,
-        settings_inactive,
-    )?;
+    spaceterm_ui::init(cx, active, inactive, settings_active, settings_inactive)?;
     Ok(())
 }
 

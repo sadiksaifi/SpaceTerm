@@ -1399,7 +1399,7 @@ fn workspace_manager_with_directory_selection(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                directory_selection: directory_selection,
+                directory_selection,
                 ..workspace_adapters(test_remote_backend_factory())
             },
             window,
@@ -8401,7 +8401,16 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     .generation(spaceterm_ui::ControlThemeGeneration::new(u64::MAX));
     cx.update(|window, cx| {
         assert_eq!(
-            spaceterm_ui::replace_control_theme_catalog(cx, catalog),
+            {
+                let catalog = Box::new(catalog);
+                spaceterm_ui::replace_control_theme_catalogs(
+                    cx,
+                    catalog.clone(),
+                    catalog.clone(),
+                    catalog.clone(),
+                    catalog,
+                )
+            },
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(

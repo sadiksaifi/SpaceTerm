@@ -82,7 +82,16 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
     .generation(spaceterm_ui::ControlThemeGeneration::new(generation));
     cx.update(|window, cx| {
         assert_eq!(
-            spaceterm_ui::replace_control_theme_catalog(cx, controls),
+            {
+                let catalog = Box::new(controls);
+                spaceterm_ui::replace_control_theme_catalogs(
+                    cx,
+                    catalog.clone(),
+                    catalog.clone(),
+                    catalog.clone(),
+                    catalog,
+                )
+            },
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(InstalledChrome::single(Arc::new(appearance)));

@@ -4159,7 +4159,14 @@ mod tests {
         let selected = row_paint(30);
         let selected_hovered = row_paint(40);
         let disabled = row_paint(50);
-        let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
+        let rows = crate::ListRowPaints::new(
+            normal,
+            hovered,
+            selected,
+            selected_hovered,
+            disabled,
+            disabled,
+        );
 
         assert_eq!(
             resolve_row_paint(Some(rows), true, true, true, true),

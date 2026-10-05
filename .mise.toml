@@ -201,6 +201,11 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 description = "Run shared tests without native features"
 run = "cargo test --all-targets --no-default-features --locked"
 
+[tasks."test:rustdoc"]
+description = "Compile and test Rust documentation examples"
+# Explicit --doc selects generated C-header prose even when the sys crate has doctest = false.
+run = "cargo test --workspace --exclude libghostty-vt-sys --doc --all-features --locked"
+
 [tasks."test:conformance"]
 description = "Run terminal protocol conformance tests"
 run = "cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
@@ -234,6 +239,7 @@ run = [
   { task = "lint:plist:macos" },
   { task = "check" },
   { task = "test" },
+  { task = "test:rustdoc" },
   { task = "test:native:macos" },
   { task = "engine:test" },
   { task = "engine:test:no-graphics" },
@@ -250,6 +256,7 @@ run = [
   { task = "lint" },
   { task = "check" },
   { task = "test" },
+  { task = "test:rustdoc" },
   { task = "test:native:linux" },
   { task = "engine:test" },
   { task = "engine:test:no-graphics" },

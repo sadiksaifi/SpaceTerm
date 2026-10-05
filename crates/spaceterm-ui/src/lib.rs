@@ -254,8 +254,8 @@ impl ControlBorderStates {
 struct InstalledControlThemeCatalogs {
     active: Box<ControlThemeCatalog>,
     inactive: Box<ControlThemeCatalog>,
-    settings_active: Option<Box<ControlThemeCatalog>>,
-    settings_inactive: Option<Box<ControlThemeCatalog>>,
+    settings_active: Box<ControlThemeCatalog>,
+    settings_inactive: Box<ControlThemeCatalog>,
 }
 
 impl gpui::Global for InstalledControlThemeCatalogs {}
@@ -285,38 +285,27 @@ pub enum ControlThemeReplacement {
     Unchanged,
 }
 
-/// Replacement was requested before reusable controls were initialized.
+/// Catalog installation or replacement could not preserve its required state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ControlThemeReplacementError;
-
-impl std::fmt::Display for ControlThemeReplacementError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("reusable controls are not initialized")
-    }
-}
-
-impl std::error::Error for ControlThemeReplacementError {}
-
-/// A paired catalog replacement did not preserve one appearance generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ControlThemeCatalogPairError {
+pub enum ControlThemeCatalogError {
     /// Reusable controls must be initialized before their catalogs can be replaced.
     NotInitialized,
-    /// Active and inactive variants must describe the same application appearance revision.
+    /// All four variants must describe the same application appearance revision.
     GenerationMismatch,
 }
 
-impl std::fmt::Display for ControlThemeCatalogPairError {
+impl std::fmt::Display for ControlThemeCatalogError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotInitialized => formatter.write_str("reusable controls are not initialized"),
-            Self::GenerationMismatch => formatter
-                .write_str("active and inactive control catalogs have different generations"),
+            Self::GenerationMismatch => {
+                formatter.write_str("control catalogs have different generations")
+            }
         }
     }
 }
 
-impl std::error::Error for ControlThemeCatalogPairError {}
+impl std::error::Error for ControlThemeCatalogError {}
 
 impl ControlThemeCatalog {
     /// Applies one ordinary-control elevation policy to Buttons and ComboBox triggers on every
@@ -557,30 +546,16 @@ impl ControlThemeCatalog {
     }
 }
 
-/// Installs the shared control catalog and initializes control-owned state.
-///
-/// Applications install desktop policy, portable modal behavior, modal key equivalents,
-/// Menu key equivalents, Command Palette key equivalents, ComboBox key equivalents, and
-/// text-input keybindings
-/// explicitly with
-/// [`install_modal_policy`], [`install_portable_modal_keybindings`],
-/// [`install_modal_keybindings`], [`install_menu_keybindings`],
-/// [`install_command_palette_keybindings`],
-/// [`install_portable_combo_box_keybindings`], [`install_combo_box_keybindings`], and
-/// [`install_text_input_keybindings`].
-pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
-    icon::register_font(cx)?;
-    let catalog = Box::new(catalog);
-    install_control_theme_catalogs(cx, catalog.clone(), catalog, None);
-    initialize_control_state(cx);
-    Ok(())
-}
-
 /// Installs the application and Settings Window presentation variants and initializes
 /// control-owned state.
 ///
 /// Heap-owned catalogs keep the complete scoped catalog set out of the caller's stack frame.
-pub fn init_scoped_control_theme_catalogs(
+/// Applications install desktop policy and control keybindings explicitly with
+/// [`install_modal_policy`], [`install_portable_modal_keybindings`], [`install_modal_keybindings`],
+/// [`install_menu_keybindings`], [`install_command_palette_keybindings`],
+/// [`install_portable_combo_box_keybindings`], [`install_combo_box_keybindings`], and
+/// [`install_text_input_keybindings`].
+pub fn init(
     cx: &mut App,
     active: Box<ControlThemeCatalog>,
     inactive: Box<ControlThemeCatalog>,
@@ -596,15 +571,10 @@ pub fn init_scoped_control_theme_catalogs(
     .into_iter()
     .any(|candidate| candidate != generation)
     {
-        return Err(ControlThemeCatalogPairError::GenerationMismatch.into());
+        return Err(ControlThemeCatalogError::GenerationMismatch.into());
     }
     icon::register_font(cx)?;
-    install_control_theme_catalogs(
-        cx,
-        active,
-        inactive,
-        Some((settings_active, settings_inactive)),
-    );
+    install_control_theme_catalogs(cx, active, inactive, settings_active, settings_inactive);
     initialize_control_state(cx);
     Ok(())
 }
@@ -619,73 +589,19 @@ fn initialize_control_state(cx: &mut App) {
     modal::init_core(cx);
 }
 
-/// Replaces all reusable-control presentation without reinstalling fonts, coordinators, or
-/// keybindings.
-///
-/// Existing control entities and open overlays retain their interaction state. Changed catalogs
-/// refresh every Operating-System Window so custom text shaping and deferred overlay content use
-/// the new generation on the next frame.
-pub fn replace_control_theme_catalog(
-    cx: &mut App,
-    catalog: ControlThemeCatalog,
-) -> Result<ControlThemeReplacement, ControlThemeReplacementError> {
-    if !cx.has_global::<InstalledControlThemeCatalogs>() {
-        return Err(ControlThemeReplacementError);
-    }
-    let installed = cx.global::<InstalledControlThemeCatalogs>();
-    if installed.active.as_ref() == &catalog
-        && installed.inactive.as_ref() == &catalog
-        && installed.settings_active.is_none()
-        && installed.settings_inactive.is_none()
-    {
-        return Ok(ControlThemeReplacement::Unchanged);
-    }
-    let catalog = Box::new(catalog);
-    install_control_theme_catalogs(cx, catalog.clone(), catalog, None);
-    cx.refresh_windows();
-    Ok(ControlThemeReplacement::Applied)
-}
-
-/// Atomically replaces the active and inactive reusable-control presentation variants.
-///
-/// Both catalogs must carry the same application-issued generation. Existing entities retain
-/// their interaction state, while every Operating-System Window selects its own immutable variant
-/// through [`ControlWindowActivity`].
-pub fn replace_control_theme_catalogs(
-    cx: &mut App,
-    active: ControlThemeCatalog,
-    inactive: ControlThemeCatalog,
-) -> Result<ControlThemeReplacement, ControlThemeCatalogPairError> {
-    if active.generation != inactive.generation {
-        return Err(ControlThemeCatalogPairError::GenerationMismatch);
-    }
-    if !cx.has_global::<InstalledControlThemeCatalogs>() {
-        return Err(ControlThemeCatalogPairError::NotInitialized);
-    }
-    let installed = cx.global::<InstalledControlThemeCatalogs>();
-    if installed.active.as_ref() == &active
-        && installed.inactive.as_ref() == &inactive
-        && installed.settings_active.is_none()
-        && installed.settings_inactive.is_none()
-    {
-        return Ok(ControlThemeReplacement::Unchanged);
-    }
-    install_control_theme_catalogs(cx, Box::new(active), Box::new(inactive), None);
-    cx.refresh_windows();
-    Ok(ControlThemeReplacement::Applied)
-}
-
 /// Atomically replaces the application and Settings Window presentation variants.
 ///
 /// The Settings pair is selected only inside an explicit [`ControlThemeScope::Settings`] scope;
-/// every other window continues to use the application pair.
-pub fn replace_scoped_control_theme_catalogs(
+/// every other window continues to use the application pair. All four catalogs must carry the
+/// same generation. Existing entities and open overlays retain their interaction state; changed
+/// catalogs refresh every window without reinstalling fonts, coordinators, or keybindings.
+pub fn replace_control_theme_catalogs(
     cx: &mut App,
     active: Box<ControlThemeCatalog>,
     inactive: Box<ControlThemeCatalog>,
     settings_active: Box<ControlThemeCatalog>,
     settings_inactive: Box<ControlThemeCatalog>,
-) -> Result<ControlThemeReplacement, ControlThemeCatalogPairError> {
+) -> Result<ControlThemeReplacement, ControlThemeCatalogError> {
     let generation = active.generation;
     if [
         inactive.generation,
@@ -695,25 +611,20 @@ pub fn replace_scoped_control_theme_catalogs(
     .into_iter()
     .any(|candidate| candidate != generation)
     {
-        return Err(ControlThemeCatalogPairError::GenerationMismatch);
+        return Err(ControlThemeCatalogError::GenerationMismatch);
     }
     if !cx.has_global::<InstalledControlThemeCatalogs>() {
-        return Err(ControlThemeCatalogPairError::NotInitialized);
+        return Err(ControlThemeCatalogError::NotInitialized);
     }
     let installed = cx.global::<InstalledControlThemeCatalogs>();
     if installed.active == active
         && installed.inactive == inactive
-        && installed.settings_active.as_ref() == Some(&settings_active)
-        && installed.settings_inactive.as_ref() == Some(&settings_inactive)
+        && installed.settings_active == settings_active
+        && installed.settings_inactive == settings_inactive
     {
         return Ok(ControlThemeReplacement::Unchanged);
     }
-    install_control_theme_catalogs(
-        cx,
-        active,
-        inactive,
-        Some((settings_active, settings_inactive)),
-    );
+    install_control_theme_catalogs(cx, active, inactive, settings_active, settings_inactive);
     cx.refresh_windows();
     Ok(ControlThemeReplacement::Applied)
 }
@@ -722,10 +633,10 @@ fn install_control_theme_catalogs(
     cx: &mut App,
     active: Box<ControlThemeCatalog>,
     inactive: Box<ControlThemeCatalog>,
-    settings: Option<(Box<ControlThemeCatalog>, Box<ControlThemeCatalog>)>,
+    settings_active: Box<ControlThemeCatalog>,
+    settings_inactive: Box<ControlThemeCatalog>,
 ) {
     debug_assert_eq!(active.generation, inactive.generation);
-    let (settings_active, settings_inactive) = settings.unzip();
     cx.set_global(active.button);
     cx.set_global(active.toggle);
     cx.set_global(active.progress);
@@ -774,22 +685,21 @@ pub(crate) fn refine_control_text(
 pub(crate) fn control_theme_catalog(cx: &App) -> Option<&ControlThemeCatalog> {
     cx.try_global::<InstalledControlThemeCatalogs>()
         .map(|catalogs| {
-            let settings = match floating_surface::current_window_activity() {
-                ControlWindowActivity::Active => catalogs.settings_active.as_ref(),
-                ControlWindowActivity::Inactive => catalogs.settings_inactive.as_ref(),
+            let catalog = match (
+                floating_surface::current_control_theme_scope(),
+                floating_surface::current_window_activity(),
+            ) {
+                (ControlThemeScope::Application, ControlWindowActivity::Active) => &catalogs.active,
+                (ControlThemeScope::Application, ControlWindowActivity::Inactive) => {
+                    &catalogs.inactive
+                }
+                (ControlThemeScope::Settings, ControlWindowActivity::Active) => {
+                    &catalogs.settings_active
+                }
+                (ControlThemeScope::Settings, ControlWindowActivity::Inactive) => {
+                    &catalogs.settings_inactive
+                }
             };
-            let catalog =
-                if floating_surface::current_control_theme_scope() == ControlThemeScope::Settings {
-                    settings.unwrap_or_else(|| match floating_surface::current_window_activity() {
-                        ControlWindowActivity::Active => &catalogs.active,
-                        ControlWindowActivity::Inactive => &catalogs.inactive,
-                    })
-                } else {
-                    match floating_surface::current_window_activity() {
-                        ControlWindowActivity::Active => &catalogs.active,
-                        ControlWindowActivity::Inactive => &catalogs.inactive,
-                    }
-                };
             catalog.as_ref()
         })
         .or_else(|| cx.try_global::<ControlThemeCatalog>())

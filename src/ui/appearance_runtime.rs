@@ -232,7 +232,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         if cx.has_global::<InstalledAppearance>() {
-            spaceterm_ui::replace_scoped_control_theme_catalogs(
+            spaceterm_ui::replace_control_theme_catalogs(
                 cx,
                 controls,
                 inactive_controls,

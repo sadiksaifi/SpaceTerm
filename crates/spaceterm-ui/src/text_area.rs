@@ -3,7 +3,7 @@
 //! The editor shares its buffer, selection, and bounded undo history with [`crate::TextInput`].
 //! It keeps line breaks, converts pasted carriage returns and Unicode line separators to `\n`,
 //! and replaces a tab with the indent unit, so every line it lays out is one shaped line without
-//! control characters. The default value limit is 256 KiB and the absolute limit is 1 MiB.
+//! control characters. The default value limit is 256 KiB and the absolute limit is 4 MiB.
 //!
 //! The editor inherits its font from the surrounding text style, so a caller chooses the typeface
 //! and size, and it sizes itself to a fixed number of visible rows. Rows beyond them scroll.

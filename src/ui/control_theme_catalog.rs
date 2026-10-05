@@ -689,8 +689,8 @@ pub(super) fn overlay_list_rows_with_policy(
             selected
         },
         disabled,
+        disabled_selected,
     )
-    .disabled_selected(disabled_selected)
 }
 
 /// What a row paints over the surface it rests on. Without a material it paints its authored
@@ -854,7 +854,7 @@ mod tests {
             CompositionCapabilities, SystemAppearance, ThemeCatalog,
         };
         use crate::ui::appearance::ChromeAppearance;
-        use spaceterm_ui::{ControlHost, ControlMotion, replace_control_theme_catalog};
+        use spaceterm_ui::{ControlHost, ControlMotion, replace_control_theme_catalogs};
 
         cx.update(crate::ui::init).unwrap();
         let mut violations = Vec::new();
@@ -884,10 +884,16 @@ mod tests {
                 for active in [true, false] {
                     let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
                     cx.update(|cx| {
-                        replace_control_theme_catalog(
-                            cx,
-                            catalog(&prepared, ControlMotion::Standard),
-                        )
+                        {
+                            let catalog = Box::new(catalog(&prepared, ControlMotion::Standard));
+                            replace_control_theme_catalogs(
+                                cx,
+                                catalog.clone(),
+                                catalog.clone(),
+                                catalog.clone(),
+                                catalog,
+                            )
+                        }
                         .unwrap()
                     });
                     for host in [

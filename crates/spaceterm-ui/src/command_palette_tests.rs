@@ -72,6 +72,7 @@ fn selected_hovered_row_should_preserve_the_complete_combined_paint() {
         row(0x456789ff),
         selected_hovered,
         row(0x808080ff),
+        row(0x808080ff),
     ));
 
     assert_eq!(paint.row_paint(false, true, true, true), selected_hovered);

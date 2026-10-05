@@ -614,7 +614,18 @@ mod tests {
     #[gpui::test]
     fn reduced_motion_shows_the_ring_at_rest(cx: &mut gpui::TestAppContext) {
         let catalog = crate::catalog_tests::catalog_with_motion(1, ControlMotion::Reduced);
-        cx.update(|cx| crate::init(cx, catalog).unwrap());
+        cx.update(|cx| {
+            {
+                crate::init(
+                    cx,
+                    Box::new(catalog.clone()),
+                    Box::new(catalog.clone()),
+                    Box::new(catalog.clone()),
+                    Box::new(catalog),
+                )
+            }
+            .unwrap()
+        });
         let (root, cx) = cx.add_window_view(|_, cx| Fixture {
             focus: cx.focus_handle(),
             border_width: px(1.0),

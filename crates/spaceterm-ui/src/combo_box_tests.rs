@@ -1767,8 +1767,8 @@ fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigatio
             row(normal),
             row(normal),
             row(disabled),
-        )
-        .disabled_selected(row(disabled_selected));
+            row(disabled_selected),
+        );
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
                 normal, normal, disabled, normal, normal, normal, normal, normal, normal,
@@ -1815,7 +1815,7 @@ fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
             ComboBoxPaint::new(
                 color, color, color, color, color, color, color, color, color,
             )
-            .rows(crate::ListRowPaints::new(row, row, row, row, row)),
+            .rows(crate::ListRowPaints::new(row, row, row, row, row, row)),
             ComboBoxMetrics::new(px(240.0), px(40.0))
                 .spacing(px(8.0), px(18.0), px(6.0))
                 .row_gutters(px(16.0), px(18.0), px(4.0), px(6.0))
