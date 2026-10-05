@@ -356,7 +356,7 @@ pub(in crate::platform) mod tests {
         });
     }
 
-    pub(in crate::platform) fn native_observer_coalesces_show_borders_notifications_and_removes_registration(
+    pub(in crate::platform) fn native_observer_coalesces_show_borders_notifications_and_closes_subscription(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
