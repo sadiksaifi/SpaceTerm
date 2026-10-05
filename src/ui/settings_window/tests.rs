@@ -870,8 +870,8 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
     set_query(&settings, "theme", cx);
     cx.update(|window, cx| window.focus(&settings.read(cx).focus_handle.clone(), cx));
 
-    // Search, section navigation, then the Light slot.
-    cx.simulate_keystrokes("tab tab tab enter");
+    // Search, section navigation, About, then the Light slot.
+    cx.simulate_keystrokes("tab tab tab tab enter");
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
@@ -4290,6 +4290,8 @@ fn about_sits_apart_at_the_foot_of_the_sidebar_and_requests_about(cx: &mut TestA
     cx.simulate_click(about.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(requests.get(), 1);
+    // A click is not keyboard traversal, so it leaves no focus ring behind.
+    assert!(cx.debug_bounds("settings-about-keyboard-focus").is_none());
 }
 
 #[gpui::test]
@@ -4318,4 +4320,46 @@ fn about_is_a_named_button_for_assistive_technology(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(requests.get(), 1);
+}
+
+#[gpui::test]
+fn about_follows_the_sections_in_keyboard_order_and_activates_from_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let (window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+    let list_focused = |cx: &mut VisualTestContext| {
+        cx.update(|gpui_window, cx| {
+            window
+                .read(cx)
+                .navigation
+                .list_focus()
+                .is_focused(gpui_window)
+        })
+    };
+
+    // Search, then the section list, then About.
+    cx.simulate_keystrokes("cmd-f tab");
+    cx.run_until_parked();
+    assert!(list_focused(cx));
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(!list_focused(cx));
+    assert!(
+        cx.debug_bounds("settings-about-keyboard-focus").is_some(),
+        "keyboard focus on About must show"
+    );
+
+    cx.simulate_keystrokes("space");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("space").unwrap(),
+    });
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+    press_return(cx);
+    assert_eq!(requests.get(), 2);
+
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert!(list_focused(cx));
 }

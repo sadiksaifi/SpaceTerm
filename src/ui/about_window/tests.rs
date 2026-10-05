@@ -205,3 +205,35 @@ fn about_opens_as_a_fixed_size_modeless_panel(cx: &mut TestAppContext) {
         assert_eq!(options.window_min_size, Some(bounds.size));
     });
 }
+
+#[gpui::test]
+fn about_presents_each_fact_to_assistive_technology(cx: &mut TestAppContext) {
+    install(cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.activate_accessibility();
+    cx.run_until_parked();
+
+    let tree: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    let labels = tree["nodes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|node| node["aria"]["role"] == "Label")
+        .filter_map(|node| node["aria"]["value"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let about = About::current();
+    for fact in [
+        about.name().to_owned(),
+        about.version_line(),
+        about.description().to_owned(),
+        about.copyright().to_owned(),
+    ] {
+        assert_eq!(
+            labels.iter().filter(|label| **label == fact).count(),
+            1,
+            "{fact:?} must be read once by a screen reader, found {labels:?}"
+        );
+    }
+}

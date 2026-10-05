@@ -920,8 +920,6 @@ impl SettingsWindow {
                 IconName::Info,
                 Box::new(crate::app::ShowAboutApplication),
                 &settings.chrome,
-                window,
-                cx,
             ))
             .render(self, settings, window, cx)
     }

@@ -12,7 +12,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Edges, FocusHandle, FontWeight, Global, LineFragment, Pixels,
-    SharedString, Size, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
+    SharedString, Size, Text, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
     WindowOptions, actions, div, img, px, size,
 };
 use spaceterm_ui::{ClientWindowControls, WindowControlSide};
@@ -244,6 +244,7 @@ impl AboutWindow {
         let typography = Typography::of(appearance);
         let text = gpui_color(appearance.colors.text);
         let secondary = gpui_color(appearance.colors.text_secondary);
+        // Each fact is its own identified text, so a screen reader reads it as a label.
         let line = |selector: &'static str, style: &ChromeTextStyle, color, value: SharedString| {
             div()
                 .debug_selector(move || selector.to_owned())
@@ -251,7 +252,7 @@ impl AboutWindow {
                 .text_center()
                 .chrome_text(style)
                 .text_color(color)
-                .child(value)
+                .child(Text::new(selector.into(), value))
         };
         let content = div()
             .size_full()
