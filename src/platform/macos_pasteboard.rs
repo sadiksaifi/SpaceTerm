@@ -528,7 +528,7 @@ pub(in crate::platform) mod tests {
     }
 
     #[test]
-    fn selection_copy_converts_only_to_public_text_mime_representations() {
+    fn selection_copy_preserves_exact_plain_and_html_representation_values() {
         let representations =
             selection_representations("alpha & beta", Some("<pre>alpha &amp; beta</pre>"));
 
@@ -545,10 +545,6 @@ pub(in crate::platform) mod tests {
                 },
             ]
         );
-        assert!(representations.iter().all(|representation| {
-            !representation.text.contains("CellSnapshot")
-                && !representation.text.contains("SelectionCopy")
-        }));
     }
 
     #[test]
@@ -576,6 +572,10 @@ pub(in crate::platform) mod tests {
         let has_plain_text = types.containsObject(plain_type);
         let has_html = types.containsObject(html_type);
         let plain_text = pasteboard.stringForType(plain_type).unwrap().to_string();
+        assert_eq!(
+            pasteboard.stringForType(html_type).unwrap().to_string(),
+            "<pre>native selection</pre>"
+        );
         // SAFETY: This unique test pasteboard supports releaseGlobally and no other code holds it.
         let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
         assert_eq!(

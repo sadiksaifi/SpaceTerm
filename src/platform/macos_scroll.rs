@@ -55,6 +55,15 @@ mod tests {
 
     #[test]
     fn native_momentum_phase_takes_precedence_over_gesture_phase() {
+        for (gesture, momentum, expected) in [
+            (16, 8, WheelPhaseDetail::MomentumEnded),
+            (1, 2, WheelPhaseDetail::MomentumChanged),
+            (16, 2, WheelPhaseDetail::MomentumChanged),
+            (16, 1 | 8, WheelPhaseDetail::MomentumStarted),
+            (1, 16 | 1 | 8, WheelPhaseDetail::MomentumCancelled),
+        ] {
+            assert_eq!(classify_detail(gesture, momentum), Some(expected));
+        }
         assert_eq!(
             classify_detail(PHASE_ENDED, PHASE_BEGAN),
             Some(WheelPhaseDetail::MomentumStarted)

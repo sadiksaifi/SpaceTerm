@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn every_custom_menu_item_should_have_a_native_icon() {
+    fn icon_mapping_covers_every_custom_menu_item_path() {
         let mut decorated = MENU_ITEM_ICONS
             .iter()
             .chain(DEVELOP_MENU_ITEM_ICONS)
@@ -811,10 +811,6 @@ mod tests {
                 "Quit SpaceTerm",
             ]
         );
-    }
-
-    #[test]
-    fn development_application_menu_should_use_its_visible_name() {
         assert_eq!(
             labels(application_menu("SpaceTerm Development").owned()),
             [
@@ -892,6 +888,24 @@ mod tests {
 
     #[test]
     fn file_menu_should_preserve_semantic_actions_and_grouping() {
+        assert_eq!(
+            labels(file_menu().owned()),
+            [
+                "New Workspace",
+                "New Remote Workspace",
+                "Open Local Directory…",
+                "Open Remote Directory…",
+                "Switch Workspace",
+                "|",
+                "New Tab",
+                "|",
+                "Close Pane",
+                "Close Tab",
+                "Close Workspace",
+                "|",
+                "Export Terminal Diagnostics…",
+            ]
+        );
         let file = file_menu().owned();
         let actions = file
             .items

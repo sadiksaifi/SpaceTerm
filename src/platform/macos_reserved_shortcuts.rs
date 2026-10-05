@@ -107,6 +107,71 @@ mod tests {
                 assert_eq!(profile.check(shortcut), Ok(()));
             }
         }
+        use SystemReservation::*;
+        let expected = [
+            ("cmd-c", Copy),
+            ("cmd-v", Paste),
+            ("cmd-x", Cut),
+            ("cmd-z", Undo),
+            ("shift-cmd-z", Redo),
+            ("cmd-a", SelectAll),
+            ("cmd-,", Settings),
+            ("cmd-q", Quit),
+            ("cmd-h", Hide),
+            ("alt-cmd-h", HideOthers),
+            ("cmd-m", Minimize),
+            ("alt-cmd-m", MinimizeAll),
+            ("ctrl-cmd-f", FullScreen),
+            ("cmd-tab", AppSwitcher),
+            ("shift-cmd-tab", AppSwitcher),
+            ("cmd-`", WindowCycling),
+            ("shift-cmd-`", WindowCycling),
+            ("cmd-space", Spotlight),
+            ("alt-cmd-space", Spotlight),
+            ("ctrl-cmd-space", CharacterViewer),
+            ("alt-cmd-escape", ForceQuit),
+            ("alt-shift-cmd-escape", ForceQuit),
+            ("ctrl-cmd-q", LockScreen),
+            ("shift-cmd-q", LogOut),
+            ("alt-shift-cmd-q", LogOut),
+            ("shift-cmd-3", Screenshot),
+            ("ctrl-shift-cmd-3", Screenshot),
+            ("shift-cmd-4", Screenshot),
+            ("ctrl-shift-cmd-4", Screenshot),
+            ("shift-cmd-5", Screenshot),
+            ("ctrl-shift-cmd-5", Screenshot),
+            ("shift-cmd-6", Screenshot),
+            ("ctrl-shift-cmd-6", Screenshot),
+            ("cmd-?", Help),
+            ("alt-cmd-'", KeyboardNavigation),
+            ("alt-cmd-d", DockHiding),
+            ("alt-cmd-8", Zoom),
+            ("alt-cmd-=", Zoom),
+            ("alt-cmd--", Zoom),
+            ("alt-cmd-\\", Zoom),
+            ("ctrl-alt-cmd-8", InvertColors),
+            ("ctrl-alt-cmd-,", Contrast),
+            ("ctrl-alt-cmd-.", Contrast),
+            ("cmd-f5", VoiceOver),
+            ("alt-cmd-f5", AccessibilityShortcuts),
+        ];
+        assert_eq!(shortcuts().len(), 45);
+        assert_eq!(
+            shortcuts()
+                .into_iter()
+                .map(|reserved| (reserved.shortcut, reserved.reason))
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|(source, reason)| (Shortcut::parse(source).unwrap(), reason))
+                .collect::<Vec<_>>()
+        );
+        for (source, reason) in expected {
+            assert_eq!(
+                profile.check(&Shortcut::parse(source).unwrap()),
+                Err(Reservation::System(reason))
+            );
+        }
         for reserved in shortcuts() {
             assert_eq!(
                 profile.check(&reserved.shortcut),

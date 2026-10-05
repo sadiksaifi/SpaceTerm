@@ -255,7 +255,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn macos_shell_capture_preserves_mode_compatibility_and_inherited_values() {
+    fn macos_shell_capture_reads_exact_inherited_values_for_each_mode() {
         use std::ffi::OsStr;
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
         for (

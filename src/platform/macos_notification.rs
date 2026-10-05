@@ -139,6 +139,27 @@ mod tests {
     #[test]
     fn unbundled_test_process_has_no_native_notification_identity() {
         assert!(!process_has_application_bundle_identity());
+        let adapter = UserNotificationAdapter::new(ApplicationIdentity::current());
+        let (sender, settings) = std::sync::mpsc::channel();
+        adapter.settings(Box::new(move |result| sender.send(result).unwrap()));
+        assert!(matches!(
+            settings
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err(AttentionFailure::Unavailable)
+        ));
+        assert!(settings.try_recv().is_err());
+        let (sender, authorization) = std::sync::mpsc::channel();
+        adapter.authorize_provisionally(Box::new(move |result| sender.send(result).unwrap()));
+        assert_eq!(
+            authorization
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err(AttentionFailure::Unavailable)
+        );
+        assert!(authorization.try_recv().is_err());
+        assert_eq!(adapter.submit(3), Err(AttentionFailure::Unavailable));
+        assert_eq!(adapter.clear(), Err(AttentionFailure::Unavailable));
     }
     #[test]
     fn native_authorization_values_map_to_closed_portable_facts() {

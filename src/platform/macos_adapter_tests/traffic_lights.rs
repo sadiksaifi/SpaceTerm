@@ -53,19 +53,6 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     candidate.preferences.window.density = ChromeDensity::Comfortable;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
-    let (workspace_expected, settings_expected) = cx.update(|cx| {
-        let appearance = crate::ui::appearance::chrome(cx);
-        let workspace_height = crate::ui::WorkspaceFrame::for_appearance(appearance, cx)
-            .top_chrome_height(appearance.top_height());
-        (
-            geometry
-                .workspace_traffic_light_position(workspace_height)
-                .unwrap(),
-            geometry
-                .sidebar_window_traffic_light_position(appearance.top_height())
-                .unwrap(),
-        )
-    });
 
     assert_eq!(
         (
@@ -73,8 +60,29 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
             cx.traffic_light_position_updates(settings_window.into()),
         ),
         (
-            vec![point(px(15.5), px(14.0)), workspace_expected],
-            vec![point(px(12.0), px(11.0)), settings_expected],
+            vec![point(px(15.5), px(14.0)), point(px(15.5), px(16.4))],
+            vec![point(px(12.0), px(11.0)), point(px(12.0), px(13.4))],
+        )
+    );
+
+    settings.cancel_preview(&token).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        (
+            cx.traffic_light_position_updates(workspace.into()),
+            cx.traffic_light_position_updates(settings_window.into())
+        ),
+        (
+            vec![
+                point(px(15.5), px(14.0)),
+                point(px(15.5), px(16.4)),
+                point(px(15.5), px(14.0))
+            ],
+            vec![
+                point(px(12.0), px(11.0)),
+                point(px(12.0), px(13.4)),
+                point(px(12.0), px(11.0))
+            ],
         )
     );
 }
