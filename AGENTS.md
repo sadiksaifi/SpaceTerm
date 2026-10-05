@@ -38,11 +38,16 @@ Put task plans and validation reports in issues or PRs.
 ## Work
 
 - Always write Conventional Commits, for example `fix(updates): preserve active sessions`.
-- Use the tasks in `.mise.toml` through `mise run` as the command authority.
-- Keep generic mise tasks platform-neutral. Give every Operating-System-specific task an explicit
-  platform segment and every Operating-System-specific script an explicit platform marker: a `-<platform>` suffix or a
-  `<platform>/` directory.
-- Name mise tasks `<domain>[:<action>][:<qualifier>][:<platform>]`, with the platform segment last.
-  Name single-purpose scripts `<verb>-<subject>[-<platform>]`; a script with subcommands takes its
-  subject's name.
+- Use `mise run` tasks as the command authority; `mise tasks` lists them. Tooling decisions:
+  ADR 0016.
+- Define a task that runs one external tool in `.mise.toml`. Write a task with logic as a
+  standard-library Python file task in `mise-tasks/`, named by its path, with shared code and
+  `unittest` tests in `mise-tasks/lib`. Prefer a maintained external tool to new task code.
+- Name tasks `<entry>[:<narrowing>...][:<platform>]`. The entry is the first word a developer
+  types, each segment is a `CONTEXT.md` term or the wrapped tool's name, and there are no aliases.
+- A mode picked by name is its own task (`development:x11:linux`); a value is a `usage` argument
+  or flag. A platform-only task ends with its platform segment. When several platforms implement
+  a task, the unsuffixed name dispatches to `<task>:{{ os() }}`.
+- Set environment variables with `env`, guard destructive tasks with `confirm`, and `hide` only
+  internal tasks.
 - Debug the source build; `/Applications/SpaceTerm.app` may be stale.

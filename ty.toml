@@ -1,0 +1,27 @@
+# Python is used only for mise tasks; see mise-tasks/.
+[src]
+include = ["mise-tasks"]
+
+[environment]
+# The Linux accessibility tasks run under the system Python, which must be 3.11 or newer.
+python-version = "3.11"
+python-platform = "all"
+extra-paths = ["mise-tasks/lib"]
+
+[analysis]
+# System Python bindings for the Linux accessibility tasks, and fonttools, which the fonts
+# tasks install into a private environment.
+allowed-unresolved-imports = ["dbus", "dbus.**", "gi", "gi.**", "pyatspi", "speechd", "fontTools.**"]
+
+# The Linux accessibility tasks drive untyped AT-SPI, D-Bus, and Orca objects whose optional
+# attributes their runtime checks guard.
+[[overrides]]
+include = ["mise-tasks/test/accessibility/**"]
+
+[overrides.rules]
+unresolved-attribute = "ignore"
+not-subscriptable = "ignore"
+invalid-assignment = "ignore"
+call-non-callable = "ignore"
+invalid-argument-type = "ignore"
+not-iterable = "ignore"

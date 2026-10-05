@@ -32,5 +32,22 @@
 	<string>SpaceTerm lets terminal applications you run use your microphone for voice input.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Signed Sparkle updates; see ADR 0009. -->
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>n5rQEtlPsivSl/mVVtDn2vKqbjeV+kSTExbA38FyafI=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<integer>0</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

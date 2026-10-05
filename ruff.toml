@@ -1,0 +1,10 @@
+# Python is used only for mise tasks; see mise-tasks/.
+include = ["mise-tasks/**/*.py"]
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+# ruff format owns line length; long strings and comments stay readable.
+# B023 flags closures that run before the loop advances, which these tasks use for polling.
+ignore = ["E501", "B023"]

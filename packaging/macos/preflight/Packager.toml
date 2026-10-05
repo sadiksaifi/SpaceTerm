@@ -1,0 +1,25 @@
+# cargo-packager configuration for the SpaceTerm Preflight identity; see ADR 0012.
+# Packaging adds the tag-derived version, the Info.plist with that version, and the build's
+# binaries directory.
+product-name = "SpaceTerm Preflight"
+identifier = "io.github.sadiksaifi.spaceterm-preflight"
+formats = ["app", "dmg"]
+category = "DeveloperTool"
+binaries = [{ path = "SpaceTerm Preflight", main = true }]
+icons = ["target/package-macos/SpaceTerm.icns"]
+resources = [
+  { src = "target/package-macos/Assets.car", target = "Assets.car" },
+  { src = "target/package-macos/terminfo", target = "terminfo" },
+  { src = "assets/shell-integration", target = "shell-integration" },
+  { src = "assets/THIRD-PARTY-NOTICES.txt", target = "THIRD-PARTY-NOTICES.txt" },
+]
+
+[macos]
+minimum-system-version = "26.0"
+signing-identity = "-"
+entitlements = "packaging/macos/preflight/Entitlements.plist"
+
+[dmg]
+window-size = { width = 600, height = 400 }
+app-position = { x = 180, y = 170 }
+application-folder-position = { x = 480, y = 170 }

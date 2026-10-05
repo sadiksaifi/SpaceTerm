@@ -1,0 +1,5 @@
+# Installed by `mise run setup:hooks`.
+commit-msg:
+  jobs:
+    - name: conventional commit
+      run: cog verify --ignore-merge-commits --file {1}
