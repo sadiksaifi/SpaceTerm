@@ -5,8 +5,9 @@ use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 
-use super::preferences::ResetTarget;
-use super::{Appearance, AppearancePreferences, TerminalTheme, ThemeCatalog, ThemeSlots};
+use crate::appearance::{
+    Appearance, AppearancePreferences, ResetTarget, TerminalTheme, ThemeCatalog, ThemeSlots,
+};
 use crate::keybindings::KeybindingPreferences;
 
 const SETTINGS_SCHEMA_VERSION: u32 = 3;
@@ -84,14 +85,7 @@ impl SettingsDocument {
         Ok(())
     }
 
-    /// Returns every Setting this document owns to its default, imported themes included.
-    ///
-    /// Preferences and the imported catalog reset together because they constrain each other: a
-    /// selection naming an imported theme is only valid while that theme is installed. Clearing
-    /// the catalog alone would strand such a selection, and defaulting preferences alone would
-    /// leave a library the reset claims to have emptied. The identity fields carry the document
-    /// forward instead: `revision` orders the write against concurrent editors, and
-    /// `schema_version` states the format this build writes.
+    /// Resets preferences and imported themes together, preserving revision and schema identity.
     pub(crate) fn reset_all(&mut self) {
         let defaults = Self::default();
         self.preferences = defaults.preferences;

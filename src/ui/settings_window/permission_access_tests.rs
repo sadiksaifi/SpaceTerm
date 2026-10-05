@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, SettingsDocument};
+use crate::appearance::Appearance;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::permission_access::testing::ScriptedPermissionAccess;
 use crate::platform::permission_access::{
@@ -16,6 +16,7 @@ use crate::platform::permission_access::{
 use crate::platform::setup_guide_host::SystemSettingsWindow;
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
 use super::permission_access::{
@@ -38,9 +39,8 @@ fn open_settings(
     host: Option<Arc<ScriptedSetupGuideHost>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &SettingsDocument::default(),
-    ));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     let access = access.map(|access| access as Rc<dyn PermissionAccess>);

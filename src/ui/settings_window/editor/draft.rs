@@ -3,17 +3,18 @@
 //! The scheduling Adapter supplies commit completion and whether it still belongs to the current
 //! edit. This Module retains the draft, token, resynchronization policy, and save classification.
 //!
-//! The draft is authoritative because [`UserSettings`] refuses preview updates during a commit
+//! The draft is authoritative because [`Settings`] refuses preview updates during a commit
 //! and retires tokens when the committed revision moves. Edits remain here until they can reach
 //! the preview transaction again.
 
 use std::sync::Arc;
 
-use crate::appearance::{ResetTarget, SettingsDocument, ThemeCatalog, ThemeId, ThemeSummary};
+use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary};
+use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
 use crate::settings::{
-    CommitOutcome, ImportReceipt, PreviewToken, SettingsError, ThemeImport, UserSettings,
+    CommitOutcome, ImportReceipt, PreviewToken, Settings, SettingsError, ThemeImport,
 };
 
 /// What the Settings Window reports about the retained document.
@@ -30,7 +31,7 @@ pub(in crate::ui::settings_window) enum SaveStatus {
 }
 
 pub(super) struct SettingsDraft {
-    settings: UserSettings,
+    settings: Settings,
     draft: Arc<SettingsDocument>,
     preview: Option<PreviewToken>,
     status: SaveStatus,
@@ -40,7 +41,7 @@ pub(super) struct SettingsDraft {
 }
 
 impl SettingsDraft {
-    pub(super) fn new(settings: UserSettings) -> Self {
+    pub(super) fn new(settings: Settings) -> Self {
         let snapshot = settings.snapshot();
         let status = match snapshot.status {
             Some(error) => SaveStatus::Unavailable(error),
@@ -138,7 +139,7 @@ impl SettingsDraft {
 
     fn edit_catalog<T>(
         &mut self,
-        edit: impl FnOnce(&UserSettings, &PreviewToken, u64) -> Result<T, SettingsError>,
+        edit: impl FnOnce(&Settings, &PreviewToken, u64) -> Result<T, SettingsError>,
     ) -> Result<T, SettingsError> {
         if !self.editable() {
             return Err(SettingsError::Busy);
@@ -186,7 +187,7 @@ impl SettingsDraft {
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
-        Ok(crate::appearance::export_settings(&self.draft)?)
+        Ok(crate::settings::export_settings(&self.draft)?)
     }
 
     /// Re-reads the retained document, discarding any live preview.

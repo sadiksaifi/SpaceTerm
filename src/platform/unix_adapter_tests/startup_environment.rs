@@ -8,7 +8,11 @@ fn capture_should_preserve_raw_non_utf8_agent_socket_bytes() {
     let mut reader = TestStartupSshEnvironmentReader::default()
         .with_environment(SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE, raw.clone());
 
-    let captured = StartupSshEnvironment::capture_with(&mut reader);
+    let captured = StartupSshEnvironment::from_environment(
+        |key| reader.environment_variable(key),
+        FALLBACK_PATH.into(),
+    )
+    .unwrap();
 
     assert_eq!(captured.agent_socket(), Some(raw.as_os_str()));
 }
@@ -27,7 +31,7 @@ impl TestStartupSshEnvironmentReader {
     }
 }
 
-impl StartupSshEnvironmentReader for TestStartupSshEnvironmentReader {
+impl TestStartupSshEnvironmentReader {
     fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
         *self.reads.entry(key.to_os_string()).or_default() += 1;
         self.environment.get(key).cloned()

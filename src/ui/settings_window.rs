@@ -55,8 +55,8 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
-    ThemeId, UnavailableWindowEffect, WindowBackgroundChoices,
+    FontClass, ResetTarget, SystemAppearance, TerminalFontFamily, ThemeCatalog, ThemeId,
+    UnavailableWindowEffect, WindowBackgroundChoices,
 };
 use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
@@ -64,6 +64,7 @@ use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{OperatingSystemWindowDragPlatform, WindowMovementFactory};
+use crate::settings::SettingsDocument;
 use crate::theme_registry::ZedThemeRegistry;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};

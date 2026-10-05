@@ -13,7 +13,7 @@ use std::{rc::Rc, time::Duration};
 use gpui::{App, AsyncApp, BorrowAppContext as _, Global, SharedString, Task};
 
 use crate::platform::settings_file::{SettingsFileAccess, SettingsFileWatch};
-use crate::settings::{SettingsError, UserSettings};
+use crate::settings::{Settings, SettingsError};
 
 /// How long the file stays quiet before SpaceTerm reads it, because editors often save in steps.
 pub(crate) const SETTLE_DELAY: Duration = Duration::from_millis(100);
@@ -32,11 +32,7 @@ impl Global for SettingsFile {}
 
 impl SettingsFile {
     /// Starts following the file for the application's life.
-    pub(crate) fn install(
-        settings: UserSettings,
-        access: Rc<dyn SettingsFileAccess>,
-        cx: &mut App,
-    ) {
+    pub(crate) fn install(settings: Settings, access: Rc<dyn SettingsFileAccess>, cx: &mut App) {
         let (changes, received) = async_channel::bounded(1);
         let settings_changed = settings.subscribe();
         let follow = cx.spawn(async move |cx| follow(settings, received, cx).await);
@@ -98,7 +94,7 @@ impl SettingsFile {
     }
 }
 
-async fn follow(settings: UserSettings, changes: async_channel::Receiver<()>, cx: &mut AsyncApp) {
+async fn follow(settings: Settings, changes: async_channel::Receiver<()>, cx: &mut AsyncApp) {
     let settings_changed = settings.subscribe();
     while changes.recv().await.is_ok() {
         cx.background_executor().timer(SETTLE_DELAY).await;

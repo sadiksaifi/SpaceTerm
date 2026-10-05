@@ -17,7 +17,7 @@ use gpui::TestAppContext;
 use super::*;
 use crate::domain::SshDestination;
 use crate::platform::app_directories::AppDirectoryEnvironment;
-use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
+use crate::platform::app_paths::AppPaths;
 use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_local_socket::UnixControlSocketProbe;
 use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
@@ -46,8 +46,13 @@ impl TestDirectory {
             xdg_cache_home: Some(self.0.join("cache").into_os_string()),
             xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
         };
-        let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
-        AppPaths::resolve(&environment, &host, Arc::new(UnixSecureFilesystem)).unwrap()
+        crate::platform::testing::resolve_app_paths(
+            &environment,
+            Some(self.0.join("temporary")),
+            103,
+            Arc::new(UnixSecureFilesystem),
+        )
+        .unwrap()
     }
 }
 

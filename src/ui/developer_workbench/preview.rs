@@ -5,11 +5,9 @@
 //! allows one preview at a time, so while this one is open the Settings Window cannot save, and
 //! closing the Developer Workbench cancels it.
 
-use crate::appearance::{
-    AppearanceMode, ChromeDensity, ResetTarget, SettingsDocument, TerminalFontFamily,
-    parse_settings,
-};
-use crate::settings::{CommitOutcome, PreviewToken, ThemeImport, UserSettings};
+use crate::appearance::{AppearanceMode, ChromeDensity, ResetTarget, TerminalFontFamily};
+use crate::settings::{CommitOutcome, PreviewToken, Settings, ThemeImport};
+use crate::settings::{SettingsDocument, parse_settings};
 
 /// The terminal typography the alternate-typography switch previews.
 const ALTERNATE_BASE_SIZE: f32 = 22.0;
@@ -53,13 +51,13 @@ impl PreviewError {
 }
 
 pub(super) struct AppearancePreview {
-    settings: UserSettings,
+    settings: Settings,
     alternate_font_family: String,
     token: Option<PreviewToken>,
 }
 
 impl AppearancePreview {
-    pub(super) fn new(settings: UserSettings, alternate_font_family: String) -> Self {
+    pub(super) fn new(settings: Settings, alternate_font_family: String) -> Self {
         Self {
             settings,
             alternate_font_family,
@@ -245,7 +243,7 @@ mod tests {
 
     fn preview() -> AppearancePreview {
         AppearancePreview::new(
-            UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage)),
+            Settings::load(Arc::new(super::super::tests::ReadOnlyStorage)),
             "Fixture Mono".into(),
         )
     }
@@ -315,7 +313,7 @@ mod tests {
     fn commit_saves_the_preview_and_closes_it() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
         let mut preview =
-            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
 
         assert!(preview.commit().is_ok());
@@ -332,7 +330,7 @@ mod tests {
     fn a_failed_commit_keeps_the_preview_open() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
         let mut preview =
-            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
         storage.fail_writes(Some(StorageError::Unavailable));
 
@@ -367,7 +365,7 @@ mod tests {
 
     #[test]
     fn dropping_the_preview_releases_the_settings_document() {
-        let settings = UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage));
+        let settings = Settings::load(Arc::new(super::super::tests::ReadOnlyStorage));
         let mut preview = AppearancePreview::new(settings.clone(), "Fixture Mono".into());
         preview.set_blur(false).unwrap();
         drop(preview);

@@ -19,7 +19,7 @@ use crate::appearance::{
     TerminalFontFamily, ThemeCatalog,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
-use crate::settings::{SettingsError, UserSettings};
+use crate::settings::{Settings, SettingsError};
 
 use super::appearance::{ChromeAppearance, InstalledChrome, settings};
 
@@ -79,7 +79,7 @@ impl AccessibilityPreviewOverride {
 }
 
 pub(crate) struct AppearanceRuntime {
-    pub(crate) settings: UserSettings,
+    pub(crate) settings: Settings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
     pending_font_names: Option<Vec<String>>,
@@ -104,7 +104,7 @@ pub(crate) fn register_fonts(cx: &App) -> gpui::Result<()> {
 }
 
 pub(crate) fn install(
-    settings: UserSettings,
+    settings: Settings,
     platform: Rc<dyn AppearancePlatform>,
     cx: &mut App,
 ) -> Result<(), SettingsError> {

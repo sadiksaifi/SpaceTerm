@@ -862,7 +862,7 @@ mod tests {
     use super::*;
     use crate::domain::SshDestination;
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
+    use crate::platform::app_paths::AppPaths;
     use crate::platform::testing::{RecordingControlSocketProbe, RecordingFilesystem};
     use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
     use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
@@ -888,8 +888,13 @@ mod tests {
                 xdg_cache_home: Some(self.0.join("cache").into_os_string()),
                 xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
             };
-            let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
-            AppPaths::resolve(&environment, &host, self.1.clone()).unwrap()
+            crate::platform::testing::resolve_app_paths(
+                &environment,
+                Some(self.0.join("temporary")),
+                103,
+                self.1.clone(),
+            )
+            .unwrap()
         }
     }
 

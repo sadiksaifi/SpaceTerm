@@ -903,13 +903,13 @@ fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
 
 #[test]
 fn control_shift_reservations_are_resolved_after_the_settings_document_is_read() {
-    let mut json = serde_json::to_value(crate::appearance::SettingsDocument::default()).unwrap();
+    let mut json = serde_json::to_value(crate::settings::SettingsDocument::default()).unwrap();
     json["keybindings"] = serde_json::json!({
         "new_workspace": "ctrl-shift-2",
         "create_tab": "ctrl-shift-6",
         "close_tab": "ctrl-shift--",
     });
-    let document = crate::appearance::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
+    let document = crate::settings::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
     let us = KeymapProfile::new(
         crate::platform::keyboard_layout::testing::us(),
         crate::keybindings::TerminalConventions::CommandShortcuts,

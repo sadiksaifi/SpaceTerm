@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://spaceterm.dev/schema/appearance-settings-v3.json",
-  "title": "SpaceTerm appearance settings",
+  "$id": "https://spaceterm.dev/schema/settings-v3.json",
+  "title": "SpaceTerm Settings",
   "type": "object",
   "additionalProperties": false,
   "required": [

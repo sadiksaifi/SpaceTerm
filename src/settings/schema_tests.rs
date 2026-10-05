@@ -19,10 +19,8 @@ const TERMINAL_ROLES: &[&str] = &[
 ];
 
 fn published_schema() -> serde_json::Value {
-    serde_json::from_str(include_str!(
-        "../../docs/schema/appearance-settings.schema.json"
-    ))
-    .expect("published appearance schema must be JSON")
+    serde_json::from_str(include_str!("../../docs/schema/settings.schema.json"))
+        .expect("published settings schema must be JSON")
 }
 
 fn validator() -> jsonschema::Validator {
@@ -55,7 +53,7 @@ fn published_schema_accepts_defaults_and_installed_themes_and_rejects_reserved_i
     let family = br##"{"name":"Sample","themes":[{"name":"Sample Dark","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
     let mut installed = settings;
     installed["terminal_themes"] =
-        serde_json::to_value(super::translate_zed_family(family).unwrap()).unwrap();
+        serde_json::to_value(crate::appearance::translate_zed_family(family).unwrap()).unwrap();
     assert!(validator.is_valid(&installed));
     assert!(super::parse_settings(&serde_json::to_vec(&installed).unwrap()).is_ok());
 
@@ -158,7 +156,7 @@ fn published_schema_lists_keybinding_commands_in_settings_order() {
         expected.iter().copied().collect()
     );
 
-    let source = include_str!("../../docs/schema/appearance-settings.schema.json");
+    let source = include_str!("../../docs/schema/settings.schema.json");
     let positions: Vec<_> = expected
         .iter()
         .map(|id| {

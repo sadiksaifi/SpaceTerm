@@ -13,7 +13,7 @@ use super::{
     PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, SetupGuide, SetupStep,
     TRACKING_INTERVAL,
 };
-use crate::appearance::{Appearance, SettingsDocument};
+use crate::appearance::Appearance;
 use crate::application_identity::ApplicationIdentity;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::permission_access::testing::ScriptedPermissionAccess;
@@ -22,6 +22,7 @@ use crate::platform::permission_access::{
 };
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
+use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::test_support::MemoryStorage;
 
@@ -40,9 +41,8 @@ fn install(
     accessibility: PermissionAuthorization,
     cx: &mut TestAppContext,
 ) -> Fixture {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &SettingsDocument::default(),
-    ));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Light));
     let access = ScriptedPermissionAccess::new(Ok(screen_recording), Ok(accessibility));

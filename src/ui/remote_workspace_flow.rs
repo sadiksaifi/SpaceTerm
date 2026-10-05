@@ -2123,10 +2123,10 @@ mod tests {
     }
 
     fn remote_account() -> RemoteWorkspaceAccount {
-        RemoteWorkspaceAccount::new(
+        RemoteWorkspaceAccount::from_validated_login_shell(
             "tester".to_owned(),
             remote_identity("/home/tester"),
-            "/bin/zsh".to_owned(),
+            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
         )
         .unwrap()
     }

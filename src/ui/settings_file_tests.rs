@@ -3,8 +3,8 @@ use std::{rc::Rc, sync::Arc};
 use gpui::TestAppContext;
 
 use super::*;
-use crate::appearance::SettingsDocument;
 use crate::platform::settings_file::testing::RecordingSettingsFile;
+use crate::settings::SettingsDocument;
 use crate::ui::settings_window::test_support::MemoryStorage;
 
 fn document_with_size(size: f32) -> SettingsDocument {
@@ -17,14 +17,14 @@ fn install(
     storage: &Arc<MemoryStorage>,
     file: &Rc<RecordingSettingsFile>,
     cx: &mut TestAppContext,
-) -> UserSettings {
-    let settings = UserSettings::load(storage.clone());
+) -> Settings {
+    let settings = Settings::load(storage.clone());
     let access: Rc<dyn SettingsFileAccess> = file.clone();
     cx.update(|cx| SettingsFile::install(settings.clone(), access, cx));
     settings
 }
 
-fn base_size(settings: &UserSettings) -> f32 {
+fn base_size(settings: &Settings) -> f32 {
     settings
         .snapshot()
         .committed

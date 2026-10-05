@@ -7549,9 +7549,9 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
     let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
     cx.update(|cx| {
         crate::ui::appearance_runtime::install(
-            crate::settings::UserSettings::load(
+            crate::settings::Settings::load(
                 crate::ui::settings_window::test_support::MemoryStorage::with_document(
-                    &crate::appearance::SettingsDocument::default(),
+                    &crate::settings::SettingsDocument::default(),
                 ),
             ),
             Rc::new(platform.clone()),

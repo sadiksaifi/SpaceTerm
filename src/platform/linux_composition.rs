@@ -483,10 +483,10 @@ mod tests {
     #[cfg(feature = "developer-tools")]
     #[gpui::test]
     fn developer_chords_are_refused_by_the_shortcut_recorder(cx: &mut gpui::TestAppContext) {
-        use crate::appearance::SettingsDocument;
         use crate::keybindings::{Command, Shortcut};
+        use crate::settings::SettingsDocument;
         use crate::ui::settings_window::{SettingsWindow, test_support::MemoryStorage};
-        let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(
             &SettingsDocument::default(),
         ));
         struct RecordingMovement;

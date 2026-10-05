@@ -743,9 +743,11 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn xdg_resolution_should_leave_runtime_unavailable_without_a_valid_source() {
-        let directories = AppDirectories::resolve_xdg(APP_DIR_NAME, &environment(), None).unwrap();
-
-        assert_eq!(directories.runtime, None);
+        for fallback in [None, Some("relative".into()), Some("/tmp/../tmp".into())] {
+            let directories =
+                AppDirectories::resolve_xdg(APP_DIR_NAME, &environment(), fallback).unwrap();
+            assert_eq!(directories.runtime, None);
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

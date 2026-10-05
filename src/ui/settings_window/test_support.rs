@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 
-use crate::appearance::{SettingsDocument, export_settings};
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, StorageError};
+use crate::settings::{SettingsDocument, export_settings};
 
 /// The bytes [`MemoryStorage::corrupt`] retains: not a Settings Document.
 pub(crate) const CORRUPT_DOCUMENT: &[u8] = b"{ not settings";
@@ -89,7 +89,7 @@ impl MemoryStorage {
     pub(crate) fn document(&self) -> Option<SettingsDocument> {
         let state = self.0.lock().unwrap();
         let (bytes, _) = state.snapshot.as_ref()?;
-        crate::appearance::parse_settings(bytes).ok()
+        crate::settings::parse_settings(bytes).ok()
     }
 
     pub(crate) fn fail_writes(&self, error: Option<StorageError>) {

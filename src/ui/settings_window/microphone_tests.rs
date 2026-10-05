@@ -5,13 +5,14 @@ use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, SettingsDocument};
+use crate::appearance::Appearance;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::microphone_access::{
     MicrophoneAccess, MicrophoneAccessError, MicrophoneAuthorization,
     MicrophoneAuthorizationCompletion,
 };
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
 use super::microphone::{
@@ -80,9 +81,8 @@ fn open_settings(
     access: Option<Rc<dyn MicrophoneAccess>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &SettingsDocument::default(),
-    ));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {

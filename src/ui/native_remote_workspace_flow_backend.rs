@@ -808,7 +808,6 @@ mod tests {
 
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::testing::{
         EmptyHostConfigFilesystem, RecordingControlSocketProbe, RecordingFilesystem,
     };
@@ -927,10 +926,10 @@ mod tests {
             home: Some("/Users/test".into()),
             ..AppDirectoryEnvironment::default()
         };
-        let host = AppPathHostFacts::new(PathBuf::from("/private/tmp"), 103).unwrap();
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &environment,
-            &host,
+            Some(PathBuf::from("/private/tmp")),
+            103,
             Arc::new(RecordingFilesystem::default()),
         )
         .unwrap();
@@ -1297,12 +1296,13 @@ mod tests {
             let cancellation = SshCancellationToken::default();
             let scope = registry.begin_connect(cancellation.clone()).unwrap();
             let filesystem = Arc::new(RecordingFilesystem::default());
-            let paths = AppPaths::resolve(
+            let paths = crate::platform::testing::resolve_app_paths(
                 &AppDirectoryEnvironment {
                     home: Some("/fixture/home".into()),
                     ..Default::default()
                 },
-                &AppPathHostFacts::new(PathBuf::from("/fixture/tmp"), 103).unwrap(),
+                Some(PathBuf::from("/fixture/tmp")),
+                103,
                 filesystem.clone(),
             )
             .unwrap();

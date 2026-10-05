@@ -1172,7 +1172,7 @@ pub(crate) fn initialize_application(
     .map_err(|_| RuntimeError::Initialization)?;
     crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
-        let settings = crate::settings::UserSettings::load(Arc::clone(storage));
+        let settings = crate::settings::Settings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
@@ -1798,13 +1798,13 @@ mod runtime_tests {
 
         assert_eq!(cx.update(|cx| cx.windows().len()), 2);
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
                 .expect("Settings window")
         });
-        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
         assert_eq!(
             settings_cx.window_title().as_deref(),
             Some("Settings"),
@@ -1816,8 +1816,9 @@ mod runtime_tests {
     fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::appearance::{ChromeDensity, SettingsDocument};
+        use crate::appearance::ChromeDensity;
         use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+        use crate::settings::SettingsDocument;
         use gpui::{point, px};
 
         let geometry = WindowFrameGeometry::new(Some(16.0))
@@ -1836,7 +1837,7 @@ mod runtime_tests {
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
@@ -1846,7 +1847,7 @@ mod runtime_tests {
         assert_eq!(
             (
                 cx.traffic_light_position_updates(workspace.into()),
-                cx.traffic_light_position_updates(settings.into()),
+                cx.traffic_light_position_updates(settings_window.into()),
             ),
             (
                 vec![point(px(15.5), px(14.0))],
@@ -1854,15 +1855,15 @@ mod runtime_tests {
             )
         );
 
-        let user_settings = cx.update(|cx| {
+        let settings = cx.update(|cx| {
             cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
                 .settings
                 .clone()
         });
-        let token = user_settings.begin_preview(0).unwrap();
+        let token = settings.begin_preview(0).unwrap();
         let mut candidate = SettingsDocument::default();
         candidate.preferences.window.density = ChromeDensity::Comfortable;
-        user_settings.update_preview(&token, candidate).unwrap();
+        settings.update_preview(&token, candidate).unwrap();
         cx.run_until_parked();
         let (workspace_expected, settings_expected) = cx.update(|cx| {
             let appearance = crate::ui::appearance::chrome(cx);
@@ -1881,7 +1882,7 @@ mod runtime_tests {
         assert_eq!(
             (
                 cx.traffic_light_position_updates(workspace.into()),
-                cx.traffic_light_position_updates(settings.into()),
+                cx.traffic_light_position_updates(settings_window.into()),
             ),
             (
                 vec![point(px(15.5), px(14.0)), workspace_expected],
@@ -2242,7 +2243,7 @@ mod runtime_tests {
     ) {
         use crate::ui::settings_window::test_support::MemoryStorage;
 
-        let storage = MemoryStorage::with_document(&crate::appearance::SettingsDocument::default());
+        let storage = MemoryStorage::with_document(&crate::settings::SettingsDocument::default());
         let application_quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
@@ -2256,13 +2257,13 @@ mod runtime_tests {
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
                 .expect("Settings window")
         });
-        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
         let edit = settings_cx
             .debug_bounds("settings-density-comfortable")
             .expect("Settings control")

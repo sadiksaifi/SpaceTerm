@@ -19,7 +19,7 @@ use super::terminal_theme::{
 use super::{Appearance, Color, TerminalColors, TerminalTheme, ThemeId, builtin};
 
 /// The largest Zed family document SpaceTerm reads.
-pub(crate) const MAX_FAMILY_BYTES: usize = super::document::MAX_DOCUMENT_BYTES;
+pub(crate) const MAX_FAMILY_BYTES: usize = 4 * 1024 * 1024;
 /// The most themes one Zed family document may contain.
 pub(crate) const MAX_FAMILY_THEMES: usize = 256;
 /// The most family documents one Zed extension may contribute. Every family holds at least one

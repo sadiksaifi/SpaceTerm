@@ -4,10 +4,11 @@ use std::{rc::Rc, sync::Arc};
 
 use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, SettingsDocument};
+use crate::appearance::Appearance;
 use crate::keybindings::{Command, KeybindingPreferences, Shortcut};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
@@ -36,7 +37,7 @@ fn open_keybindings_on(
     install_desktop: impl FnOnce(&mut gpui::App),
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(storage);
+    let settings = crate::settings::Settings::load(storage);
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {

@@ -1,8 +1,9 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceMode, SettingsDocument};
+use crate::appearance::{Appearance, AppearanceMode};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
+use crate::settings::SettingsDocument;
 use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
 use gpui::TestAppContext;
 
@@ -43,8 +44,8 @@ impl SettingsStorage for PreviewStorage {
     }
 }
 
-fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform) {
-    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
+fn start(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
+    let settings = Settings::load(Arc::new(PreviewStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -668,7 +669,7 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
 fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx: &mut TestAppContext,
 ) {
-    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
+    let settings = Settings::load(Arc::new(PreviewStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_reduced_motion(true);
@@ -771,10 +772,10 @@ fn repeated_system_notifications_without_effective_change_do_not_publish(cx: &mu
 fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppContext) {
     let mut committed = SettingsDocument::default();
     committed.preferences.mode = AppearanceMode::Auto;
-    let bytes = crate::appearance::export_settings(&committed)
+    let bytes = crate::settings::export_settings(&committed)
         .unwrap()
         .into_bytes();
-    let settings = UserSettings::load(Arc::new(PreviewStorage(Some(bytes))));
+    let settings = Settings::load(Arc::new(PreviewStorage(Some(bytes))));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {

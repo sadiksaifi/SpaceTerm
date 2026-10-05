@@ -13,7 +13,7 @@ use spaceterm_ui::{
     ModalActionRole, ModalId, TextArea,
 };
 
-use crate::appearance::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
+use crate::settings::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};

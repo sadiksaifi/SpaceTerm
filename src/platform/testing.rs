@@ -5,6 +5,20 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+pub(crate) fn resolve_app_paths(
+    environment: &super::app_directories::AppDirectoryEnvironment,
+    runtime_fallback_root: Option<PathBuf>,
+    local_ipc_path_maximum: usize,
+    filesystem: Arc<dyn SecureFilesystem>,
+) -> Result<super::app_paths::AppPaths, super::app_paths::AppPathsError> {
+    let directories = super::app_directories::AppDirectories::resolve_xdg(
+        super::app_directories::APP_DIR_NAME,
+        environment,
+        runtime_fallback_root,
+    )?;
+    super::app_paths::AppPaths::from_directories(directories, local_ipc_path_maximum, filesystem)
+}
+
 #[derive(Default)]
 pub(crate) struct RecordingFilesystem {
     directories: Mutex<BTreeSet<PathBuf>>,

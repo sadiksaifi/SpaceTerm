@@ -1,4 +1,4 @@
-//! Identity-aware storage for the single appearance preferences and catalog document.
+//! Identity-aware storage for the Settings Document.
 
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +9,7 @@ use crate::platform::secure_filesystem::{
     SecureFilesystemError,
 };
 
-pub(super) const MAXIMUM_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+pub(super) use super::document::MAX_DOCUMENT_BYTES;
 const PREPARE_ATTEMPTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -126,11 +126,11 @@ impl SettingsStorage for ConfigSettingsStorage {
         let snapshot = self
             .paths
             .filesystem()
-            .read_private_file(&directory, name, MAXIMUM_DOCUMENT_BYTES)
+            .read_private_file(&directory, name, MAX_DOCUMENT_BYTES)
             .map_err(filesystem_error)?;
         if let Some(snapshot) = &snapshot {
             *observed = Some(snapshot.identity.clone());
-            if snapshot.bytes.len() > MAXIMUM_DOCUMENT_BYTES {
+            if snapshot.bytes.len() > MAX_DOCUMENT_BYTES {
                 return Err(StorageError::TooLarge);
             }
         }
@@ -142,7 +142,7 @@ impl SettingsStorage for ConfigSettingsStorage {
         bytes: &[u8],
         expected: Option<&SecureEntryIdentity>,
     ) -> Result<StorageCommit, StorageError> {
-        if bytes.len() > MAXIMUM_DOCUMENT_BYTES {
+        if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(StorageError::TooLarge);
         }
         let directory = self.directory(true)?.ok_or(StorageError::Unavailable)?;
@@ -167,7 +167,7 @@ impl SettingsStorage for ConfigSettingsStorage {
             };
             let identity = commit.published_identity.and_then(|published| {
                 filesystem
-                    .read_private_file(&directory, name, MAXIMUM_DOCUMENT_BYTES)
+                    .read_private_file(&directory, name, MAX_DOCUMENT_BYTES)
                     .ok()
                     .flatten()
                     .filter(|snapshot| snapshot.identity == published && snapshot.bytes == bytes)

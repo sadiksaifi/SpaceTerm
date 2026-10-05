@@ -647,10 +647,10 @@ impl RemoteDirectoryProvider for TestRemoteProvider {
             return gpui::Task::ready(Err(RemoteDirectoryProviderError::Other));
         }
         gpui::Task::ready(
-            RemoteWorkspaceAccount::new(
+            RemoteWorkspaceAccount::from_validated_login_shell(
                 "tester".to_owned(),
                 crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-                "/bin/zsh".to_owned(),
+                crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
             )
             .map_err(|_| RemoteDirectoryProviderError::InvalidResponse),
         )
@@ -748,10 +748,10 @@ impl RemoteDirectoryProvider for BlockingRemoteProvider {
 }
 
 fn test_remote_account() -> RemoteWorkspaceAccount {
-    RemoteWorkspaceAccount::new(
+    RemoteWorkspaceAccount::from_validated_login_shell(
         "tester".to_owned(),
         crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-        "/bin/zsh".to_owned(),
+        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
     )
     .unwrap()
 }
@@ -935,8 +935,12 @@ fn remote_completion_with_provider(
         }),
         provider,
     );
-    let account =
-        RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+    let account = RemoteWorkspaceAccount::from_validated_login_shell(
+        "tester".to_owned(),
+        home,
+        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
+    )
+    .unwrap();
     (
         RemoteWorkspaceFlowCompletion::for_test(
             session,
@@ -1008,8 +1012,12 @@ fn remote_completion_with_active_alias_pin_failure(
         }),
         Arc::new(TestRemoteProvider::failing()),
     );
-    let account =
-        RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+    let account = RemoteWorkspaceAccount::from_validated_login_shell(
+        "tester".to_owned(),
+        home,
+        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
+    )
+    .unwrap();
     (
         RemoteWorkspaceFlowCompletion::for_test(
             session,

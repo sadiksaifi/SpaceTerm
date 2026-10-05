@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
-use crate::appearance::{ChromeDensity, ResetTarget, SettingsDocument};
+use crate::appearance::{ChromeDensity, ResetTarget};
+use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
-use crate::settings::{PreviewPhase, SettingsError, ThemeImport, UserSettings};
+use crate::settings::{PreviewPhase, Settings, SettingsError, ThemeImport};
 use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
 
 const IMPORTED_FAMILY: &[u8] = br##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
-fn setup() -> (SettingsDraft, UserSettings, Arc<MemoryStorage>) {
+fn setup() -> (SettingsDraft, Settings, Arc<MemoryStorage>) {
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     (SettingsDraft::new(settings.clone()), settings, storage)
 }
 
@@ -140,7 +141,7 @@ fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     );
     let exported = draft.export_document().unwrap();
     assert_eq!(
-        crate::appearance::parse_settings(exported.as_bytes()).unwrap(),
+        crate::settings::parse_settings(exported.as_bytes()).unwrap(),
         *draft.document()
     );
     assert_eq!(draft.document().preferences, preferences);
@@ -319,7 +320,7 @@ fn exporting_while_another_writer_is_busy_uses_the_authoritative_draft() {
     draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
     let exported = draft.export_document().unwrap();
     assert_eq!(
-        crate::appearance::parse_settings(exported.as_bytes())
+        crate::settings::parse_settings(exported.as_bytes())
             .unwrap()
             .preferences
             .terminal

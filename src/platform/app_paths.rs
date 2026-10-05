@@ -6,8 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
-#[cfg(test)]
-use super::app_directories::{APP_DIR_NAME, AppDirectoryEnvironment};
 use super::app_directories::{AppDirectories, AppDirectoryFile, AppDirectoryRoot, DirectoryError};
 use super::secure_filesystem::{
     SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
@@ -19,59 +17,6 @@ pub(crate) const ASKPASS_RUNTIME_SOCKET_NAME: &str = "a";
 pub(crate) const CONTROL_RUNTIME_OWNER_KIND: &str = "c";
 pub(crate) const CONTROL_RUNTIME_SOCKET_NAME: &str = "c";
 static NEXT_RUNTIME_OWNER: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct AppPathHostFacts {
-    runtime_fallback_root: Option<PathBuf>,
-    local_ipc_path_maximum: NonZeroUsize,
-}
-
-#[cfg(test)]
-impl std::fmt::Debug for AppPathHostFacts {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AppPathHostFacts(..)")
-    }
-}
-
-#[cfg(test)]
-impl AppPathHostFacts {
-    pub(crate) fn new(
-        runtime_fallback_root: PathBuf,
-        local_ipc_path_maximum: usize,
-    ) -> Result<Self, AppPathHostFactsError> {
-        if !is_absolute_normal_path(&runtime_fallback_root) {
-            return Err(AppPathHostFactsError::InvalidRuntimeFallbackRoot);
-        }
-        let local_ipc_path_maximum = NonZeroUsize::new(local_ipc_path_maximum)
-            .ok_or(AppPathHostFactsError::InvalidLocalIpcPathMaximum)?;
-        Ok(Self {
-            runtime_fallback_root: Some(runtime_fallback_root),
-            local_ipc_path_maximum,
-        })
-    }
-
-    /// Omits fallback capture when the startup environment already selects an absolute root.
-    pub(crate) fn without_runtime_fallback(
-        local_ipc_path_maximum: usize,
-    ) -> Result<Self, AppPathHostFactsError> {
-        let local_ipc_path_maximum = NonZeroUsize::new(local_ipc_path_maximum)
-            .ok_or(AppPathHostFactsError::InvalidLocalIpcPathMaximum)?;
-        Ok(Self {
-            runtime_fallback_root: None,
-            local_ipc_path_maximum,
-        })
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum AppPathHostFactsError {
-    #[error("the runtime fallback root is invalid")]
-    InvalidRuntimeFallbackRoot,
-    #[error("the local IPC path maximum is invalid")]
-    InvalidLocalIpcPathMaximum,
-}
 
 const PRIVATE_RUNTIME_ATTEMPTS: usize = 8;
 const PRIVATE_RUNTIME_SUFFIX_BYTES: usize = 8;
@@ -85,25 +30,6 @@ pub(crate) struct AppPaths {
 }
 
 impl AppPaths {
-    #[cfg(test)]
-    pub(crate) fn resolve(
-        environment: &AppDirectoryEnvironment,
-        host: &AppPathHostFacts,
-        filesystem: Arc<dyn SecureFilesystem>,
-    ) -> Result<Self, AppPathsError> {
-        let directories = AppDirectories::resolve_xdg(
-            APP_DIR_NAME,
-            environment,
-            host.runtime_fallback_root.clone(),
-        )?;
-        Ok(Self {
-            directories,
-            local_ipc_path_maximum: host.local_ipc_path_maximum,
-            filesystem,
-            private_runtime: Mutex::new(None),
-        })
-    }
-
     pub(crate) fn from_directories(
         directories: AppDirectories,
         local_ipc_path_maximum: usize,
@@ -121,15 +47,6 @@ impl AppPaths {
 
     pub(crate) fn directories(&self) -> &AppDirectories {
         &self.directories
-    }
-
-    #[cfg(test)]
-    pub(crate) fn config(&self) -> &Path {
-        &self.directories.config
-    }
-    #[cfg(test)]
-    pub(crate) fn runtime(&self) -> &Path {
-        self.directories.runtime.as_deref().unwrap()
     }
 
     pub(crate) fn managed_ssh_config(&self) -> PathBuf {
@@ -499,14 +416,6 @@ impl From<SecureFilesystemError> for AppPathsError {
     }
 }
 
-#[cfg(test)]
-fn is_absolute_normal_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-}
-
 fn validate_child_name(name: &str) -> Result<(), AppPathsError> {
     let mut components = Path::new(name).components();
     let valid = !name.is_empty()
@@ -532,10 +441,6 @@ mod tests {
             ..Default::default()
         }
     }
-    fn host(maximum: usize) -> AppPathHostFacts {
-        AppPathHostFacts::new("/runtime".into(), maximum).unwrap()
-    }
-
     #[test]
     fn resolve_should_apply_xdg_precedence_and_validate_spelling() {
         let environment = AppDirectoryEnvironment {
@@ -543,14 +448,21 @@ mod tests {
             xdg_runtime_dir: Some("relative".into()),
             ..environment()
         };
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &environment,
-            &host(200),
+            Some("/runtime".into()),
+            200,
             Arc::new(RecordingFilesystem::default()),
         )
         .unwrap();
-        assert_eq!(paths.config(), Path::new("/explicit/../config/spaceterm"));
-        assert_eq!(paths.runtime(), Path::new("/runtime/spaceterm"));
+        assert_eq!(
+            paths.directories().config.as_path(),
+            Path::new("/explicit/../config/spaceterm")
+        );
+        assert_eq!(
+            paths.directories().runtime.as_deref().unwrap(),
+            Path::new("/runtime/spaceterm")
+        );
     }
 
     #[test]
@@ -559,26 +471,27 @@ mod tests {
             xdg_runtime_dir: Some("/explicit/../runtime".into()),
             ..environment()
         };
-        let host = AppPathHostFacts::without_runtime_fallback(200).unwrap();
 
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &environment,
-            &host,
+            None,
+            200,
             Arc::new(RecordingFilesystem::default()),
         )
         .unwrap();
 
         assert_eq!(
-            paths.runtime().as_os_str(),
+            paths.directories().runtime.as_deref().unwrap().as_os_str(),
             OsStr::new("/explicit/../runtime/spaceterm")
         );
     }
 
     #[test]
     fn runtime_owner_should_report_an_unavailable_runtime_directory() {
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &environment(),
-            &AppPathHostFacts::without_runtime_fallback(200).unwrap(),
+            None,
+            200,
             Arc::new(RecordingFilesystem::default()),
         )
         .unwrap();
@@ -597,7 +510,13 @@ mod tests {
             .lock()
             .unwrap()
             .insert(PathBuf::from("/runtime/spaceterm"));
-        let paths = AppPaths::resolve(&environment(), &host(200), filesystem.clone()).unwrap();
+        let paths = crate::platform::testing::resolve_app_paths(
+            &environment(),
+            Some("/runtime".into()),
+            200,
+            filesystem.clone(),
+        )
+        .unwrap();
 
         let first = paths.create_runtime_owner("a").unwrap();
         let second = paths.create_runtime_owner("c").unwrap();
@@ -623,7 +542,13 @@ mod tests {
             xdg_runtime_dir: Some("/run/user/1000".into()),
             ..environment()
         };
-        let paths = AppPaths::resolve(&environment, &host(200), filesystem).unwrap();
+        let paths = crate::platform::testing::resolve_app_paths(
+            &environment,
+            Some("/runtime".into()),
+            200,
+            filesystem,
+        )
+        .unwrap();
 
         assert!(matches!(
             paths.create_runtime_owner("a"),
@@ -632,21 +557,30 @@ mod tests {
     }
 
     #[test]
-    fn host_facts_should_reject_unusable_values() {
+    fn constructor_should_reject_an_unusable_local_ipc_bound() {
+        let directories = AppDirectories::resolve_xdg(
+            crate::platform::app_directories::APP_DIR_NAME,
+            &environment(),
+            Some("/runtime".into()),
+        )
+        .unwrap();
         assert_eq!(
-            AppPathHostFacts::new("relative".into(), 1).unwrap_err(),
-            AppPathHostFactsError::InvalidRuntimeFallbackRoot
-        );
-        assert_eq!(
-            AppPathHostFacts::new("/runtime".into(), 0).unwrap_err(),
-            AppPathHostFactsError::InvalidLocalIpcPathMaximum
+            AppPaths::from_directories(directories, 0, Arc::new(RecordingFilesystem::default()))
+                .unwrap_err(),
+            AppPathsError::InvalidLocalIpcPathMaximum
         );
     }
 
     #[test]
     fn owner_policy_should_name_register_and_cleanup_in_order() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = AppPaths::resolve(&environment(), &host(200), filesystem.clone()).unwrap();
+        let paths = crate::platform::testing::resolve_app_paths(
+            &environment(),
+            Some("/runtime".into()),
+            200,
+            filesystem.clone(),
+        )
+        .unwrap();
         let owner = paths
             .create_runtime_owner_with_identity("a", 35, 36)
             .unwrap();
@@ -672,7 +606,13 @@ mod tests {
     #[test]
     fn socket_path_should_use_injected_constraint() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = AppPaths::resolve(&environment(), &host(4), filesystem).unwrap();
+        let paths = crate::platform::testing::resolve_app_paths(
+            &environment(),
+            Some("/runtime".into()),
+            4,
+            filesystem,
+        )
+        .unwrap();
         let owner = paths.create_runtime_owner_with_identity("a", 1, 1).unwrap();
         assert!(matches!(
             owner.socket_path("a"),
@@ -682,14 +622,14 @@ mod tests {
 
     #[test]
     fn debug_output_should_not_expose_paths_or_native_details() {
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &environment(),
-            &host(200),
+            Some("/runtime".into()),
+            200,
             Arc::new(RecordingFilesystem::default()),
         )
         .unwrap();
         assert_eq!(format!("{paths:?}"), "AppPaths(..)");
-        assert_eq!(format!("{:?}", host(200)), "AppPathHostFacts(..)");
         assert_eq!(format!("{:?}", AppPathsError::UnsafePath), "UnsafePath");
     }
 }

@@ -13,9 +13,17 @@ fn terminal_theme(id: impl Into<String>, name: impl Into<String>) -> TerminalThe
     }
 }
 
+fn catalog_snapshot(catalog: &ThemeCatalog) -> Vec<TerminalTheme> {
+    catalog
+        .summaries()
+        .iter()
+        .map(|summary| catalog.get(&summary.id).unwrap().clone())
+        .collect()
+}
+
 fn imported_theme_count(catalog: &ThemeCatalog) -> usize {
     catalog
-        .themes()
+        .summaries()
         .iter()
         .filter(|theme| !theme.id.is_reserved())
         .count()
@@ -127,7 +135,7 @@ fn catalog_retires_themes_in_the_same_batch_and_frees_their_capacity() {
 fn catalog_retires_only_installed_imported_themes() {
     let original = terminal_theme("custom.original", "Original");
     let mut catalog = ThemeCatalog::from_terminal_themes(std::slice::from_ref(&original)).unwrap();
-    let before = catalog.themes();
+    let before = catalog_snapshot(&catalog);
     let incoming = [terminal_theme("custom.incoming", "Incoming")];
 
     assert_eq!(
@@ -147,13 +155,13 @@ fn catalog_retires_only_installed_imported_themes() {
         Err(CatalogError::ReservedId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.themes(), before);
+    assert_eq!(catalog_snapshot(&catalog), before);
 }
 
 #[test]
 fn catalog_never_replaces_a_reserved_builtin() {
     let mut catalog = ThemeCatalog::default();
-    let before = catalog.themes();
+    let before = catalog_snapshot(&catalog);
     let reserved = terminal_theme("builtin.spaceterm.dark", "Overwrite");
 
     assert_eq!(
@@ -161,14 +169,14 @@ fn catalog_never_replaces_a_reserved_builtin() {
         Err(CatalogError::ReservedId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.themes(), before);
+    assert_eq!(catalog_snapshot(&catalog), before);
 }
 
 #[test]
 fn catalog_batch_failure_is_atomic_after_valid_entries() {
     let original = terminal_theme("custom.atomic-original", "Original");
     let mut catalog = ThemeCatalog::from_terminal_themes(&[original]).unwrap();
-    let before = catalog.themes();
+    let before = catalog_snapshot(&catalog);
     let batch = [
         terminal_theme("custom.atomic-new", "New"),
         terminal_theme("custom.atomic-new", "Duplicate"),
@@ -179,7 +187,7 @@ fn catalog_batch_failure_is_atomic_after_valid_entries() {
         Err(CatalogError::DuplicateId)
     );
     assert_eq!(catalog.revision(), 0);
-    assert_eq!(catalog.themes(), before);
+    assert_eq!(catalog_snapshot(&catalog), before);
 }
 
 #[test]
@@ -189,7 +197,7 @@ fn catalog_rejects_stale_batches_without_mutation() {
     catalog
         .install_batch(&[first], 0, &BTreeSet::new())
         .unwrap();
-    let before = catalog.themes();
+    let before = catalog_snapshot(&catalog);
 
     assert_eq!(
         catalog.install_batch(
@@ -200,7 +208,7 @@ fn catalog_rejects_stale_batches_without_mutation() {
         Err(CatalogError::RevisionConflict)
     );
     assert_eq!(catalog.revision(), 1);
-    assert_eq!(catalog.themes(), before);
+    assert_eq!(catalog_snapshot(&catalog), before);
 }
 
 #[test]
@@ -222,20 +230,6 @@ fn reinstalling_a_zed_family_replaces_its_themes_in_place() {
     );
     assert_eq!(catalog.revision(), 2);
     assert_eq!(imported_theme_count(&catalog), ids.len());
-}
-
-#[test]
-fn catalog_theme_listing_is_globally_sorted_and_includes_builtins() {
-    let catalog = ThemeCatalog::from_terminal_themes(&[
-        terminal_theme("custom.z-last", "Last"),
-        terminal_theme("custom.a-first", "First"),
-    ])
-    .unwrap();
-    let themes = catalog.themes();
-    let ids = themes.iter().map(|theme| &theme.id).collect::<Vec<_>>();
-
-    assert_eq!(themes.len(), 4);
-    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[test]

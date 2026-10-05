@@ -2,14 +2,13 @@ use std::{rc::Rc, sync::Arc};
 
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
-use crate::appearance::{
-    Appearance, AppearanceMode, ChromeDensity, SettingsDocument, builtin_fallback_theme,
-};
+use crate::appearance::{Appearance, AppearanceMode, ChromeDensity, builtin_fallback_theme};
 use crate::desktop_profile::HostFeature;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
 };
+use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
 use crate::theme_registry::ZedThemeRegistry;
 use crate::theme_registry::testing::{MemoryTransport, extension_archive};
@@ -23,7 +22,7 @@ use super::test_support::MemoryStorage;
 
 struct Harness {
     storage: Arc<MemoryStorage>,
-    settings: crate::settings::UserSettings,
+    settings: crate::settings::Settings,
     platform: RecordingAppearancePlatform,
 }
 
@@ -376,7 +375,7 @@ fn open_settings_with_capabilities(
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     registry: Option<ZedThemeRegistry>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(storage.clone());
+    let settings = crate::settings::Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -3153,7 +3152,7 @@ fn shared_mode_and_independent_slots_survive_save_reload_and_restart(cx: &mut Te
     cx.update(|_, cx| window.update(cx, |settings, cx| settings.editor.reload(cx)));
     cx.run_until_parked();
     assert_eq!(document_of(&window, cx).preferences, expected);
-    let restarted = crate::settings::UserSettings::load(harness.storage);
+    let restarted = crate::settings::Settings::load(harness.storage);
     assert_eq!(restarted.snapshot().candidate.preferences, expected);
 }
 
@@ -3584,7 +3583,7 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
     select_section(SettingsSectionId::Advanced, cx);
     assert_eq!(
         settings_file_text(&window, cx),
-        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
+        crate::settings::export_settings(&document_of(&window, cx)).unwrap()
     );
 
     cx.update(|_, cx| {
@@ -3600,7 +3599,7 @@ fn the_settings_file_shows_the_whole_document_as_stored(cx: &mut TestAppContext)
     let text = settings_file_text(&window, cx);
     assert_eq!(
         text,
-        crate::appearance::export_settings(&document_of(&window, cx)).unwrap()
+        crate::settings::export_settings(&document_of(&window, cx)).unwrap()
     );
     assert!(
         text.contains("comfortable"),
@@ -3637,7 +3636,7 @@ fn a_settings_file_too_large_to_show_says_so_instead_of_showing_an_earlier_one(
     };
     let compact = serde_json::to_vec(&document).unwrap();
     assert!(compact.len() <= 4 * 1024 * 1024);
-    assert!(crate::appearance::export_settings(&document).unwrap().len() > 4 * 1024 * 1024);
+    assert!(crate::settings::export_settings(&document).unwrap().len() > 4 * 1024 * 1024);
     harness.storage.save_bytes_elsewhere(compact);
     follow_outside_save(&file, cx);
 
@@ -3884,7 +3883,7 @@ fn exported_document_with_a_theme() -> Vec<u8> {
     document.preferences.window.density = ChromeDensity::Comfortable;
     document.terminal_themes =
         crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
-    crate::appearance::export_settings(&document)
+    crate::settings::export_settings(&document)
         .unwrap()
         .into_bytes()
 }
@@ -3998,7 +3997,7 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
 ) {
     cx.update(|cx| {
         appearance_runtime::install(
-            crate::settings::UserSettings::load(MemoryStorage::with_document(
+            crate::settings::Settings::load(MemoryStorage::with_document(
                 &SettingsDocument::default(),
             )),
             Rc::new(RecordingAppearancePlatform::default()),
@@ -4114,9 +4113,8 @@ impl crate::platform::window_movement::WindowMovementFactory for RecordingMoveme
 
 #[gpui::test]
 fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &SettingsDocument::default(),
-    ));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     cx.update(|cx| {
         appearance_runtime::install(
             settings,
@@ -4152,9 +4150,8 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
 fn keyboard_shortcuts_opens_settings_at_keybindings_and_moves_an_open_window_there(
     cx: &mut TestAppContext,
 ) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &SettingsDocument::default(),
-    ));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     cx.update(|cx| {
         appearance_runtime::install(
             settings,

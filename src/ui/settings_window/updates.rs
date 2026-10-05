@@ -8,8 +8,8 @@ use gpui::{AnyElement, App, Context, Entity, SharedString};
 use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::{SettingsRowId, SettingsWindow};
-use crate::appearance::SettingsDocument;
 use crate::application_identity::ApplicationIdentity;
+use crate::settings::SettingsDocument;
 use crate::ui::sidebar_window::form::action_button;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};

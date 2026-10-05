@@ -15,12 +15,13 @@ use std::{
 
 use gpui::{Context, Task};
 
-use crate::appearance::{ResetTarget, SettingsDocument, ThemeId, ThemeSummary};
+use crate::appearance::{ResetTarget, ThemeId, ThemeSummary};
 #[cfg(test)]
 use crate::settings::CommitJob;
+use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
-use crate::settings::{CommitOutcome, ImportReceipt, SettingsError, ThemeImport, UserSettings};
+use crate::settings::{CommitOutcome, ImportReceipt, Settings, SettingsError, ThemeImport};
 
 use super::SettingsWindow;
 pub(super) use draft::SaveStatus;
@@ -66,7 +67,7 @@ impl CommitCompletion {
 }
 
 impl SettingsEditor {
-    pub(super) fn new(settings: UserSettings) -> Self {
+    pub(super) fn new(settings: Settings) -> Self {
         Self {
             draft: SettingsDraft::new(settings),
             pending: None,

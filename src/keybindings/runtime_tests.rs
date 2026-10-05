@@ -162,22 +162,22 @@ fn menu_reinstalls_only_when_the_resolved_keymap_changes(cx: &mut TestAppContext
     });
 }
 
-fn settings() -> UserSettings {
+fn settings() -> Settings {
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
     use crate::platform::testing::RecordingFilesystem;
     use crate::settings::storage::ConfigSettingsStorage;
 
-    let paths = AppPaths::resolve(
+    let paths = crate::platform::testing::resolve_app_paths(
         &AppDirectoryEnvironment {
             home: Some("/home/test".into()),
             ..Default::default()
         },
-        &AppPathHostFacts::new("/runtime".into(), 200).unwrap(),
+        Some("/runtime".into()),
+        200,
         Arc::new(RecordingFilesystem::default()),
     )
     .unwrap();
-    UserSettings::load(Arc::new(ConfigSettingsStorage::new(Arc::new(paths))))
+    Settings::load(Arc::new(ConfigSettingsStorage::new(Arc::new(paths))))
 }
 
 #[gpui::test]

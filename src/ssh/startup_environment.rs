@@ -17,16 +17,6 @@ const LOCALE_ENVIRONMENT_VARIABLES: [&str; 8] = [
     "LC_TIME",
 ];
 
-trait StartupSshEnvironmentReader {
-    fn environment_variable(&mut self, key: &OsStr) -> Option<OsString>;
-}
-
-impl<F: FnMut(&OsStr) -> Option<OsString>> StartupSshEnvironmentReader for F {
-    fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
-        self(key)
-    }
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct StartupSshEnvironment {
     path: OsString,
@@ -59,34 +49,22 @@ impl StartupSshEnvironment {
         if !safe_environment_value(&fallback_path) {
             return Err("SSH search-path fallback is invalid");
         }
-        Ok(Self::prepare(&mut read, fallback_path))
-    }
-
-    #[cfg(test)]
-    fn capture_with(reader: &mut impl StartupSshEnvironmentReader) -> Self {
-        Self::prepare(reader, FALLBACK_PATH.into())
-    }
-
-    fn prepare(reader: &mut impl StartupSshEnvironmentReader, fallback_path: OsString) -> Self {
-        let path = reader
-            .environment_variable(OsStr::new(PATH_ENVIRONMENT_VARIABLE))
+        let path = read(OsStr::new(PATH_ENVIRONMENT_VARIABLE))
             .filter(|value| safe_environment_value(value))
             .unwrap_or(fallback_path);
         let locale = LOCALE_ENVIRONMENT_VARIABLES
             .into_iter()
             .filter_map(|name| {
-                reader
-                    .environment_variable(OsStr::new(name))
+                read(OsStr::new(name))
                     .filter(|value| safe_environment_value(value))
                     .map(|value| (name, value))
             })
             .collect();
-        Self {
+        Ok(Self {
             path,
             locale,
-            agent_socket: reader
-                .environment_variable(OsStr::new(SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE)),
-        }
+            agent_socket: read(OsStr::new(SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE)),
+        })
     }
 
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
@@ -189,7 +167,7 @@ mod tests {
         }
     }
 
-    impl StartupSshEnvironmentReader for TestStartupSshEnvironmentReader {
+    impl TestStartupSshEnvironmentReader {
         fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
             *self.reads.entry(key.to_os_string()).or_default() += 1;
             self.environment.get(key).cloned()
@@ -203,7 +181,11 @@ mod tests {
             "/private/tmp/ssh-agent.sock",
         );
 
-        let captured = StartupSshEnvironment::capture_with(&mut reader);
+        let captured = StartupSshEnvironment::from_environment(
+            |key| reader.environment_variable(key),
+            FALLBACK_PATH.into(),
+        )
+        .unwrap();
 
         assert_eq!(
             (
@@ -218,7 +200,11 @@ mod tests {
     fn capture_should_preserve_an_unset_agent_socket() {
         let mut reader = TestStartupSshEnvironmentReader::default();
 
-        let captured = StartupSshEnvironment::capture_with(&mut reader);
+        let captured = StartupSshEnvironment::from_environment(
+            |key| reader.environment_variable(key),
+            FALLBACK_PATH.into(),
+        )
+        .unwrap();
 
         assert_eq!(captured.agent_socket(), None);
     }
@@ -228,7 +214,11 @@ mod tests {
         let mut reader = TestStartupSshEnvironmentReader::default()
             .with_environment(SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE, OsString::new());
 
-        let captured = StartupSshEnvironment::capture_with(&mut reader);
+        let captured = StartupSshEnvironment::from_environment(
+            |key| reader.environment_variable(key),
+            FALLBACK_PATH.into(),
+        )
+        .unwrap();
 
         assert_eq!(captured.agent_socket(), Some(OsStr::new("")));
     }
@@ -246,7 +236,11 @@ mod tests {
             .with_environment("LC_SECRET", "locale-shaped-secret")
             .with_environment("SPACETERM_UNRELATED_SECRET", "secret");
 
-        let captured = StartupSshEnvironment::capture_with(&mut reader);
+        let captured = StartupSshEnvironment::from_environment(
+            |key| reader.environment_variable(key),
+            FALLBACK_PATH.into(),
+        )
+        .unwrap();
 
         assert_eq!(
             captured.entries().collect::<Vec<_>>(),
@@ -283,7 +277,11 @@ mod tests {
             if let Some(path) = path {
                 reader = reader.with_environment(PATH_ENVIRONMENT_VARIABLE, path);
             }
-            let captured = StartupSshEnvironment::capture_with(&mut reader);
+            let captured = StartupSshEnvironment::from_environment(
+                |key| reader.environment_variable(key),
+                FALLBACK_PATH.into(),
+            )
+            .unwrap();
 
             assert_eq!(
                 captured.entries().next(),

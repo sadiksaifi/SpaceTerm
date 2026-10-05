@@ -18,8 +18,8 @@ impl WindowMovementFactory for RecordingMovement {
 }
 
 fn install(cx: &mut TestAppContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &crate::appearance::SettingsDocument::default(),
+    let settings = crate::settings::Settings::load(MemoryStorage::with_document(
+        &crate::settings::SettingsDocument::default(),
     ));
     cx.update(|cx| {
         crate::ui::appearance_runtime::install(

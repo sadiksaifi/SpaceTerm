@@ -198,7 +198,6 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
 mod tests {
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::askpass::{
         AskPassHelperReply, AskPassPresentationFailure, AskPassPresenter, AskPassProtocolReply,
         CAPABILITY_ENV, ENDPOINT_ENV, read_reply, start_attempt_with_presenter, write_request,
@@ -227,7 +226,7 @@ mod tests {
         }
 
         fn paths(&self) -> AppPaths {
-            AppPaths::resolve(
+            crate::platform::testing::resolve_app_paths(
                 &AppDirectoryEnvironment {
                     home: None,
                     tmpdir: None,
@@ -237,7 +236,8 @@ mod tests {
                     xdg_cache_home: Some(self.0.join("cache").into_os_string()),
                     xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
                 },
-                &AppPathHostFacts::new(self.0.join("temporary"), 104).unwrap(),
+                Some(self.0.join("temporary")),
+                104,
                 Arc::new(UnixSecureFilesystem),
             )
             .unwrap()
@@ -324,12 +324,13 @@ mod tests {
         fs::create_dir_all(&temporary).unwrap();
         fs::create_dir(&elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, temporary.join("spaceterm")).unwrap();
-        let paths = AppPaths::resolve(
+        let paths = crate::platform::testing::resolve_app_paths(
             &AppDirectoryEnvironment {
                 home: Some(directory.0.join("home").into_os_string()),
                 ..Default::default()
             },
-            &AppPathHostFacts::new(temporary.clone(), 104).unwrap(),
+            Some(temporary.clone()),
+            104,
             Arc::new(UnixSecureFilesystem),
         )
         .unwrap();

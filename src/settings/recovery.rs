@@ -19,7 +19,7 @@ pub(crate) struct RecoveryReceipt {
     pub(crate) durability: Durability,
 }
 
-impl UserSettings {
+impl Settings {
     pub(crate) fn recover_by_reset(&self) -> Result<RecoveryReceipt, RecoveryError> {
         let mut state = self.0.lock();
         if !matches!(state.transaction, Transaction::Idle) {

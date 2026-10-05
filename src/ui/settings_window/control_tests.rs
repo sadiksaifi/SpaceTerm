@@ -3,8 +3,9 @@ use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, AppearanceMode, SettingsDocument, TerminalFontFamily};
+use crate::appearance::{Appearance, AppearanceMode, TerminalFontFamily};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
+use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
 use super::test_support::MemoryStorage;
@@ -184,7 +185,7 @@ fn open_settings<'a>(
     document: &SettingsDocument,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(document));
+    let settings = crate::settings::Settings::load(MemoryStorage::with_document(document));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -526,11 +527,11 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 fn a_missing_theme_selection_opens_on_the_builtin_theme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
     document.preferences.mode = crate::appearance::AppearanceMode::Dark;
-    let bytes = crate::appearance::export_settings(&document)
+    let bytes = crate::settings::export_settings(&document)
         .unwrap()
         .replace("builtin.spaceterm.dark", "user.missing-terminal")
         .into_bytes();
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_bytes(bytes));
+    let settings = crate::settings::Settings::load(MemoryStorage::with_bytes(bytes));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {

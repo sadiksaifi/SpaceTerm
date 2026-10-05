@@ -4,8 +4,9 @@ use super::*;
 fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     cx: &mut gpui::TestAppContext,
 ) {
-    use crate::appearance::{ChromeDensity, SettingsDocument};
+    use crate::appearance::ChromeDensity;
     use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+    use crate::settings::SettingsDocument;
     use gpui::{point, px};
 
     let geometry = WindowFrameGeometry::new(Some(16.0))
@@ -24,7 +25,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     cx.run_until_parked();
     cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
     cx.run_until_parked();
-    let settings = cx.update(|cx| {
+    let settings_window = cx.update(|cx| {
         cx.windows()
             .into_iter()
             .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
@@ -34,7 +35,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     assert_eq!(
         (
             cx.traffic_light_position_updates(workspace.into()),
-            cx.traffic_light_position_updates(settings.into()),
+            cx.traffic_light_position_updates(settings_window.into()),
         ),
         (
             vec![point(px(15.5), px(14.0))],
@@ -42,15 +43,15 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
         )
     );
 
-    let user_settings = cx.update(|cx| {
+    let settings = cx.update(|cx| {
         cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
             .settings
             .clone()
     });
-    let token = user_settings.begin_preview(0).unwrap();
+    let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
     candidate.preferences.window.density = ChromeDensity::Comfortable;
-    user_settings.update_preview(&token, candidate).unwrap();
+    settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     let (workspace_expected, settings_expected) = cx.update(|cx| {
         let appearance = crate::ui::appearance::chrome(cx);
@@ -69,7 +70,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     assert_eq!(
         (
             cx.traffic_light_position_updates(workspace.into()),
-            cx.traffic_light_position_updates(settings.into()),
+            cx.traffic_light_position_updates(settings_window.into()),
         ),
         (
             vec![point(px(15.5), px(14.0)), workspace_expected],

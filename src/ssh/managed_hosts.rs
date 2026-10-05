@@ -537,7 +537,6 @@ mod tests {
 
     use super::*;
     use crate::platform::app_directories::{APP_DIR_NAME, AppDirectories, AppDirectoryEnvironment};
-    use crate::platform::app_paths::AppPathHostFacts;
     use crate::platform::secure_filesystem::{
         PreparedPrivateFile, SecureCommitResult, SecureFilesystem,
     };
@@ -763,8 +762,13 @@ mod tests {
             home: Some("/home/test".into()),
             ..Default::default()
         };
-        let host = AppPathHostFacts::new("/runtime".into(), 200).unwrap();
-        AppPaths::resolve(&environment, &host, filesystem).unwrap()
+        crate::platform::testing::resolve_app_paths(
+            &environment,
+            Some("/runtime".into()),
+            200,
+            filesystem,
+        )
+        .unwrap()
     }
 
     fn windows_policy_paths(filesystem: Arc<RecordingFilesystem>) -> AppPaths {

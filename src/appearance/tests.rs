@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
+use crate::settings::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
 
 #[test]
 fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() {

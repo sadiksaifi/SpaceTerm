@@ -187,11 +187,8 @@ mod builtin;
 mod catalog_tests;
 mod compiler;
 mod composition;
-mod document;
 mod preferences;
 mod resolution;
-#[cfg(test)]
-mod schema_tests;
 mod terminal_theme;
 #[cfg(test)]
 mod tests;
@@ -204,9 +201,6 @@ pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     UnavailableWindowEffect, WindowBackgroundAppearance, WindowBackgroundChoices,
-};
-pub(crate) use document::{
-    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 pub(crate) use preferences::{
     AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, TerminalFontFamily,

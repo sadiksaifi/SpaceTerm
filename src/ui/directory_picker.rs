@@ -1482,10 +1482,10 @@ mod tests {
         let parsed = parse_picker_path("/sensitive/project").unwrap();
         let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
         let listing = DirectoryListing::new(vec![row.clone()]);
-        let account = RemoteWorkspaceAccount::new(
+        let account = RemoteWorkspaceAccount::from_validated_login_shell(
             "sensitive-user".to_owned(),
             RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
-            "/bin/zsh".to_owned(),
+            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
         )
         .unwrap();
         let pinned = PinnedDirectory::Remote {
@@ -1657,10 +1657,10 @@ mod tests {
     }
 
     fn remote_account() -> RemoteWorkspaceAccount {
-        RemoteWorkspaceAccount::new(
+        RemoteWorkspaceAccount::from_validated_login_shell(
             "tester".to_owned(),
             RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-            "/bin/zsh".to_owned(),
+            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
         )
         .unwrap()
     }

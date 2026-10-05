@@ -7,7 +7,7 @@ use crate::appearance::{Appearance, AppearanceMode, ChromeDensity};
 use crate::platform::appearance::AppearancePlatform as _;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::settings::UserSettings;
+use crate::settings::Settings;
 
 /// Storage with no settings file that fails every write, so a test proves a preview never saves.
 pub(super) struct ReadOnlyStorage;
@@ -46,8 +46,8 @@ impl WindowMovementFactory for RecordingMovement {
 }
 
 /// Installs appearance over read-only settings, with the system in Dark.
-fn install(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform) {
-    let settings = UserSettings::load(Arc::new(ReadOnlyStorage));
+fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
+    let settings = Settings::load(Arc::new(ReadOnlyStorage));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_native_window_transparency_supported(true);
@@ -244,7 +244,7 @@ fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
     );
 
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = crate::appearance::SettingsDocument::default();
+    let mut candidate = crate::settings::SettingsDocument::default();
     candidate.preferences.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();

@@ -77,9 +77,9 @@ impl SettingsStorage for MemoryStorage {
     }
 }
 
-fn setup() -> (UserSettings, Arc<MemoryStorage>) {
+fn setup() -> (Settings, Arc<MemoryStorage>) {
     let storage = Arc::new(MemoryStorage::default());
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     (settings, storage)
 }
 
@@ -99,7 +99,7 @@ fn zed_extension(version: &str, names: &[&str]) -> ZedExtension {
     }
 }
 
-fn installed_names(settings: &UserSettings) -> Vec<String> {
+fn installed_names(settings: &Settings) -> Vec<String> {
     let mut names = settings
         .snapshot()
         .candidate
@@ -129,13 +129,19 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
     );
     assert_eq!(imported.candidate.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
-    assert_eq!(settings.list_themes().unwrap().len(), 3);
+    assert_eq!(
+        ThemeCatalog::from_terminal_themes(&settings.snapshot().candidate.terminal_themes)
+            .unwrap()
+            .summaries()
+            .len(),
+        3
+    );
     assert_eq!(
         settings.import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY)),
         Err(SettingsError::Stale)
     );
     let exported = settings.export_document().unwrap();
-    let copy = crate::appearance::parse_settings(exported.as_bytes()).unwrap();
+    let copy = crate::settings::parse_settings(exported.as_bytes()).unwrap();
     assert_eq!(&copy, imported.candidate.as_ref());
     let reinstalled = settings
         .import_preview(
@@ -164,7 +170,7 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
         Err(SettingsError::Busy)
     );
     job.run().unwrap();
-    let restarted = UserSettings::load(storage);
+    let restarted = Settings::load(storage);
     assert_eq!(
         restarted.export_document().unwrap(),
         settings.export_document().unwrap()
@@ -172,30 +178,37 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
 }
 
 #[test]
-fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
+fn preview_import_and_reset_use_the_same_serialized_commit_owner() {
     let (settings, storage) = setup();
     let initial = settings.snapshot();
-    let (receipt, job) = settings
-        .import_committed(
-            initial.committed.revision,
-            initial.catalog_revision,
-            ThemeImport::ZedFamily(ZED_FAMILY),
-        )
+    let token = settings.begin_preview(initial.committed.revision).unwrap();
+    let before_import = settings.snapshot().catalog_revision;
+    let receipt = settings
+        .import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY))
         .unwrap();
     assert_eq!(receipt.installed.len(), 1);
-    assert_eq!(receipt.catalog_revision, initial.catalog_revision + 1);
-    assert!(settings.snapshot().candidate.terminal_themes.is_empty());
-    job.run().unwrap();
+    assert_eq!(receipt.catalog_revision, before_import + 1);
+    assert!(settings.snapshot().committed.terminal_themes.is_empty());
+    settings.commit_preview(&token).unwrap().run().unwrap();
+    assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     assert_eq!(
         settings.snapshot().catalog_revision,
-        receipt.catalog_revision
+        receipt.catalog_revision + 1
     );
-    let revision = settings.snapshot().committed.revision;
-    settings
-        .reset_committed(revision, ResetTarget::AllAppearance)
-        .unwrap()
-        .run()
+    let token = settings
+        .begin_preview(settings.snapshot().committed.revision)
         .unwrap();
+    let mut candidate = (*settings.snapshot().candidate).clone();
+    candidate.preferences.mode = AppearanceMode::Light;
+    settings.update_preview(&token, candidate).unwrap();
+    settings
+        .reset_preview(&token, ResetTarget::AllAppearance)
+        .unwrap();
+    assert_eq!(
+        settings.snapshot().candidate.preferences,
+        SettingsDocument::default().preferences
+    );
+    settings.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
@@ -528,40 +541,45 @@ fn deletion_rejects_stale_and_busy_operations_without_removing_the_theme() {
         settings.remove_themes_preview(&token, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     );
-    assert!(matches!(
-        settings.remove_themes_committed(0, current_catalog_revision, std::slice::from_ref(&id)),
-        Err(SettingsError::Busy)
-    ));
     assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     drop(job);
 }
 
 #[test]
-fn direct_deletion_commits_only_the_named_custom_theme() {
+fn preview_deletion_commits_only_the_named_custom_theme() {
     let (settings, storage) = setup();
-    let initial = settings.snapshot();
-    let (receipt, job) = settings
-        .import_committed(
-            initial.committed.revision,
-            initial.catalog_revision,
+    let token = settings.begin_preview(0).unwrap();
+    let receipt = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
             ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
     let id = receipt.installed[0].clone();
-    job.run().unwrap();
+    settings.commit_preview(&token).unwrap().run().unwrap();
     let installed = settings.snapshot();
-
-    let deletion = settings
-        .remove_themes_committed(
-            installed.committed.revision,
-            installed.catalog_revision,
+    let token = settings
+        .begin_preview(installed.committed.revision)
+        .unwrap();
+    settings
+        .remove_themes_preview(
+            &token,
+            settings.snapshot().catalog_revision,
             std::slice::from_ref(&id),
         )
         .unwrap();
+    let deletion = settings.commit_preview(&token).unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     deletion.run().unwrap();
     assert!(settings.snapshot().committed.terminal_themes.is_empty());
-    assert_eq!(settings.list_themes().unwrap().len(), 2);
+    assert_eq!(
+        ThemeCatalog::from_terminal_themes(&settings.snapshot().candidate.terminal_themes)
+            .unwrap()
+            .summaries()
+            .len(),
+        2
+    );
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 
@@ -683,7 +701,7 @@ fn commit_captures_one_candidate_and_rejects_conflicting_edits() {
     let outcome = job.run().unwrap();
     assert_eq!(outcome.revision, original.revision + 1);
     assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
-    let restarted = UserSettings::load(storage);
+    let restarted = Settings::load(storage);
     assert_eq!(
         export_settings(&settings.snapshot().committed).unwrap(),
         export_settings(&restarted.snapshot().committed).unwrap()
@@ -826,7 +844,7 @@ fn uncertain_durability_is_committed_and_identity_is_reconciled() {
 fn invalid_startup_document_is_retained_and_cannot_be_overwritten() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 1));
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
     let current = settings.snapshot().committed;
     assert!(
@@ -970,7 +988,7 @@ fn recovery_preserves_backup_and_competing_file_on_conflict() {
         state.snapshot = Some((b"broken".to_vec(), 1));
         state.successor_after_quarantine = true;
     }
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     assert_eq!(
         settings.recover_by_reset(),
         Err(RecoveryError::Storage(StorageError::Conflict))
@@ -1015,7 +1033,7 @@ fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
     use super::recovery::RecoveryError;
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"broken".to_vec(), 1));
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
     assert_eq!(
         settings.recover_by_reset(),
@@ -1115,7 +1133,7 @@ fn ensuring_the_file_writes_only_a_document_no_file_holds() {
         .clone()
         .expect("the file");
     assert_eq!(
-        crate::appearance::parse_settings(&written.0)
+        crate::settings::parse_settings(&written.0)
             .unwrap()
             .preferences,
         SettingsDocument::default().preferences
@@ -1129,7 +1147,7 @@ fn ensuring_the_file_writes_only_a_document_no_file_holds() {
 fn ensuring_the_file_leaves_an_unreadable_file_alone() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"{ broken".to_vec(), 7));
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
 
     assert!(settings.ensure_file().unwrap().is_none());
     assert_eq!(
