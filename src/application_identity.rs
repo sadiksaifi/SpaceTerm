@@ -19,12 +19,38 @@ macro_rules! named {
     };
 }
 
+/// One identity's Icon Composer document and the layer artwork it names.
+///
+/// The macOS bundle compiles the document into the application icon. A surface that draws the icon
+/// itself renders the same document, so every host shows one design per identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ApplicationIcon {
+    /// The document's `icon.json`.
+    pub(crate) document: &'static str,
+    /// Each layer's SVG artwork, keyed by the `image-name` the document gives it.
+    pub(crate) artwork: &'static [(&'static str, &'static str)],
+}
+
+/// Embeds one identity's Icon Composer document from its bundle template directory.
+macro_rules! icon {
+    ($directory:literal, [$($artwork:literal),+ $(,)?]) => {
+        ApplicationIcon {
+            document: include_str!(concat!("../packaging/macos/", $directory, "/icon.json")),
+            artwork: &[$((
+                $artwork,
+                include_str!(concat!("../packaging/macos/", $directory, "/Assets/", $artwork)),
+            )),+],
+        }
+    };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
     version_label: &'static str,
     directory_name: &'static str,
     application_id: &'static str,
+    icon: ApplicationIcon,
     update_source: UpdateSource,
     microphone_access: bool,
 }
@@ -60,6 +86,10 @@ impl ApplicationIdentity {
     /// The shared desktop identity used by Wayland, X11, D-Bus, and the desktop entry.
     pub(crate) const fn application_id(self) -> &'static str {
         self.application_id
+    }
+
+    pub(crate) const fn icon(self) -> ApplicationIcon {
+        self.icon
     }
 
     /// The bundle identifier the Operating System keys this identity's privacy grants to.
@@ -105,6 +135,7 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm",
             application_id: "io.github.sadiksaifi.spaceterm",
+            icon: icon!("spaceterm/SpaceTerm.icon", ["Glyph.svg"]),
             update_source: UpdateSource::SignedFeed,
             microphone_access: true,
         }
@@ -117,6 +148,10 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm-preflight",
             application_id: "io.github.sadiksaifi.spaceterm-preflight",
+            icon: icon!(
+                "preflight/SpaceTerm Preflight.icon",
+                ["Channel Mark.svg", "Glyph.svg"]
+            ),
             update_source: UpdateSource::Unavailable,
             microphone_access: true,
         }
@@ -129,9 +164,27 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm-development",
             application_id: "io.github.sadiksaifi.spaceterm-development",
+            icon: icon!(
+                "development/SpaceTerm Development.icon",
+                ["Channel Mark.svg", "Glyph.svg"]
+            ),
             update_source: UpdateSource::Simulation,
             microphone_access: false,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::ApplicationIdentity;
+
+    /// Every identity a build can carry: production, preflight, and development.
+    pub(crate) const fn all() -> [ApplicationIdentity; 3] {
+        [
+            ApplicationIdentity::production(),
+            ApplicationIdentity::preflight(),
+            ApplicationIdentity::development(),
+        ]
     }
 }
 
@@ -279,39 +332,35 @@ mod tests {
     /// step, which survives the Dark, Clear, and Tinted appearances that replace their colors.
     #[test]
     fn identity_icons_should_share_the_glyph_and_rank_by_channel_marks() {
-        let glyphs = [
-            include_bytes!("../packaging/macos/spaceterm/SpaceTerm.icon/Assets/Glyph.svg")
-                .as_slice(),
-            include_bytes!(
-                "../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Glyph.svg"
-            ),
-            include_bytes!(
-                "../packaging/macos/development/SpaceTerm Development.icon/Assets/Glyph.svg"
-            ),
-        ];
-        let marks = [
-            None,
-            Some(include_str!(
-                "../packaging/macos/preflight/SpaceTerm Preflight.icon/Assets/Channel Mark.svg"
-            )),
-            Some(include_str!(
-                "../packaging/macos/development/SpaceTerm Development.icon/Assets/Channel Mark.svg"
-            )),
-        ];
-        let documents = [
-            include_str!("../packaging/macos/spaceterm/SpaceTerm.icon/icon.json"),
-            include_str!("../packaging/macos/preflight/SpaceTerm Preflight.icon/icon.json"),
-            include_str!("../packaging/macos/development/SpaceTerm Development.icon/icon.json"),
-        ];
+        let icons = [
+            ApplicationIdentity::production(),
+            ApplicationIdentity::preflight(),
+            ApplicationIdentity::development(),
+        ]
+        .map(ApplicationIdentity::icon);
+        let artwork = |icon: ApplicationIcon, name: &str| {
+            icon.artwork
+                .iter()
+                .find_map(|(candidate, artwork)| (*candidate == name).then_some(*artwork))
+        };
 
+        let glyphs = icons.map(|icon| artwork(icon, "Glyph.svg").expect("every icon has a glyph"));
         assert!(glyphs.iter().all(|glyph| *glyph == glyphs[0]));
         assert_eq!(
-            marks.map(|mark| mark.map_or(0, |mark| mark.matches("<circle").count())),
+            icons.map(|icon| artwork(icon, "Channel Mark.svg")
+                .map_or(0, |mark| mark.matches("<circle").count())),
             [0, 1, 2]
         );
-        for (document, mark) in documents.into_iter().zip(marks) {
-            assert!(document.contains("\"Glyph.svg\""));
-            assert_eq!(document.contains("\"Channel Mark.svg\""), mark.is_some());
+        // The embedded artwork is exactly what each document names.
+        for icon in icons {
+            let named = icon.document.matches("\"image-name\"").count();
+            assert_eq!(named, icon.artwork.len());
+            for (name, _) in icon.artwork {
+                assert!(
+                    icon.document
+                        .contains(&format!("\"image-name\" : \"{name}\""))
+                );
+            }
         }
     }
 

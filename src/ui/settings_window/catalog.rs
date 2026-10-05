@@ -640,6 +640,7 @@ const fn shortcut_group(group: CommandGroup) -> &'static str {
         CommandGroup::Pane => "Panes",
         CommandGroup::Terminal => "Terminal",
         CommandGroup::View => "View",
+        CommandGroup::Help => "Help",
     }
 }
 
@@ -718,6 +719,7 @@ shortcut_rows! {
     ToggleSidebar => "toggle-sidebar",
     ToggleSidebarFocus => "toggle-sidebar-focus",
     KeyboardShortcuts => "keyboard-shortcuts",
+    About => "about",
 }
 
 #[cfg(test)]

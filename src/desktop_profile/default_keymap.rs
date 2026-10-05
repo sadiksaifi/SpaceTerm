@@ -223,6 +223,7 @@ pub(crate) fn profile(
             Some(DefaultBinding::new("cmd-shift-e", &[])),
         ),
         (Command::KeyboardShortcuts, None),
+        (Command::About, None),
     ];
     KeymapProfile::new(
         layout,
@@ -341,6 +342,11 @@ fn control_bindings() -> Vec<KeyBinding> {
             "escape",
             crate::ui::settings_window::ClearSettingsSearch,
             Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-w",
+            crate::ui::about_window::CloseAboutWindow,
+            Some(crate::ui::about_window::ABOUT_KEY_CONTEXT),
         ),
     ]
 }

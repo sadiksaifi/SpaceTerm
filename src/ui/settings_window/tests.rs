@@ -870,8 +870,8 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
     set_query(&settings, "theme", cx);
     cx.update(|window, cx| window.focus(&settings.read(cx).focus_handle.clone(), cx));
 
-    // Search, section navigation, then the Light slot.
-    cx.simulate_keystrokes("tab tab tab enter");
+    // Search, section navigation, About, then the Light slot.
+    cx.simulate_keystrokes("tab tab tab tab enter");
     cx.run_until_parked();
     assert_eq!(
         settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
@@ -4249,4 +4249,117 @@ fn client_window_controls_share_the_search_row_and_its_edge_inset(cx: &mut TestA
     assert_eq!(close.top() - surface.top(), edge_margin);
     assert!(search.top() >= titlebar.bottom());
     assert_eq!(search.top() - titlebar.bottom(), px(10.0));
+}
+
+/// Counts About requests, as the application's own handler would receive them.
+fn count_about_requests(cx: &mut VisualTestContext) -> Rc<std::cell::Cell<usize>> {
+    let requests = Rc::new(std::cell::Cell::new(0));
+    let counted = requests.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::app::ShowAboutApplication, _| counted.set(counted.get() + 1));
+    });
+    requests
+}
+
+#[gpui::test]
+fn about_sits_apart_at_the_foot_of_the_sidebar_and_requests_about(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+
+    let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
+    let navigation = cx.debug_bounds("settings-navigation").unwrap();
+    let about = cx
+        .debug_bounds("settings-about")
+        .expect("Settings offers About");
+    let section_row = cx
+        .debug_bounds("settings-navigation-settings-section-interface")
+        .unwrap();
+    assert!(
+        about.top() > navigation.bottom(),
+        "About follows the sections"
+    );
+    assert!(about.bottom() <= sidebar.bottom());
+    // It rests in the band the content footer draws across the window's bottom edge.
+    let footer = cx.debug_bounds("settings-footer").unwrap();
+    assert!((about.center().y - footer.center().y).abs() < px(0.5));
+    assert_eq!(footer.bottom(), sidebar.bottom());
+    assert_eq!(about.left(), section_row.left());
+    assert_eq!(about.size, section_row.size);
+
+    cx.simulate_mouse_move(about.center(), None, gpui::Modifiers::none());
+    cx.simulate_click(about.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+    // A click is not keyboard traversal, so it leaves no focus ring behind.
+    assert!(cx.debug_bounds("settings-about-keyboard-focus").is_none());
+}
+
+#[gpui::test]
+fn about_is_a_named_button_for_assistive_technology(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+    cx.activate_accessibility();
+    let tree: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    let label = crate::keybindings::Command::About.label();
+    let (_, node) = tree["nodes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["aria"]["label"] == label)
+        .unwrap_or_else(|| panic!("{label} must be exposed to screen readers"));
+    assert_eq!(node["aria"]["role"], "Button");
+
+    cx.simulate_accessibility_action(gpui::accesskit::ActionRequest {
+        action: gpui::AccessibleAction::Click,
+        target_tree: gpui::accesskit::TreeId::ROOT,
+        target_node: gpui::accesskit::NodeId(
+            node["accesskit_id"].as_str().unwrap().parse().unwrap(),
+        ),
+        data: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+}
+
+#[gpui::test]
+fn about_follows_the_sections_in_keyboard_order_and_activates_from_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let (window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+    let list_focused = |cx: &mut VisualTestContext| {
+        cx.update(|gpui_window, cx| {
+            window
+                .read(cx)
+                .navigation
+                .list_focus()
+                .is_focused(gpui_window)
+        })
+    };
+
+    // Search, then the section list, then About.
+    cx.simulate_keystrokes("cmd-f tab");
+    cx.run_until_parked();
+    assert!(list_focused(cx));
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(!list_focused(cx));
+    assert!(
+        cx.debug_bounds("settings-about-keyboard-focus").is_some(),
+        "keyboard focus on About must show"
+    );
+
+    cx.simulate_keystrokes("space");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("space").unwrap(),
+    });
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+    press_return(cx);
+    assert_eq!(requests.get(), 2);
+
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert!(list_focused(cx));
 }

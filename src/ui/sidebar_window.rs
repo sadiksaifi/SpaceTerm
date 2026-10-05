@@ -19,8 +19,9 @@ use gpui::{
     Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
-    ClientWindowControls, HoverFade, Icon, IconName, WindowCloseHandler, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse,
+    Button, ButtonMetrics, ButtonPaint, ButtonVariantStyle, ClientWindowControls, HoverFade, Icon,
+    IconName, WindowCloseHandler, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse,
 };
 
 use crate::platform::window_movement::{
@@ -307,7 +308,8 @@ impl WindowMovement {
         }
     }
 
-    fn region(
+    /// Wraps `content` as window-movement space whose uncovered area behaves as the titlebar.
+    pub(super) fn region(
         &self,
         id: String,
         content: impl IntoElement,
@@ -441,12 +443,13 @@ pub(crate) fn navigation_chip_paint(
     }
 }
 
-/// The sidebar column: the traffic-light strip, an optional header such as a search field, and the
-/// navigation list.
+/// The sidebar column: the traffic-light strip, an optional header such as a search field, the
+/// navigation list, and an optional footer at the bottom edge.
 pub(crate) struct Sidebar<'a, T: SidebarOwner> {
     prefix: &'static str,
     entries: Vec<NavigationEntry<T::Section>>,
     header: Option<AnyElement>,
+    footer: Option<AnyElement>,
     movement: &'a WindowMovement,
     close: Option<WindowCloseHandler>,
 }
@@ -462,6 +465,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             prefix,
             entries,
             header: None,
+            footer: None,
             movement,
             close: None,
         }
@@ -474,6 +478,12 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
 
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
         self.header = Some(header.into_any_element());
+        self
+    }
+
+    /// Quiet items that sit apart from the sections, at the bottom of the column.
+    pub(crate) fn footer(mut self, footer: impl IntoElement) -> Self {
+        self.footer = Some(footer.into_any_element());
         self
     }
 
@@ -575,12 +585,104 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                         // between them is wider than the spacing inside the list.
                         div().w_full().mb(appearance.spacing(12.0)).child(header)
                     }))
-                    .child(list),
+                    .child(list)
+                    .children(self.footer.map(|footer| {
+                        div()
+                            .debug_selector(move || format!("{prefix}-sidebar-footer"))
+                            .flex()
+                            .items_center()
+                            .flex_none()
+                            .w_full()
+                            .h(footer_height(appearance))
+                            .mt_auto()
+                            .child(footer)
+                    })),
             );
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)
             .into_any_element()
     }
+}
+
+/// A quiet command at the foot of the sidebar, such as About. It shares a section row's shape and
+/// hover but reads in secondary text, and it dispatches its action instead of selecting a section.
+///
+/// It is the shared button in a row's geometry, so it is a keyboard stop after the section list
+/// that Space and Return activate, and assistive technology reads it as a named button.
+pub(crate) fn render_footer_action(
+    selector: String,
+    label: SharedString,
+    icon: IconName,
+    action: Box<dyn gpui::Action>,
+    appearance: &ChromeAppearance,
+) -> AnyElement {
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    // The chip a section row rests on, so the action lights exactly as a row does.
+    let chip =
+        navigation_chip_paint(false, true, colors).raised_on(appearance, colors.panel_background);
+    let fill = |fill: Option<crate::appearance::Color>| fill.map_or(gpui::rgba(0), gpui_color);
+    let paint = |background, foreground, icon| {
+        ButtonPaint::new(background, gpui_color(foreground), gpui::rgba(0))
+            .icon_foreground(gpui_color(icon))
+    };
+    let normal = paint(fill(chip.fill), colors.text_secondary, colors.row_icon);
+    // An inactive window does not light under the pointer.
+    let hovered = if appearance.active {
+        paint(
+            fill(chip.hover_fill),
+            colors.row_hover_foreground,
+            colors.row_hover_icon,
+        )
+    } else {
+        normal
+    };
+    let text = appearance.typography.style(TextRole::Secondary);
+    let line_height = f32::from(text.line_height) / f32::from(text.size);
+    let metrics = ButtonMetrics::new(navigation_row_height(appearance))
+        .horizontal_padding(appearance.spacing(8.0))
+        .gap(appearance.spacing(7.0))
+        .corner_radius(RadiusRole::Control.pixels())
+        .border_width(px(0.0))
+        .font_size(text.size)
+        .line_heights(line_height, line_height);
+    let glyph_size = appearance.icons.metrics(IconRole::Row).glyph_size;
+    let activated = action.boxed_clone();
+    // The shared button publishes no accessibility node of its own, so the row names it, the way
+    // client-drawn Window Controls do.
+    div()
+        .id(SharedString::from(format!("{selector}-accessible")))
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+            window.dispatch_action(action.boxed_clone(), cx)
+        })
+        .w_full()
+        .child(
+            Button::new(SharedString::from(selector.clone()), label)
+                .contextual_style(
+                    ButtonVariantStyle::new(normal, hovered, hovered, normal),
+                    gpui_color(colors.focus_ring),
+                )
+                .contextual_metrics(metrics)
+                .full_width(true)
+                .align_start()
+                .tab_stop(true)
+                .debug_selector(selector)
+                .leading(move |color| Icon::new(icon, glyph_size, color).into_any_element())
+                .on_activate(move |_, window, cx| {
+                    window.dispatch_action(activated.boxed_clone(), cx)
+                }),
+        )
+        .into_any_element()
+}
+
+/// The height of a navigation entry, which a footer action shares.
+fn navigation_row_height(appearance: &ChromeAppearance) -> Pixels {
+    appearance
+        .typography
+        .style(TextRole::Navigation)
+        .line_height
+        + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0)
 }
 
 fn render_navigation_list<T: SidebarOwner>(
@@ -670,11 +772,7 @@ fn render_navigation_list<T: SidebarOwner>(
                 .items_center()
                 .gap(appearance.spacing(7.0))
                 .w_full()
-                .h(appearance
-                    .typography
-                    .style(TextRole::Navigation)
-                    .line_height
-                    + appearance.spacing(NAVIGATION_ROW_HEIGHT - 16.0))
+                .h(navigation_row_height(appearance))
                 .px(appearance.spacing(8.0))
                 .cursor_default()
                 .chrome_text(appearance.typography.style(TextRole::Navigation))
@@ -855,6 +953,13 @@ impl<'a> DetailHeading<'a> {
     }
 }
 
+/// The height of the content column's footer, which a sidebar footer shares so the two read as one
+/// band across the window.
+fn footer_height(appearance: &ChromeAppearance) -> Pixels {
+    appearance.typography.style(TextRole::Secondary).line_height
+        + appearance.spacing(FOOTER_HEIGHT - 15.0)
+}
+
 /// The content column's closing strip.
 ///
 /// The strip belongs to the content column alone, so the sidebar runs unbroken to the window's
@@ -872,8 +977,7 @@ pub(crate) fn render_footer(
         .flex_row()
         .flex_none()
         .w_full()
-        .h(appearance.typography.style(TextRole::Secondary).line_height
-            + appearance.spacing(FOOTER_HEIGHT - 15.0))
+        .h(footer_height(appearance))
         .border_t_1()
         .border_color(gpui_color(surface.separator(SettingsSurfaceRole::Canvas)))
         .bg(gpui_color(

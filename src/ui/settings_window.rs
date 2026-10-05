@@ -913,6 +913,14 @@ impl SettingsWindow {
                 SearchField::new("settings-search-frame", self.search.clone())
                     .debug_selectors("settings-search-frame", "settings-search-clear"),
             )
+            .footer(super::sidebar_window::render_footer_action(
+                "settings-about".to_owned(),
+                // The entry names the product as its Command does; the window names the build.
+                crate::keybindings::Command::About.label().into(),
+                IconName::Info,
+                Box::new(crate::app::ShowAboutApplication),
+                &settings.chrome,
+            ))
             .render(self, settings, window, cx)
     }
 

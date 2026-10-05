@@ -542,28 +542,7 @@ impl ButtonTheme {
 
     fn resolve(self, variant: ButtonVariant, size: ButtonSize, shape: ButtonShape) -> ButtonStyle {
         let variant = self.variants.resolve(variant);
-        let metrics = self.sizes.resolve(size);
-        ButtonStyle {
-            normal: variant.normal,
-            hovered: variant.hovered,
-            pressed: variant.pressed,
-            disabled: variant.disabled,
-            focus_border: self.focus_border,
-            height: metrics.height,
-            icon_button_size: metrics.icon_button_size.unwrap_or(metrics.height),
-            icon_baseline_center: metrics.icon_baseline_center,
-            horizontal_padding: metrics.horizontal_padding,
-            gap: metrics.gap,
-            corner_radius: match shape {
-                ButtonShape::Rounded => metrics.corner_radius,
-                ButtonShape::Square => px(0.0),
-                ButtonShape::Capsule => metrics.height / 2.0,
-            },
-            border_width: metrics.border_width,
-            font_size: metrics.font_size,
-            single_line_height: metrics.single_line_height,
-            multiline_line_height: metrics.multiline_line_height,
-        }
+        ButtonStyle::new(variant, self.focus_border, self.sizes.resolve(size), shape)
     }
 }
 
@@ -623,6 +602,41 @@ pub(crate) struct ButtonStyle {
     font_size: Pixels,
     single_line_height: f32,
     multiline_line_height: f32,
+}
+
+impl ButtonStyle {
+    fn new(
+        paints: ButtonVariantStyle,
+        focus_border: Rgba,
+        metrics: ButtonMetrics,
+        shape: ButtonShape,
+    ) -> Self {
+        Self {
+            normal: paints.normal,
+            hovered: paints.hovered,
+            pressed: paints.pressed,
+            disabled: paints.disabled,
+            focus_border,
+            height: metrics.height,
+            icon_button_size: metrics.icon_button_size.unwrap_or(metrics.height),
+            icon_baseline_center: metrics.icon_baseline_center,
+            horizontal_padding: metrics.horizontal_padding,
+            gap: metrics.gap,
+            corner_radius: match shape {
+                ButtonShape::Rounded => metrics.corner_radius,
+                ButtonShape::Square => px(0.0),
+                ButtonShape::Capsule => metrics.height / 2.0,
+            },
+            border_width: metrics.border_width,
+            font_size: metrics.font_size,
+            single_line_height: metrics.single_line_height,
+            multiline_line_height: metrics.multiline_line_height,
+        }
+    }
+
+    fn paints(self) -> ButtonVariantStyle {
+        ButtonVariantStyle::new(self.normal, self.hovered, self.pressed, self.disabled)
+    }
 }
 
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
@@ -902,6 +916,7 @@ pub struct Button {
     trailing: Option<ContentBuilder>,
     shortcut: Option<SharedString>,
     full_width: bool,
+    align_start: bool,
     multiline: bool,
 }
 
@@ -920,6 +935,14 @@ impl Button {
         self
     }
 
+    /// Supplies complete metrics resolved for a host's own geometry and density, such as a row
+    /// in a sidebar. The metrics replace the standard size; paints, interaction, and focus remain
+    /// owned by the button.
+    pub fn contextual_metrics(mut self, metrics: ButtonMetrics) -> Self {
+        self.core.contextual_metrics = Some(metrics);
+        self
+    }
+
     /// Creates a small secondary text button. Its label is also its logical accessibility name.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
@@ -930,6 +953,7 @@ impl Button {
             trailing: None,
             shortcut: None,
             full_width: false,
+            align_start: false,
             multiline: false,
         }
     }
@@ -1006,6 +1030,13 @@ impl Button {
         self
     }
 
+    /// Leads a full-width button's content from its start edge, the way a list row reads,
+    /// instead of centering it.
+    pub fn align_start(mut self) -> Self {
+        self.align_start = true;
+        self
+    }
+
     /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.core.variant = variant;
@@ -1071,6 +1102,7 @@ impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = self.core.resolve_style(cx);
         let full_width = self.full_width;
+        let align_start = self.align_start;
         let multiline = self.multiline;
         let has_leading = self.leading.is_some();
         let has_trailing = self.trailing.is_some();
@@ -1100,7 +1132,13 @@ impl RenderOnce for Button {
                 .flex()
                 .min_w_0()
                 .items_center()
-                .justify_center()
+                .map(|content| {
+                    if align_start {
+                        content.justify_start()
+                    } else {
+                        content.justify_center()
+                    }
+                })
                 .gap(style.gap)
                 .when(full_width, |content| content.w_full())
                 .when_some(self.leading, |content, build| {
@@ -1351,6 +1389,7 @@ struct ButtonCore {
     preserve_ancestor_hover: bool,
     accept_first_mouse: bool,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    contextual_metrics: Option<ButtonMetrics>,
     icon_button_size: Option<Pixels>,
     corner_radius: Option<Pixels>,
     visual_inset: Pixels,
@@ -1383,6 +1422,7 @@ impl ButtonCore {
             preserve_ancestor_hover: false,
             accept_first_mouse: true,
             contextual_style: None,
+            contextual_metrics: None,
             icon_button_size: None,
             corner_radius: None,
             visual_inset: px(0.0),
@@ -1401,6 +1441,9 @@ impl ButtonCore {
             self.size,
             self.shape,
         );
+        if let Some(metrics) = self.contextual_metrics {
+            style = ButtonStyle::new(style.paints(), style.focus_border, metrics, self.shape);
+        }
         if let Some((paints, focus_border)) = self.contextual_style {
             style.normal = paints.normal;
             style.hovered = paints.hovered;
@@ -2229,6 +2272,50 @@ mod tests {
                 })
                 .on_activate(|_, _, _| {})
         }
+    }
+
+    struct RowProbe;
+
+    impl Render for RowProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(200.0)).child(
+                Button::new("row-probe", "Label")
+                    .contextual_metrics(
+                        ButtonMetrics::new(px(30.0))
+                            .horizontal_padding(px(9.0))
+                            .gap(px(7.0))
+                            .border_width(px(0.0)),
+                    )
+                    .full_width(true)
+                    .align_start()
+                    .debug_selector("row-probe")
+                    .leading(|_| {
+                        div()
+                            .debug_selector(|| "row-probe-icon".to_owned())
+                            .size(px(10.0))
+                            .into_any_element()
+                    })
+                    .on_activate(|_, _, _| {}),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn contextual_metrics_shape_a_start_aligned_row_instead_of_the_standard_size(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| RowProbe);
+        cx.run_until_parked();
+
+        let button = cx.debug_bounds("row-probe").expect("button is rendered");
+        let icon = cx.debug_bounds("row-probe-icon").expect("icon is rendered");
+        let label = cx
+            .debug_bounds("row-probe-label")
+            .expect("label is rendered");
+        assert_eq!(button.size, gpui::size(px(200.0), px(30.0)));
+        assert_eq!(icon.left() - button.left(), px(9.0));
+        assert_eq!(label.left() - icon.right(), px(7.0));
     }
 
     #[gpui::test]

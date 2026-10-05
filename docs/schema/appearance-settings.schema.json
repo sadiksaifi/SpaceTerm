@@ -605,6 +605,9 @@
         },
         "keyboard_shortcuts": {
           "$ref": "#/$defs/shortcutOverride"
+        },
+        "about": {
+          "$ref": "#/$defs/shortcutOverride"
         }
       }
     },

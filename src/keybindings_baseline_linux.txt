@@ -194,6 +194,9 @@ ctrl-w	Some(Identifier("Settings"))	spaceterm::CloseSettingsWindow
 ctrl-shift-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
 ctrl-f	Some(Identifier("Settings"))	spaceterm::FocusSettingsSearch
 escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch
+ctrl-shift-w	Some(Identifier("About"))	spaceterm::CloseAboutWindow
+ctrl-w	Some(Identifier("About"))	spaceterm::CloseAboutWindow
+escape	Some(Identifier("About"))	spaceterm::CloseAboutWindow
 ctrl-shift-c	Some(Identifier("TerminalPane"))	spaceterm_text_input::Copy
 ctrl-insert	Some(Identifier("TerminalPane"))	terminal::CopySelection
 ctrl-shift-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste

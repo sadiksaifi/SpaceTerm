@@ -1,3 +1,4 @@
+mod about;
 mod app;
 mod appearance;
 mod application_identity;

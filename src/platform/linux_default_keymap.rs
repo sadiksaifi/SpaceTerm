@@ -244,6 +244,8 @@ pub(super) fn profile(
             Command::KeyboardShortcuts,
             Some(DefaultBinding::new("ctrl-?", &[])),
         ),
+        // GNOME offers About from an app menu and binds no key to it.
+        (Command::About, None),
     ];
     KeymapProfile::new(
         layout,
@@ -310,6 +312,7 @@ fn developer_reservations() -> [SystemReserved; 2] {
 
 fn control_bindings() -> Vec<KeyBinding> {
     let settings = Some(crate::ui::settings_window::SETTINGS_KEY_CONTEXT);
+    let about = Some(crate::ui::about_window::ABOUT_KEY_CONTEXT);
     let bindings = vec![
         KeyBinding::new("shift-enter", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new("escape", CloseTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
@@ -359,6 +362,14 @@ fn control_bindings() -> Vec<KeyBinding> {
             crate::ui::settings_window::ClearSettingsSearch,
             settings,
         ),
+        KeyBinding::new(
+            "ctrl-shift-w",
+            crate::ui::about_window::CloseAboutWindow,
+            about,
+        ),
+        KeyBinding::new("ctrl-w", crate::ui::about_window::CloseAboutWindow, about),
+        // Escape dismisses About as it dismisses a GNOME About dialog.
+        KeyBinding::new("escape", crate::ui::about_window::CloseAboutWindow, about),
     ];
     #[cfg(feature = "developer-tools")]
     let bindings = bindings
@@ -445,7 +456,7 @@ mod tests {
             profile.refresh_layout(&testing::UnknownLayout).unwrap();
             let resolved = profile.resolve(&KeybindingPreferences::default());
             for command in Command::ALL {
-                let expected = if command == Command::CloseWorkspace {
+                let expected = if matches!(command, Command::CloseWorkspace | Command::About) {
                     KeybindingState::Unassigned
                 } else {
                     KeybindingState::Default
@@ -476,6 +487,30 @@ mod tests {
             super::super::linux_reserved_shortcuts::shortcuts(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn about_waits_for_a_shortcut_the_person_assigns() {
+        let preferences: KeybindingPreferences =
+            serde_json::from_value(serde_json::json!({"about": "ctrl-shift-y"})).unwrap();
+        let profile = profile();
+        assert_eq!(
+            profile
+                .resolve(&KeybindingPreferences::default())
+                .state(Command::About),
+            crate::keybindings::KeybindingState::Unassigned
+        );
+        let resolved = profile.resolve(&preferences);
+        assert_eq!(
+            resolved.shortcut(Command::About).map(ToString::to_string),
+            Some("ctrl-shift-y".to_owned())
+        );
+        assert!(resolved.key_bindings().iter().any(|binding| {
+            binding
+                .action()
+                .partial_eq(&crate::app::ShowAboutApplication)
+                && binding.predicate().is_none()
+        }));
     }
 
     #[test]
