@@ -52,7 +52,6 @@ impl Render for GridView {
         // acknowledgements belong only to the first draw of this candidate.
         self.0.presentation_operation = None;
         self.0.graphics_attempt = None;
-        self.0.paint_fault = None;
         self.0.fallback = None;
         self.0.fallback_generation = None;
         element
@@ -129,7 +128,6 @@ impl TerminalGridPresentation {
         let presentation_unchanged = eligible
             && configuration.presentation_operation.is_none()
             && configuration.graphics_attempt.is_none()
-            && configuration.paint_fault.is_none()
             && self.cursor.batch.borrow().is_some()
             && self.grid.as_ref().is_some_and(|grid| {
                 let previous = &grid.read(cx).0;
@@ -188,7 +186,7 @@ impl TerminalGridPresentation {
                         }
                         let batch = cursor.batch.borrow().clone();
                         if let Some(batch) = batch
-                            && batch.preflight(None, window, cx).is_ok()
+                            && batch.preflight(window, cx).is_ok()
                         {
                             #[cfg(test)]
                             {

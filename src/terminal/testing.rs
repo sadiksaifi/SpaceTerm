@@ -328,6 +328,7 @@ pub(crate) struct TestTerminalSessionFactory {
     start_failure_session_id: Option<usize>,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
+    pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
 }
 
@@ -341,6 +342,7 @@ impl TestTerminalSessionFactory {
             start_failure_session_id: None,
             selection_response: Ok(None),
             paste_response: Ok(PasteRequestOutcome::Written),
+            pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
         }
     }
@@ -379,6 +381,14 @@ impl TestTerminalSessionFactory {
         response: Result<PasteRequestOutcome, String>,
     ) -> Self {
         self.paste_response = response;
+        self
+    }
+
+    pub(crate) fn with_pending_paste_response(
+        mut self,
+        receiver: async_channel::Receiver<Result<PasteRequestOutcome, String>>,
+    ) -> Self {
+        self.pending_paste_response = Some(receiver);
         self
     }
 
@@ -441,6 +451,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 records: self.records.clone(),
                 selection_response: self.selection_response.clone(),
                 paste_response: self.paste_response.clone(),
+                pending_paste_response: self.pending_paste_response.clone(),
                 paste_resolution: self.paste_resolution.clone(),
             }),
             events,
@@ -459,6 +470,7 @@ struct TestTerminalSessionHandle {
     records: TestTerminalSessionRecords,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
+    pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
 }
 
@@ -566,6 +578,9 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         text: crate::terminal::native_services::PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         self.record(RecordedSessionCommand::RequestPaste(text.into_text()));
+        if let Some(receiver) = &self.pending_paste_response {
+            return receiver.clone();
+        }
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_response.clone());
         receiver

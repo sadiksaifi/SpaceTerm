@@ -4700,22 +4700,25 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        let first_pane = host.read_with(cx, |host, _| {
+        let _first_pane = host.read_with(cx, |host, _| {
             host.tab
                 .terminal(PaneId::new(1))
                 .cloned()
                 .expect("the original Pane should still exist")
         });
 
-        cx.update(|window, cx| {
-            first_pane.update(cx, |pane, cx| {
-                pane.insert_dropped_file_paths_for_test(
-                    &[PathBuf::from("/tmp/first pane")],
-                    window,
-                    cx,
-                );
-            });
+        let position = host.read_with(cx, |host, _| {
+            host.pane_bounds
+                .get(&PaneId::new(1))
+                .expect("the target Pane has measured bounds")
+                .center()
         });
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: gpui::ExternalPaths(vec![PathBuf::from("/tmp/first pane")].into()),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
         cx.run_until_parked();
 
         let paste_requests = records

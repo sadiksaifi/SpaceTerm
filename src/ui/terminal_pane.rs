@@ -19,8 +19,6 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
-#[cfg(test)]
-use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation, TerminalPadding,
 };
@@ -612,8 +610,6 @@ pub(crate) struct TerminalPane {
     render_cache: Entity<TerminalGridCache>,
     fallback_render_cache: Entity<TerminalGridCache>,
     grid_presentation: TerminalGridPresentation,
-    #[cfg(test)]
-    paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
@@ -914,8 +910,6 @@ impl TerminalPane {
             render_cache,
             fallback_render_cache,
             grid_presentation: TerminalGridPresentation::new(),
-            #[cfg(test)]
-            paint_fault: None,
             graphics_cache,
             selection_pasteboard: SelectionPublication::new(
                 native_service_adapters.selection_clipboard,
@@ -1362,12 +1356,6 @@ impl TerminalPane {
             self.preedit_layout_key = Some(key);
         }
         self.preedit_layout.clone()
-    }
-
-    #[cfg(test)]
-    fn mark_for_preedit_cache_test(&mut self, text: &str, selected_utf16: Range<usize>) {
-        self.ime.replace_and_mark(None, text, Some(selected_utf16));
-        self.invalidate_preedit_layout();
     }
 
     fn invalidate_preedit_layout(&mut self) {
@@ -3157,16 +3145,6 @@ impl TerminalPane {
         cx.notify();
     }
 
-    #[cfg(test)]
-    pub(crate) fn insert_dropped_file_paths_for_test(
-        &mut self,
-        paths: &[PathBuf],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.insert_dropped_file_paths(paths, window, cx);
-    }
-
     fn flush_pending_file_insertion(&mut self, cx: &mut Context<Self>) {
         if !self.terminal_input_focus || self.terminal_session.session.is_none() {
             return;
@@ -4493,16 +4471,6 @@ impl Render for TerminalPane {
                         fallback_graphics,
                     )
                 }),
-                paint_fault: {
-                    #[cfg(test)]
-                    {
-                        self.paint_fault.take()
-                    }
-                    #[cfg(not(test))]
-                    {
-                        None
-                    }
-                },
             },
             cx,
         );
@@ -4833,8 +4801,15 @@ fn render_paste_confirmation(
         "Pasting multiple lines may execute commands in your shell."
     };
 
+    let prompt = format!(
+        "Paste {} bytes across {} lines? {explanation}",
+        confirmation.byte_len, confirmation.line_count
+    );
     shell.mount(
         div()
+            .id("unsafe-paste-confirmation")
+            .role(gpui::Role::Group)
+            .aria_label(prompt.clone())
             .debug_selector(|| "unsafe-paste-confirmation".to_owned())
             .chrome_text(appearance.typography.style(TextRole::Body))
             .absolute()
@@ -4866,10 +4841,7 @@ fn render_paste_confirmation(
                     .gap(appearance.spacing(10.0))
                     .px(appearance.spacing(12.0))
                     .py(appearance.spacing(10.0))
-                    .child(div().w_full().whitespace_normal().child(format!(
-                        "Paste {} bytes across {} lines? {explanation}",
-                        confirmation.byte_len, confirmation.line_count
-                    )))
+                    .child(div().w_full().whitespace_normal().child(prompt))
                     .child(
                         div()
                             .w_full()

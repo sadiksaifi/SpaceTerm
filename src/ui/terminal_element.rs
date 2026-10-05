@@ -10,8 +10,6 @@ use gpui::{
     IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
     UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
-#[cfg(test)]
-use gpui::{FontFallbacks, FontFeatures, font};
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::appearance::{Color, ResolvedTerminalAppearance, TerminalColors};
@@ -453,7 +451,6 @@ pub(crate) struct TerminalGridElement {
     active_hyperlink: Option<(u64, CellGridPosition)>,
     fallback: Option<Box<TerminalGridElement>>,
     fallback_generation: Option<crate::terminal::PresentationGeneration>,
-    paint_fault: Option<PaintPreflightFault>,
     cursor_layer: Option<presentation::CursorLayer>,
     padding: TerminalPadding,
 }
@@ -484,15 +481,6 @@ pub(crate) struct TerminalGridConfiguration {
         Entity<TerminalGridCache>,
         PreparedGraphics,
     )>,
-    pub(crate) paint_fault: Option<PaintPreflightFault>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PaintPreflightFault {
-    #[cfg(test)]
-    Row(usize),
-    #[cfg(test)]
-    Glyph(usize),
 }
 
 impl TerminalGridElement {
@@ -534,7 +522,6 @@ impl TerminalGridElement {
                         graphics_cache: configuration.graphics_cache.clone(),
                         active_hyperlink: None,
                         fallback: None,
-                        paint_fault: None,
                     },
                     cx,
                 ))
@@ -604,7 +591,6 @@ impl TerminalGridElement {
             active_hyperlink: configuration.active_hyperlink,
             fallback,
             fallback_generation,
-            paint_fault: configuration.paint_fault,
             cursor_layer: None,
             padding: configuration.padding,
         }
@@ -858,15 +844,7 @@ enum PaintBatchFailure {
 }
 
 impl TerminalPaintBatch {
-    fn preflight(
-        &self,
-        fault: Option<PaintPreflightFault>,
-        window: &mut Window,
-        _cx: &mut App,
-    ) -> Result<(), PaintBatchFailure> {
-        if let Some(failure) = self.injected_failure(fault) {
-            return Err(failure);
-        }
+    fn preflight(&self, window: &mut Window, _cx: &mut App) -> Result<(), PaintBatchFailure> {
         // GPUI intersects this empty mask with the current mask. Atlas lookups still
         // run, while Scene::insert_primitive drops every prepared primitive.
         let preflight_mask = ContentMask {
@@ -875,37 +853,6 @@ impl TerminalPaintBatch {
         window.with_content_mask(Some(preflight_mask), |window| {
             self.submit(self.grid_bounds, false, window, _cx)
         })
-    }
-
-    fn injected_failure(&self, fault: Option<PaintPreflightFault>) -> Option<PaintBatchFailure> {
-        match fault? {
-            #[cfg(test)]
-            PaintPreflightFault::Row(index) => self
-                .rows
-                .get(index)
-                .map(|_| PaintBatchFailure::Presentation),
-            #[cfg(test)]
-            PaintPreflightFault::Glyph(index) => self
-                .rows
-                .iter()
-                .flat_map(|row| {
-                    row.stable
-                        .text
-                        .iter()
-                        .filter(|text| {
-                            text_fragment_visible(text.blinking, self.blink_phase_visible)
-                        })
-                        .chain(
-                            row.preedit
-                                .as_ref()
-                                .into_iter()
-                                .flat_map(|preedit| preedit.text.iter().map(|text| &text.text)),
-                        )
-                })
-                .flat_map(|text| text.line.text.chars())
-                .nth(index)
-                .map(|_| PaintBatchFailure::Presentation),
-        }
     }
 
     fn submit(
@@ -2059,14 +2006,11 @@ impl Element for TerminalGridElement {
             #[cfg(test)]
             layer.record_grid_paint();
         }
-        let mut failure = prepaint
-            .candidate
-            .preflight(self.paint_fault.take(), window, cx)
-            .err();
+        let mut failure = prepaint.candidate.preflight(window, cx).err();
         if failure.is_none()
             && let Some(cursor) = &prepaint.cursor
         {
-            failure = cursor.preflight(None, window, cx).err();
+            failure = cursor.preflight(window, cx).err();
         }
         let mut submitted_generation = None;
         let mut candidate_submission_started = false;
@@ -2097,7 +2041,7 @@ impl Element for TerminalGridElement {
         if failure.is_some()
             && !candidate_submission_started
             && let Some(fallback) = &prepaint.fallback
-            && fallback.preflight(None, window, cx).is_ok()
+            && fallback.preflight(window, cx).is_ok()
             && fallback
                 .submit(fallback.grid_bounds, true, window, cx)
                 .is_ok()
@@ -2337,22 +2281,26 @@ impl FragmentBuilder {
 }
 
 #[cfg(test)]
-thread_local! {
-    static TERMINAL_FONT_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) use tests::terminal_cell_font;
-
-#[cfg(test)]
 fn test_terminal_fonts(family: &SharedString) -> TerminalFonts {
-    TerminalFonts {
+    let descriptor = |weight, style| crate::appearance::ResolvedFontDescriptor {
+        primary_family: family.to_string(),
+        fallback_families: vec!["fixture-emoji".into(), "fixture-monospace".into()],
+        size: 14.0,
+        line_height: 20.0,
+        weight,
+        style,
+        features: vec!["-liga".into(), "-clig".into(), "-calt".into()],
         resolution_identity: family.to_string(),
-        regular: terminal_cell_font(family, false, false),
-        bold: terminal_cell_font(family, true, false),
-        italic: terminal_cell_font(family, false, true),
-        bold_italic: terminal_cell_font(family, true, true),
-    }
+    };
+    TerminalFonts::prepare(&crate::appearance::ResolvedTerminalTypography {
+        regular: descriptor(400, crate::appearance::FontStyle::Normal),
+        bold: descriptor(700, crate::appearance::FontStyle::Normal),
+        italic: descriptor(400, crate::appearance::FontStyle::Italic),
+        bold_italic: descriptor(700, crate::appearance::FontStyle::Italic),
+        cell_size: 14.0,
+        line_height: 20.0,
+        render_italic: true,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3425,31 +3373,7 @@ fn frame_cursor_paint_plan(
 }
 
 #[cfg(test)]
-mod tests {
-    pub(in crate::ui) fn terminal_cell_font(
-        family: &SharedString,
-        bold: bool,
-        italic: bool,
-    ) -> Font {
-        #[cfg(test)]
-        TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
-        let mut cell_font = font(family.clone());
-        cell_font.features = FontFeatures::disable_ligatures();
-        cell_font.fallbacks = Some(FontFallbacks::from_fonts(
-            ["Apple Color Emoji", "Menlo"]
-                .into_iter()
-                .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
-                .map(str::to_owned)
-                .collect(),
-        ));
-        if bold {
-            cell_font = cell_font.bold();
-        }
-        if italic {
-            cell_font = cell_font.italic();
-        }
-        cell_font
-    }
+pub(super) mod tests {
 
     use std::{
         borrow::Cow,
@@ -3464,6 +3388,36 @@ mod tests {
     use super::*;
     use crate::ui::terminal_ime::layout_preedit;
     use gpui::Styled as _;
+
+    pub(in crate::ui) fn assert_geometry_reused(
+        cache: &TerminalGridCache,
+        expected_decorations: usize,
+    ) -> impl Fn(&TerminalGridCache) + use<> {
+        let rows = Arc::clone(&cache.prepared_visible_geometry.as_ref().unwrap().rows);
+        assert_eq!(
+            rows[0].under_text_decorations.quads.len(),
+            expected_decorations
+        );
+        move |cache| {
+            let current = &cache.prepared_visible_geometry.as_ref().unwrap().rows;
+            assert!(
+                Arc::ptr_eq(&rows, current),
+                "clock phase must reuse visible geometry storage"
+            );
+            assert!(
+                Arc::ptr_eq(&rows[0], &current[0]),
+                "clock phase must reuse the rebuilt first row"
+            );
+            assert_eq!(
+                rows[0].under_text_decorations.quads.as_ptr(),
+                current[0].under_text_decorations.quads.as_ptr(),
+            );
+            assert_eq!(
+                current[0].under_text_decorations.quads.len(),
+                expected_decorations
+            );
+        }
+    }
 
     #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
@@ -3522,14 +3476,14 @@ mod tests {
         glyphs
     }
 
-    struct RasterTextSystem {
-        base: gpui::NoopTextSystem,
-        bounds: Bounds<gpui::DevicePixels>,
-        observation: Option<Arc<RasterObservation>>,
+    pub(in crate::ui) struct RasterTextSystem {
+        pub(in crate::ui) base: gpui::NoopTextSystem,
+        pub(in crate::ui) bounds: Bounds<gpui::DevicePixels>,
+        pub(in crate::ui) observation: Option<Arc<RasterObservation>>,
     }
 
     #[derive(Default)]
-    struct RasterObservation {
+    pub(in crate::ui) struct RasterObservation {
         rasterized: Mutex<Vec<gpui::RenderGlyphParams>>,
         dilations: Mutex<Vec<u8>>,
         fail_next_raster: AtomicBool,
@@ -3737,12 +3691,12 @@ mod tests {
                 move |_, (batch, baseline), window, cx| {
                     atlas.requested.lock().unwrap().clear();
                     let baseline = if let Some(baseline) = baseline {
-                        baseline.preflight(None, window, cx).unwrap();
+                        baseline.preflight(window, cx).unwrap();
                         Some(std::mem::take(&mut *atlas.requested.lock().unwrap()))
                     } else {
                         None
                     };
-                    batch.preflight(None, window, cx).unwrap();
+                    batch.preflight(window, cx).unwrap();
                     let prepared = std::mem::take(&mut *atlas.requested.lock().unwrap());
                     batch.submit(batch.grid_bounds, true, window, cx).unwrap();
                     let submitted = std::mem::take(&mut *atlas.requested.lock().unwrap());
@@ -3975,7 +3929,7 @@ mod tests {
                 gpui::canvas(
                     move |_, _, _| batch,
                     move |_, batch, window, cx| {
-                        batch.preflight(None, window, cx).unwrap();
+                        batch.preflight(window, cx).unwrap();
                         let prepared = observation.rasterized.lock().unwrap().clone();
                         let mut prepared_dilations =
                             std::mem::take(&mut *observation.dilations.lock().unwrap());
@@ -4065,7 +4019,7 @@ mod tests {
                 let batch = cursor_render_batches(window, false).remove(0);
                 gpui::canvas(
                     move |_, _, _| batch,
-                    move |_, batch, window, cx| batch.preflight(None, window, cx).unwrap(),
+                    move |_, batch, window, cx| batch.preflight(window, cx).unwrap(),
                 )
                 .size_full()
             },
@@ -4099,7 +4053,7 @@ mod tests {
                                     size(px(71.875), px(13.875)),
                                 ),
                             }),
-                            |window| batch.preflight(None, window, cx).unwrap(),
+                            |window| batch.preflight(window, cx).unwrap(),
                         );
                     },
                 )
@@ -4127,7 +4081,9 @@ mod tests {
                         Some(&layout),
                         2,
                         batch.grid_bounds,
-                        &terminal_cell_font(&"Menlo".into(), false, false),
+                        &test_terminal_fonts(&"Menlo".into())
+                            .cell(false, false)
+                            .clone(),
                         px(18.0),
                         px(8.375),
                         batch.line_height,
@@ -4142,7 +4098,7 @@ mod tests {
                 gpui::canvas(
                     move |_, _, _| batch,
                     move |_, batch, window, cx| {
-                        batch.preflight(None, window, cx).unwrap();
+                        batch.preflight(window, cx).unwrap();
                         let prepared = observation.rasterized.lock().unwrap().clone();
                         let preedit_glyph = gpui::GlyphId('界' as u32);
                         assert!(
@@ -4180,7 +4136,9 @@ mod tests {
                             Some(&layout),
                             2,
                             bounds,
-                            &terminal_cell_font(&"Menlo".into(), false, false),
+                            &test_terminal_fonts(&"Menlo".into())
+                                .cell(false, false)
+                                .clone(),
                             px(18.0),
                             px(8.375),
                             px(14.0),
@@ -4245,7 +4203,9 @@ mod tests {
                             Some(&layout),
                             2,
                             bounds,
-                            &terminal_cell_font(&"Menlo".into(), false, false),
+                            &test_terminal_fonts(&"Menlo".into())
+                                .cell(false, false)
+                                .clone(),
                             px(18.0),
                             px(8.375),
                             px(14.0),
@@ -4291,7 +4251,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_preedit_raster_failure_paints_only_the_retained_surface() {
+    fn cold_preedit_raster_failure_adds_no_candidate_primitives() {
         let observation = Arc::new(RasterObservation::default());
         *observation.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('界' as u32));
         let mut cx = recording_test_app(Arc::clone(&observation));
@@ -4307,7 +4267,9 @@ mod tests {
                         Some(&layout),
                         2,
                         candidate.grid_bounds,
-                        &terminal_cell_font(&"Menlo".into(), false, false),
+                        &test_terminal_fonts(&"Menlo".into())
+                            .cell(false, false)
+                            .clone(),
                         px(18.0),
                         px(8.375),
                         candidate.line_height,
@@ -4335,10 +4297,10 @@ mod tests {
                     move |_, _, _| (candidate, retained),
                     move |_, (candidate, retained), window, cx| {
                         assert_eq!(
-                            candidate.preflight(None, window, cx),
+                            candidate.preflight(window, cx),
                             Err(PaintBatchFailure::Presentation)
                         );
-                        retained.preflight(None, window, cx).unwrap();
+                        retained.preflight(window, cx).unwrap();
                         retained
                             .submit(retained.grid_bounds, true, window, cx)
                             .unwrap();
@@ -4361,7 +4323,7 @@ mod tests {
     }
 
     #[test]
-    fn glyph_raster_failure_prevents_candidate_primitives_and_paints_only_retained_surface() {
+    fn glyph_raster_failure_adds_no_candidate_primitives() {
         let observation = Arc::new(RasterObservation::default());
         observation.fail_next_raster.store(true, Ordering::Relaxed);
         let mut cx = recording_test_app(Arc::clone(&observation));
@@ -4387,10 +4349,10 @@ mod tests {
                     move |_, _, _| (candidate, retained),
                     move |_, (candidate, retained), window, cx| {
                         assert_eq!(
-                            candidate.preflight(None, window, cx),
+                            candidate.preflight(window, cx),
                             Err(PaintBatchFailure::Presentation)
                         );
-                        retained.preflight(None, window, cx).unwrap();
+                        retained.preflight(window, cx).unwrap();
                         retained
                             .submit(retained.grid_bounds, true, window, cx)
                             .unwrap();
@@ -4630,8 +4592,11 @@ mod tests {
                     },
                 ];
                 for variant in variants {
+                    let baseline = cache.prepare_visible_geometry(&inputs, 2, layout, window);
+                    let reused = cache.prepare_visible_geometry(&inputs, 2, layout, window);
+                    assert!(Arc::ptr_eq(&baseline, &reused));
                     let rebuilt = cache.prepare_visible_geometry(&inputs, 2, variant, window);
-                    assert!(!Arc::ptr_eq(&original, &rebuilt));
+                    assert!(!Arc::ptr_eq(&baseline, &rebuilt));
                 }
 
                 let moved = cache.prepare_visible_geometry(
@@ -4715,7 +4680,9 @@ mod tests {
             caret: layout.caret,
             visible_rows,
             grid_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(40.0))),
-            font: terminal_cell_font(&"Menlo".into(), false, false),
+            font: test_terminal_fonts(&"Menlo".into())
+                .cell(false, false)
+                .clone(),
             font_size: px(14.0),
             cell_width: px(8.0),
             line_height: px(20.0),
@@ -4906,7 +4873,7 @@ mod tests {
     }
 
     #[test]
-    fn final_row_cursor_should_keep_normal_cell_geometry() {
+    fn frame_cursor_plan_preserves_requested_cell_geometry() {
         let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(95.0), px(45.0)));
         let position = CursorPositionSnapshot {
             column: 9,
@@ -4922,17 +4889,17 @@ mod tests {
         let actual =
             frame_cursor_paint_plan(grid.left(), px(20.0), px(9.0), px(20.0), position, style)
                 .unwrap();
-        let expected = cursor_paint_plan(
-            true,
-            CursorShapeSnapshot::Bar,
-            point(px(81.0), px(20.0)),
-            px(9.0),
-            px(20.0),
-            1,
-        )
-        .unwrap();
+        let expected = CursorPaintPlan {
+            bounds: Bounds::new(point(px(81.0), px(20.0)), size(px(1.08), px(20.0))),
+            recolor_text: false,
+            paint: CursorPaint::Fill,
+        };
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual.bounds.origin, expected.bounds.origin);
+        assert!((f32::from(actual.bounds.size.width) - 1.08).abs() < 0.000001);
+        assert_eq!(actual.bounds.size.height, expected.bounds.size.height);
+        assert_eq!(actual.recolor_text, expected.recolor_text);
+        assert_eq!(actual.paint, expected.paint);
     }
 
     #[test]
@@ -5311,20 +5278,35 @@ mod tests {
 
     #[test]
     fn text_runs_cover_utf8_bytes_and_coalesce_matching_styles() {
-        let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("é"), cell("b")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        for (middle, expected, bytes) in [("é", "aéb", 4), ("b", "abc", 3)] {
+            let row = if middle == "é" {
+                Arc::<[CellSnapshot]>::from([cell("a"), cell("é"), cell("b")])
+            } else {
+                Arc::<[CellSnapshot]>::from([cell("a"), cell("b"), cell("c")])
+            };
+            let input = prepare_row(&row, &colors(), &"Menlo".into());
 
-        assert_eq!(input.fragments.len(), 1);
-        assert_eq!(input.fragments[0].text.as_ref(), "aéb");
-        assert_eq!(input.fragments[0].runs.len(), 1);
-        assert_eq!(
-            input.fragments[0]
-                .runs
-                .iter()
-                .map(|run| run.len)
-                .sum::<usize>(),
-            input.fragments[0].text.len()
-        );
+            assert_eq!(input.fragments.len(), 1);
+            assert_eq!(input.fragments[0].text.as_ref(), expected);
+            assert_eq!(
+                input
+                    .fragments
+                    .iter()
+                    .map(|fragment| fragment.text.as_ref())
+                    .collect::<Vec<_>>(),
+                [expected]
+            );
+            assert_eq!(input.fragments[0].text.len(), bytes);
+            assert_eq!(input.fragments[0].runs.len(), 1);
+            assert_eq!(
+                input.fragments[0]
+                    .runs
+                    .iter()
+                    .map(|run| run.len)
+                    .sum::<usize>(),
+                input.fragments[0].text.len()
+            );
+        }
     }
 
     #[test]
@@ -5336,16 +5318,37 @@ mod tests {
         let styles = [(false, false), (true, false), (true, true), (false, true)];
         let mut expected_fonts = Vec::new();
         let mut expected_paint = Vec::new();
-        for (bold, italic) in styles {
+        for ((bold, italic), (weight, style)) in styles.into_iter().zip([
+            (400.0, gpui::FontStyle::Normal),
+            (700.0, gpui::FontStyle::Normal),
+            (700.0, gpui::FontStyle::Italic),
+            (400.0, gpui::FontStyle::Italic),
+        ]) {
             expected_fonts.push(TextRun {
                 len: 8,
-                font: terminal_cell_font(&family, bold, italic),
+                font: Font {
+                    family: "JetBrains Mono".into(),
+                    features: gpui::FontFeatures(Arc::new(vec![
+                        ("liga".to_owned(), 0),
+                        ("clig".to_owned(), 0),
+                        ("calt".to_owned(), 0),
+                    ])),
+                    fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                        "fixture-emoji".to_owned(),
+                        "fixture-monospace".to_owned(),
+                    ])),
+                    weight: gpui::FontWeight(weight),
+                    style,
+                },
                 color: rgba(0).into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
             });
-            for foreground in [Color::rgb(0x12_34_56), Color::rgb(0x65_43_21)] {
+            for (foreground, expected_color) in [
+                (Color::rgb(0x12_34_56), rgba(0x12_34_56_ff).into()),
+                (Color::rgb(0x65_43_21), rgba(0x65_43_21_ff).into()),
+            ] {
                 let mut subject = cell("é");
                 subject.bold = bold;
                 subject.italic = italic;
@@ -5355,7 +5358,7 @@ mod tests {
                 fragment.push(&subject, foreground, &terminal_fonts);
                 expected_paint.push(TextPaintRun {
                     end: (expected_paint.len() + 1) * 4,
-                    color: gpui_color(foreground).into(),
+                    color: expected_color,
                 });
             }
         }
@@ -5391,26 +5394,50 @@ mod tests {
         assert_eq!(fragment.runs[0].len, 2);
         assert_eq!(
             fragment.runs[0].font,
-            terminal_cell_font(&first_family, false, false)
+            Font {
+                family: "Menlo".into(),
+                features: gpui::FontFeatures(Arc::new(vec![
+                    ("liga".to_owned(), 0),
+                    ("clig".to_owned(), 0),
+                    ("calt".to_owned(), 0),
+                ])),
+                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                    "fixture-emoji".to_owned(),
+                    "fixture-monospace".to_owned(),
+                ])),
+                weight: gpui::FontWeight(400.0),
+                style: gpui::FontStyle::Normal,
+            }
         );
         assert_eq!(fragment.runs[1].len, 3);
         assert_eq!(
             fragment.runs[1].font,
-            terminal_cell_font(&second_family, false, false)
+            Font {
+                family: "JetBrains Mono".into(),
+                features: gpui::FontFeatures(Arc::new(vec![
+                    ("liga".to_owned(), 0),
+                    ("clig".to_owned(), 0),
+                    ("calt".to_owned(), 0),
+                ])),
+                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                    "fixture-emoji".to_owned(),
+                    "fixture-monospace".to_owned(),
+                ])),
+                weight: gpui::FontWeight(400.0),
+                style: gpui::FontStyle::Normal,
+            }
         );
     }
 
     #[test]
-    fn row_preparation_constructs_the_font_set_once_instead_of_per_cell() {
+    fn long_utf8_row_coalesces_into_one_fragment_and_run() {
         let row = Arc::<[CellSnapshot]>::from(vec![cell("é"); 192]);
         let colors = colors();
         let family: SharedString = "Menlo".into();
-        let before = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get);
+        let fonts = test_terminal_fonts(&family);
 
-        let input = prepare_row(&row, &colors, &family);
+        let input = prepare_row_cached(&row, &colors, &fonts, 0, &[]);
 
-        let prepared = TERMINAL_FONT_PREPARATIONS.with(std::cell::Cell::get) - before;
-        assert_eq!(prepared, 4);
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].runs.len(), 1);
         assert_eq!(input.fragments[0].runs[0].len, 384);
@@ -5420,7 +5447,16 @@ mod tests {
     fn terminal_text_runs_configure_emoji_and_system_fallbacks() {
         let row = Arc::<[CellSnapshot]>::from([cell("A")]);
 
-        let input = prepare_row(&row, &colors(), &"JetBrains Mono".into());
+        let fonts = test_terminal_fonts(&"JetBrains Mono".into());
+        let input = prepare_row_cached(&row, &colors(), &fonts, 0, &[]);
+        assert_eq!(
+            input.fragments[0].runs[0].font.features,
+            gpui::FontFeatures(std::sync::Arc::new(vec![
+                ("liga".to_owned(), 0),
+                ("clig".to_owned(), 0),
+                ("calt".to_owned(), 0)
+            ]))
+        );
 
         assert_eq!(
             input.fragments[0].runs[0]
@@ -5429,7 +5465,7 @@ mod tests {
                 .as_ref()
                 .expect("terminal text must carry an explicit fallback cascade")
                 .fallback_list(),
-            ["Apple Color Emoji", "Menlo"]
+            ["fixture-emoji", "fixture-monospace"]
         );
     }
 
@@ -6283,6 +6319,24 @@ mod tests {
         let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.selections.len(), 1);
+        assert_eq!(input.under_text_decorations.len(), 2);
+        assert_eq!(
+            input.under_text_decorations[0].kind,
+            DecorationKind::Underline(crate::terminal::TerminalUnderlineSnapshot::Single)
+        );
+        assert_eq!(input.over_text_decorations.len(), 1);
+        assert!(
+            input
+                .under_text_decorations
+                .iter()
+                .any(|span| span.kind == DecorationKind::Overline)
+        );
+        assert!(
+            input
+                .over_text_decorations
+                .iter()
+                .any(|span| span.kind == DecorationKind::Strikethrough)
+        );
         assert!(
             input
                 .under_text_decorations
@@ -6298,6 +6352,7 @@ mod tests {
             px(8.0),
             metrics,
         );
+        assert!(!prepared.quads.is_empty());
         assert!(prepared.quads.iter().all(|quad| quad.blinking));
 
         decorated.invisible = true;
@@ -6353,6 +6408,29 @@ mod tests {
         let dotted = prepare(crate::terminal::TerminalUnderlineSnapshot::Dotted);
         let dashed = prepare(crate::terminal::TerminalUnderlineSnapshot::Dashed);
 
+        for prepared in [&single, &double, &curly, &dotted, &dashed] {
+            assert!(!prepared.quads.is_empty() || !prepared.underlines.is_empty());
+            for bounds in prepared.quads.iter().map(|quad| quad.quad.bounds).chain(
+                prepared.underlines.iter().map(|underline| {
+                    Bounds::new(
+                        underline.origin,
+                        size(underline.width, underline.style.thickness * 3.0),
+                    )
+                }),
+            ) {
+                for value in [
+                    bounds.left(),
+                    bounds.top(),
+                    bounds.size.width,
+                    bounds.size.height,
+                ] {
+                    assert!(f32::from(value).is_finite());
+                }
+                assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+                assert!(bounds.left() >= px(0.0) && bounds.right() <= px(16.0));
+                assert!(bounds.top() >= px(0.0) && bounds.bottom() <= px(20.0));
+            }
+        }
         assert_eq!(single.quads.len(), 1);
         assert_eq!(double.quads.len(), 2);
         assert_eq!(curly.underlines.len(), 1);
@@ -6390,22 +6468,6 @@ mod tests {
                 len: 2,
                 color: TerminalColors::default().selection_background,
             }]
-        );
-    }
-
-    #[test]
-    fn adjacent_narrow_cells_share_one_shaping_fragment() {
-        let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("b"), cell("c")]);
-
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
-
-        assert_eq!(
-            input
-                .fragments
-                .iter()
-                .map(|fragment| fragment.text.as_ref())
-                .collect::<Vec<_>>(),
-            vec!["abc"]
         );
     }
 
@@ -6766,7 +6828,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn kitty_placeholder_protocol_never_reaches_text_or_block_cursor_shaping(
+    fn kitty_placeholder_protocol_omits_placeholder_text_and_preserves_columns(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::terminal::geometry::{
@@ -7313,53 +7375,6 @@ mod tests {
     }
 
     #[test]
-    fn blink_frames_reuse_the_stable_geometry_buffer_without_clone_or_rebuild() {
-        let source = Arc::new(prepare_row(
-            &Arc::from([cell("a")]),
-            &colors(),
-            &"Menlo".into(),
-        ));
-        let builds = Cell::new(0);
-        let mut cached = None;
-        let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(), || {
-            builds.set(builds.get() + 1);
-            PreparedRow {
-                text: Vec::new(),
-                symbols: PreparedDecorations::default(),
-                backgrounds: Vec::new(),
-                selections: Vec::new(),
-                under_text_decorations: PreparedDecorations {
-                    quads: vec![PreparedQuad {
-                        quad: fill(
-                            Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(1.0))),
-                            gpui_color(Color::rgb(0xff_ff_ff)),
-                        ),
-                        blinking: true,
-                    }],
-                    underlines: Vec::new(),
-                },
-                over_text_decorations: PreparedDecorations::default(),
-            }
-        });
-        let stable_buffer = stable.under_text_decorations.quads.as_ptr();
-
-        for _phase in [false, true] {
-            let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(), || {
-                builds.set(builds.get() + 1);
-                panic!("blink phase must not rebuild stable row geometry")
-            });
-            let frame = PreparedFrameRow::new(Arc::clone(&stable));
-            assert!(Arc::ptr_eq(&stable, &frame.stable));
-            assert_eq!(
-                frame.stable.under_text_decorations.quads.as_ptr(),
-                stable_buffer
-            );
-        }
-
-        assert_eq!(builds.get(), 1);
-    }
-
-    #[test]
     fn shaped_geometry_cache_invalidates_when_row_identity_changes() {
         let first_source = Arc::new(prepare_row(
             &Arc::from([cell("a")]),
@@ -7403,8 +7418,10 @@ mod tests {
 
     #[test]
     fn render_cache_invalidates_rows_when_color_semantics_change() {
-        let row = Arc::<[CellSnapshot]>::from([cell("a")]);
-        let rows = Arc::<[RowSnapshot]>::from([row]);
+        let mut palette_cell = cell("a");
+        palette_cell.foreground_source = TerminalColor::Palette(1);
+        let row = Arc::<[CellSnapshot]>::from([palette_cell]);
+        let rows = Arc::<[RowSnapshot]>::from([row, Arc::from([cell("a")])]);
         let mut cache = TerminalGridCache::new();
         let first_colors = colors();
         let terminal_fonts = test_terminal_fonts(&"Menlo".into());
@@ -7428,6 +7445,19 @@ mod tests {
         );
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
+        assert!(!Arc::ptr_eq(&first[1], &second[1]));
+        assert_eq!(
+            first[1].fragments[0].paint_runs[0].color,
+            second[1].fragments[0].paint_runs[0].color
+        );
+        assert_ne!(
+            first[0].fragments[0].paint_runs[0].color,
+            second[0].fragments[0].paint_runs[0].color
+        );
+        assert_eq!(
+            second[0].fragments[0].paint_runs[0].color,
+            rgba(0xff_00_00_ff).into()
+        );
     }
 
     #[test]

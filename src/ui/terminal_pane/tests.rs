@@ -24,22 +24,7 @@ use crate::terminal::{
     LocalTerminalLaunchPlan, RemoteTerminalChannelProvider, ScrollbarSnapshot, SessionExit,
     SessionFailure, TerminalLaunchPlan, TerminalSessionFactory,
 };
-
-pub(super) fn select_terminal_font(font_names: &[String]) -> &'static str {
-    [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ]
-    .into_iter()
-    .find(|candidate| {
-        font_names
-            .iter()
-            .any(|available| available.eq_ignore_ascii_case(candidate))
-    })
-    .unwrap_or("Menlo")
-}
+use crate::ui::appearance::TerminalFonts;
 
 #[gpui::test]
 fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
@@ -702,10 +687,16 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
 
 #[gpui::test]
 fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
 
     pane.update(cx, |pane, cx| {
-        pane.terminal_input_focus = true;
+        pane.set_product_focus(
+            TerminalProductFocus {
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
         pane.handle_event(
             SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
             cx,
@@ -713,7 +704,14 @@ fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppConte
     });
     assert!(pane.read_with(cx, |pane, _| pane.attention_visual));
 
-    pane.update(cx, |pane, cx| pane.clear_attention(cx));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
     assert!(!pane.read_with(cx, |pane, _| pane.attention_visual));
 }
 
@@ -774,14 +772,29 @@ fn accepted_paste_clears_pending_attention(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppContext) {
-    let (pane, cx, _records) = terminal_pane_with_paste_response(
-        cx,
-        Ok(PasteRequestOutcome::Written),
-        Ok(PasteResolution::Cancelled),
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let (reply, receiver) = async_channel::bounded(1);
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(
+            TestTerminalSessionFactory::new(records.clone())
+                .with_pending_paste_response(receiver)
+                .with_paste_resolution(Ok(PasteResolution::Cancelled)),
+        ),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-stale-paste-test")),
     );
+    let (pane, cx) =
+        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
+    });
+    cx.run_until_parked();
     cx.write_to_clipboard(ClipboardItem::new_string("stale paste".to_owned()));
 
     cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+    assert_eq!(records.commands().iter().filter(|call| matches!(&call.command, RecordedSessionCommand::RequestPaste(text) if text == "stale paste")).count(), 1);
     pane.update(cx, |pane, cx| {
         pane.advance_native_service_focus_epoch();
         pane.terminal_input_focus = false;
@@ -801,6 +814,7 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
         1
     );
 
+    reply.try_send(Ok(PasteRequestOutcome::Written)).unwrap();
     cx.run_until_parked();
 
     assert_eq!(
@@ -1447,10 +1461,11 @@ fn remote_pane_disables_local_file_actions_but_preserves_text_services_and_web_l
                 window,
                 cx,
             );
-            pane.insert_dropped_file_paths_for_test(std::slice::from_ref(&file), window, cx);
         });
     });
     cx.run_until_parked();
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    drop_file_paths(cx, position, vec![file.clone()]);
     cx.write_to_clipboard(ClipboardItem::new_string("clipboard text".to_owned()));
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
@@ -1812,282 +1827,159 @@ fn visible_surface() -> SurfaceVisibility {
 
 #[gpui::test]
 fn minimized_pane_coalesces_sustained_accessibility_updates_until_restore(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.render_lifecycle.update_visibility(SurfaceVisibility {
+    for hidden in [
+        SurfaceVisibility {
             minimized: true,
             ..visible_surface()
-        });
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                pane.pending_accessibility_notifications
-                    .contains(AccessibilityNotification::Value),
-                pane.pending_accessibility_notifications
-                    .contains(AccessibilityNotification::Selection),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, true, "update-4095x".to_owned())
-    );
-
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| {
-            pane.render_lifecycle.update_visibility(visible_surface());
-            pane.sync_native_accessibility(window, false);
-        });
-    });
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
-            )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
-}
-
-#[gpui::test]
-fn occluded_pane_coalesces_sustained_accessibility_updates_until_restore(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.render_lifecycle.update_visibility(SurfaceVisibility {
+        },
+        SurfaceVisibility {
             occluded: true,
             ..visible_surface()
-        });
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, "update-4095x".to_owned())
-    );
-
-    cx.update(|window, cx| {
+        },
+    ] {
+        let (pane, cx) = terminal_pane(cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
-            pane.render_lifecycle.update_visibility(visible_surface());
-            pane.sync_native_accessibility(window, false);
+            pane.render_lifecycle.update_visibility(hidden);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
         });
-    });
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Value),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Selection),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, true, "update-4095x".to_owned())
+        );
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.render_lifecycle.update_visibility(visible_surface());
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    accessibility_record
+                        .borrow()
+                        .delivered
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    accessibility_record.borrow().model.text().to_owned(),
+                )
+            }),
             (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
             )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
+        );
+    }
 }
 
 #[gpui::test]
 fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    let layout_bounds = pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.expect("initial presentation has geometry")
-    });
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(
-            TerminalProductFocus {
-                pane_visible: false,
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            },
-            cx,
-        );
-        pane.set_accessibility_hierarchy(false, usize::MAX);
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                accessibility_record.borrow().delivered.is_empty(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, "update-4095x".to_owned())
-    );
-
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(TerminalProductFocus::default(), cx);
-        pane.set_accessibility_hierarchy(true, 0);
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.is_none()
-            && pane.pending_accessibility_notifications.len() == 2
-            && !accessibility_record.borrow().visible
-            && accessibility_record.borrow().delivered.is_empty()
-            && accessibility_record.borrow().model.text() == "update-4095x"
-    }));
-    // Production restores geometry in on_children_prepainted before publishing
-    // native accessibility. Exercise that order instead of using hidden bounds.
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.update_grid_bounds(layout_bounds, cx);
-            pane.sync_native_accessibility(window, false);
+    for hidden in [
+        TerminalProductFocus {
+            pane_visible: false,
+            focused_pane: false,
+            ..TerminalProductFocus::default()
+        },
+        TerminalProductFocus {
+            active_workspace: false,
+            active_tab: false,
+            pane_visible: false,
+            focused_pane: false,
+            blocker: None,
+        },
+    ] {
+        let (pane, cx) = terminal_pane(cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
+        let layout_bounds = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.expect("initial presentation has geometry")
         });
-    });
-    assert!(accessibility_record.borrow().visible);
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
-            )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
-}
-
-#[gpui::test]
-fn inactive_workspace_retains_only_bounded_accessibility_state_until_restore(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    let layout_bounds = pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.expect("initial presentation has geometry")
-    });
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(
-            TerminalProductFocus {
-                active_workspace: false,
-                active_tab: false,
-                pane_visible: false,
-                focused_pane: false,
-                blocker: None,
-            },
-            cx,
-        );
-        pane.set_accessibility_hierarchy(false, usize::MAX);
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                accessibility_record.borrow().delivered.is_empty(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, "update-4095x".to_owned())
-    );
-
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(TerminalProductFocus::default(), cx);
-        pane.set_accessibility_hierarchy(true, 0);
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.is_none()
-            && pane.pending_accessibility_notifications.len() == 2
-            && !accessibility_record.borrow().visible
-            && accessibility_record.borrow().delivered.is_empty()
-            && accessibility_record.borrow().model.text() == "update-4095x"
-    }));
-    // Production restores geometry in on_children_prepainted before publishing
-    // native accessibility. Exercise that order instead of using hidden bounds.
-    cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.update_grid_bounds(layout_bounds, cx);
-            pane.sync_native_accessibility(window, false);
+            pane.set_product_focus(hidden, cx);
+            pane.set_accessibility_hierarchy(false, usize::MAX);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
         });
-    });
-    assert!(accessibility_record.borrow().visible);
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    accessibility_record.borrow().delivered.is_empty(),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, "update-4095x".to_owned())
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+            pane.set_accessibility_hierarchy(true, 0);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.is_none()
+                && pane.pending_accessibility_notifications.len() == 2
+                && !accessibility_record.borrow().visible
+                && accessibility_record.borrow().delivered.is_empty()
+                && accessibility_record.borrow().model.text() == "update-4095x"
+        }));
+        // Production restores geometry in on_children_prepainted before publishing
+        // native accessibility. Exercise that order instead of using hidden bounds.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.update_grid_bounds(layout_bounds, cx);
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert!(accessibility_record.borrow().visible);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    accessibility_record
+                        .borrow()
+                        .delivered
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    accessibility_record.borrow().model.text().to_owned(),
+                )
+            }),
             (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
             )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
+        );
+    }
 }
 
 #[gpui::test]
@@ -3310,11 +3202,24 @@ fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAp
     assert!(pane.read_with(cx, |pane, _| {
         pane.grid_presentation.cursor_storage().is_some()
     }));
+    let completed = pane.read_with(cx, |pane, _| {
+        (
+            pane.scene_submission_attempts.len(),
+            pane.last_valid_screen.generation,
+        )
+    });
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
         pane.read_with(cx, |pane, _| pane.pane_state.clone()),
         PaneTerminalState::Running
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| (
+            pane.scene_submission_attempts.len(),
+            pane.last_valid_screen.generation
+        )),
+        completed
     );
 }
 
@@ -3404,28 +3309,68 @@ fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn cursor_layer_rebuilds_for_output_selection_and_font_changes(cx: &mut TestAppContext) {
+fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     let mut screen = text_screen(10, &["first row", "cursor row", "last row"]);
     Arc::make_mut(&mut screen).cursor = blinking_cursor_screen(true, true).cursor;
+    cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
     pane.update(cx, |pane, cx| {
+        let colors = &mut Arc::make_mut(&mut Arc::make_mut(&mut pane.appearance).terminal).colors;
+        colors.selection_background = Color::rgb(0x11_dd_77);
+        colors.cursor = Color::rgb(0xff_00_00);
+        pane.cell_width = px(8.0);
+        pane.line_height = 16.0;
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(40, 10),
+            LogicalCellSize::new(8.0, 16.0),
+            BackingScale::ONE,
+        ));
         pane.handle_event(SessionEvent::Screen(screen.clone()), cx);
         cx.notify();
     });
     cx.run_until_parked();
+    let assert_composition = |cx: &mut VisualTestContext, cursor_visible: bool| {
+        cx.update(|window, _| {
+            let quads = window.painted_quads();
+            let selected: Vec<_> = quads
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .collect();
+            let cursor: Vec<_> = quads
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0xff_00_00_ff).into())
+                .collect();
+            let cell_bounds = Bounds::new(point(px(2.0), px(0.0)), gpui::size(px(8.0), px(16.0)))
+                .scale(window.scale_factor());
+            assert_eq!(selected.len(), if cursor_visible { 2 } else { 1 });
+            for quad in &selected {
+                assert_eq!(quad.bounds, cell_bounds);
+            }
+            assert_eq!(cursor.len(), usize::from(cursor_visible));
+            if cursor_visible {
+                assert_eq!(cursor[0].bounds, cell_bounds);
+                assert!(selected[0].order < selected[1].order);
+                assert!(
+                    selected[1].order < cursor[0].order,
+                    "cursor must compose over Selection"
+                );
+            }
+        });
+    };
     let mut paints = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
     assert!(paints > 0);
 
-    // A new Selection and output arrive in the same frame as a blink. Snapshot
-    // identity must win over the otherwise reusable cursor phase.
+    // Output and Selection change in separate frames so each invalidation is observed.
     let changed = Arc::make_mut(&mut screen);
     changed.generation = crate::terminal::PresentationGeneration::test(11);
     let rows = Arc::make_mut(&mut changed.rows);
-    Arc::make_mut(&mut rows[0])[0].selected = true;
+
     Arc::make_mut(&mut rows[2])[0].text = "changed".to_owned();
     pane.update(cx, |pane, cx| {
         pane.blink_phase_visible = !pane.blink_phase_visible;
-        pane.handle_event(SessionEvent::Screen(screen), cx);
+        pane.handle_event(SessionEvent::Screen(screen.clone()), cx);
         cx.notify();
     });
     cx.run_until_parked();
@@ -3442,6 +3387,45 @@ fn cursor_layer_rebuilds_for_output_selection_and_font_changes(cx: &mut TestAppC
         ))
     );
     paints = after_output;
+    let changed = Arc::make_mut(&mut screen);
+    changed.generation = crate::terminal::PresentationGeneration::test(12);
+    Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].selected = true;
+    pane.update(cx, |pane, cx| {
+        pane.blink_phase_visible = true;
+        pane.handle_event(SessionEvent::Screen(screen), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let after_selection = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    assert!(after_selection > paints);
+    paints = after_selection;
+    assert_composition(cx, true);
+    let assert_selected_row_reused = pane.read_with(cx, |pane, cx| {
+        crate::ui::terminal_element::tests::assert_geometry_reused(pane.render_cache.read(cx), 0)
+    });
+    let selected_cursor_storage =
+        pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage());
+    assert!(selected_cursor_storage.is_some());
+    for phase in [false, true] {
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.blink_phase_visible),
+            phase
+        );
+        assert_composition(cx, phase);
+        pane.read_with(cx, |pane, cx| {
+            assert_selected_row_reused(pane.render_cache.read(cx))
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage()),
+            selected_cursor_storage
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+            after_selection
+        );
+    }
 
     cx.simulate_keystrokes("cmd-=");
     cx.run_until_parked();
@@ -3496,9 +3480,11 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
     assert!(pane.read_with(cx, |pane, _| {
         pane.grid_presentation.cursor_storage().is_some()
     }));
-    pane.update(cx, |pane, cx| {
-        pane.mark_for_preedit_cache_test("かな", 2..2);
-        cx.notify();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx);
+            cx.notify();
+        });
     });
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| {
@@ -4578,8 +4564,9 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
         Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
         Ok(PasteResolution::Written),
     );
-    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.write_to_clipboard(ClipboardItem::new_string("q9!w2\nz7@r4x".to_owned()));
 
+    cx.activate_accessibility();
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
@@ -4594,6 +4581,14 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
             .iter()
             .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
     );
+
+    let tree = cx.update(|window, _| {
+        window
+            .debug_a11y_tree_json()
+            .expect("rendered notice accessibility tree")
+    });
+    assert!(tree.contains("Paste 12 bytes across 2 lines?"));
+    assert!(!tree.contains("q9!w2") && !tree.contains("z7@r4x"));
 
     let confirm = cx
         .debug_bounds("confirm-unsafe-paste")
@@ -4654,7 +4649,7 @@ fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
             closing_fence: false,
         },
     };
-    let (_pane, cx, records) = terminal_pane_with_paste_response(
+    let (pane, cx, records) = terminal_pane_with_paste_response(
         cx,
         Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
         Ok(PasteResolution::Cancelled),
@@ -4663,12 +4658,32 @@ fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    let command_start = records.commands().len();
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     assert!(records.commands().iter().any(|call| {
         call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
+    let decisions = records
+        .commands()
+        .into_iter()
+        .skip(command_start)
+        .filter_map(|call| match call.command {
+            command @ RecordedSessionCommand::ResolvePaste(_, _) => Some(command),
+            command @ RecordedSessionCommand::Key(_) => Some(command),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decisions,
+        [RecordedSessionCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
 }
 
 #[gpui::test]
@@ -4692,6 +4707,7 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
+    let command_start = records.commands().len();
     pane.update(cx, |pane, cx| {
         pane.set_product_focus(
             TerminalProductFocus {
@@ -4704,9 +4720,27 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
     cx.run_until_parked();
 
     assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     assert!(records.commands().iter().any(|call| {
         call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
+    let decisions = records
+        .commands()
+        .into_iter()
+        .skip(command_start)
+        .filter_map(|call| match call.command {
+            command @ RecordedSessionCommand::ResolvePaste(_, _) => Some(command),
+            command @ RecordedSessionCommand::Key(_) => Some(command),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decisions,
+        [RecordedSessionCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
 }
 
 #[gpui::test]
@@ -4867,6 +4901,7 @@ fn completed_and_reset_escape_sequences_start_over() {
 #[gpui::test]
 fn windowed_double_escape_still_reaches_the_session(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
+    let command_start = records.commands().len();
     let key_count_before = records
         .commands()
         .iter()
@@ -4882,11 +4917,28 @@ fn windowed_double_escape_still_reaches_the_session(cx: &mut TestAppContext) {
         .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
         .count();
     assert_eq!(key_count_after, key_count_before + 2);
+    let keys = records
+        .commands()
+        .into_iter()
+        .skip(command_start)
+        .filter_map(|call| match call.command {
+            RecordedSessionCommand::Key(key) => Some(key),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    assert!(!cx.update(|window, _| window.is_fullscreen()));
+    for key in keys {
+        assert_eq!(key.physical_key, crate::terminal::key::PhysicalKey::Escape);
+        assert_eq!(key.logical_key, "escape");
+        assert_eq!(key.action, KeyAction::Press);
+    }
 }
 
 #[gpui::test]
 fn fullscreen_double_escape_exits_and_reaches_the_session(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
+    let command_start = records.commands().len();
     let key_count_before = records
         .commands()
         .iter()
@@ -4904,6 +4956,21 @@ fn fullscreen_double_escape_exits_and_reaches_the_session(cx: &mut TestAppContex
         .count();
     assert!(!cx.update(|window, _| window.is_fullscreen()));
     assert_eq!(key_count_after, key_count_before + 2);
+    let keys = records
+        .commands()
+        .into_iter()
+        .skip(command_start)
+        .filter_map(|call| match call.command {
+            RecordedSessionCommand::Key(key) => Some(key),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    for key in keys {
+        assert_eq!(key.physical_key, crate::terminal::key::PhysicalKey::Escape);
+        assert_eq!(key.logical_key, "escape");
+        assert_eq!(key.action, KeyAction::Press);
+    }
 }
 
 #[gpui::test]
@@ -5012,7 +5079,9 @@ fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut Te
 }
 
 #[gpui::test]
-fn unhandled_key_translation_preserves_pane_presentation_and_propagates(cx: &mut TestAppContext) {
+fn unhandled_key_translation_returns_unconsumed_and_preserves_presentation(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
         pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
@@ -5317,15 +5386,8 @@ fn file_drop_from_inactive_app_focuses_before_requesting_paste(cx: &mut TestAppC
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.deactivate_window();
 
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.insert_dropped_file_paths_for_test(
-                &[PathBuf::from("/tmp/a dropped file")],
-                window,
-                cx,
-            );
-        });
-    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    drop_file_paths(cx, position, vec![PathBuf::from("/tmp/a dropped file")]);
     cx.run_until_parked();
 
     let mut relevant = records
@@ -5372,20 +5434,6 @@ fn reported_terminal_title_should_replace_the_shell_fallback() {
 }
 
 #[test]
-fn preferred_terminal_font_is_selected_when_present() {
-    let available = vec!["Menlo".to_owned(), "JetBrains Mono".to_owned()];
-
-    assert_eq!(select_terminal_font(&available), "JetBrains Mono");
-}
-
-#[test]
-fn system_monospace_font_is_selected_when_preferred_fonts_are_absent() {
-    let available = vec!["Helvetica".to_owned(), "Menlo".to_owned()];
-
-    assert_eq!(select_terminal_font(&available), "Menlo");
-}
-
-#[test]
 fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
     let element_bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(50.0), px(60.0)));
     let layout = layout_preedit("界", 0, 4, 5, 1);
@@ -5398,10 +5446,12 @@ fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
 
 #[gpui::test]
 fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    pane.update(cx, |pane, _| {
-        pane.screen = blinking_cursor_screen(true, false);
-        pane.mark_for_preedit_cache_test("かな", 2..2);
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx);
+        });
     });
 
     let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
@@ -5412,28 +5462,59 @@ fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext
 
 #[gpui::test]
 fn marked_text_edit_replaces_logical_preedit_clusters(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    pane.update(cx, |pane, _| {
-        pane.screen = blinking_cursor_screen(true, false);
-        pane.mark_for_preedit_cache_test("か", 1..1);
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.replace_and_mark_text_in_range(None, "か", Some(1..1), window, cx);
+        });
     });
     let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
-    pane.update(cx, |pane, _| pane.mark_for_preedit_cache_test("かな", 2..2));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx)
+        });
+    });
 
     let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
 
     assert!(!Arc::ptr_eq(&first.clusters, &second.clusters));
+    assert_eq!(
+        first
+            .clusters
+            .iter()
+            .map(|cluster| cluster.text.as_str())
+            .collect::<String>(),
+        "か"
+    );
+    assert_eq!(
+        second
+            .clusters
+            .iter()
+            .map(|cluster| cluster.text.as_str())
+            .collect::<String>(),
+        "かな"
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.ime.selected_range()),
+        2..2
+    );
+    assert_eq!(first.caret, PreeditPosition { row: 1, column: 0 });
+    assert_eq!(second.caret, PreeditPosition { row: 2, column: 0 });
 }
 
 #[gpui::test]
-fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppContext) {
-    let (_pane, cx) = terminal_pane(cx);
+fn headless_shaper_preserves_emoji_run_routing(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    let fonts = pane.read_with(cx, |pane, _| {
+        TerminalFonts::prepare(&pane.appearance.terminal.typography)
+    });
 
     cx.update(|window, _cx| {
         let text = "👩\u{200d}💻";
         let run = TextRun {
             len: text.len(),
-            font: crate::ui::terminal_element::terminal_cell_font(&"Menlo".into(), false, false),
+            font: fonts.regular.clone(),
             color: gpui_color(TerminalColors::default().foreground).into(),
             background_color: None,
             underline: None,
@@ -6189,6 +6270,9 @@ fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut Tes
 
     preview(cx);
     pane.update(cx, |pane, _| pane.file_preview.dismiss());
+    let dismissed_state = pane.read_with(cx, |pane, _| {
+        (pane.pane_state.failure().cloned(), pane.status.clone())
+    });
     pending.borrow()[2]
         .try_send(FilePreviewError::PlatformUnavailable)
         .unwrap();
@@ -6197,6 +6281,13 @@ fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut Tes
         dismissals.get(),
         2,
         "only the explicit dismissal releases it"
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| (
+            pane.pane_state.failure().cloned(),
+            pane.status.clone()
+        )),
+        dismissed_state
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -6526,31 +6617,54 @@ fn presentation_failure_retry_preserves_and_restores_the_current_presentation(
     );
 }
 
-#[gpui::test]
-fn second_row_preflight_failure_submits_only_the_last_valid_generation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
+#[test]
+fn second_row_preflight_failure_submits_only_the_last_valid_generation() {
+    let (handle, mut cx, records, atlas) = headless_glyph_pane();
     let events = records.last_event_sender().unwrap();
     events
         .try_send(SessionEvent::Screen(text_screen(1, &["old", "frame"])))
         .unwrap();
     cx.run_until_parked();
-    let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
-
-    pane.update(cx, |pane, _| {
-        pane.paint_fault = Some(PaintPreflightFault::Row(1));
-    });
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let before = handle
+        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+        .unwrap();
+    atlas.glyph_lookups.lock().unwrap().clear();
+    *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('f' as u32));
     events
         .try_send(SessionEvent::Screen(text_screen(2, &["new", "frame"])))
         .unwrap();
     cx.run_until_parked();
-
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let lookups = atlas.glyph_lookups.lock().unwrap().clone();
+    assert!(
+        lookups.contains(&gpui::GlyphId('f' as u32)),
+        "the real failing atlas lookup was reached"
+    );
     assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.pane_state.last_valid_frame(),
-            pane.pane_state.failure().map(TerminalFailure::class),
-        )),
+        &lookups[..4],
+        &[
+            gpui::GlyphId('n' as u32),
+            gpui::GlyphId('e' as u32),
+            gpui::GlyphId('w' as u32),
+            gpui::GlyphId('f' as u32)
+        ]
+    );
+    assert!(
+        lookups.contains(&gpui::GlyphId('n' as u32)),
+        "the candidate's first glyph reached the atlas"
+    );
+    assert_eq!(
+        handle
+            .read_with(&cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state.failure().map(TerminalFailure::class),
+            ))
+            .unwrap(),
         (
             crate::terminal::PresentationGeneration::test(2),
             crate::terminal::PresentationGeneration::test(1),
@@ -6558,30 +6672,106 @@ fn second_row_preflight_failure_submits_only_the_last_valid_generation(cx: &mut 
             Some(crate::terminal::FailureClass::Presentation),
         )
     );
-    let submissions = pane.read_with(cx, |pane, _| {
-        pane.scene_submission_attempts[submissions_before..].to_vec()
-    });
+    let submissions = handle
+        .read_with(&cx, |pane, _| {
+            pane.scene_submission_attempts[before..].to_vec()
+        })
+        .unwrap();
     assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
     assert_eq!(
         submissions.last(),
         Some(&crate::terminal::PresentationGeneration::test(1))
     );
 }
-
-#[gpui::test]
-fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
-    let (pane, cx, _records) = connected_terminal_pane(cx);
-
-    let (candidate, fallback) = pane.read_with(cx, |pane, _| {
+#[test]
+fn candidate_and_fallback_use_isolated_render_caches() {
+    let (handle, mut cx, records, atlas) = headless_glyph_pane();
+    let events = records.last_event_sender().unwrap();
+    events
+        .try_send(SessionEvent::Screen(text_screen(1, &["old", "frame"])))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let retained_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert!(!retained_sprites.is_empty());
+    let before = handle
+        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+        .unwrap();
+    atlas.glyph_lookups.lock().unwrap().clear();
+    *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('f' as u32));
+    events
+        .try_send(SessionEvent::Screen(text_screen(2, &["new", "frame"])))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let submitted_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .filter(|sprite| {
+                    sprite.bounds.origin.y < retained_sprites.last().unwrap().1.bottom()
+                })
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(submitted_sprites, retained_sprites);
+    let lookups = atlas.glyph_lookups.lock().unwrap().clone();
+    assert!(
+        lookups.contains(&gpui::GlyphId('f' as u32)),
+        "the real failing atlas lookup was reached"
+    );
+    assert!(
+        lookups.contains(&gpui::GlyphId('n' as u32)),
+        "the candidate's first glyph reached the atlas"
+    );
+    assert_eq!(
+        handle
+            .read_with(&cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state.failure().map(TerminalFailure::class),
+            ))
+            .unwrap(),
         (
-            pane.render_cache.entity_id(),
-            pane.fallback_render_cache.entity_id(),
+            crate::terminal::PresentationGeneration::test(2),
+            crate::terminal::PresentationGeneration::test(1),
+            Some(crate::terminal::PresentationGeneration::test(1)),
+            Some(crate::terminal::FailureClass::Presentation),
         )
-    });
-
-    assert_ne!(candidate, fallback);
+    );
+    let submissions = handle
+        .read_with(&cx, |pane, _| {
+            pane.scene_submission_attempts[before..].to_vec()
+        })
+        .unwrap();
+    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    assert_eq!(
+        submissions.last(),
+        Some(&crate::terminal::PresentationGeneration::test(1))
+    );
+    handle
+        .read_with(&cx, |pane, _| {
+            assert_ne!(
+                pane.render_cache.entity_id(),
+                pane.fallback_render_cache.entity_id()
+            );
+            assert_eq!(pane.last_valid_screen.rows.len(), 2);
+        })
+        .unwrap();
 }
-
 #[gpui::test]
 fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
@@ -6639,45 +6829,72 @@ fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut Te
     );
 }
 
-#[gpui::test]
-fn second_glyph_preflight_failure_submits_only_the_last_valid_generation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
+#[test]
+fn second_glyph_preflight_failure_submits_only_the_last_valid_generation() {
+    let (handle, mut cx, records, atlas) = headless_glyph_pane();
     let events = records.last_event_sender().unwrap();
     events
         .try_send(SessionEvent::Screen(text_screen(1, &["old"])))
         .unwrap();
     cx.run_until_parked();
-    let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
-
-    pane.update(cx, |pane, _| {
-        pane.paint_fault = Some(PaintPreflightFault::Glyph(1));
-    });
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let before = handle
+        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+        .unwrap();
+    atlas.glyph_lookups.lock().unwrap().clear();
+    *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('e' as u32));
     events
         .try_send(SessionEvent::Screen(text_screen(2, &["new"])))
         .unwrap();
     cx.run_until_parked();
-
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let lookups = atlas.glyph_lookups.lock().unwrap().clone();
+    assert!(
+        lookups.contains(&gpui::GlyphId('e' as u32)),
+        "the real failing atlas lookup was reached"
+    );
+    assert!(
+        lookups.contains(&gpui::GlyphId('n' as u32)),
+        "the candidate's first glyph reached the atlas"
+    );
     assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.pane_state.failure().map(TerminalFailure::class),
-        )),
+        handle
+            .read_with(&cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state.failure().map(TerminalFailure::class),
+            ))
+            .unwrap(),
         (
             crate::terminal::PresentationGeneration::test(2),
             crate::terminal::PresentationGeneration::test(1),
+            Some(crate::terminal::PresentationGeneration::test(1)),
             Some(crate::terminal::FailureClass::Presentation),
         )
     );
-    let submissions = pane.read_with(cx, |pane, _| {
-        pane.scene_submission_attempts[submissions_before..].to_vec()
-    });
+    let submissions = handle
+        .read_with(&cx, |pane, _| {
+            pane.scene_submission_attempts[before..].to_vec()
+        })
+        .unwrap();
     assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    assert_eq!(
+        submissions.last(),
+        Some(&crate::terminal::PresentationGeneration::test(1))
+    );
+    assert_eq!(
+        &lookups[..2],
+        &[gpui::GlyphId('n' as u32), gpui::GlyphId('e' as u32)]
+    );
 }
-
 struct FailImageAtlas {
     inner: gpui::HeadlessAtlas,
     image_lookups: AtomicUsize,
+    glyph_lookups: std::sync::Mutex<Vec<gpui::GlyphId>>,
+    fail_glyph: std::sync::Mutex<Option<gpui::GlyphId>>,
     fail_at_lookup: AtomicUsize,
 }
 
@@ -6689,6 +6906,14 @@ impl gpui::PlatformAtlas for FailImageAtlas {
             Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>,
         >,
     ) -> anyhow::Result<Option<gpui::AtlasTile>> {
+        if let gpui::AtlasKey::Glyph(params) = &key {
+            self.glyph_lookups.lock().unwrap().push(params.glyph_id);
+            let mut failure = self.fail_glyph.lock().unwrap();
+            if failure.as_ref() == Some(&params.glyph_id) {
+                *failure = None;
+                anyhow::bail!("injected glyph atlas failure");
+            }
+        }
         if matches!(key, gpui::AtlasKey::Image(_)) {
             let lookup = self.image_lookups.fetch_add(1, Ordering::Relaxed) + 1;
             if lookup == self.fail_at_lookup.load(Ordering::Relaxed) {
@@ -6736,6 +6961,8 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
     let atlas = Arc::new(FailImageAtlas {
         inner: gpui::HeadlessAtlas::default(),
         image_lookups: AtomicUsize::new(0),
+        glyph_lookups: Default::default(),
+        fail_glyph: Default::default(),
         fail_at_lookup: AtomicUsize::new(0),
     });
     let mut cx =
@@ -8115,7 +8342,34 @@ mod permission_requests {
         assert!(access.prepared.borrow().is_empty());
 
         request(&pane, &[ScreenRecording], cx);
+        let sent = records.commands().len();
         cx.simulate_keystrokes("enter escape");
+        let keys = records
+            .commands()
+            .into_iter()
+            .skip(sent)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(key) => {
+                    Some((key.logical_key, key.physical_key, key.action))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                (
+                    "enter".to_owned(),
+                    crate::terminal::key::PhysicalKey::Enter,
+                    KeyAction::Press
+                ),
+                (
+                    "escape".to_owned(),
+                    crate::terminal::key::PhysicalKey::Escape,
+                    KeyAction::Press
+                )
+            ]
+        );
         assert!(
             cx.debug_bounds("permission-request").is_some(),
             "terminal input never answers the notice"
@@ -8144,6 +8398,23 @@ mod permission_requests {
         raise_request(&pane, &[ScreenRecording], cx);
         let sent = records.commands().len();
         cx.simulate_keystrokes("cmd-enter");
+        let early_keys = records
+            .commands()
+            .into_iter()
+            .skip(sent)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(key) => Some(key),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(early_keys.len(), 1);
+        assert_eq!(
+            early_keys[0].physical_key,
+            crate::terminal::key::PhysicalKey::Enter
+        );
+        assert_eq!(early_keys[0].logical_key, "enter");
+        assert_eq!(early_keys[0].action, KeyAction::Press);
+        assert!(early_keys[0].modifiers.platform);
         let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
         cx.simulate_click(set_up.center(), Modifiers::none());
         let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
@@ -8452,4 +8723,106 @@ mod permission_requests {
         cx.run_until_parked();
         assert_eq!(offered(&pane, cx), [ScreenRecording]);
     }
+}
+
+fn drop_file_paths(
+    cx: &mut VisualTestContext,
+    position: gpui::Point<gpui::Pixels>,
+    paths: Vec<PathBuf>,
+) {
+    cx.simulate_event(gpui::FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths(paths.into()),
+    });
+    cx.run_until_parked();
+    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn blink_frames_reuse_stable_geometry_and_decorations_through_the_pane_clock(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let marker = Color::rgb(0x11_dd_77);
+    let mut screen = blinking_screen();
+    let cell = &mut Arc::make_mut(&mut Arc::make_mut(&mut Arc::make_mut(&mut screen).rows)[0])[0];
+    cell.text = "a".to_owned();
+    cell.underline = crate::terminal::TerminalUnderlineSnapshot::Single;
+    cell.underline_source = crate::terminal::TerminalColor::Rgb(marker);
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(SessionEvent::Screen(screen), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let assert_reused = pane.read_with(cx, |pane, cx| {
+        crate::ui::terminal_element::tests::assert_geometry_reused(pane.render_cache.read(cx), 1)
+    });
+    let decoration_count = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .count()
+        })
+    };
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert_eq!(decoration_count(cx), 1);
+    for phase in [false, true] {
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.blink_phase_visible),
+            phase
+        );
+        pane.read_with(cx, |pane, cx| assert_reused(pane.render_cache.read(cx)));
+        assert_eq!(decoration_count(cx), usize::from(phase));
+    }
+}
+
+fn headless_glyph_pane() -> (
+    gpui::WindowHandle<TerminalPane>,
+    gpui::HeadlessAppContext,
+    TestTerminalSessionRecords,
+    Arc<FailImageAtlas>,
+) {
+    let atlas = Arc::new(FailImageAtlas {
+        inner: gpui::HeadlessAtlas::default(),
+        image_lookups: AtomicUsize::new(0),
+        glyph_lookups: Default::default(),
+        fail_glyph: Default::default(),
+        fail_at_lookup: AtomicUsize::new(0),
+    });
+    let text_system = Arc::new(crate::ui::terminal_element::tests::RasterTextSystem {
+        base: gpui::NoopTextSystem,
+        bounds: Bounds::new(
+            point(gpui::DevicePixels(0), gpui::DevicePixels(0)),
+            size(gpui::DevicePixels(8), gpui::DevicePixels(16)),
+        ),
+        observation: None,
+    });
+    let mut cx = gpui::HeadlessAppContext::with_platform(text_system, Arc::new(()), {
+        let atlas = Arc::clone(&atlas);
+        move || Ok(Some(Box::new(FailImageRenderer(Arc::clone(&atlas)))))
+    });
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(records.clone())),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-glyph-failure-test")),
+    );
+    let handle = cx
+        .open_window(size(px(800.0), px(600.0)), move |window, cx| {
+            cx.new(|cx| TerminalPane::new(factory, window, cx))
+        })
+        .unwrap();
+    handle
+        .update(&mut cx, |pane, window, cx| {
+            window.activate_window();
+            pane.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    (handle, cx, records, atlas)
 }
