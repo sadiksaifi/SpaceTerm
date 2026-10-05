@@ -174,10 +174,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
     }
 
     drop(session);
-    assert!(
-        exit_status.is_some(),
-        "shell exit did not produce a terminal lifecycle event"
-    );
+    assert_eq!(exit_status, Some(SessionExit::Success));
 }
 
 struct JoinedRealPtySession(TerminalSession);

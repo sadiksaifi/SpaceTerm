@@ -47,7 +47,7 @@ impl AskPassLocalIpc for UnixAskPassLocalIpc {
         let address = authenticated_endpoint(&socket_path, std::process::id());
         Ok(BoundAskPassEndpoint::new(
             address,
-            Box::new(MacosAskPassListener {
+            Box::new(UnixAskPassListener {
                 listener,
                 _socket: socket,
                 _runtime_owner: runtime_owner,
@@ -56,13 +56,13 @@ impl AskPassLocalIpc for UnixAskPassLocalIpc {
     }
 }
 
-struct MacosAskPassListener {
+struct UnixAskPassListener {
     listener: UnixListener,
     _socket: RegisteredRuntimeSocket,
     _runtime_owner: RuntimeOwner,
 }
 
-impl AskPassLocalListener for MacosAskPassListener {
+impl AskPassLocalListener for UnixAskPassListener {
     fn accept_authenticated(&self) -> AskPassLocalAccept {
         let stream = match self.listener.accept() {
             Ok((stream, _)) => stream,

@@ -173,6 +173,19 @@ fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
     let mut registry = LocalFileEmissionRegistry::default();
     let token = registry.emit(&file).unwrap();
     assert_eq!(token.len(), 24);
+    assert_eq!(&token[..8], b"STLF\0\0\0\x02");
+    for private in [
+        b"private-name".as_slice(),
+        b"contents".as_slice(),
+        path.as_os_str().as_encoded_bytes(),
+    ] {
+        assert!(!token.windows(private.len()).any(|bytes| bytes == private));
+    }
+    assert_eq!(format!("{file:?}"), "ValidatedLocalFile(<redacted>)");
+    assert_eq!(
+        format!("{:?}", file.0.identity),
+        "LocalObjectIdentity(<redacted>)"
+    );
     assert_eq!(registry.restore(&token), Some(file.clone()));
     assert!(
         LocalFileEmissionRegistry::default()

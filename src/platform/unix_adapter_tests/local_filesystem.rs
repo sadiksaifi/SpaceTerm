@@ -1,7 +1,6 @@
 //! Native retained identity, permissions, and filesystem integration evidence.
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Fixture(PathBuf);
@@ -141,59 +140,6 @@ fn errors_and_retained_identities_do_not_disclose_content() {
     assert_ne!(directory.identity(), LocalDirectoryIdentity::for_test(31));
 }
 
-struct ScriptedIdentities(Mutex<VecDeque<Result<LocalIdentityObservation, LocalFilesystemError>>>);
-
-impl LocalIdentitySource for ScriptedIdentities {
-    fn identify(&self, _: &Path) -> Result<LocalIdentityObservation, LocalFilesystemError> {
-        self.0
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("unexpected identity request")
-    }
-}
-
-fn observation(
-    label: u64,
-    kind: LocalObjectKind,
-) -> Result<LocalIdentityObservation, LocalFilesystemError> {
-    Ok(LocalIdentityObservation {
-        identity: LocalObjectIdentity(IdentityValue::Fixture(label), None),
-        kind,
-    })
-}
-
-#[test]
-fn directory_validation_rejects_a_replacement_during_readability_check() {
-    let root = Fixture::new();
-    let source = Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([
-        observation(1, LocalObjectKind::Directory),
-        observation(2, LocalObjectKind::Directory),
-    ]))));
-    let authority =
-        LocalFilesystemAuthority::new(crate::local_path::LocalPathSemantics::Posix, source.clone());
-    assert_eq!(
-        authority.validate_directory(&root.0),
-        Err(LocalFilesystemError::IdentityChanged)
-    );
-    assert!(source.0.lock().unwrap().is_empty());
-}
-
-#[test]
-fn identity_failures_remain_closed_and_do_not_fall_back_to_path_equality() {
-    let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(ScriptedIdentities(Mutex::new(VecDeque::from([Err(
-            LocalFilesystemError::PermissionDenied,
-        )])))),
-    );
-    assert_eq!(
-        authority.validate_directory(&root.0),
-        Err(LocalFilesystemError::PermissionDenied)
-    );
-}
-
 #[test]
 fn local_file_authority_rejects_symlink_retargeting_and_successor_objects() {
     let root = Fixture::new();
@@ -271,6 +217,19 @@ fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
     let mut registry = LocalFileEmissionRegistry::default();
     let token = registry.emit(&file).unwrap();
     assert_eq!(token.len(), 24);
+    assert_eq!(&token[..8], b"STLF\0\0\0\x02");
+    for private in [
+        b"private-name".as_slice(),
+        b"contents".as_slice(),
+        path.as_os_str().as_encoded_bytes(),
+    ] {
+        assert!(!token.windows(private.len()).any(|bytes| bytes == private));
+    }
+    assert_eq!(format!("{file:?}"), "ValidatedLocalFile(<redacted>)");
+    assert_eq!(
+        format!("{:?}", file.0.identity),
+        "LocalObjectIdentity(<redacted>)"
+    );
     assert_eq!(registry.restore(&token), Some(file.clone()));
     assert!(
         LocalFileEmissionRegistry::default()
@@ -293,37 +252,6 @@ fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
 }
 
 #[test]
-fn emission_eviction_revokes_old_metadata_without_reusing_its_authority() {
-    let root = Fixture::new();
-    let path = root.0.join("file");
-    fs::write(&path, b"fixture").unwrap();
-    let authority = LocalFilesystemAuthority::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
-    );
-    let mut registry = LocalFileEmissionRegistry::default();
-    let first_file = authority.local_file("file", &root.0).unwrap();
-    let first = registry.emit(&first_file).unwrap();
-    for label in 0..MAX_EMITTED_LOCAL_FILES {
-        let file = ValidatedLocalFile(Arc::new(LocalFileState {
-            selected: path.clone(),
-            canonical: path.clone(),
-            identity: LocalObjectIdentity(IdentityValue::Fixture(label as u64), None),
-            authority: authority.clone(),
-            _permit: authority.files.reserve(MAX_LOCAL_FILE_LEASES).unwrap(),
-        }));
-        registry.emit(&file).unwrap();
-    }
-    assert_eq!(registry.files.len(), MAX_EMITTED_LOCAL_FILES);
-    assert!(registry.restore(&first).is_none());
-    // A snapshot already holding the original typed target still retains its own exact lease.
-    assert!(first_file.revalidated_path().is_some());
-    let next = registry.emit(&first_file).unwrap();
-    assert_ne!(first, next);
-    assert!(registry.restore(&first).is_none());
-}
-
-#[test]
 fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots() {
     const CHILD: &str = "SPACETERM_TEST_LOCAL_FILESYSTEM_LIMIT";
     if std::env::var_os(CHILD).is_none() {
@@ -341,6 +269,12 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "SPACETERM_LOCAL_FILESYSTEM_LIMIT_COMPLETED"),
+            "descriptor-headroom child body did not execute"
         );
         return;
     }
@@ -383,6 +317,7 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
     assert!(authority.local_file("file-0", &root.0).is_some());
     drop(snapshots);
     assert!(authority.local_file("file-0", &root.0).is_some());
+    println!("SPACETERM_LOCAL_FILESYSTEM_LIMIT_COMPLETED");
 }
 
 #[test]

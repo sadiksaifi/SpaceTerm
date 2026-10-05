@@ -259,6 +259,8 @@ mod tests {
         let current = unsafe { current.assume_init() };
         // SAFETY: current is initialized and SIGWINCH is a valid signal number.
         assert_eq!(unsafe { libc::sigismember(&current, libc::SIGWINCH) }, 0);
+        // A dedicated exit code proves this ignored child reached its assertion.
+        std::process::exit(73);
     }
 
     #[test]
@@ -281,7 +283,7 @@ mod tests {
         });
         adapter.reap(spawned.into_process()).unwrap();
 
-        assert!(exit.is_some_and(ProcessExit::is_success));
+        assert_eq!(exit.map(ProcessExit::code), Some(Some(73)));
     }
 
     #[test]
@@ -316,12 +318,18 @@ mod tests {
             );
             std::thread::yield_now();
         };
-        let observation = adapter.observe_exit(spawned.process_mut());
+        let mut observation = adapter.observe_exit(spawned.process_mut()).unwrap();
+        let interrupt = observation.interrupt_handle();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || sender.send(observation.wait()).unwrap());
+        let observed = receiver.recv_timeout(Duration::from_secs(2));
+        interrupt.interrupt();
+        waiter.join().unwrap();
         adapter.reap(spawned.into_process()).unwrap();
         assert_eq!(exit.code(), Some(7));
-        assert!(
-            observation.is_some(),
-            "native child exit observation should be available"
+        assert_eq!(
+            observed.unwrap(),
+            Ok(crate::ssh::process::SshProcessExitWake::Exit)
         );
     }
 

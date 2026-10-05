@@ -190,21 +190,3 @@ pub(crate) mod testing {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_material_accessibility_facts_do_not_suppress_transparency() {
-        let platform = testing::RecordingAppearancePlatform::default();
-        platform.set_show_borders(true);
-        platform.set_differentiate_without_color(true);
-        let options = platform.accessibility_display_options();
-
-        assert!(options.show_borders);
-        assert!(options.differentiate_without_color);
-        assert!(!options.reduce_transparency);
-        assert!(!options.increase_contrast);
-    }
-}

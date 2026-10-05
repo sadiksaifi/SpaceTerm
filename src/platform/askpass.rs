@@ -1247,14 +1247,14 @@ mod tests {
         }
         let token = token();
         let bytes = request_bytes(token.as_str().as_bytes(), b"Password:", REQUEST_SECRET);
-        assert!(
-            read_request(
-                &mut OneByteReader(Cursor::new(bytes)),
-                &token,
-                &AtomicBool::new(false),
-            )
-            .is_ok()
-        );
+        let request = read_request(
+            &mut OneByteReader(Cursor::new(bytes)),
+            &token,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(request.kind(), AskPassPromptKind::Secret);
+        assert_eq!(request.prompt(), "Password:");
     }
 
     #[test]
@@ -1381,23 +1381,39 @@ mod tests {
         let cases = [
             (
                 AskPassProtocolReply::Secret(AskPassSecret::new(b"private".to_vec()).unwrap()),
-                HELPER_SUCCESS,
+                0,
                 b"private\n".as_slice(),
+                b"\0\0\0\x08\x01private".as_slice(),
             ),
             (
                 AskPassProtocolReply::Confirmation(true),
-                HELPER_SUCCESS,
+                0,
                 b"yes\n".as_slice(),
+                b"\0\0\0\x01\x02".as_slice(),
+            ),
+            (
+                AskPassProtocolReply::Confirmation(false),
+                0,
+                b"no\n".as_slice(),
+                b"\0\0\0\x01\x03".as_slice(),
             ),
             (
                 AskPassProtocolReply::Cancelled,
-                HELPER_CANCELLED,
+                1,
                 b"".as_slice(),
+                b"\0\0\0\x01\x04".as_slice(),
+            ),
+            (
+                AskPassProtocolReply::Failed,
+                2,
+                b"".as_slice(),
+                b"\0\0\0\x01\x05".as_slice(),
             ),
         ];
-        for (reply, expected_exit, expected_stdout) in cases {
+        for (reply, expected_exit, expected_stdout, expected_frame) in cases {
             let mut encoded = Vec::new();
             write_reply(&mut encoded, reply).unwrap();
+            assert_eq!(encoded, expected_frame);
             let connector = MemoryConnector {
                 stream: Mutex::new(Some(MemoryStream::new(encoded))),
             };
@@ -1431,46 +1447,53 @@ mod tests {
             capability: Arc::new(token()),
         };
         assert_eq!(
-            environment
-                .entries()
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>(),
+            environment.entries().collect::<Vec<_>>(),
             vec![
-                "SSH_ASKPASS",
-                "SSH_ASKPASS_REQUIRE",
-                "DISPLAY",
-                HELPER_MODE_ENV,
-                ENDPOINT_ENV,
-                CAPABILITY_ENV,
+                ("SSH_ASKPASS", OsStr::new("/application/helper")),
+                ("SSH_ASKPASS_REQUIRE", OsStr::new("force")),
+                ("DISPLAY", OsStr::new("spaceterm-askpass")),
+                ("SPACETERM_SSH_ASKPASS_MODE", OsStr::new("broker-v1")),
+                (
+                    "SPACETERM_SSH_ASKPASS_SOCKET",
+                    OsStr::new("private-endpoint")
+                ),
+                (
+                    "SPACETERM_SSH_ASKPASS_CAPABILITY",
+                    OsStr::new("5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a")
+                ),
             ]
         );
-    }
-
-    struct CancelPresenter;
-
-    impl AskPassPresenter for CancelPresenter {
-        fn present(
-            &self,
-            _request: AskPassRequest,
-            _stop: &AtomicBool,
-        ) -> Result<AskPassProtocolReply, AskPassPresentationFailure> {
-            Ok(AskPassProtocolReply::Cancelled)
-        }
-
-        fn cancel_active(&self) {}
     }
 
     #[test]
     fn observation_tracks_one_prompt_and_clears_activity_after_settlement() {
         let observation = AskPassAttemptObservation::default();
-        let presenter =
-            ObservedAskPassPresenter::new(Arc::new(CancelPresenter), observation.clone());
+        let (commands, receiver) = async_channel::bounded(2);
+        let presenter = ObservedAskPassPresenter::new(
+            Arc::new(ChannelAskPassPresenter {
+                commands,
+                owner: 41,
+                state: Arc::new(Mutex::new(ChannelPresentationState::default())),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }),
+            observation.clone(),
+        );
         let request =
             AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap();
+        let worker = thread::spawn(move || presenter.present(request, &AtomicBool::new(false)));
+        let response = match receiver.recv_blocking().unwrap() {
+            AskPassUiCommand::Present { job, .. } => job.response,
+            AskPassUiCommand::Cancel { .. } => panic!("expected presentation"),
+        };
+        let started_while_blocked = observation.prompt_started();
+        let active_while_blocked = observation.prompt_active();
+        let cancelled_while_blocked = observation.cancelled();
+        response.send(Ok(AskPassProtocolReply::Cancelled)).unwrap();
         assert!(matches!(
-            presenter.present(request, &AtomicBool::new(false)),
+            worker.join().unwrap(),
             Ok(AskPassProtocolReply::Cancelled)
         ));
+        assert!(started_while_blocked && active_while_blocked && !cancelled_while_blocked);
         assert!(observation.prompt_started());
         assert!(!observation.prompt_active());
         assert!(observation.cancelled());
@@ -1514,36 +1537,35 @@ mod tests {
     }
 
     #[test]
-    fn teardown_is_exactly_once_and_cleans_up_only_after_worker_exit() {
-        let events = Arc::new(Mutex::new(Vec::new()));
+    fn teardown_signals_stop_and_cancels_presentation_once() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (release, released) = mpsc::sync_channel(1);
-        let worker_events = Arc::clone(&events);
+        let (finished, completion) = mpsc::sync_channel(1);
+        let worker_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             let _ = released.recv();
-            worker_events.lock().unwrap().push("worker-exit");
-            worker_events.lock().unwrap().push("cleanup");
+            finished.send(worker_stop.load(Ordering::Acquire)).unwrap();
         });
-        let cancel_events = Arc::clone(&events);
-        let release = Mutex::new(Some(release));
+        let cancel_count = Arc::clone(&cancels);
+        let cancel_stop = Arc::clone(&stop);
         let cancel = Arc::new(move || {
-            cancel_events.lock().unwrap().push("cancel");
-            if let Some(release) = release.lock().unwrap().take() {
-                let _ = release.send(());
-            }
+            assert!(cancel_stop.load(Ordering::Acquire));
+            cancel_count.fetch_add(1, Ordering::AcqRel);
         });
-        let teardown = AskPassTeardown::new(Arc::new(AtomicBool::new(false)), cancel, worker);
+        let teardown = AskPassTeardown::new(Arc::clone(&stop), cancel, worker);
 
         teardown.close();
         teardown.close();
-        for _ in 0..100 {
-            if events.lock().unwrap().len() == 3 {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(
-            events.lock().unwrap().as_slice(),
-            ["cancel", "worker-exit", "cleanup"]
-        );
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(cancels.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            completion.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert!(completion.recv_timeout(Duration::from_secs(2)).unwrap());
+        drop(teardown);
+        assert_eq!(cancels.load(Ordering::Acquire), 1);
     }
 }

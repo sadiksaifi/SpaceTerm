@@ -312,7 +312,11 @@ fn destination() -> SshDestination {
 }
 
 fn timing() -> ControlConnectionTiming {
-    ControlConnectionTiming::new(Duration::from_millis(100), Duration::from_millis(50)).unwrap()
+    ControlConnectionTiming {
+        timeout: Some(Duration::from_millis(100)),
+        poll_interval: Duration::from_millis(50),
+        readiness_check_timeout: Duration::from_millis(100),
+    }
 }
 
 #[gpui::test]
@@ -548,6 +552,7 @@ fn connect_should_report_an_early_master_exit_as_reaped(cx: &mut TestAppContext)
                 && output.as_str() == "bad  config"
                 && !format!("{error:?}").contains("bad")
     ));
+    assert_eq!(backend.reap_count(), 1);
 }
 
 #[gpui::test]
@@ -659,19 +664,37 @@ fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppCon
 
     let exit_commands = backend
         .records()
-        .iter()
+        .into_iter()
         .filter(|arguments| contains_pair(arguments, "-O", "exit"))
-        .count();
+        .collect::<Vec<_>>();
+    assert_eq!(
+        exit_commands,
+        vec![vec![
+            OsString::from("-F"),
+            paths.managed_ssh_config().into_os_string(),
+            OsString::from("-S"),
+            socket_path.as_os_str().to_owned(),
+            OsString::from("-o"),
+            OsString::from("ControlMaster=no"),
+            OsString::from("-o"),
+            OsString::from("ControlPersist=no"),
+            OsString::from("-o"),
+            OsString::from("ProxyCommand=; exit 1"),
+            OsString::from("-O"),
+            OsString::from("exit"),
+            OsString::from("--"),
+            OsString::from("work"),
+        ]]
+    );
     assert!(
-        exit_commands == 1
-            && backend.reap_count() == 1
+        backend.reap_count() == 1
             && !socket_path.exists()
             && connection.state() == ControlConnectionState::Closed
     );
 }
 
 #[gpui::test]
-fn hanging_readiness_check_should_obey_the_wall_clock_deadline_and_reap(cx: &mut TestAppContext) {
+fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::default());
@@ -734,7 +757,7 @@ fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut TestAppContext) {
+fn shutdown_should_escalate_from_terminate_to_kill_for_the_owned_group(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -821,7 +844,7 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
 }
 
 #[gpui::test]
-fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContext) {
+fn dropping_a_ready_connection_should_publish_closed(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -919,14 +942,6 @@ fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socke
 
     let socket_path = backend.socket_path();
     assert!(backend.reap_count() == 1 && socket_path.exists());
-}
-
-#[test]
-fn timing_should_reject_unbounded_or_zero_polling() {
-    assert!(
-        ControlConnectionTiming::new(Duration::from_secs(61), Duration::from_millis(10)).is_err()
-            && ControlConnectionTiming::new(Duration::from_secs(1), Duration::ZERO).is_err()
-    );
 }
 
 #[test]

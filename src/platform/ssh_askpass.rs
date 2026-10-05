@@ -600,6 +600,12 @@ mod tests {
         let request = request("line one\r\nline two", AskPassPromptKind::Confirmation);
 
         assert_eq!(request.prompt(), "line one\nline two");
+        for control in ['\0', '\t', '\r', '\u{1b}'] {
+            assert_eq!(
+                AskPassRequest::new(format!("Password:{control}"), AskPassPromptKind::Secret).err(),
+                Some(AskPassRequestError::ContainsUnsafeCharacter),
+            );
+        }
     }
 
     #[test]
@@ -613,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn password_should_require_nonempty_obscured_entry() {
+    fn password_should_require_nonempty_response() {
         let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
             .secret_presentation()
             .unwrap();
@@ -622,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn password_should_present_account_and_host_without_exposing_response() {
+    fn password_should_present_account_and_host_details() {
         let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
             .secret_presentation()
             .unwrap();
@@ -635,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn key_passphrase_should_require_nonempty_obscured_entry() {
+    fn key_passphrase_should_require_nonempty_response() {
         let presentation = request(
             "Enter passphrase for key '/Users/dev/.ssh/id_ed25519':",
             AskPassPromptKind::Secret,
@@ -674,20 +680,40 @@ mod tests {
             .unwrap();
 
         assert!(presentation.is_first_contact());
+        assert_eq!(presentation.title(), "Verify SSH Host");
+        assert_eq!(
+            presentation.message(),
+            "Verify the host key fingerprint before connecting."
+        );
+        assert_eq!(
+            presentation.detail(),
+            concat!(
+                "SSH does not recognize this host key for this address. Verify the fingerprint with ",
+                "the host owner.\n\nHost: example.test\nAddress: 192.0.2.1\n\n",
+                "ED25519 fingerprint:\nSHA256:abcDEF0123+/=",
+                "\n\nIf you continue, SSH will attempt to remember this key for future connections.",
+            )
+        );
+        assert_eq!(presentation.affirmative(), "Trust & Connect");
+        assert_eq!(presentation.negative(), "Cancel");
     }
 
     #[test]
     fn changed_host_warning_should_never_enter_first_contact_path() {
-        let prompt = concat!(
-            "The authenticity of host 'example.test' can't be established.\n",
-            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n",
-            "ED25519 key fingerprint is SHA256:abcDEF0123+/=.\n",
-            "Are you sure you want to continue connecting (yes/no)?"
-        );
-        let request = request(prompt, AskPassPromptKind::Secret);
-        let presentation = request.confirmation_presentation().unwrap();
-
-        assert!(!presentation.is_first_contact());
+        for warning in [
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+            "WARNING: REVOKED HOST KEY DETECTED!",
+            "WARNING: POSSIBLE DNS SPOOFING DETECTED!",
+        ] {
+            let prompt = format!(
+                "The authenticity of host 'example.test' can't be established.\n{warning}\n\
+                 ED25519 key fingerprint is SHA256:abcDEF0123+/=.\n\
+                 Are you sure you want to continue connecting (yes/no)?",
+            );
+            let request = request(&prompt, AskPassPromptKind::Secret);
+            let presentation = request.confirmation_presentation().unwrap();
+            assert!(!presentation.is_first_contact(), "{warning}");
+        }
     }
 
     #[test]

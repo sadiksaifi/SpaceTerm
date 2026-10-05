@@ -225,6 +225,40 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .is_ok()
         );
+        let settle = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match receiver.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(()) => assert!(std::time::Instant::now() < deadline),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(error) => panic!("watch disconnected: {error}"),
+                }
+            }
+        };
+        settle();
+        let replacement = directory.join("settings.json.tmp");
+        std::fs::write(&replacement, b"{\"replaced\":true}").expect("replacement");
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err()
+        );
+        std::fs::rename(&replacement, &path).expect("atomic replacement");
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "atomic replacement must be observed"
+        );
+        settle();
+        std::fs::write(&path, b"{\"after_replacement\":true}").expect("subsequent change");
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the watch must survive replacement"
+        );
+        drop(_watch);
         let _ = std::fs::remove_dir_all(&directory);
     }
 

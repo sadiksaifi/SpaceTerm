@@ -25,7 +25,7 @@ impl ControlSocketProbe for UnixControlSocketProbe {
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -50,6 +50,22 @@ mod tests {
         UnixControlSocketProbe.probe(&endpoint).unwrap();
 
         assert!(endpoint.exists());
+        // A concurrent fork can briefly inherit the listener before its child execs.
+        let release_deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            assert!(
+                Instant::now() < release_deadline,
+                "the probe should release its listener within 500 ms"
+            );
+            match std::os::unix::net::UnixStream::connect(&endpoint) {
+                Ok(connection) => drop(connection),
+                Err(error) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         fs::remove_file(&endpoint).unwrap();
         fs::remove_dir(directory).unwrap();
     }

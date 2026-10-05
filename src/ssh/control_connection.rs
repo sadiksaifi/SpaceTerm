@@ -27,23 +27,11 @@ use crate::platform::app_paths::{
     RegisteredRuntimeSocket, RuntimeOwner,
 };
 use crate::platform::control_socket::{ControlSocketProbe, ControlSocketUnavailable};
-#[cfg(test)]
-const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_MASTER_GRACE: Duration = Duration::from_secs(2);
 const SHUTDOWN_TERMINATE_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_KILL_DEADLINE: Duration = Duration::from_secs(1);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-/// Invalid bounded readiness timing supplied to a control connection.
-#[cfg(test)]
-pub(crate) enum ControlConnectionTimingError {
-    #[error("SSH readiness timeout must be between one nanosecond and 60 seconds")]
-    InvalidTimeout,
-    #[error("SSH readiness polling interval must be nonzero and no longer than the timeout")]
-    InvalidPollInterval,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Readiness polling policy for one control-master launch.
@@ -54,26 +42,6 @@ pub(crate) struct ControlConnectionTiming {
     timeout: Option<Duration>,
     poll_interval: Duration,
     readiness_check_timeout: Duration,
-}
-
-impl ControlConnectionTiming {
-    #[cfg(test)]
-    pub(crate) fn new(
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<Self, ControlConnectionTimingError> {
-        if timeout.is_zero() || timeout > MAXIMUM_READINESS_TIMEOUT {
-            return Err(ControlConnectionTimingError::InvalidTimeout);
-        }
-        if poll_interval.is_zero() || poll_interval > timeout {
-            return Err(ControlConnectionTimingError::InvalidPollInterval);
-        }
-        Ok(Self {
-            timeout: Some(timeout),
-            poll_interval,
-            readiness_check_timeout: timeout,
-        })
-    }
 }
 
 impl Default for ControlConnectionTiming {
@@ -1367,7 +1335,11 @@ mod tests {
     }
 
     fn timing() -> ControlConnectionTiming {
-        ControlConnectionTiming::new(Duration::from_millis(100), Duration::from_millis(50)).unwrap()
+        ControlConnectionTiming {
+            timeout: Some(Duration::from_millis(100)),
+            poll_interval: Duration::from_millis(50),
+            readiness_check_timeout: Duration::from_millis(100),
+        }
     }
 
     #[gpui::test]
