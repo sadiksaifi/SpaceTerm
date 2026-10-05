@@ -1,0 +1,2 @@
+# Installed by the fonts tasks into a private virtual environment; see spaceterm_tasks.venv.
+fonttools @ https://files.pythonhosted.org/packages/83/65/826290863c9df6041f2e36a5ae5d604cd8247fffc8ec7b45581fd2473e4d/fonttools-4.66.0-py3-none-any.whl --hash=sha256:bc7b7ddc1a1f46c363354304e9a8dd93722e4a6a24f785015650898dacf40df9

@@ -13,7 +13,7 @@ and layout tables are unchanged.
 `OFL.txt` is the upstream archive's `LICENSE.txt`, copied verbatim. The full
 license is also included in `assets/THIRD-PARTY-NOTICES.txt`.
 
-Regenerate with `mise run fonts:prepare:ui <archive>`. The task pins the archive
+Regenerate with `mise run fonts:ui <archive>`. The task pins the archive
 SHA-256 and fontTools version and verifies every other table is unchanged.
 Add `--check` to compare with the committed artifacts. `SHA256SUMS` records the
 prepared font and license hashes. Normal builds use these committed files

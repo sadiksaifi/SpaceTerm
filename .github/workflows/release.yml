@@ -27,114 +27,29 @@ jobs:
           fetch-depth: 0
       - uses: jdx/mise-action@v5
         with:
-          install_args: node
+          install_args: "node npm:tagsmith"
       - name: Validate annotated release tag
         id: release
         timeout-minutes: 5
-        run: mise run release:validate
+        run: mise run release:validate "$GITHUB_REF_NAME"
 
   validate:
     name: Validate macOS
     needs: tag
     runs-on: macos-26
-    timeout-minutes: 65
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
       - uses: jdx/mise-action@v5
-      - name: Install Xcode Metal tools
+      - name: Install the Xcode Metal toolchain
         timeout-minutes: 10
-        run: mise run deps:metal:macos
-      - name: Identify validation cache
-        id: validation-cache-key
-        env:
-          INPUT_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '.mise.toml', 'third_party/libghostty-vt-sys/build.rs', 'third_party/libghostty-vt-sys/patches/*.patch', 'packaging/macos/sparkle.json') }}
-        run: |
-          xcode=$(xcodebuild -version | shasum | cut -d ' ' -f 1)
-          ghostty=$(git rev-parse HEAD:third_party/ghostty)
-          echo "key=validation-macos-26-${RUNNER_ARCH}-${xcode}-${INPUT_HASH}-${ghostty}" >> "$GITHUB_OUTPUT"
-      - name: Restore validation build cache
-        id: validation-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            target/debug
-            target/sparkle
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/git/db
-          key: ${{ steps.validation-cache-key.outputs.key }}
-      - name: Report cache and artifact budget
-        env:
-          CACHE_KEY: ${{ steps.validation-cache-key.outputs.key }}
-          CACHE_HIT: ${{ steps.validation-cache.outputs.cache-hit }}
-        run: |
-          echo "Validation cache: ${CACHE_KEY} (hit: ${CACHE_HIT:-false})"
-          mise run artifacts:status
-      # Keep this list in the same order as validate:macos in .mise.toml. Each
-      # task has its own log and deadline, so a failed test is visible immediately.
-      - name: Test Cargo artifact guard
-        timeout-minutes: 5
-        run: mise run test:artifacts
-      - name: Test repository scripts
-        timeout-minutes: 5
-        run: mise run test:scripts
-      - name: Check Rust formatting
-        timeout-minutes: 5
-        run: mise run fmt:check
-      - name: Check all Rust targets and features
-        timeout-minutes: 20
-        run: mise run check
-      - name: Test all Rust targets and features
-        timeout-minutes: 30
-        run: mise run test
-      - name: Lint Rust
-        timeout-minutes: 20
-        run: mise run lint:rust
-      - name: Lint repository scripts
-        timeout-minutes: 5
-        run: mise run lint:scripts
-      - name: Check diff whitespace
-        timeout-minutes: 5
-        run: mise run lint:diff
-      - name: Test vendored terminal library
-        timeout-minutes: 10
-        run: mise run engine:test
-      - name: Test vendored terminal library without graphics
-        timeout-minutes: 10
-        run: mise run engine:test:no-graphics
-      - name: Check vendored formatting
-        timeout-minutes: 5
-        run: mise run engine:fmt:check
-      - name: Check macOS adapter formatting
-        timeout-minutes: 5
-        run: mise run fmt:check:macos
-      - name: Test macOS adapters
-        timeout-minutes: 12
-        run: mise run test:macos
-      - name: Lint macOS scripts
-        timeout-minutes: 5
-        run: mise run lint:scripts:macos
-      - name: Test macOS packaging
-        timeout-minutes: 5
-        run: mise run test:package:macos
-      - name: Test macOS updater
-        timeout-minutes: 10
-        run: mise run test:updater:macos
-      - name: Save validation cache even if a test fails
-        if: ${{ !cancelled() && steps.validation-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
-        continue-on-error: true
-        with:
-          path: |
-            target/debug
-            target/sparkle
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/git/db
-          key: ${{ steps.validation-cache.outputs.cache-primary-key }}
+        run: mise run setup:metal:macos
+      - name: Validate
+        timeout-minutes: 60
+        run: mise run validate:macos
 
   package:
     name: Package and sign Apple Silicon
@@ -147,12 +62,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - uses: jdx/mise-action@v5
-      - name: Install Xcode Metal tools
+      - name: Install the Xcode Metal toolchain
         timeout-minutes: 10
-        run: mise run deps:metal:macos
+        run: mise run setup:metal:macos
       - name: Fetch locked Rust dependencies
         timeout-minutes: 10
-        run: mise run deps:fetch
+        run: mise run setup:deps
       - name: Build and verify Apple Silicon package
         timeout-minutes: 35
         env:
@@ -215,10 +130,12 @@ jobs:
   homebrew:
     name: Update Homebrew cask
     needs: [tag, package, publish]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    # brew bump-cask-pr edits the tapped cask in place.
+    runs-on: macos-26
+    timeout-minutes: 15
     env:
       MISE_TASK_RUN_AUTO_INSTALL: "false"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
@@ -238,10 +155,16 @@ jobs:
           repository: sadiksaifi/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_PAT }}
           path: homebrew-tap
-      - name: Render cask
+      - name: Tap the checkout
+        run: |
+          taps="$(brew --repository)/Library/Taps/sadiksaifi"
+          mkdir -p "$taps"
+          rm -rf "$taps/homebrew-tap"
+          ln -s "$GITHUB_WORKSPACE/homebrew-tap" "$taps/homebrew-tap"
+      - name: Update cask
         env:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-        run: mise run release:cask:macos "$RELEASE_TAG" homebrew-tap/Casks/spaceterm.rb
+        run: mise run release:cask:macos "$RELEASE_TAG"
       - name: Commit and push cask
         working-directory: homebrew-tap
         env:

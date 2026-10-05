@@ -1,0 +1,6 @@
+# Installed by `mise run setup:hooks`. The hook resolves pinned tools through mise, so it needs
+# mise on PATH but not an activated shell. Lefthook substitutes {1} unquoted.
+commit-msg:
+  jobs:
+    - name: conventional commit
+      run: mise run lint:commit "{1}"

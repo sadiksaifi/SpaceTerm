@@ -90,39 +90,37 @@ cd SpaceTerm
 mise trust
 ```
 
-### macOS
-
-Xcode 26 or newer supplies the Metal compiler, macOS SDK, and icon packaging tools.
+Then prepare the host and run from source:
 
 ```sh
-# Install pinned tools, initialize submodules, and verify the macOS development environment
-mise run setup:macos
+# Install system packages, pinned tools, Git hooks, submodules, and Rust dependencies,
+# then check the host
+mise run setup
 
 # Run from source
 mise run development
+```
 
+`mise doctor project` repeats the host checks and names the fix for each failure.
+
+### macOS
+
+Xcode 26 or newer supplies the Metal compiler, macOS SDK, and icon packaging tools. If the host
+check reports a missing Metal toolchain, run `mise run setup:metal:macos`.
+
+```sh
 # Build, verify, and install to /Applications
 mise run preflight:install:macos
 ```
 
 ### Linux
 
-Wayland and X11 are supported. On Debian or Ubuntu, install:
+Wayland and X11 are supported. On Debian or Ubuntu, `setup` installs the system packages listed
+under `[bootstrap.packages]` in `.mise.toml` after asking for confirmation. On other distributions,
+install their equivalents, then run `mise doctor project`.
 
-```sh
-sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
-  libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev \
-  libvulkan1 mesa-vulkan-drivers ncurses-bin openssh-client dbus desktop-file-utils zsh \
-  python3-gi gir1.2-glib-2.0
-
-mise run setup:linux
-mise run doctor:linux
-mise run development
-```
-
-`setup:linux` installs pinned tools, initializes submodules, and runs the environment checks.
-`doctor:linux` repeats those checks. Development uses Wayland when available;
-`mise run development:x11:linux` selects X11. Each launch registers the Development desktop entry
+Development uses Wayland when available; `mise run development:wayland:linux` and
+`mise run development:x11:linux` select a display server. Each launch registers the Development desktop entry
 for desktop activation and notifications. GNOME Sushi (`gnome-sushi`) is optional for File Preview;
 its preview window is shared, so closing a Pane leaves it open for dismissal in Sushi. Linux
 application Shortcuts mostly use Ctrl+Shift. Alt+1 to Alt+9 choose a Tab and Ctrl+Alt+1 to
@@ -144,12 +142,12 @@ Linux currently supports source builds only, with no packaging, distribution, or
 
 `mise run validate:linux` includes the native adapters and SpaceTerm accessibility tests.
 The pinned AccessKit fork owns its patch tests and validation, documented in its `SPACETERM.md`.
-For local fork development, run `mise run accesskit:local:on /path/to/accesskit`; restore the
-published tag with `mise run accesskit:local:off`. Keep the `.cargo/config.toml` addition uncommitted.
+For local fork development, run `mise run accesskit:local /path/to/accesskit`; restore the
+published tag with `mise run accesskit:pinned`. Keep the `.cargo/config.toml` addition uncommitted.
 For terminal screen-reader checks on private X11 and Wayland displays, install system Python 3.11+
-and the dependencies listed in `scripts/verify-accessibility-linux.py`, then run
+and the dependencies listed in `mise-tasks/test/accessibility/linux.py`, then run
 `mise run test:accessibility:regressions:linux` and `mise run test:accessibility:linux`.
 
 Run `mise tasks` to see the complete command list. Rust is pinned in `rust-toolchain.toml`, and
-development tools and tasks are pinned in `.mise.toml`. Platform-specific tasks carry an explicit
-platform segment such as `:macos` or `:linux`.
+development tools and tasks are pinned in `.mise.toml` and `mise.lock`. Platform-specific tasks
+carry an explicit platform segment such as `:macos` or `:linux`.

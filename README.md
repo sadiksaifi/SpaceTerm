@@ -65,11 +65,10 @@ See the [SpaceTerm guide](docs/guide.md) for terminal clipboard setup and source
 
 ## Linux development
 
-Wayland and X11 are supported from source. Install the [Linux development dependencies](docs/guide.md#linux), then run:
+Wayland and X11 are supported from source. On Debian or Ubuntu, `setup` installs the system packages; the [guide](docs/guide.md#linux) covers other distributions. Run:
 
 ```sh
-mise run setup:linux
-mise run doctor:linux
+mise run setup
 mise run development
 ```
 

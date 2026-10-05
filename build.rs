@@ -1,3 +1,6 @@
+#[path = "build/identity.rs"]
+mod identity;
+
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
@@ -7,33 +10,21 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_packaged)");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_release)");
+    let root =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies the manifest"));
     // Watch source changes as well as refs so development identity cannot retain a release label.
-    for path in [
-        "src",
-        "packaging/resolve-release-version.py",
-        ".git/HEAD",
-        ".git/index",
-        ".git/refs",
-        ".git/packed-refs",
-    ] {
-        println!("cargo:rerun-if-changed={path}");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=build/identity.rs");
+    for path in identity::watched_paths(&root).unwrap_or_else(|error| panic!("{error}")) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
     let release_tag = env::var("SPACETERM_RELEASE_TAG").ok();
-    let mut version = Command::new("python3");
-    version.args(["packaging/resolve-release-version.py", "--cargo"]);
-    if let Some(tag) = &release_tag {
-        version.args(["--tag", tag, "--require-clean"]);
-    }
-    let result = version
-        .output()
-        .expect("Python is required to resolve Git build identity");
-    assert!(
-        result.status.success(),
-        "Git build identity could not be resolved"
-    );
-    print!(
-        "{}",
-        String::from_utf8(result.stdout).expect("build identity is UTF-8")
+    let identity =
+        identity::resolve(&root, release_tag.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    println!("cargo:rustc-env=SPACETERM_VERSION={}", identity.version);
+    println!(
+        "cargo:rustc-env=SPACETERM_BUNDLE_VERSION={}",
+        identity.bundle_version
     );
     // The application identity follows these inputs; see ADR 0012.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");

@@ -10,7 +10,7 @@ and layout tables are unchanged. This prevents the bundled font from replacing a
 explicitly selected system font. `OFL.txt` contains the upstream license, also
 included in the shipped `assets/THIRD-PARTY-NOTICES.txt`.
 
-Regenerate from the release archive with `mise run fonts:prepare <archive>`.
+Regenerate from the release archive with `mise run fonts:terminal <archive>`.
 The task pins the archive SHA-256 and fontTools version and checks that other tables
 are unchanged. Add `--check` to compare the output with the committed artifacts.
 `SHA256SUMS` records the prepared file hashes. Normal builds use the committed TTFs
