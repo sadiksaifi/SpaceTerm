@@ -1,6 +1,7 @@
 """Shared code for SpaceTerm's mise file tasks. Standard library only."""
 
 import errno
+import signal
 import sys
 from pathlib import Path
 
@@ -13,8 +14,15 @@ class TaskError(Exception):
 
 def main(entry):
     """Run a task entry point and report TaskError or OSError as a content-free line."""
+    # Imported here because processes imports this package.
+    from spaceterm_tasks.processes import terminating_signals_raise
+
     try:
-        status = entry()
+        # Termination unwinds the task so its cleanup, such as detaching a disk image, runs.
+        with terminating_signals_raise():
+            status = entry()
+    except KeyboardInterrupt:
+        raise SystemExit(128 + signal.SIGINT) from None
     except TaskError as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1) from None

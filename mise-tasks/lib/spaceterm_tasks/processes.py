@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import time
 from contextlib import contextmanager
 
 # Popen start_new_session value that puts a child and its descendants in their own group.
@@ -30,26 +31,44 @@ def terminating_signals_raise():
             signal.signal(signum, handler)
 
 
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A member that changed credentials still exists.
+        return True
+    return True
+
+
 def stop_group(process: subprocess.Popen, timeout: float = 5) -> None:
-    """Terminate a child started with OWN_GROUP and its descendants, then reap it."""
-    if process.poll() is not None:
+    """Terminate a child started with OWN_GROUP and every descendant, then reap the child.
+
+    The leader can exit before its descendants, so completion waits for the whole group.
+    """
+    if os.name != "posix":
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        process.wait()
         return
     try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
+        os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         process.wait()
         return
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            if os.name == "posix":
+    deadline = time.monotonic() + timeout
+    # Reaping the leader lets the group disappear once its descendants have exited.
+    while process.poll() is None or group_alive(process.pid):
+        if time.monotonic() >= deadline:
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
-            pass
-        process.wait()
+            except ProcessLookupError:
+                pass
+            break
+        time.sleep(0.05)
+    process.wait()

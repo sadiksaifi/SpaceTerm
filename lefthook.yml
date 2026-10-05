@@ -1,5 +1,6 @@
-# Installed by `mise run setup:hooks`.
+# Installed by `mise run setup:hooks`. The hook resolves pinned tools through mise, so it needs
+# mise on PATH but not an activated shell. Lefthook substitutes {1} unquoted.
 commit-msg:
   jobs:
     - name: conventional commit
-      run: cog verify --ignore-merge-commits --file {1}
+      run: mise run lint:commit "{1}"

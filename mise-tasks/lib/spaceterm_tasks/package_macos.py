@@ -143,11 +143,20 @@ def verify(app=None, dmg=None, release_tag=None):
     with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
         mount = Path(temporary) / "mount"
         mount.mkdir()
-        checked(
-            ["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mount), str(dmg)],
-            "the disk image could not be mounted",
-        )
         try:
+            # Inside try: termination during attach can still leave the image mounted.
+            checked(
+                [
+                    "hdiutil",
+                    "attach",
+                    "-nobrowse",
+                    "-readonly",
+                    "-mountpoint",
+                    str(mount),
+                    str(dmg),
+                ],
+                "the disk image could not be mounted",
+            )
             applications = mount / "Applications"
             if not applications.is_symlink() or os.readlink(applications) != "/Applications":
                 raise TaskError("the disk image must link Applications to /Applications")

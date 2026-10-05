@@ -82,10 +82,13 @@ pub fn watched_paths(root: &Path) -> Result<Vec<PathBuf>, &'static str> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?);
     let mut paths = vec![git_directory.join("HEAD"), common.join("refs")];
+    // The index changes when a change is staged, which can make the checkout dirty without
+    // touching a source file Cargo watches. A linked worktree has its own index.
     // Cargo reruns a build script on every build while a watched path is missing.
-    let packed = common.join("packed-refs");
-    if packed.exists() {
-        paths.push(packed);
-    }
+    paths.extend(
+        [git_directory.join("index"), common.join("packed-refs")]
+            .into_iter()
+            .filter(|path| path.exists()),
+    );
     Ok(paths)
 }

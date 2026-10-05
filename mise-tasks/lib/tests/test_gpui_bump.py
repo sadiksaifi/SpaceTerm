@@ -471,13 +471,22 @@ class GpuiBumpTests(unittest.TestCase):
         with patch.object(MODULE.subprocess, "Popen") as popen:
             process = popen.return_value
             process.pid = 12345
-            process.poll.return_value = None
+            process.poll.side_effect = [None, 0]
             process.wait.side_effect = [KeyboardInterrupt, 0]
-            with patch.object(os, "killpg", create=True) as killpg:
+
+            def killpg(pgid, signum):
+                # The group is gone once the leader exits after SIGTERM.
+                if signum == 0:
+                    raise ProcessLookupError
+
+            with patch.object(os, "killpg", side_effect=killpg, create=True) as signals:
                 with self.assertRaises(KeyboardInterrupt):
                     MODULE.cargo_update(self.root, list(LOCK_NAMES))
         if os.name == "posix":
-            killpg.assert_called_once_with(12345, signal.SIGTERM)
+            self.assertEqual(signals.call_args_list[0].args, (12345, signal.SIGTERM))
+            self.assertNotIn(
+                (12345, signal.SIGKILL), [call.args for call in signals.call_args_list]
+            )
         else:
             process.terminate.assert_called_once_with()
 

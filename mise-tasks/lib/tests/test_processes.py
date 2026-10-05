@@ -1,4 +1,4 @@
-"""Exercise task failure reporting and Cargo process-group cleanup."""
+"""Exercise task failure reporting and process-group cleanup."""
 
 import io
 import os
@@ -15,12 +15,25 @@ from spaceterm_tasks import ROOT, main
 
 LIBRARY = ROOT / "mise-tasks" / "lib"
 FAKE_CARGO = """#!/bin/sh
-# Keep the test runner's output pipes free of the descendant.
-sleep 300 >/dev/null 2>&1 &
+# The descendant ignores SIGTERM and outlives Cargo; output stays off the runner's pipes.
+(trap '' TERM; exec sleep 300) >/dev/null 2>&1 &
 echo $! > "$DESCENDANT_PID"
 wait
 """
 BUILD = "from spaceterm_tasks.cargo import build_executable; build_executable()"
+CLEANUP = """
+import sys, time
+from pathlib import Path
+from spaceterm_tasks import main
+ready, cleaned = map(Path, sys.argv[1:])
+def entry():
+    try:
+        ready.touch()
+        time.sleep(30)
+    finally:
+        cleaned.touch()
+main(entry)
+"""
 
 
 def alive(pid):
@@ -42,6 +55,34 @@ class TaskFailureTests(unittest.TestCase):
         self.assertEqual(
             output.getvalue(), "error: an operating-system operation failed (ENOENT)\n"
         )
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX signals")
+class TaskTerminationTests(unittest.TestCase):
+    def test_terminated_task_runs_its_cleanup(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signal=signum.name), tempfile.TemporaryDirectory() as directory:
+                ready, cleaned = Path(directory) / "ready", Path(directory) / "cleaned"
+                task = subprocess.Popen(
+                    [sys.executable, "-c", CLEANUP, str(ready), str(cleaned)],
+                    env={**os.environ, "PYTHONPATH": str(LIBRARY)},
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    deadline = time.monotonic() + 10
+                    while not ready.exists():
+                        self.assertLess(time.monotonic(), deadline, "the task did not start")
+                        time.sleep(0.05)
+                    task.send_signal(signum)
+                    _, error = task.communicate(timeout=10)
+                finally:
+                    if task.poll() is None:
+                        task.kill()
+                        task.wait()
+                self.assertEqual(task.returncode, 128 + signum)
+                self.assertTrue(cleaned.exists())
+                self.assertEqual(error, "")
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX process groups")
@@ -68,8 +109,9 @@ class CargoProcessGroupTests(unittest.TestCase):
                     time.sleep(0.05)
                 descendant = int(pid_file.read_text())
                 task.send_signal(signal.SIGTERM)
-                self.assertEqual(task.wait(timeout=10), 128 + signal.SIGTERM)
-                deadline = time.monotonic() + 5
+                self.assertEqual(task.wait(timeout=15), 128 + signal.SIGTERM)
+                # SIGKILL takes effect asynchronously after stop_group escalates.
+                deadline = time.monotonic() + 2
                 while alive(descendant) and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertFalse(alive(descendant))

@@ -132,6 +132,15 @@ fn watched_paths_exist_in_a_linked_worktree() {
     repository.git(&["worktree", "add", "-q", worktree.to_str().unwrap()]);
     repository.git(&["pack-refs", "--all"]);
     let paths = identity::watched_paths(&worktree).unwrap();
-    assert_eq!(paths.len(), 3);
+    assert_eq!(paths.len(), 4);
     assert!(paths.iter().all(|path| path.exists()), "{paths:?}");
+    let index = PathBuf::from(repository.git(&[
+        "-C",
+        worktree.to_str().unwrap(),
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+    ]));
+    assert!(paths.contains(&index), "{paths:?}");
 }
