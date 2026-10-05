@@ -188,6 +188,30 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "View",
         submenu: None,
+        item: "Scroll to Top",
+        symbol: "arrow.up.to.line",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
+        item: "Scroll to Bottom",
+        symbol: "arrow.down.to.line",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
+        item: "Scroll Page Up",
+        symbol: "arrow.up.square",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
+        item: "Scroll Page Down",
+        symbol: "arrow.down.square",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
         item: "Split Right",
         symbol: "rectangle.split.2x1",
     },
@@ -244,6 +268,30 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
         submenu: None,
         item: "Zoom",
         symbol: "arrow.up.left.and.arrow.down.right",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Previous Tab",
+        symbol: "chevron.backward",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Next Tab",
+        symbol: "chevron.forward",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Move Tab Left",
+        symbol: "arrow.left.square",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Move Tab Right",
+        symbol: "arrow.right.square",
     },
     MenuItemIcon {
         menu: "Window",
@@ -309,11 +357,12 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     }
 }
 
-fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 7] {
+fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 8] {
     [
         (format!("About {application_name}"), "info.circle"),
         (CHECK_FOR_UPDATES_TITLE.to_owned(), "arrow.down.circle"),
         ("Settings…".to_owned(), "gearshape"),
+        ("Keyboard Shortcuts…".to_owned(), "keyboard"),
         (format!("Hide {application_name}"), "eye.slash"),
         ("Hide Others".to_owned(), "eye.slash.fill"),
         ("Show All".to_owned(), "eye"),
@@ -752,6 +801,7 @@ mod tests {
                 "Check for Updates…",
                 "|",
                 "Settings…",
+                "Keyboard Shortcuts…",
                 "|",
                 "Services",
                 "|",
@@ -773,6 +823,7 @@ mod tests {
                 "Check for Updates…",
                 "|",
                 "Settings…",
+                "Keyboard Shortcuts…",
                 "|",
                 "Services",
                 "|",
@@ -797,6 +848,11 @@ mod tests {
                 "Decrease Terminal Font Size",
                 "Reset Terminal Font Size",
                 "|",
+                "Scroll to Top",
+                "Scroll to Bottom",
+                "Scroll Page Up",
+                "Scroll Page Down",
+                "|",
                 "Split Right",
                 "Split Down",
                 "Focus Pane",
@@ -810,9 +866,19 @@ mod tests {
         assert_eq!(
             (labels(window_menu().owned()), labels(help_menu().owned())),
             (
-                ["Minimize", "Zoom", "|", "Bring All to Front"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                [
+                    "Minimize",
+                    "Zoom",
+                    "|",
+                    "Previous Tab",
+                    "Next Tab",
+                    "Move Tab Left",
+                    "Move Tab Right",
+                    "|",
+                    "Bring All to Front",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
                 [
                     "SpaceTerm Help",
                     "|",
