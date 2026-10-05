@@ -111,6 +111,11 @@ run = "git submodule update --init --recursive"
 description = "Download locked Rust dependencies"
 run = "cargo fetch --locked"
 
+[tasks."setup:skills"]
+description = "Install the agent skills listed in skills-lock.json and share them with Claude Code"
+env = { DISABLE_TELEMETRY = "1" }
+run = ["skills experimental_install", "python -m spaceterm_tasks.agent_skills"]
+
 [tasks."setup:metal:macos"]
 description = "Install the Xcode Metal toolchain for native GPUI builds"
 run = "xcodebuild -downloadComponent MetalToolchain"
