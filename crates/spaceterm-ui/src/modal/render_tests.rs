@@ -320,6 +320,388 @@ fn install_test_catalogs(cx: &mut TestAppContext) {
     });
 }
 
+struct WindowChromeFixture {
+    drag_disabled: bool,
+    application_presses: Rc<Cell<usize>>,
+    closes: Rc<Cell<usize>>,
+}
+
+impl Render for WindowChromeFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let closes = self.closes.clone();
+        let close: crate::WindowCloseHandler = Rc::new(move |_, _| closes.set(closes.get() + 1));
+        let presses = self.application_presses.clone();
+        let titlebar = crate::WindowDragRegion::new(
+            "modal-titlebar",
+            "Move window",
+            div()
+                .size_full()
+                .flex()
+                .justify_between()
+                .items_end()
+                .child(
+                    crate::ClientWindowControls::new(close.clone())
+                        .side(crate::WindowControlSide::Left),
+                )
+                .child(
+                    Button::new("titlebar-content", "Application control")
+                        .debug_selector("titlebar-content")
+                        .on_activate(move |_, _, _| presses.set(presses.get() + 1)),
+                )
+                .child(crate::ClientWindowControls::new(close)),
+        )
+        .disabled(self.drag_disabled)
+        .middle_activation(true)
+        .debug_selector("modal-titlebar")
+        .on_event(|event, window, _| {
+            match event {
+                crate::WindowDragRegionEvent::MoveRequested { .. } => {
+                    window.start_window_move();
+                    return crate::WindowDragRegionResponse::OperatingSystemWindowMoveStarted;
+                }
+                crate::WindowDragRegionEvent::DoubleActivationRequested => {
+                    window.titlebar_double_click()
+                }
+                crate::WindowDragRegionEvent::MiddleActivationRequested => {
+                    window.titlebar_middle_click()
+                }
+                crate::WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                    window.titlebar_right_click(*position)
+                }
+                _ => {}
+            }
+            crate::WindowDragRegionResponse::Continue
+        });
+        let presses = self.application_presses.clone();
+        ModalLayer::new(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(40.)).w_full().flex_none().child(titlebar))
+                .child(
+                    div().flex_1().flex().items_end().child(
+                        Button::new("application-content", "Application content")
+                            .debug_selector("application-content")
+                            .on_activate(move |_, _, _| presses.set(presses.get() + 1)),
+                    ),
+                ),
+        )
+    }
+}
+
+#[gpui::test]
+fn modal_window_chrome_preserves_pointer_operations_and_focus(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    for family in ["alert", "dialog", "progress"] {
+        for left in [false, true] {
+            let presses = Rc::new(Cell::new(0));
+            let closes = Rc::new(Cell::new(0));
+            let (root, cx) = cx.add_window_view(|_, _| WindowChromeFixture {
+                drag_disabled: false,
+                application_presses: presses.clone(),
+                closes: closes.clone(),
+            });
+            cx.simulate_decorations(gpui::Decorations::Client {
+                tiling: gpui::Tiling::default(),
+            });
+            let buttons = [
+                Some(gpui::WindowButton::Close),
+                Some(gpui::WindowButton::Minimize),
+                Some(gpui::WindowButton::Maximize),
+            ];
+            cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+                left: if left { buttons } else { [None; 3] },
+                right: if left { [None; 3] } else { buttons },
+            }));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.activate_window();
+                root.update(cx, |_, cx| {
+                    let cancel = ModalAction::new(
+                        "cancel",
+                        "Cancel",
+                        ModalActionRole::Cancel,
+                        "chrome-cancel",
+                    );
+                    let proceed = ModalAction::new(
+                        "continue",
+                        "Continue",
+                        ModalActionRole::Affirmative,
+                        "chrome-continue",
+                    );
+                    match family {
+                        "alert" => {
+                            Alert::new(
+                                ModalId::new("chrome-alert"),
+                                "Chrome alert",
+                                "Notice",
+                                "Message",
+                                vec![cancel, proceed],
+                            )
+                            .present(window, cx, |_, _| {})
+                            .unwrap();
+                        }
+                        "dialog" => {
+                            Dialog::new(
+                                ModalId::new("chrome-dialog"),
+                                "Chrome dialog",
+                                "Notice",
+                                vec![cancel, proceed],
+                                DialogInitialFocus::Action("cancel"),
+                            )
+                            .present(
+                                window,
+                                cx,
+                                |_, _, _| DialogCloseDecision::Deny {
+                                    first_invalid: None,
+                                },
+                                |_, _| {},
+                            )
+                            .unwrap();
+                        }
+                        "progress" => {
+                            ProgressDialog::new(
+                                ModalId::new("chrome-progress"),
+                                "Chrome progress",
+                                "Working",
+                                "Working",
+                                ProgressState::Indeterminate,
+                                ProgressCancellation::Cancellable(cancel),
+                            )
+                            .present(
+                                window,
+                                cx,
+                                |_, _, _| ProgressCancelDecision::Deny,
+                                |_, _| {},
+                            )
+                            .unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                });
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("tab");
+            cx.run_until_parked();
+            if family != "progress" {
+                assert!(
+                    cx.debug_bounds("modal-action-chrome-continue-keyboard-focus")
+                        .is_some()
+                );
+            }
+            let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+            for selector in [
+                "window-minimize",
+                "window-maximize",
+                "window-close",
+                "titlebar-content",
+                "application-content",
+            ] {
+                let position = cx.debug_bounds(selector).unwrap().center();
+                cx.simulate_mouse_move(position, None, Modifiers::none());
+                cx.simulate_click(position, Modifiers::none());
+                cx.run_until_parked();
+                assert!(
+                    cx.update(|window, _| focused.is_focused(window)),
+                    "{family}, left={left}, {selector}"
+                );
+            }
+            assert_eq!(
+                cx.window_requests(),
+                [
+                    gpui::TestWindowRequest::Minimize,
+                    gpui::TestWindowRequest::Zoom
+                ]
+            );
+            assert_eq!(closes.get(), 1);
+            assert_eq!(presses.get(), 0);
+            let titlebar = cx.debug_bounds("modal-titlebar").unwrap();
+            let start = point(
+                titlebar.origin.x + titlebar.size.width * 0.25,
+                titlebar.center().y,
+            );
+            let blocked = cx.debug_bounds("titlebar-content").unwrap().center();
+            cx.simulate_mouse_down(blocked, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+            assert_eq!(
+                cx.window_requests().len(),
+                2,
+                "blocked content must not start a window move"
+            );
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+            // The chrome owns the stream even after the pointer leaves its region.
+            cx.simulate_mouse_move(
+                point(start.x, titlebar.bottom() + px(10.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+            for (button, click_count) in [
+                (MouseButton::Left, 2),
+                (MouseButton::Middle, 1),
+                (MouseButton::Right, 1),
+            ] {
+                cx.simulate_event(MouseDownEvent {
+                    position: start,
+                    button,
+                    click_count,
+                    modifiers: Modifiers::none(),
+                    first_mouse: false,
+                });
+                cx.simulate_event(MouseUpEvent {
+                    position: start,
+                    button,
+                    click_count,
+                    modifiers: Modifiers::none(),
+                });
+            }
+            assert!(matches!(
+                cx.window_requests()[2..],
+                [
+                    gpui::TestWindowRequest::StartWindowMove,
+                    gpui::TestWindowRequest::TitlebarDoubleClick { .. },
+                    gpui::TestWindowRequest::TitlebarClick {
+                        button: MouseButton::Middle,
+                        ..
+                    },
+                    gpui::TestWindowRequest::TitlebarClick {
+                        button: MouseButton::Right,
+                        ..
+                    }
+                ]
+            ));
+            assert!(cx.update(|window, _| focused.is_focused(window)));
+            assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
+            let requests = cx.window_requests();
+            root.update(cx, |fixture, cx| {
+                fixture.drag_disabled = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_move(
+                point(start.x + px(10.), start.y),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+            assert_eq!(
+                cx.window_requests(),
+                requests,
+                "a disabled region must withdraw its pointer route"
+            );
+            assert!(cx.update(|window, _| focused.is_focused(window)));
+        }
+    }
+}
+
+#[gpui::test]
+fn modal_window_chrome_is_occluded_only_where_the_surface_overlaps(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let presses = Rc::new(Cell::new(0));
+    let closes = Rc::new(Cell::new(0));
+    let (root, cx) = cx.add_window_view(|_, _| WindowChromeFixture {
+        drag_disabled: false,
+        application_presses: presses.clone(),
+        closes: closes.clone(),
+    });
+    cx.simulate_resize(size(px(360.), px(200.)));
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    let presentation = cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |_, cx| {
+            Dialog::new(
+                ModalId::new("overlapping-chrome"),
+                "Overlapping chrome",
+                "Notice",
+                vec![ModalAction::new(
+                    "cancel",
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "overlap-cancel",
+                )],
+                DialogInitialFocus::Action("cancel"),
+            )
+            .present(
+                window,
+                cx,
+                |_, _, _| DialogCloseDecision::Deny {
+                    first_invalid: None,
+                },
+                |_, _| {},
+            )
+            .unwrap()
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(presentation.presentation_id().value(), 1);
+    let surface = cx.debug_bounds("modal-surface-1").unwrap();
+    let titlebar = cx.debug_bounds("modal-titlebar").unwrap();
+    assert!(!surface.intersect(&titlebar).is_empty());
+    let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+    for selector in [
+        "window-minimize",
+        "window-maximize",
+        "window-close",
+        "titlebar-content",
+    ] {
+        let overlap = surface.intersect(&cx.debug_bounds(selector).unwrap());
+        assert!(!overlap.is_empty(), "{selector} must overlap the surface");
+        cx.simulate_click(overlap.center(), Modifiers::none());
+    }
+    let overlap = point(surface.left() + px(5.), surface.top() + px(2.));
+    for (button, click_count) in [
+        (MouseButton::Left, 1),
+        (MouseButton::Left, 2),
+        (MouseButton::Middle, 1),
+        (MouseButton::Right, 1),
+    ] {
+        cx.simulate_event(MouseDownEvent {
+            position: overlap,
+            button,
+            click_count,
+            modifiers: Modifiers::none(),
+            first_mouse: false,
+        });
+        cx.simulate_mouse_move(overlap + point(px(5.), px(0.)), button, Modifiers::none());
+        cx.simulate_event(MouseUpEvent {
+            position: overlap,
+            button,
+            click_count,
+            modifiers: Modifiers::none(),
+        });
+    }
+    assert!(
+        cx.window_requests().is_empty(),
+        "surface presses must never reach Window Controls or the drag tracker"
+    );
+    assert_eq!(closes.get(), 0);
+    assert_eq!(presses.get(), 0);
+    let minimize = cx.debug_bounds("window-minimize").unwrap();
+    let outside = point(minimize.center().x, surface.top() - px(2.));
+    assert!(minimize.contains(&outside));
+    cx.simulate_click(outside, Modifiers::none());
+    assert_eq!(cx.window_requests(), [gpui::TestWindowRequest::Minimize]);
+    let outside = point(surface.left() + px(5.), surface.top() - px(2.));
+    cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        outside + point(px(5.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+    assert_eq!(
+        cx.window_requests()[1],
+        gpui::TestWindowRequest::StartWindowMove
+    );
+    assert!(cx.update(|window, _| focused.is_focused(window)));
+    assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
+}
+
 struct AlertFixture {
     invoker: FocusHandle,
     underlay_activations: Rc<Cell<usize>>,

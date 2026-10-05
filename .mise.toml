@@ -91,6 +91,20 @@ else
 fi
 '''
 
+[tasks."fonts:prepare:ui"]
+description = "Prepare private UI font identities from the pinned Inter archive"
+usage = '''
+arg "<archive>" help="Inter-4.1.zip from the official Inter 4.1 release"
+flag "--check" help="Verify committed fonts without changing files"
+'''
+run = '''
+if [ "${usage_check:-false}" = "true" ]; then
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}" --check
+else
+  uv run scripts/prepare-ui-fonts.py "${usage_archive?}"
+fi
+'''
+
 [tasks."gpui:local:on"]
 description = "Use a local SpaceTerm Zed checkout for GPUI dependencies"
 usage = '''
@@ -105,6 +119,23 @@ cargo metadata --format-version 1 > /dev/null
 description = "Restore the pinned GPUI Git dependencies"
 run = '''
 python3 scripts/gpui-local.py off
+cargo metadata --format-version 1 > /dev/null
+'''
+
+[tasks."accesskit:local:on"]
+description = "Use a local SpaceTerm AccessKit checkout for accessibility dependencies"
+usage = '''
+arg "<checkout>" help="Local SpaceTerm AccessKit checkout"
+'''
+run = '''
+python3 scripts/accesskit-local.py on "${usage_checkout?}"
+cargo metadata --format-version 1 > /dev/null
+'''
+
+[tasks."accesskit:local:off"]
+description = "Restore the pinned AccessKit Git dependencies"
+run = '''
+python3 scripts/accesskit-local.py off
 cargo metadata --format-version 1 > /dev/null
 '''
 
@@ -261,12 +292,20 @@ run = [
 ]
 
 [tasks."fmt:macos"]
-description = "Format isolated macOS Adapter sources"
-run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs"
+description = "Format isolated macOS and shared Unix Adapter sources"
+run = "rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
 
 [tasks."fmt:check:macos"]
-description = "Check isolated macOS Adapter formatting"
-run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs"
+description = "Check isolated macOS and shared Unix Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
+
+[tasks."fmt:linux"]
+description = "Format isolated Linux and shared Unix Adapter sources"
+run = "rustfmt --edition 2024 src/platform/linux_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
+
+[tasks."fmt:check:linux"]
+description = "Check isolated Linux and shared Unix Adapter formatting"
+run = "rustfmt --edition 2024 --check src/platform/linux_adapter_tests/*.rs src/platform/unix_adapter_tests/*.rs"
 
 [tasks.test]
 description = "Run all tests with every feature for the current platform"
@@ -291,11 +330,13 @@ run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-
 description = "Test shared repository scripts"
 run = [
   "python3 scripts/test-gpui-local.py",
+  "python3 scripts/test-accesskit-local.py",
   "python3 scripts/test-bump-gpui.py",
   "python3 packaging/test-release.py",
   "python3 scripts/test-release-workflow.py",
   "python3 scripts/test-commit-hook.py",
   "python3 scripts/test-supervise-cargo-artifacts.py",
+  "python3 scripts/test-run-development-app.py",
 ]
 
 [tasks."test:artifacts"]
@@ -304,7 +345,7 @@ run = "./scripts/test-cargo-artifacts.sh"
 
 [tasks."test:macos"]
 description = "Run native macOS Adapter tests"
-run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features macos-native-tests --locked macos"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- macos unix"
 
 [tasks."test:updater:macos"]
 description = "Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
@@ -536,3 +577,132 @@ usage = '''
 arg "<tag>" help="Validated stable release tag"
 '''
 run = 'python3 packaging/publish-release.py "${usage_tag}"'
+
+[tasks."setup:linux"]
+description = "Prepare the Linux development environment"
+run = [{ task = "setup" }, { task = "doctor:linux" }]
+
+[tasks."doctor:linux"]
+description = "Verify Linux development libraries and tools"
+run = '''
+set -eu
+pkg-config --exists xkbcommon xkbcommon-x11 wayland-client xcb x11-xcb fontconfig freetype2 || {
+  echo "Install: pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev" >&2
+  exit 1
+}
+python3 -c 'import ctypes; ctypes.CDLL("libvulkan.so.1")' || {
+  echo "Install a Vulkan loader and driver, for example libvulkan1 and mesa-vulkan-drivers" >&2
+  exit 1
+}
+command -v tic
+command -v desktop-file-validate >/dev/null || {
+  echo "Install desktop-file-utils to validate the Development desktop entry" >&2
+  exit 1
+}
+/usr/bin/python3 -c 'from gi.repository import Gio; assert Gio.DesktopAppInfo' || {
+  echo "Install python3-gi and gir1.2-glib-2.0 to test the Development desktop entry" >&2
+  exit 1
+}
+command -v dbus-daemon
+command -v ssh
+test -x /bin/zsh || {
+  echo "Install zsh; native shell integration tests run /bin/zsh" >&2
+  exit 1
+}
+'''
+
+[tasks."development:linux"]
+description = "Run SpaceTerm Development from a source-built private Linux prefix"
+hide = true
+run = "exec bash scripts/run-development-app-linux.sh"
+
+[tasks."development:x11:linux"]
+description = "Run SpaceTerm Development through X11"
+run = "exec env -u WAYLAND_DISPLAY bash scripts/run-development-app-linux.sh"
+
+[tasks."development:workbench:linux"]
+description = "Open the Developer Workbench in SpaceTerm Development on Linux"
+hide = true
+usage = '''
+arg "[section]" default="appearance"
+'''
+run = '''
+case "${usage_section}" in
+  appearance|controls|floating-surfaces|modals|terminal|document) ;;
+  *) echo "Unknown Developer Workbench section" >&2; exit 2 ;;
+esac
+export SPACETERM_DEVELOPER_WORKBENCH="${usage_section}"
+exec bash scripts/run-development-app-linux.sh
+'''
+
+[tasks."test:compose:linux"]
+description = "Test native Compose key lifecycles and Kitty encoding on a private display"
+usage = '''
+arg "<backend>" help="Display backend: x11 or wayland"
+'''
+run = './scripts/cargo-artifacts.sh run -- python3 scripts/test-compose-input-linux.py "${usage_backend?}"'
+
+[tasks."test:linux"]
+description = "Run native Linux and shared Unix Adapter tests"
+run = "./scripts/cargo-artifacts.sh run -- cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
+
+[tasks."build:accessibility:linux"]
+description = "Build the source executable for private Linux accessibility smoke tests"
+usage = '''
+arg "<artifact>" help="File receiving Cargo's executable path"
+'''
+run = 'CARGO_BUILD_JOBS=2 ./scripts/cargo-artifacts.sh run -- python3 scripts/build-cargo-executable.py --output "${usage_artifact?}" --bin spaceterm -- --locked'
+
+[tasks."test:accessibility:linux"]
+description = "Verify AT-SPI Terminal text, selection, focus and bounded event churn on private Linux displays"
+usage = '''
+flag "--backend <backend>" help="both, x11 or wayland" default="both"
+flag "--binary <binary>" help="Existing source executable; skips building"
+flag "--expected-binary-sha256 <expected_binary_sha256>" help="Required SHA256 pin for --binary"
+flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
+flag "--session-timeout <session_timeout>" help="Maximum runtime per backend in seconds" default="600"
+flag "--isolation-only" help="Verify private bus/dconf ownership without launching a display"
+'''
+run = '''
+set -- --backend "${usage_backend?}" --session-timeout "${usage_session_timeout?}"
+if [ -n "${usage_binary:-}" ]; then set -- "$@" --binary "$usage_binary"; fi
+if [ -n "${usage_expected_binary_sha256:-}" ]; then set -- "$@" --expected-binary-sha256 "$usage_expected_binary_sha256"; fi
+if [ -n "${usage_output_dir:-}" ]; then set -- "$@" --output-dir "$usage_output_dir"; fi
+if [ "${usage_isolation_only:-false}" = true ]; then set -- "$@" --isolation-only; fi
+exec /usr/bin/python3 scripts/verify-accessibility-linux.py "$@"
+'''
+
+[tasks."test:accessibility:regressions:linux"]
+description = "Test real Linux accessibility FIFOs and owned-process cleanup"
+usage = '''
+flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
+'''
+run = '''
+set --
+if [ -n "${usage_output_dir:-}" ]; then set -- --output-dir "$usage_output_dir"; fi
+exec /usr/bin/python3 scripts/test-verify-accessibility-linux.py "$@"
+'''
+
+[tasks."test:scripts:linux"]
+description = "Test private Linux runner cleanup without a bus or display"
+run = "python3 scripts/test-private-runners-linux.py"
+
+[tasks."lint:scripts:linux"]
+description = "Check Linux scripts"
+run = '''
+set -eu
+bash -n scripts/run-development-app-linux.sh
+shellcheck -x scripts/run-development-app-linux.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/register-development-desktop-linux.py").read_text())'
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in ("scripts/verify-accessibility-linux.py", "scripts/test-verify-accessibility-linux.py")]'
+'''
+
+[tasks."validate:linux"]
+description = "Run the full Linux validation gate"
+run = [
+  { task = "validate" },
+  { task = "fmt:check:linux" },
+  { task = "test:linux" },
+  { task = "lint:scripts:linux" },
+  { task = "test:scripts:linux" },
+]

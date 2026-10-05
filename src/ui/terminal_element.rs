@@ -33,6 +33,7 @@ use super::terminal_pane::{OperationToken, TerminalPane};
 use super::terminal_symbols::{
     DevicePoint, SymbolPlanCache, SymbolPrimitive, TerminalSymbol, terminal_symbol,
 };
+use super::workspace_frame::WorkspaceFrame;
 
 #[derive(Clone, Copy)]
 struct TerminalGridMetrics {
@@ -237,8 +238,7 @@ fn take_aligned_row<T>(
 pub(crate) struct TerminalPadding {
     side: Pixels,
     bottom: Pixels,
-    rim: Pixels,
-    bottom_corner_radius: Pixels,
+    frame: Option<WorkspaceFrame>,
 }
 
 impl TerminalPadding {
@@ -246,30 +246,32 @@ impl TerminalPadding {
         Self {
             side,
             bottom,
-            rim: Pixels::ZERO,
-            bottom_corner_radius: Pixels::ZERO,
+            frame: None,
         }
     }
 
-    /// Leaves a `rim` band on the side and bottom edges unpainted and rounds fills at the rim's
-    /// inner bottom corners with `bottom_corner_radius`.
-    pub(crate) const fn within_rim(self, rim: Pixels, bottom_corner_radius: Pixels) -> Self {
+    /// Keeps fills inside the Pane's device-snapped rim and concentric inner bottom corners.
+    pub(crate) const fn within_pane(self, frame: WorkspaceFrame) -> Self {
         Self {
-            rim,
-            bottom_corner_radius,
+            frame: Some(frame),
             ..self
         }
     }
 
-    /// The region inside the rim that the terminal may paint within layout `bounds`.
-    fn interior(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-        Bounds::new(
-            point(bounds.left() + self.rim, bounds.top()),
-            size(
-                (bounds.size.width - self.rim * 2.0).max(px(0.0)),
-                (bounds.size.height - self.rim).max(px(0.0)),
-            ),
-        )
+    fn paint_corners(self, bounds: Bounds<Pixels>, scale_factor: f32) -> BottomCorners {
+        match self.frame {
+            Some(frame) => {
+                let interior = frame.pane_paint_interior(bounds, scale_factor);
+                BottomCorners {
+                    bounds: interior.bounds,
+                    radius: interior.corner_radius,
+                }
+            }
+            None => BottomCorners {
+                bounds,
+                radius: Pixels::ZERO,
+            },
+        }
     }
 
     /// The cell grid inside layout `bounds`.
@@ -1818,11 +1820,8 @@ impl Element for TerminalGridElement {
         _cx: &mut App,
     ) -> Self::PrepaintState {
         let grid_bounds = self.padding.grid_bounds(bounds);
-        let interior = self.padding.interior(bounds);
-        let corners = BottomCorners {
-            bounds: interior,
-            radius: self.padding.bottom_corner_radius,
-        };
+        let corners = self.padding.paint_corners(bounds, window.scale_factor());
+        let interior = corners.bounds;
         let fitted_cell = TerminalGeometry::fitted_cell_size(
             LogicalSize::new(
                 f32::from(grid_bounds.size.width),
@@ -2343,26 +2342,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
-    #[cfg(test)]
-    TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
-    let mut cell_font = font(family.clone());
-    cell_font.features = FontFeatures::disable_ligatures();
-    cell_font.fallbacks = Some(FontFallbacks::from_fonts(
-        ["Apple Color Emoji", "Menlo"]
-            .into_iter()
-            .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
-            .map(str::to_owned)
-            .collect(),
-    ));
-    if bold {
-        cell_font = cell_font.bold();
-    }
-    if italic {
-        cell_font = cell_font.italic();
-    }
-    cell_font
-}
+pub(super) use tests::terminal_cell_font;
 
 #[cfg(test)]
 fn test_terminal_fonts(family: &SharedString) -> TerminalFonts {
@@ -3446,6 +3426,31 @@ fn frame_cursor_paint_plan(
 
 #[cfg(test)]
 mod tests {
+    pub(in crate::ui) fn terminal_cell_font(
+        family: &SharedString,
+        bold: bool,
+        italic: bool,
+    ) -> Font {
+        #[cfg(test)]
+        TERMINAL_FONT_PREPARATIONS.with(|count| count.set(count.get() + 1));
+        let mut cell_font = font(family.clone());
+        cell_font.features = FontFeatures::disable_ligatures();
+        cell_font.fallbacks = Some(FontFallbacks::from_fonts(
+            ["Apple Color Emoji", "Menlo"]
+                .into_iter()
+                .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
+                .map(str::to_owned)
+                .collect(),
+        ));
+        if bold {
+            cell_font = cell_font.bold();
+        }
+        if italic {
+            cell_font = cell_font.italic();
+        }
+        cell_font
+    }
+
     use std::{
         borrow::Cow,
         cell::{Cell, RefCell},
@@ -3460,9 +3465,13 @@ mod tests {
     use crate::ui::terminal_ime::layout_preedit;
     use gpui::Styled as _;
 
-    #[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+    #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
         include!("../platform/macos_adapter_tests/terminal_glyphs.rs");
+    }
+    #[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+    mod linux_adapter_tests {
+        include!("../platform/linux_adapter_tests/terminal_glyphs.rs");
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -5629,10 +5638,199 @@ mod tests {
     }
 
     #[test]
+    fn terminal_padding_fills_match_the_device_snapped_pane_rim() {
+        use crate::platform::window_frame::WindowFrameGeometry;
+
+        let ink = Color::rgb(0x0a_0a_0a);
+        let accent = Color::rgb(0x33_66_99);
+        let rim_color = rgba(0xff_00_00_ff);
+        let rows = [
+            padding_row([painted_cell("a", ink), cell("b"), painted_cell("c", accent)]),
+            padding_row([
+                painted_cell("d", ink),
+                painted_cell("e", ink),
+                painted_cell("f", accent),
+            ]),
+        ];
+
+        for (density, window_radius) in [(1.0, 15.0), (1.2, 15.0), (1.0, 5.0)] {
+            let frame = WorkspaceFrame::resolve(
+                density,
+                WindowFrameGeometry::new(Some(window_radius)).with_outer_edge_width(1.0),
+            );
+            for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+                for offset in [0.0, 0.4] {
+                    let bounds = Bounds::new(
+                        point(px(offset), px(48.0 + offset)),
+                        size(px(100.0), px(52.0)),
+                    );
+                    let pane_bounds = Bounds::from_corners(
+                        point(bounds.left(), px(offset)),
+                        bounds.bottom_right(),
+                    );
+                    let padding = TerminalPadding::new(px(2.0), px(2.0)).within_pane(frame);
+                    let grid = padding.grid_bounds(bounds);
+                    assert_eq!(
+                        grid,
+                        TerminalPadding::new(px(2.0), px(2.0)).grid_bounds(bounds),
+                        "paint geometry must not move the grid, text, cursor or hit targets"
+                    );
+                    let mut cx = recording_test_app(Arc::new(RasterObservation::default()));
+                    let cx = cx.add_empty_window();
+                    cx.update(|window, _| window.set_scale_factor(scale));
+                    let paint = |cx: &mut gpui::VisualTestContext, corners: BottomCorners| {
+                        let rows = rows.clone();
+                        cx.draw(
+                            point(px(0.0), px(0.0)),
+                            size(px(120.0), px(120.0)),
+                            move |_, _| {
+                                gpui::canvas(
+                                    |_, _, _| (),
+                                    move |_, (), window, _| {
+                                        for quad in prepare_padding_background_geometry(
+                                            &rows,
+                                            true,
+                                            corners.bounds,
+                                            grid,
+                                            px(32.0),
+                                            px(25.0),
+                                        ) {
+                                            corners.paint(&quad, window);
+                                        }
+                                        window.paint_quad(
+                                            outline(pane_bounds, rim_color, BorderStyle::Solid)
+                                                .border_widths(frame.pane_rim_width())
+                                                .corner_radii(frame.pane_radius()),
+                                        );
+                                    },
+                                )
+                                .size_full()
+                            },
+                        );
+                    };
+                    let corners =
+                        cx.update(|window, _| padding.paint_corners(bounds, window.scale_factor()));
+                    paint(cx, corners);
+                    cx.update(|window, _| {
+                        let quads = window.painted_quads();
+                        let rim = quads
+                            .iter()
+                            .find(|quad| quad.border_color == rim_color.into())
+                            .unwrap();
+                        // GPUI's WGPU shader uses outer_radius - snapped_border for its circular
+                        // inner arc. Compare with the real submitted rim, not logical metrics.
+                        let inner_left = rim.bounds.left() + rim.border_widths.left;
+                        let inner_right = rim.bounds.right() - rim.border_widths.right;
+                        let inner_bottom = rim.bounds.bottom() - rim.border_widths.bottom;
+                        let left = quads
+                            .iter()
+                            .find(|quad| {
+                                quad.background == gpui_color(ink).into()
+                                    && quad.corner_radii.bottom_left > gpui::ScaledPixels(0.0)
+                                    && quad.content_mask.bounds.bottom() == inner_bottom
+                            })
+                            .unwrap();
+                        let right = quads
+                            .iter()
+                            .find(|quad| {
+                                quad.background == gpui_color(accent).into()
+                                    && quad.corner_radii.bottom_right > gpui::ScaledPixels(0.0)
+                                    && quad.content_mask.bounds.bottom() == inner_bottom
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            left.bounds.left(),
+                            inner_left,
+                            "scale={scale}, offset={offset}"
+                        );
+                        assert_eq!(
+                            right.bounds.right(),
+                            inner_right,
+                            "scale={scale}, offset={offset}"
+                        );
+                        assert_eq!(left.content_mask.bounds.left(), inner_left);
+                        assert_eq!(right.content_mask.bounds.right(), inner_right);
+                        for (fill, fill_radius, rim_radius, border) in [
+                            (
+                                left,
+                                left.corner_radii.bottom_left,
+                                rim.corner_radii.bottom_left,
+                                rim.border_widths.left,
+                            ),
+                            (
+                                right,
+                                right.corner_radii.bottom_right,
+                                rim.corner_radii.bottom_right,
+                                rim.border_widths.right,
+                            ),
+                        ] {
+                            assert_eq!(
+                                fill.bounds.bottom(),
+                                inner_bottom,
+                                "scale={scale}, offset={offset}"
+                            );
+                            assert!(
+                                (fill_radius.0 - (rim_radius.0 - border.0)).abs() < 0.0001,
+                                "scale={scale}: terminal radius={}, painted rim inner radius={}",
+                                fill_radius.0,
+                                rim_radius.0 - border.0
+                            );
+                            if scale == 1.0 || scale == 2.0 {
+                                assert_eq!(
+                                    fill_radius.0,
+                                    (f32::from(frame.pane_radius()) - 1.0) * scale
+                                );
+                            }
+                        }
+                    });
+                    if scale == 1.0 || scale == 2.0 {
+                        let capture = |window: &Window| {
+                            window
+                                .painted_quads()
+                                .into_iter()
+                                .map(|quad| {
+                                    (
+                                        quad.bounds,
+                                        quad.content_mask,
+                                        quad.corner_radii,
+                                        quad.background,
+                                        quad.border_widths,
+                                        quad.border_color,
+                                        quad.border_style,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let actual = cx.update(|window, _| capture(window));
+                        // Retain the old logical geometry as an independent scene baseline at
+                        // integer scales, including every side strip and corner mask.
+                        paint(
+                            cx,
+                            BottomCorners {
+                                bounds: Bounds::new(
+                                    point(bounds.left() + px(1.0), bounds.top()),
+                                    size(bounds.size.width - px(2.0), bounds.size.height - px(1.0)),
+                                ),
+                                radius: frame.pane_radius() - px(1.0),
+                            },
+                        );
+                        let previous = cx.update(|window, _| capture(window));
+                        assert_eq!(actual, previous, "scale={scale}, offset={offset}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn padding_keeps_the_grid_and_painted_interior_inside_their_margins() {
         let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(52.0)));
 
-        let padding = TerminalPadding::new(px(2.0), px(3.0)).within_rim(px(1.0), px(8.0));
+        let frame = WorkspaceFrame::resolve(
+            1.0,
+            crate::platform::window_frame::WindowFrameGeometry::new(Some(14.0)),
+        );
+        let padding = TerminalPadding::new(px(2.0), px(3.0)).within_pane(frame);
 
         assert_eq!(
             padding.grid_bounds(bounds),
@@ -5640,7 +5838,7 @@ mod tests {
             "the rim never moves the grid"
         );
         assert_eq!(
-            padding.interior(bounds),
+            padding.paint_corners(bounds, 1.0).bounds,
             Bounds::new(point(px(11.0), px(20.0)), size(px(98.0), px(51.0))),
             "the painted interior stops at the rim's inner edge on the sides and bottom"
         );

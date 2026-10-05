@@ -5,6 +5,7 @@ use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, po
 use crate::appearance::{
     Appearance, AppearanceMode, ChromeDensity, SettingsDocument, builtin_fallback_theme,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
@@ -24,6 +25,309 @@ struct Harness {
     storage: Arc<MemoryStorage>,
     settings: crate::settings::UserSettings,
     platform: RecordingAppearancePlatform,
+}
+
+/// Retained window effects that differ from the defaults in every respect a row can show.
+fn retained_window_effects() -> SettingsDocument {
+    let mut document = SettingsDocument::default();
+    document.preferences.window.transparency = 0.8;
+    document.preferences.window.blur = false;
+    document
+}
+
+/// Configures the desktop's window-effect capabilities and lets Settings observe them.
+fn set_window_effects(
+    harness: &Harness,
+    transparency: bool,
+    blur: bool,
+    cx: &mut VisualTestContext,
+) {
+    harness
+        .platform
+        .set_native_window_transparency_supported(transparency);
+    harness.platform.set_native_window_blur_supported(blur);
+    cx.run_until_parked();
+}
+
+fn window_background_rows(
+    window: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> crate::appearance::WindowBackgroundChoices {
+    window.read_with(cx, |settings, cx| settings.window_background(cx))
+}
+
+/// Whether the Blur switch presents itself as on, read from where its thumb rests.
+fn blur_switch_shows_on(cx: &mut VisualTestContext) -> bool {
+    let track = cx
+        .debug_bounds("settings-blur-indicator")
+        .expect("the Blur switch should render");
+    let thumb = cx
+        .debug_bounds("settings-blur-thumb")
+        .expect("the Blur switch thumb should render");
+    thumb.center().x > track.center().x
+}
+
+/// Whether the element at `selector` paints exactly this fill, and this border where one is
+/// given.
+fn paints_frame(
+    selector: &'static str,
+    (fill, border): (crate::appearance::Color, Option<crate::appearance::Color>),
+    cx: &mut VisualTestContext,
+) -> bool {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"));
+    cx.update(|window, _| {
+        let bounds = bounds.scale(window.scale_factor());
+        let fill = gpui::Background::from(crate::ui::appearance::gpui_color(fill));
+        let border =
+            border.map(|border| gpui::Hsla::from(crate::ui::appearance::gpui_color(border)));
+        // A frame paints its fill and its border as separate quads over the same bounds.
+        let quads = window.painted_quads();
+        let framed = quads.iter().filter(|quad| quad.bounds == bounds);
+        framed.clone().any(|quad| quad.background == fill)
+            && border.is_none_or(|border| framed.clone().any(|quad| quad.border_color == border))
+    })
+}
+
+/// The number of distinct keyboard stops Tab visits on the way once around the window.
+fn keyboard_stops(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| {
+        let mut visited: Vec<gpui::FocusHandle> = Vec::new();
+        for _ in 0..512 {
+            window.focus_next(cx);
+            let Some(focused) = window.focused(cx) else {
+                break;
+            };
+            if visited.contains(&focused) {
+                break;
+            }
+            visited.push(focused);
+        }
+        visited.len()
+    })
+}
+
+#[gpui::test]
+fn missing_desktop_transparency_shows_disabled_window_effect_defaults(cx: &mut TestAppContext) {
+    assert_unavailable_window_effects_show_disabled_defaults(
+        false,
+        crate::appearance::UnavailableWindowEffect::Transparency,
+        [
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency.",
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+        ],
+        cx,
+    );
+}
+
+#[gpui::test]
+fn missing_desktop_blur_shows_disabled_window_effect_defaults(cx: &mut TestAppContext) {
+    assert_unavailable_window_effects_show_disabled_defaults(
+        true,
+        crate::appearance::UnavailableWindowEffect::Blur,
+        [
+            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency.",
+            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+        ],
+        cx,
+    );
+}
+
+/// Where the desktop cannot present a window effect, the window stays opaque and neither
+/// Transparency nor Blur can change it. Both rows show their defaults, which are what render,
+/// in the disabled state, and the retained choices return once the desktop can present them.
+fn assert_unavailable_window_effects_show_disabled_defaults(
+    transparency: bool,
+    unavailable: crate::appearance::UnavailableWindowEffect,
+    guidance: [&'static str; 2],
+    cx: &mut TestAppContext,
+) {
+    use crate::appearance::{ChromeTone, ResolvedWindowComposition, WindowBackgroundAppearance};
+
+    let blur = false;
+    {
+        let retained = retained_window_effects();
+        let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&retained));
+        set_window_effects(&harness, transparency, blur, cx);
+        let case = format!("transparency={transparency} blur={blur}");
+
+        // The rows show the defaults, not the retained choices.
+        let defaults = crate::appearance::AppearancePreferences::default().window;
+        let rows = window_background_rows(&window, cx);
+        assert_eq!(rows.unavailable, Some(unavailable), "{case}");
+        assert_eq!(
+            (rows.transparency, rows.blur),
+            (defaults.transparency, defaults.blur),
+            "{case}"
+        );
+        assert!(blur_switch_shows_on(cx), "{case}: Blur shows its default");
+        let description = |row, cx: &mut VisualTestContext| {
+            window.read_with(cx, |settings, cx| settings.row_description(row, cx))
+        };
+        assert_eq!(
+            [
+                description(SettingsRowId::Transparency, cx),
+                description(SettingsRowId::Blur, cx),
+            ],
+            guidance.map(Some),
+            "{case}"
+        );
+
+        // What renders is the defaults, floating surfaces included.
+        let composition = cx.update(|_, cx| {
+            let chrome = &appearance_runtime::current(cx).chrome;
+            (
+                chrome.composition,
+                ResolvedWindowComposition::resolve(
+                    &defaults,
+                    chrome.composition.capabilities,
+                    ChromeTone::of(chrome.colors.background),
+                ),
+            )
+        });
+        assert_eq!(composition.0, composition.1, "{case}");
+        assert_eq!(composition.0.effective, WindowBackgroundAppearance::Opaque);
+        assert!(!composition.0.floating_materials.is_opaque(), "{case}");
+        assert!(composition.0.floating_blur, "{case}");
+
+        // Both controls paint the shared disabled state rather than the enabled one.
+        let card = cx.update(|_, cx| {
+            crate::ui::appearance::settings::shared(cx)
+                .chrome
+                .host_colors(spaceterm_ui::ControlHost::Card)
+                .clone()
+        });
+        // The switch track's border is a shared control-library treatment in every state, so
+        // only its fill tells the states apart.
+        for (selector, disabled, enabled) in [
+            (
+                "settings-blur-indicator",
+                (card.toggle_on_disabled_background, None),
+                (card.toggle_on_background, None),
+            ),
+            (
+                "settings-transparency-buttons",
+                (
+                    card.input_disabled_background,
+                    Some(card.input_disabled_border),
+                ),
+                (card.input_background, Some(card.input_border)),
+            ),
+        ] {
+            assert!(
+                paints_frame(selector, disabled, cx),
+                "{case}: {selector} paints the disabled state"
+            );
+            assert!(
+                !paints_frame(selector, enabled, cx),
+                "{case}: {selector} does not paint the enabled state"
+            );
+        }
+
+        // Neither pointer nor reset reaches the retained choices, and nothing is written.
+        assert!(
+            !window.read_with(cx, |settings, cx| {
+                settings.differs_from_default(SettingsRowId::Transparency, cx)
+                    || settings.differs_from_default(SettingsRowId::Blur, cx)
+            }),
+            "{case}: a row showing its default offers no reset"
+        );
+        click("settings-transparency-increase", cx);
+        click("settings-transparency-decrease", cx);
+        click("settings-blur", cx);
+        settle(cx);
+        assert_eq!(
+            document_of(&window, cx).preferences.window,
+            retained.preferences.window,
+            "{case}"
+        );
+        assert_eq!(harness.storage.writes(), 0, "{case}");
+        assert!(blur_switch_shows_on(cx), "{case}");
+
+        // The keyboard cannot reach the decrement, the increment, the switch, or a reset. Once
+        // the desktop presents both effects, all five become stops: the retained choices differ
+        // from the defaults, so each row offers its reset again.
+        let locked_stops = keyboard_stops(cx);
+        set_window_effects(&harness, true, true, cx);
+        assert_eq!(keyboard_stops(cx), locked_stops + 5, "{case}");
+        assert!(
+            window.read_with(cx, |settings, cx| {
+                settings.differs_from_default(SettingsRowId::Transparency, cx)
+                    && settings.differs_from_default(SettingsRowId::Blur, cx)
+            }),
+            "{case}"
+        );
+
+        // A desktop that presents both effects restores the retained choices, editable again.
+        let rows = window_background_rows(&window, cx);
+        assert_eq!(rows.unavailable, None, "{case}");
+        assert_eq!((rows.transparency, rows.blur), (0.8, false), "{case}");
+        assert!(!blur_switch_shows_on(cx), "{case}");
+        assert_eq!(
+            cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
+            WindowBackgroundAppearance::Transparent,
+            "{case}"
+        );
+        click("settings-blur", cx);
+        settle(cx);
+        assert!(harness.storage.document().unwrap().preferences.window.blur);
+        assert_eq!(
+            harness
+                .storage
+                .document()
+                .unwrap()
+                .preferences
+                .window
+                .transparency,
+            0.8
+        );
+    }
+}
+
+/// Reduce Transparency still explains floating surfaces while a missing window effect keeps the
+/// rows at their disabled defaults.
+#[gpui::test]
+fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) =
+        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
+    set_window_effects(&harness, true, false, cx);
+    harness.platform.set_reduce_transparency(true);
+    cx.run_until_parked();
+    let description = |row, cx: &mut VisualTestContext| {
+        window.read_with(cx, |settings, cx| settings.row_description(row, cx))
+    };
+    assert_eq!(
+        description(SettingsRowId::Transparency, cx),
+        Some(
+            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+        )
+    );
+    assert_eq!(
+        description(SettingsRowId::Blur, cx),
+        Some(
+            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+        )
+    );
+    harness
+        .platform
+        .set_native_window_transparency_supported(false);
+    cx.run_until_parked();
+    assert_eq!(
+        description(SettingsRowId::Transparency, cx),
+        Some(
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+        )
+    );
+    assert_eq!(
+        description(SettingsRowId::Blur, cx),
+        Some(
+            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+        )
+    );
+    assert!(!window_background_rows(&window, cx).adjustable());
 }
 
 fn open_settings(
@@ -1528,28 +1832,30 @@ fn settings_backdrop_tracks_blur_and_accessibility_live(cx: &mut TestAppContext)
 fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     cx: &mut TestAppContext,
 ) {
-    let (window, harness, cx) = open_settings(cx);
+    let (window, harness, cx) =
+        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
+    let retained = retained_window_effects().preferences.window;
     let guidance = |row, cx: &mut VisualTestContext| {
         window.read_with(cx, |settings, cx| settings.row_description(row, cx))
     };
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("Floating surfaces still use your transparency choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
     assert!(
         guidance(SettingsRowId::Blur, cx)
             .unwrap()
-            .contains("Floating surfaces still use your blur choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
 
-    // The fallback must not disable editing the choices that will apply when support returns.
+    // The fallback shows the defaults it renders and leaves the retained choices for a desktop
+    // that can present them.
     click("settings-transparency-increase", cx);
     click("settings-blur", cx);
     settle(cx);
-    let retained = harness.storage.document().unwrap().preferences.window;
-    assert_eq!(retained.transparency, 0.4);
-    assert!(!retained.blur);
+    assert_eq!(document_of(&window, cx).preferences.window, retained);
+    assert_eq!(harness.storage.writes(), 0);
 
     harness
         .platform
@@ -1577,7 +1883,7 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert!(
         guidance(SettingsRowId::Transparency, cx)
             .unwrap()
-            .contains("Floating surfaces still use your transparency choice")
+            .starts_with("Desktop transparency is unavailable on this system")
     );
     assert_eq!(document_of(&window, cx).preferences.window, retained);
     assert_eq!(
@@ -1658,10 +1964,16 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
                 settings.row_description(SettingsRowId::Blur, cx).unwrap(),
             )
         });
-        assert!(transparency.contains("opaque at 0"));
-        assert!(blur.contains("Increase Transparency above 0"));
-        assert!(!transparency.contains("accessibility"));
-        assert!(!blur.contains("accessibility"));
+        if supported {
+            assert!(transparency.contains("opaque at 0"));
+            assert!(blur.contains("Increase Transparency above 0"));
+        } else {
+            // Without desktop transparency the rows show the default rather than the retained 0.
+            assert!(transparency.starts_with("Desktop transparency is unavailable"));
+            assert!(blur.starts_with("Desktop transparency is unavailable"));
+        }
+        assert!(!transparency.contains("ccessibility"));
+        assert!(!blur.contains("ccessibility"));
         assert_eq!(
             document_of(&window, cx).preferences.window,
             document.preferences.window
@@ -1672,6 +1984,7 @@ fn backdrop_guidance_identifies_zero_transparency_without_claiming_a_system_over
 #[gpui::test]
 fn transparency_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
+    set_window_effects(&harness, true, true, cx);
     assert_eq!(
         document_of(&window, cx).preferences.window.transparency,
         0.35
@@ -2023,6 +2336,58 @@ fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppCon
             "{section:?} description should sit directly below its title on one edge"
         );
     }
+}
+
+#[gpui::test]
+fn settings_window_titlebar_preserves_modal_focus_while_moving(cx: &mut TestAppContext) {
+    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let (_window, _harness, cx) = open_settings_with_drag(
+        cx,
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        records.clone(),
+    );
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [Some(gpui::WindowButton::Close), None, None],
+        right: [None; 3],
+    }));
+    cx.run_until_parked();
+    select_section(SettingsSectionId::Advanced, cx);
+    click("settings-reset-all", cx);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-settings-reset-all-confirm-keyboard-focus")
+            .is_some()
+    );
+    let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+    for region in [
+        "settings-sidebar-drag-region-hitbox",
+        "settings-detail-drag-region-hitbox",
+    ] {
+        let bounds = cx.debug_bounds(region).unwrap();
+        let start = point(bounds.right() - px(10.), bounds.top() + px(10.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "{region} must preserve modal focus on press"
+        );
+        cx.simulate_mouse_move(
+            point(start.x - px(8.), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "{region} must preserve modal focus after movement"
+        );
+    }
+    assert_eq!(records.counts(), (2, 2, 2, 0));
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
 }
 
 #[gpui::test]
@@ -2535,6 +2900,10 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     cx: &mut TestAppContext,
 ) {
     let (window, harness, cx) = open_settings(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.run_until_parked();
     click("settings-density-comfortable", cx);
     let (job, finished) = cx.update(|_, cx| {
         window.update(cx, |settings, cx| settings.editor.start_deferred_commit(cx))
@@ -2549,8 +2918,7 @@ fn closing_during_a_write_retains_the_window_until_the_newer_edit_is_saved(
     });
     let handle = cx.update(|native, _| native.window_handle());
 
-    request_window_close(&window, cx);
-    request_window_close(&window, cx);
+    click("window-close", cx);
     assert!(cx.cx.update(|cx| cx.windows().contains(&handle)));
     assert!(window.read_with(cx, |settings, _| settings.close_after_save.is_some()));
 
@@ -3624,6 +3992,118 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
 }
 
+#[gpui::test]
+fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_privacy(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        appearance_runtime::install(
+            crate::settings::UserSettings::load(MemoryStorage::with_document(
+                &SettingsDocument::default(),
+            )),
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx)
+            .clone()
+            .without_features(&[
+                HostFeature::Updates,
+                HostFeature::MicrophoneAccess,
+                HostFeature::SystemPermissions,
+            ]);
+        cx.set_global(presentation);
+    });
+    let (window, cx) = cx.add_window_view(SettingsWindow::new);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    window.read_with(cx, |settings, _| {
+        assert_eq!(
+            settings.reset_all_detail(),
+            "This cannot be undone. Themes can be installed again from their Zed extension or file."
+        );
+        assert!(
+            settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Privacy)
+        );
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Updates)
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-privacy")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_none()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    for omitted in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(cx.debug_bounds(omitted).is_none(), "{omitted} rendered");
+    }
+    assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
+    assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+    for query in [
+        "microphone",
+        "updates",
+        "screen recording",
+        "device control",
+        "accessibility",
+    ] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(settings.matching_rows().is_empty(), "{query} matched");
+            assert!(settings.navigable_sections().is_empty());
+            assert_eq!(settings.revealed, None);
+        });
+    }
+}
+
+#[gpui::test]
+fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+
+    window.read_with(cx, |settings, _| {
+        let accessibility = settings.permission_access.row(crate::platform::permission_access::SystemPermission::Accessibility).copy().name;
+        assert_eq!(settings.reset_all_detail(), format!("This cannot be undone. Themes can be installed again from their Zed extension or file. Microphone, Screen Recording, and {accessibility} access are system permissions and are not affected."));
+    });
+
+    assert!(
+        cx.debug_bounds("settings-navigation-settings-section-updates")
+            .is_some()
+    );
+    select_section(SettingsSectionId::Privacy, cx);
+    for unavailable in [
+        "settings-row-microphone-access",
+        "settings-row-screen-recording-access",
+        "settings-row-accessibility-access",
+    ] {
+        assert!(
+            cx.debug_bounds(unavailable).is_some(),
+            "{unavailable} omitted"
+        );
+    }
+    for query in ["microphone", "updates", "screen recording", "accessibility"] {
+        set_query(&window, query, cx);
+        window.read_with(cx, |settings, _| {
+            assert!(
+                !settings.matching_rows().is_empty(),
+                "{query} matched nothing"
+            );
+        });
+    }
+}
+
 struct RecordingMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
@@ -3646,7 +4126,7 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
         super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
-        super::open_or_activate(cx);
+        super::open_or_activate(None, cx);
     });
     cx.run_until_parked();
     let settings_windows = |cx: &mut TestAppContext| {
@@ -3661,9 +4141,112 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
 
     // The Settings shortcut dispatches inside Settings once Settings is the main window.
     opened
-        .update(cx, |_, _, cx| super::open_or_activate(cx))
+        .update(cx, |_, _, cx| super::open_or_activate(None, cx))
         .expect("Settings should stay open");
     cx.run_until_parked();
 
     assert_eq!(settings_windows(cx).len(), 1);
+}
+
+#[gpui::test]
+fn keyboard_shortcuts_opens_settings_at_keybindings_and_moves_an_open_window_there(
+    cx: &mut TestAppContext,
+) {
+    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        &SettingsDocument::default(),
+    ));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::init(cx);
+    });
+    let settings_window = |cx: &mut TestAppContext| {
+        let windows = cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<SettingsWindow>())
+            .collect::<Vec<_>>();
+        let [window] = windows[..] else {
+            panic!(
+                "Settings should have exactly one window, found {}",
+                windows.len()
+            );
+        };
+        window
+    };
+    let active_section = |window: gpui::WindowHandle<SettingsWindow>, cx: &mut TestAppContext| {
+        window
+            .read_with(cx, |settings, _| settings.active_section())
+            .expect("Settings should stay open")
+    };
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenKeyboardShortcuts));
+    cx.run_until_parked();
+    let opened = settings_window(cx);
+    assert_eq!(active_section(opened, cx), SettingsSectionId::Keybindings);
+
+    opened
+        .update(cx, |settings, _, cx| {
+            settings.select_section(SettingsSectionId::Font, cx);
+        })
+        .expect("Settings should stay open");
+    cx.update(|cx| cx.dispatch_action(&super::OpenSettings));
+    cx.run_until_parked();
+    assert_eq!(
+        active_section(opened, cx),
+        SettingsSectionId::Font,
+        "Open Settings keeps the section in view"
+    );
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenKeyboardShortcuts));
+    cx.run_until_parked();
+    assert_eq!(settings_window(cx), opened);
+    assert_eq!(active_section(opened, cx), SettingsSectionId::Keybindings);
+}
+
+#[gpui::test]
+fn client_window_controls_share_the_search_row_and_its_edge_inset(cx: &mut TestAppContext) {
+    let (_window, _harness, cx) = open_settings(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    let edge_margin = px(spaceterm_ui::DesktopWindowStyle::Adwaita
+        .control_metrics()
+        .edge_margin);
+    let center_y = |bounds: gpui::Bounds<gpui::Pixels>| bounds.origin.y + bounds.size.height / 2.0;
+
+    // Trailing controls leave no empty strip above Search, and Close keeps the same inset from the
+    // top edge as from the trailing edge.
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [None; 3],
+        right: [Some(gpui::WindowButton::Close), None, None],
+    }));
+    cx.run_until_parked();
+    let surface = cx.debug_bounds("settings-window-surface").unwrap();
+    let close = cx.debug_bounds("window-close").unwrap();
+    let search = cx.debug_bounds("settings-search-frame").unwrap();
+    assert_eq!(surface.right() - close.right(), edge_margin);
+    assert_eq!(close.top() - surface.top(), edge_margin);
+    assert_eq!(search.top() - surface.top(), px(10.0));
+    assert_eq!(center_y(close), center_y(search));
+
+    // Leading controls take their own row above Search on that same center line.
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [Some(gpui::WindowButton::Close), None, None],
+        right: [None; 3],
+    }));
+    cx.run_until_parked();
+    let close = cx.debug_bounds("window-close").unwrap();
+    let search = cx.debug_bounds("settings-search-frame").unwrap();
+    let titlebar = cx.debug_bounds("settings-sidebar-titlebar").unwrap();
+    assert_eq!(close.left() - surface.left(), edge_margin);
+    assert_eq!(close.top() - surface.top(), edge_margin);
+    assert!(search.top() >= titlebar.bottom());
+    assert_eq!(search.top() - titlebar.bottom(), px(10.0));
 }

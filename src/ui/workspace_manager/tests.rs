@@ -5337,6 +5337,102 @@ fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mu
 }
 
 #[gpui::test]
+fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut TestAppContext) {
+    for layout in [
+        gpui::WindowButtonLayout {
+            left: [None; 3],
+            right: [
+                Some(gpui::WindowButton::Close),
+                Some(gpui::WindowButton::Minimize),
+                Some(gpui::WindowButton::Maximize),
+            ],
+        },
+        gpui::WindowButtonLayout {
+            left: [
+                Some(gpui::WindowButton::Close),
+                Some(gpui::WindowButton::Minimize),
+                Some(gpui::WindowButton::Maximize),
+            ],
+            right: [None; 3],
+        },
+    ] {
+        let (manager, records, cx) = workspace_manager(cx);
+        cx.simulate_button_layout(Some(layout));
+        cx.simulate_decorations(gpui::Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        });
+        let alert = present_test_alert(&manager, "window-close-under-alert", cx);
+        redraw(cx);
+        let alert_focus = cx.update(|window, cx| window.focused(cx).unwrap());
+        click("window-close", cx);
+        assert!(cx.update(|window, _| alert_focus.is_focused(window)));
+        assert!(cx.debug_bounds("modal-action-acknowledge").is_some());
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-cancel")
+                .is_none()
+        );
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window)
+        );
+        cx.update(|window, cx| alert.dismiss(window, cx).unwrap());
+        redraw(cx);
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-confirm-keyboard-focus")
+                .is_some()
+        );
+        let pending = manager.read_with(cx, |manager, _| manager.close_confirmation.pending());
+        let focused = cx.update(|window, cx| window.focused(cx).unwrap());
+        click("window-minimize", cx);
+        click("window-maximize", cx);
+        assert_eq!(
+            cx.window_requests(),
+            [
+                gpui::TestWindowRequest::Minimize,
+                gpui::TestWindowRequest::Zoom
+            ]
+        );
+        assert!(cx.update(|window, _| focused.is_focused(window)));
+        click("toggle-sidebar-button", cx);
+        assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
+        click("window-close", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.close_confirmation.pending()),
+            pending
+        );
+        assert!(cx.update(|window, _| focused.is_focused(window)));
+        assert_eq!(cx.windows().len(), 1);
+        assert!(records.dropped_session_ids().is_empty());
+        click("modal-action-close-confirmation-cancel", cx);
+        assert_eq!(cx.windows().len(), 1);
+        assert!(records.dropped_session_ids().is_empty());
+        click("window-close", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window),
+            "the second native close activation must reopen confirmation after cancellation"
+        );
+        click("modal-action-close-confirmation-confirm", cx);
+        assert!(
+            manager.read_with(cx, |manager, _| manager
+                .close_confirmation
+                .pending()
+                .is_none()),
+            "confirmation must consume the pending close request"
+        );
+        assert!(cx.windows().is_empty());
+    }
+}
+
+#[gpui::test]
 fn command_q_and_quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
     let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
@@ -6410,7 +6506,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         .expect("sidebar toggle");
     assert_eq!(chooser.size, toggle.size);
     let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
-    assert_eq!(toggle.left(), chrome.left() + px(78.0));
+    assert_eq!(toggle.left(), chrome.left() + frame_space(cx));
     assert!(toggle.right() < chooser.left());
     let tabs = cx.debug_bounds("tab-bar").unwrap();
     assert_eq!(tabs.left() - chooser.right(), frame_space(cx));
@@ -6944,7 +7040,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
     assert!(cx.debug_bounds("workspace-chip-icon").is_none());
     let label = cx.debug_bounds("workspace-chip-label").unwrap();
     let tabs = cx.debug_bounds("tab-bar").unwrap();
-    assert_eq!(expanded_toggle.left(), px(78.0));
+    assert_eq!(expanded_toggle.left(), frame_space(cx));
     assert_eq!(expanded_toggle.size, gpui::size(px(28.0), px(28.0)));
     assert_eq!(chooser.left(), expanded_toggle.right() + frame_space(cx));
     // Ten pixels of content padding inside the one-pixel trigger border.
@@ -8066,6 +8162,68 @@ fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_windo
 }
 
 #[gpui::test]
+fn scroll_shortcuts_from_sidebar_focus_use_the_active_tabs_focused_pane(cx: &mut TestAppContext) {
+    let profile = crate::desktop_profile::default_keymap::profile(
+        crate::platform::keyboard_layout::testing::us(),
+        vec![],
+    )
+    .unwrap();
+    crate::ui::assert_scroll_shortcuts_from_sidebar_focus(profile, cx);
+}
+
+pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
+    profile: crate::keybindings::KeymapProfile,
+    cx: &mut TestAppContext,
+) {
+    use crate::keybindings::{Command, KeybindingPreferences};
+    use crate::terminal::ScrollbackMovement;
+    let (manager, records, cx) = workspace_manager(cx);
+    let keymap = profile.resolve(&KeybindingPreferences::default());
+    cx.update(|_, cx| {
+        cx.clear_key_bindings();
+        cx.bind_keys(
+            keymap
+                .key_bindings()
+                .into_iter()
+                .chain(profile.control_bindings().iter().cloned())
+                .chain(profile.fixed_bindings().iter().cloned()),
+        );
+        crate::keybindings::runtime::install(profile, cx);
+    });
+    let shortcut = |command| keymap.shortcut(command).unwrap().to_string();
+    cx.simulate_keystrokes(&shortcut(Command::CreateTab));
+    cx.run_until_parked();
+    cx.simulate_keystrokes(&shortcut(Command::SplitRight));
+    cx.run_until_parked();
+    assert_eq!(records.starts().len(), 3);
+    for (command, movement) in [
+        (Command::ScrollPageUp, ScrollbackMovement::PageUp),
+        (Command::ScrollPageDown, ScrollbackMovement::PageDown),
+        (Command::ScrollToTop, ScrollbackMovement::Top),
+        (Command::ScrollToBottom, ScrollbackMovement::Bottom),
+    ] {
+        cx.simulate_keystrokes(&shortcut(Command::ToggleSidebarFocus));
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+        let before = records.commands().len();
+        cx.simulate_keystrokes(&shortcut(command));
+        cx.run_until_parked();
+        let calls = records.commands();
+        let calls = calls[before..]
+            .iter()
+            .filter(|call| !matches!(call.command, RecordedSessionCommand::Focus(_)))
+            .map(|call| (call.session_id, &call.command))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![(3, &RecordedSessionCommand::ScrollScrollback(movement))],
+            "{command:?} must move only the Active Tab's Focused Pane and send no terminal input"
+        );
+        assert!(cx.update(|window, cx| !manager.read(cx).sidebar.read(cx).is_focused(window)));
+    }
+}
+
+#[gpui::test]
 fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
     cx: &mut TestAppContext,
 ) {
@@ -8503,9 +8661,13 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     });
     assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
 }
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
-mod macos_adapter_tests {
-    include!("../../platform/macos_adapter_tests/workspace_manager.rs");
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+mod unix_adapter_tests {
+    include!("../../platform/unix_adapter_tests/workspace_manager.rs");
 }
 
 #[gpui::test]
@@ -9809,4 +9971,80 @@ fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mu
             "no surface should paint over the strip-start mark at {mark:?}, got {covering:?}"
         );
     });
+}
+
+#[gpui::test]
+fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    for collapsed in [false, true] {
+        if collapsed {
+            click("toggle-sidebar-button", cx);
+        }
+        for style in [
+            spaceterm_ui::DesktopWindowStyle::Adwaita,
+            spaceterm_ui::DesktopWindowStyle::Breeze,
+        ] {
+            cx.update(|window, cx| {
+                cx.set_global(spaceterm_ui::DesktopWindowControls {
+                    style,
+                    ..Default::default()
+                });
+                window.refresh();
+            });
+            let (target, diameter, gap) = match style {
+                spaceterm_ui::DesktopWindowStyle::Adwaita => (34.0, 24.0, 3.0),
+                spaceterm_ui::DesktopWindowStyle::Breeze => (20.0, 18.0, 4.0),
+            };
+            for (left, right) in [
+                ([None; 3], [Some(gpui::WindowButton::Close), None, None]),
+                (
+                    [None; 3],
+                    [
+                        Some(gpui::WindowButton::Minimize),
+                        Some(gpui::WindowButton::Maximize),
+                        Some(gpui::WindowButton::Close),
+                    ],
+                ),
+                (
+                    [
+                        Some(gpui::WindowButton::Close),
+                        Some(gpui::WindowButton::Minimize),
+                        Some(gpui::WindowButton::Maximize),
+                    ],
+                    [None; 3],
+                ),
+            ] {
+                cx.simulate_button_layout(Some(gpui::WindowButtonLayout { left, right }));
+                redraw(cx);
+                let toggle = cx.debug_bounds("toggle-sidebar-button").unwrap();
+                let close = cx.debug_bounds("window-close").unwrap();
+                assert_eq!(close.size.width, px(target));
+                if style == spaceterm_ui::DesktopWindowStyle::Adwaita {
+                    cx.update(|window, _| {
+                    let circle = close.inset(px((target - diameter) / 2.0)).scale(window.scale_factor());
+                    assert!(
+                        window
+                            .painted_quads()
+                            .iter()
+                            .any(|quad| { quad.bounds == circle && !quad.background.is_transparent() }),
+                        "the native 24px circle must retain its full size inside the 34px target"
+                    );
+                });
+                }
+                if left[0].is_some() {
+                    let minimize = cx.debug_bounds("window-minimize").unwrap();
+                    let maximize = cx.debug_bounds("window-maximize").unwrap();
+                    assert!(close.right() < minimize.left());
+                    assert!(minimize.right() < maximize.left());
+                    assert!(maximize.right() < toggle.left());
+                    assert_eq!(minimize.left() - close.right(), px(gap));
+                } else {
+                    assert!(toggle.right() < close.left());
+                }
+            }
+        }
+    }
 }

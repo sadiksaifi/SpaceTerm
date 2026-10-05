@@ -15,6 +15,7 @@ fn preferences(source: &str) -> KeybindingPreferences {
 fn profile() -> KeymapProfile {
     KeymapProfile::new(
         crate::platform::keyboard_layout::testing::us(),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
         [
             (
                 Command::NewWorkspace,
@@ -80,7 +81,7 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
             previous_group = command.group();
         }
     }
-    assert_eq!(Command::ALL.len(), 45);
+    assert_eq!(Command::ALL.len(), 54);
     assert_eq!(Command::NewWorkspace.id(), "new_workspace");
     assert_eq!(Command::CloseTab.id(), "close_tab");
     assert_eq!(Command::from_id("NewWorkspace"), None);
@@ -97,6 +98,10 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
         Command::IncreaseTerminalFontSize.label(),
         "Increase Font Size"
     );
+    assert_eq!(Command::NextTab.label(), "Next Tab");
+    assert_eq!(Command::MoveTabLeft.label(), "Move Tab Left");
+    assert_eq!(Command::ScrollToTop.label(), "Scroll to Top");
+    assert_eq!(Command::KeyboardShortcuts.label(), "Keyboard Shortcuts");
 }
 
 #[test]
@@ -111,6 +116,7 @@ fn command_scopes_and_actions_preserve_the_existing_binding_contract() {
         Command::CreateTab,
         Command::ClosePane,
         Command::CloseTab,
+        Command::KeyboardShortcuts,
     ];
     for command in Command::ALL {
         let application = application_commands.contains(&command);
@@ -171,7 +177,12 @@ fn preferences_are_sparse_and_validate_only_override_conflicts() {
         Err(KeybindingPreferencesError::DuplicateShortcut)
     );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"unknown":null}"#).is_err());
-    assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"close_tab":"ctrl-c"}"#).is_err());
+    let reserved = profile().resolve(&preferences(r#"{"close_tab":"ctrl-c"}"#));
+    assert_eq!(reserved.state(Command::CloseTab), KeybindingState::Default);
+    assert_eq!(
+        reserved.inactive_override(Command::CloseTab),
+        Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
+    );
     assert!(serde_json::from_str::<KeybindingPreferences>(r#"{"close_tab":12}"#).is_err());
     assert_eq!(preferences(r#"{"close_tab":"cmd-q"}"#).validate(), Ok(()));
     assert_eq!(
@@ -185,6 +196,7 @@ fn profile_rejects_invalid_duplicate_and_system_reserved_defaults() {
     let build = |defaults| {
         KeymapProfile::new(
             crate::platform::keyboard_layout::testing::us(),
+            crate::keybindings::TerminalConventions::CommandShortcuts,
             defaults,
             vec![SystemReserved {
                 shortcut: shortcut("cmd-q"),
@@ -201,9 +213,11 @@ fn profile_rejects_invalid_duplicate_and_system_reserved_defaults() {
         ),
         (
             "ctrl-c",
-            KeymapProfileError::InvalidDefault(ShortcutRejection::TerminalReserved(
-                TerminalConvention::ControlCharacter,
-            )),
+            KeymapProfileError::TerminalReserved(TerminalConvention::ControlCharacter),
+        ),
+        (
+            "ctrl-shift-c",
+            KeymapProfileError::TerminalReserved(TerminalConvention::ControlCharacter),
         ),
         (
             "cmd-q",
@@ -260,6 +274,7 @@ fn profile_rejects_invalid_duplicate_and_system_reserved_defaults() {
     assert_eq!(
         KeymapProfile::new(
             crate::platform::keyboard_layout::testing::us(),
+            crate::keybindings::TerminalConventions::CommandShortcuts,
             [],
             vec![reserved.clone(), reserved],
             vec![],
@@ -299,15 +314,15 @@ fn resolve_defaults_preserves_primary_alias_order_and_separates_fixed_controls()
     assert_eq!(profile.fixed_bindings().len(), 1);
     assert_eq!(
         profile.fixed_bindings()[0].keystrokes()[0].unparse(),
-        "cmd-q"
+        spelling("cmd-q")
     );
     assert_eq!(profile.control_bindings().len(), 1);
     assert_eq!(
         profile.control_bindings()[0].keystrokes()[0].unparse(),
         "escape"
     );
-    assert_eq!(profile.fixed_bindings()[0].meta(), None);
-    assert_eq!(profile.control_bindings()[0].meta(), None);
+    assert_eq!(profile.fixed_bindings()[0].meta(), Some(FIXED_BINDINGS));
+    assert_eq!(profile.control_bindings()[0].meta(), Some(CONTROL_BINDINGS));
 }
 
 #[test]
@@ -336,11 +351,14 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         resolved.state(Command::CloseTab),
         KeybindingState::Unassigned
     );
+    // A Reserved override is inactive, and its Command keeps the host default.
+    assert_eq!(resolved.state(Command::CreateTab), KeybindingState::Default);
     assert_eq!(
-        resolved.state(Command::CreateTab),
-        KeybindingState::Blocked(SystemReservation::Quit)
+        resolved.inactive_override(Command::CreateTab),
+        Some(Reservation::System(SystemReservation::Quit))
     );
-    assert!(resolved.shortcuts(Command::CreateTab).is_empty());
+    assert_eq!(resolved.shortcuts(Command::CreateTab), &[shortcut("cmd-t")]);
+    assert_eq!(resolved.inactive_override(Command::NewWorkspace), None);
     assert_eq!(
         resolved.state(Command::IncreaseTerminalFontSize),
         KeybindingState::Default
@@ -350,7 +368,7 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         &[shortcut("cmd-="), shortcut("alt-cmd-=")]
     );
     assert_eq!(resolved.owner(&shortcut("cmd-n")), None);
-    assert_eq!(resolved.owner(&shortcut("cmd-t")), None);
+    assert_eq!(resolved.owner(&shortcut("cmd-t")), Some(Command::CreateTab));
     assert_eq!(profile.resolve(&prefs), resolved);
 }
 
@@ -398,6 +416,7 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
     ] {
         let profile = KeymapProfile::new(
             crate::platform::keyboard_layout::testing::us(),
+            crate::keybindings::TerminalConventions::CommandShortcuts,
             [],
             vec![SystemReserved {
                 shortcut: shortcut("cmd-q"),
@@ -409,9 +428,14 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
         .unwrap();
         let mut prefs = preferences(r#"{"new_workspace":"cmd-q"}"#);
         let before = prefs.clone();
+        let resolved = profile.resolve(&prefs);
         assert_eq!(
-            profile.resolve(&prefs).state(Command::NewWorkspace),
-            KeybindingState::Blocked(reason)
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Unassigned
+        );
+        assert_eq!(
+            resolved.inactive_override(Command::NewWorkspace),
+            Some(Reservation::System(reason))
         );
         assert_eq!(
             profile.check(&shortcut("cmd-q")),
@@ -655,7 +679,7 @@ fn bindings_follow_command_order_and_mirror_each_find_shortcut_immediately() {
     .map(|(command, keys, context)| {
         (
             command.action().name(),
-            keys.to_owned(),
+            spelling(keys),
             context.map(str::to_owned),
         )
     });
@@ -727,7 +751,18 @@ fn deterministic_assign_reset_clear_sequence_preserves_unique_ownership() {
 fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "7", "/");
-    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut profile = KeymapProfile::new(
+        std::rc::Rc::new(layout),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
+        [],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
     assert_eq!(prefs.validate(), Ok(()));
     let resolved = profile.resolve(&prefs);
@@ -766,11 +801,24 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
 fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(false, "7", "/");
-    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut profile = KeymapProfile::new(
+        std::rc::Rc::new(layout),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
+        [],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"ctrl-shift-7"}"#);
     assert_eq!(
-        profile.resolve(&prefs).state(Command::NewWorkspace),
-        KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+        profile
+            .resolve(&prefs)
+            .inactive_override(Command::NewWorkspace),
+        Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
     assert_eq!(
         profile.assign(
@@ -786,14 +834,18 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
 fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "7", "/");
-    let profile = KeymapProfile::new(
+    let mut profile = KeymapProfile::new(
         std::rc::Rc::new(layout),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
         [(Command::CloseTab, Some(DefaultBinding::new("cmd-/", &[])))],
         vec![],
         vec![],
         vec![],
     )
     .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
     profile.reset(&mut prefs, Command::CloseTab);
     assert_eq!(prefs.validate(), Ok(()));
@@ -807,7 +859,18 @@ fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
 fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(true, "ı", "I");
-    let profile = KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut profile = KeymapProfile::new(
+        std::rc::Rc::new(layout),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
+        [],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    profile
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let prefs = preferences(r#"{"new_workspace":"shift-cmd-ı","create_tab":"shift-cmd-i"}"#);
     let resolved = profile.resolve(&prefs);
     let native = gpui::Keystroke {
@@ -847,6 +910,7 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
     let document = crate::appearance::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
     let us = KeymapProfile::new(
         crate::platform::keyboard_layout::testing::us(),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
         [],
         vec![],
         vec![],
@@ -855,15 +919,25 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
     .unwrap();
     for command in [Command::NewWorkspace, Command::CreateTab, Command::CloseTab] {
         assert_eq!(
-            us.resolve(&document.keybindings).state(command),
-            KeybindingState::TerminalBlocked(TerminalConvention::ControlCharacter)
+            us.resolve(&document.keybindings).inactive_override(command),
+            Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
         );
     }
 
     let mut layout = crate::platform::keyboard_layout::KeyboardLayout::default();
     layout.insert(false, "2", "\"");
-    let norwegian =
-        KeymapProfile::new(std::rc::Rc::new(layout), [], vec![], vec![], vec![]).unwrap();
+    let mut norwegian = KeymapProfile::new(
+        std::rc::Rc::new(layout),
+        crate::keybindings::TerminalConventions::CommandShortcuts,
+        [],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    norwegian
+        .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+        .unwrap();
     let native = gpui::Keystroke::parse("ctrl-\"").unwrap();
     let recorded = Shortcut::from_keystroke(&native).unwrap();
     let resolved = norwegian.resolve(&document.keybindings);
@@ -880,4 +954,76 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
         serde_json::to_value(&document).unwrap()["keybindings"],
         json["keybindings"]
     );
+}
+
+#[test]
+fn an_inactive_override_keeps_its_reason_when_another_override_owns_its_default() {
+    let profile = KeymapProfile::new(
+        crate::platform::keyboard_layout::testing::us(),
+        TerminalConventions::ControlShiftShortcuts,
+        [
+            (
+                Command::CreateTab,
+                Some(DefaultBinding::new("ctrl-shift-t", &[])),
+            ),
+            (
+                Command::SplitRight,
+                Some(DefaultBinding::new("ctrl-shift-d", &[])),
+            ),
+        ],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    for (retained, reason) in [
+        (
+            "cmd-t",
+            Reservation::System(SystemReservation::DesktopShortcut),
+        ),
+        (
+            "ctrl-c",
+            Reservation::Terminal(TerminalConvention::ControlCharacter),
+        ),
+    ] {
+        let mut prefs = KeybindingPreferences::default();
+        prefs.set(Command::CreateTab, Some(shortcut(retained)));
+        prefs.set(Command::SplitRight, Some(shortcut("ctrl-shift-t")));
+        let original = prefs.clone();
+        assert_eq!(prefs.validate(), Ok(()));
+
+        let resolved = profile.resolve(&prefs);
+
+        assert_eq!(resolved.inactive_override(Command::CreateTab), Some(reason));
+        assert_eq!(
+            resolved.state(Command::CreateTab),
+            KeybindingState::Displaced {
+                by: Command::SplitRight
+            }
+        );
+        assert_eq!(resolved.shortcut(Command::CreateTab), None);
+        assert_eq!(
+            resolved.owner(&shortcut("ctrl-shift-t")),
+            Some(Command::SplitRight)
+        );
+        assert_eq!(
+            resolved.shortcut(Command::SplitRight),
+            Some(&shortcut("ctrl-shift-t"))
+        );
+        assert_eq!(
+            resolved.state(Command::SplitRight),
+            KeybindingState::Overridden
+        );
+        assert!(!resolved.key_bindings().iter().any(|binding| {
+            binding
+                .action()
+                .partial_eq(Command::CreateTab.action().as_ref())
+        }));
+        assert_eq!(prefs, original);
+    }
+}
+
+/// GPUI spells the platform modifier per host, so expectations use its own spelling.
+fn spelling(source: &str) -> String {
+    gpui::Keystroke::parse(source).unwrap().unparse()
 }

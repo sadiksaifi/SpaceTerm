@@ -33,6 +33,14 @@ impl KeyboardProtocolEncoder {
             return Err("terminal key text must not contain control characters".to_owned());
         }
 
+        // Ctrl+[ is xterm's Escape in legacy encoding. Keep the layout text so Ghostty can
+        // encode the logical character rather than falling back to its physical US key.
+        let xterm_escape = input.action != KeyAction::Release
+            && input.logical_key == "["
+            && input.modifiers.control
+            && !input.modifiers.shift
+            && !input.modifiers.alt
+            && !input.modifiers.platform;
         self.encoder
             .set_options_from_terminal(terminal)
             .set_macos_option_as_alt(match input.option_as_alt {
@@ -51,9 +59,23 @@ impl KeyboardProtocolEncoder {
             .set_composing(false)
             .set_utf8(input.text.clone())
             .set_unshifted_codepoint(input.unshifted_codepoint.unwrap_or('\0'));
+        let start = bytes.len();
         self.encoder
             .encode_to_vec(&self.event, bytes)
-            .map_err(|error| format!("failed to encode terminal key input: {error}"))
+            .map_err(|error| format!("failed to encode terminal key input: {error}"))?;
+        // The legacy fixterms response is CSI u (or empty when there is no text). Kitty's
+        // reports and modifyOtherKeys mode 2's CSI 27 response remain authoritative.
+        if xterm_escape
+            && terminal
+                .kitty_keyboard_flags()
+                .map_err(|_| "failed to read terminal keyboard protocol".to_owned())?
+                .is_empty()
+            && !bytes[start..].starts_with(b"\x1b[27;")
+        {
+            bytes.truncate(start);
+            bytes.push(0x1b);
+        }
+        Ok(())
     }
 }
 

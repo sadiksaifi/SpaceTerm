@@ -1229,6 +1229,24 @@ impl IconButton {
         self
     }
 
+    /// Paints an icon button inside its larger pointer target, as desktop window controls do.
+    pub fn visual_inset(mut self, inset: Pixels) -> Self {
+        self.core.visual_inset = inset.max(px(0.0));
+        self
+    }
+
+    /// Overrides the border independently from the pointer target and visual fill.
+    pub fn border_width(mut self, width: Pixels) -> Self {
+        self.core.border_width = Some(width.max(px(0.0)));
+        self
+    }
+
+    /// Uses a desktop outline instead of the application's AppKit focus band.
+    pub fn focus_outline(mut self, width: Pixels, outset: Pixels, radius: Pixels) -> Self {
+        self.core.focus_outline = Some((width.max(px(0.0)), outset, radius.max(px(0.0))));
+        self
+    }
+
     /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
@@ -1335,6 +1353,9 @@ struct ButtonCore {
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     icon_button_size: Option<Pixels>,
     corner_radius: Option<Pixels>,
+    visual_inset: Pixels,
+    border_width: Option<Pixels>,
+    focus_outline: Option<(Pixels, Pixels, Pixels)>,
     joined_edge: JoinedEdge,
     even_spacing: bool,
     #[cfg(feature = "control-preview")]
@@ -1364,6 +1385,9 @@ impl ButtonCore {
             contextual_style: None,
             icon_button_size: None,
             corner_radius: None,
+            visual_inset: px(0.0),
+            border_width: None,
+            focus_outline: None,
             joined_edge: JoinedEdge::None,
             even_spacing: false,
             #[cfg(feature = "control-preview")]
@@ -1389,6 +1413,9 @@ impl ButtonCore {
         }
         if let Some(corner_radius) = self.corner_radius {
             style.corner_radius = corner_radius;
+        }
+        if let Some(border_width) = self.border_width {
+            style.border_width = border_width;
         }
         style
     }
@@ -1473,11 +1500,21 @@ impl ButtonCore {
                 let down_hitbox = hitbox.clone();
                 let move_hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || !down_hitbox.is_hovered(window)
-                        || (event.first_mouse && !accept_first_mouse)
-                    {
+                    if !down_hitbox.is_hovered(window) {
+                        return;
+                    }
+                    // Let transient overlays observe outside presses during capture, then keep
+                    // secondary and middle presses from reaching an enclosing window drag region.
+                    if event.button != MouseButton::Left {
+                        if phase.bubble() {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if !phase.capture() {
+                        return;
+                    }
+                    if event.first_mouse && !accept_first_mouse {
                         return;
                     }
                     window.prevent_default();
@@ -1547,6 +1584,7 @@ impl ButtonCore {
 
         let ring_id = crate::focus_ring::ring_id(&self.id);
         let corner_radii = self.joined_edge.corner_radii(style.corner_radius);
+        let visual_inset = self.visual_inset;
         let button = div()
             .id(self.id)
             .debug_selector(move || {
@@ -1584,7 +1622,18 @@ impl ButtonCore {
                 button.border_l(px(0.0))
             })
             .border_color(border_color)
-            .bg(paint.background)
+            .when(visual_inset == px(0.0), |button| {
+                button.bg(paint.background)
+            })
+            .when(visual_inset > px(0.0), |button| {
+                button.child(
+                    div()
+                        .absolute()
+                        .inset(visual_inset)
+                        .rounded(style.corner_radius)
+                        .bg(paint.background),
+                )
+            })
             .shadow(paint.shadow.layers())
             .shadow_outside_only()
             .text_color(paint.foreground)
@@ -1644,9 +1693,14 @@ impl ButtonCore {
         let button = crate::Ringed::new(
             button,
             focus_ring.map(|ring_color| {
-                crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
-                    .corner_radii(corner_radii)
-                    .debug_selector(focus_selector)
+                let mut ring =
+                    crate::focus_ring(ring_id, ring_color, style.corner_radius, style.border_width)
+                        .corner_radii(corner_radii)
+                        .debug_selector(focus_selector);
+                if let Some((width, outset, radius)) = self.focus_outline {
+                    ring = ring.outline(width, outset, radius);
+                }
+                ring
             }),
         );
 
@@ -2703,5 +2757,83 @@ mod tests {
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
 
         assert_eq!(activations.get(), 0);
+    }
+    #[gpui::test]
+    fn chrome_button_preserving_ancestor_hover_consumes_secondary_activation(
+        cx: &mut TestAppContext,
+    ) {
+        struct ChromeRoot(Rc<RefCell<Vec<crate::WindowDragRegionEvent>>>);
+        impl Render for ChromeRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let events = self.0.clone();
+                crate::WindowDragRegion::new(
+                    "chrome-drag-region",
+                    "Move window",
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            crate::IconButton::new("sidebar-toggle", "Toggle sidebar", |_| {
+                                div().into_any_element()
+                            })
+                            .preserve_ancestor_hover()
+                            .debug_selector("sidebar-toggle")
+                            .on_activate(|_, _, _| {}),
+                        )
+                        .child(
+                            crate::Menu::new(
+                                "chrome-menu",
+                                "Actions",
+                                vec![crate::MenuEntry::action("Open", ())],
+                            )
+                            .debug_selector("chrome-menu-trigger")
+                            .on_activate(|_, _, _| {}),
+                        ),
+                )
+                .middle_activation(true)
+                .on_event(move |event, _, _| events.borrow_mut().push(*event))
+            }
+        }
+        cx.update(crate::menu::init);
+        cx.set_global(test_theme());
+        let metrics = crate::MenuMetrics::new(px(160.0), px(28.0));
+        cx.set_global(crate::MenuTheme::new(
+            crate::MenuPaint::new(
+                rgba(0xffffffff),
+                rgba(0xaaaaaaff),
+                rgba(0x777777ff),
+                rgba(0x336699ff),
+                rgba(0xffffffff),
+                rgba(0xff5555ff),
+            ),
+            crate::MenuSizes::new(metrics, metrics, metrics),
+        ));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, _| ChromeRoot(events.clone()));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let button = cx.debug_bounds("sidebar-toggle").unwrap().center();
+        for mouse_button in [MouseButton::Right, MouseButton::Middle] {
+            cx.simulate_mouse_down(button, mouse_button, Modifiers::none());
+            cx.simulate_mouse_up(button, mouse_button, Modifiers::none());
+            assert!(events.borrow().is_empty());
+            let trigger = cx.debug_bounds("chrome-menu-trigger").unwrap().center();
+            cx.simulate_click(trigger, Modifiers::none());
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+            cx.simulate_mouse_down(button, mouse_button, Modifiers::none());
+            cx.simulate_mouse_up(button, mouse_button, Modifiers::none());
+            cx.run_until_parked();
+            assert!(!cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+            assert!(events.borrow().is_empty());
+        }
+        let empty = button + gpui::point(px(100.0), px(0.0));
+        cx.simulate_mouse_down(empty, MouseButton::Right, Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[crate::WindowDragRegionEvent::SecondaryActivationRequested { position: empty }]
+        );
     }
 }

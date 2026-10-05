@@ -2165,11 +2165,20 @@ fn non_floating_control_hosts_match_the_painted_surface_stack() {
     );
 }
 
+/// Without native window support the retained choices cannot take effect, so floating surfaces
+/// stay translucent at the defaults the Settings rows then show.
 #[test]
 fn native_window_support_does_not_disable_floating_translucency() {
+    let defaults = AppearancePreferences::default().window;
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, supported) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
-        let (_, unsupported) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, false);
+        let (_, supported) = resolve_case(
+            appearance,
+            ChromeDensity::Compact,
+            defaults.transparency,
+            defaults.blur,
+            true,
+        );
+        let (_, unsupported) = resolve_case(appearance, ChromeDensity::Compact, 1.0, false, false);
 
         for role in FLOATING_ROLES {
             let supported_shell = supported.floating_surfaces().shell(role);
@@ -2199,7 +2208,8 @@ fn native_window_support_does_not_disable_floating_translucency() {
 
 #[test]
 fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
-    let default_transparency = AppearancePreferences::default().window.transparency;
+    let defaults = AppearancePreferences::default().window;
+    let default_transparency = defaults.transparency;
     for appearance in [Appearance::Light, Appearance::Dark] {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
             let (opaque, opaque_prepared) = resolve_case(appearance, density, 0.0, false, true);
@@ -2210,6 +2220,13 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
                     for blur in [false, true] {
                         let (resolved, prepared) =
                             resolve_case(appearance, density, transparency, blur, supported);
+                        // Without native window support the retained choices cannot take
+                        // effect, so every material follows the defaults instead.
+                        let (transparency, blur) = if supported {
+                            (transparency, blur)
+                        } else {
+                            (defaults.transparency, defaults.blur)
+                        };
                         assert_eq!(resolved.terminal, opaque.terminal);
                         assert_eq!(resolved.chrome.colors, opaque.chrome.colors);
                         assert_eq!(prepared.colors.text, opaque_prepared.colors.text);

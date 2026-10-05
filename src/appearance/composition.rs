@@ -16,6 +16,7 @@ pub(crate) enum WindowBackgroundAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionCapabilities {
     pub(crate) native_window_transparency: bool,
+    pub(crate) native_window_blur: bool,
     pub(crate) reduce_transparency: bool,
     pub(crate) increase_contrast: bool,
     pub(crate) show_borders: bool,
@@ -30,6 +31,7 @@ impl CompositionCapabilities {
     ) -> Self {
         Self {
             native_window_transparency,
+            native_window_blur: native_window_transparency,
             reduce_transparency: !accessibility_allows_transparency,
             increase_contrast: false,
             show_borders: false,
@@ -40,6 +42,67 @@ impl CompositionCapabilities {
 
     const fn accessibility_allows_transparency(self) -> bool {
         !self.reduce_transparency
+    }
+
+    /// The missing desktop capability that keeps Transparency and Blur from changing the window.
+    ///
+    /// Without desktop transparency nothing shows through the window. Without desktop blur the
+    /// window keeps its opaque backing too, because unsoftened desktop content reads poorly
+    /// behind these materials and an application cannot blur the desktop behind its own window.
+    pub(crate) const fn unavailable_window_effect(self) -> Option<UnavailableWindowEffect> {
+        if !self.native_window_transparency {
+            Some(UnavailableWindowEffect::Transparency)
+        } else if !self.native_window_blur {
+            Some(UnavailableWindowEffect::Blur)
+        } else {
+            None
+        }
+    }
+
+    /// The Transparency and Blur that take effect on this desktop.
+    ///
+    /// Where a window effect is unavailable, neither choice can change the window, so both take
+    /// their defaults everywhere, floating surfaces included. The retained choices are untouched
+    /// and return on a desktop that presents them.
+    pub(crate) fn window_background(
+        self,
+        preferences: &super::preferences::WindowPreferences,
+    ) -> WindowBackgroundChoices {
+        let unavailable = self.unavailable_window_effect();
+        let defaults = super::preferences::WindowPreferences::default();
+        let source = if unavailable.is_some() {
+            &defaults
+        } else {
+            preferences
+        };
+        WindowBackgroundChoices {
+            transparency: source.transparency,
+            blur: source.blur,
+            unavailable,
+        }
+    }
+}
+
+/// A desktop capability whose absence keeps the window opaque.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnavailableWindowEffect {
+    Transparency,
+    Blur,
+}
+
+/// Transparency and Blur as they take effect on one desktop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WindowBackgroundChoices {
+    pub(crate) transparency: f32,
+    pub(crate) blur: bool,
+    /// Why the retained choices cannot take effect, in which case these are the defaults.
+    pub(crate) unavailable: Option<UnavailableWindowEffect>,
+}
+
+impl WindowBackgroundChoices {
+    /// Whether the retained choices take effect and may be changed.
+    pub(crate) const fn adjustable(self) -> bool {
+        self.unavailable.is_none()
     }
 }
 
@@ -477,12 +540,13 @@ impl ResolvedWindowComposition {
         capabilities: CompositionCapabilities,
         tone: ChromeTone,
     ) -> Self {
-        let requested = if preferences.blur {
+        let choices = capabilities.window_background(preferences);
+        let requested = if choices.blur {
             WindowBackgroundAppearance::Blurred
         } else {
             WindowBackgroundAppearance::Transparent
         };
-        let requested_materials = SurfaceMaterials::derive(preferences.transparency, tone);
+        let requested_materials = SurfaceMaterials::derive(choices.transparency, tone);
         let accessibility_allows_transparency = capabilities.accessibility_allows_transparency();
         let floating_materials = if accessibility_allows_transparency {
             requested_materials
@@ -491,7 +555,7 @@ impl ResolvedWindowComposition {
         };
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
-        let native_enabled = capabilities.native_window_transparency
+        let native_enabled = choices.adjustable()
             && accessibility_allows_transparency
             && !requested_materials.is_opaque();
         Self {
@@ -508,7 +572,7 @@ impl ResolvedWindowComposition {
                 SurfaceMaterials::OPAQUE
             },
             floating_materials,
-            floating_blur: preferences.blur && !floating_materials.is_opaque(),
+            floating_blur: choices.blur && !floating_materials.is_opaque(),
         }
     }
 }
@@ -700,6 +764,111 @@ mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
 
+    /// A desktop without transparency or blur keeps the window opaque, so neither choice changes
+    /// it. Both then take their defaults everywhere, floating surfaces included, so what Settings
+    /// shows is what renders; a desktop with both presents the retained choices again.
+    #[test]
+    fn unavailable_window_effects_resolve_every_material_from_the_defaults() {
+        use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+        let defaults = crate::appearance::preferences::WindowPreferences::default();
+        for (transparency, blur, unavailable) in [
+            (false, false, Some(UnavailableWindowEffect::Transparency)),
+            (false, true, Some(UnavailableWindowEffect::Transparency)),
+            (true, false, Some(UnavailableWindowEffect::Blur)),
+            (true, true, None),
+        ] {
+            let capabilities = CompositionCapabilities {
+                native_window_transparency: transparency,
+                native_window_blur: blur,
+                ..CompositionCapabilities::new(transparency, true)
+            };
+            for (retained_transparency, retained_blur) in
+                [(0.8, false), (0.8, true), (0.0, false), (0.0, true)]
+            {
+                let preferences = crate::appearance::preferences::WindowPreferences {
+                    transparency: retained_transparency,
+                    blur: retained_blur,
+                    ..Default::default()
+                };
+                let choices = capabilities.window_background(&preferences);
+                let resolved = ResolvedWindowComposition::resolve(
+                    &preferences,
+                    capabilities,
+                    ChromeTone::Dark,
+                );
+                let case = format!(
+                    "transparency={transparency} blur={blur} \
+                     retained=({retained_transparency}, {retained_blur})"
+                );
+                assert_eq!(choices.unavailable, unavailable, "{case}");
+                assert_eq!(choices.adjustable(), unavailable.is_none(), "{case}");
+                let (shown_transparency, shown_blur) = if unavailable.is_some() {
+                    (defaults.transparency, defaults.blur)
+                } else {
+                    (retained_transparency, retained_blur)
+                };
+                assert_eq!(
+                    (choices.transparency, choices.blur),
+                    (shown_transparency, shown_blur),
+                    "{case}"
+                );
+                let shown_materials =
+                    SurfaceMaterials::derive(shown_transparency, ChromeTone::Dark);
+                let window = match (unavailable, shown_materials.is_opaque(), shown_blur) {
+                    (None, false, true) => Blurred,
+                    (None, false, false) => Transparent,
+                    _ => Opaque,
+                };
+                assert_eq!(
+                    resolved.requested,
+                    if shown_blur { Blurred } else { Transparent },
+                    "{case}"
+                );
+                assert_eq!(resolved.effective, window, "{case}");
+                assert_eq!(
+                    resolved.materials,
+                    if window == Opaque {
+                        SurfaceMaterials::OPAQUE
+                    } else {
+                        shown_materials
+                    },
+                    "{case}"
+                );
+                assert_eq!(resolved.floating_materials, shown_materials, "{case}");
+                assert_eq!(
+                    resolved.floating_blur,
+                    shown_blur && !shown_materials.is_opaque(),
+                    "{case}"
+                );
+                assert_eq!(resolved.capabilities, capabilities, "{case}");
+            }
+        }
+    }
+
+    /// Reduce Transparency keeps every material opaque, whether or not the desktop could present
+    /// the window effects.
+    #[test]
+    fn reduce_transparency_keeps_every_material_opaque_with_or_without_window_effects() {
+        let preferences = crate::appearance::preferences::WindowPreferences {
+            transparency: 0.8,
+            blur: true,
+            ..Default::default()
+        };
+        for (transparency, blur) in [(false, false), (true, false), (true, true)] {
+            let capabilities = CompositionCapabilities {
+                native_window_blur: blur,
+                reduce_transparency: true,
+                ..CompositionCapabilities::new(transparency, true)
+            };
+            let resolved =
+                ResolvedWindowComposition::resolve(&preferences, capabilities, ChromeTone::Dark);
+            assert_eq!(resolved.effective, WindowBackgroundAppearance::Opaque);
+            assert!(resolved.materials.is_opaque());
+            assert!(resolved.floating_materials.is_opaque());
+            assert!(!resolved.floating_blur);
+        }
+    }
+
     #[test]
     fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
         let preferences = crate::appearance::preferences::WindowPreferences::default();
@@ -743,6 +912,7 @@ mod tests {
         );
         let capabilities = CompositionCapabilities {
             native_window_transparency: true,
+            native_window_blur: true,
             reduce_transparency: false,
             increase_contrast: false,
             show_borders: true,

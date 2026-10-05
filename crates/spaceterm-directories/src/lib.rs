@@ -18,6 +18,8 @@ const XDG_DATA_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_HOME";
 const XDG_STATE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_STATE_HOME";
 const XDG_CACHE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CACHE_HOME";
 const XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE: &str = "XDG_RUNTIME_DIR";
+const XDG_DATA_DIRS_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_DIRS";
+const DEFAULT_XDG_DATA_DIRS: [&str; 2] = ["/usr/local/share", "/usr/share"];
 
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct AppDirectoryEnvironment {
@@ -125,6 +127,7 @@ pub struct AppDirectories {
     pub runtime: Option<PathBuf>,
     layout: DirectoryLayout,
     temporary: Option<PathBuf>,
+    runtime_in_shared_temporary: bool,
 }
 
 impl AppDirectories {
@@ -135,7 +138,12 @@ impl AppDirectories {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let environment = AppDirectoryEnvironment::capture();
-            return Self::resolve_xdg_for_host(app_name, &environment, os_temporary_directory);
+            return Self::resolve_xdg_for_host(
+                app_name,
+                &environment,
+                os_temporary_directory,
+                &temporary_runtime_name(app_name),
+            );
         }
 
         #[cfg(target_os = "windows")]
@@ -152,18 +160,35 @@ impl AppDirectories {
         app_name: &str,
         environment: &AppDirectoryEnvironment,
         os_temporary: impl FnOnce() -> Option<PathBuf>,
+        temporary_runtime_name: &str,
     ) -> Result<Self, DirectoryError> {
         let temporary = environment
             .configured_temporary_root()
             .and_then(canonical_temporary_directory)
             .or_else(|| os_temporary().and_then(canonical_temporary_directory));
-        Self::resolve_xdg(app_name, environment, temporary)
+        Self::resolve_xdg_with_runtime_name(
+            app_name,
+            environment,
+            temporary,
+            temporary_runtime_name,
+        )
     }
 
     pub fn resolve_xdg(
         app_name: &str,
         environment: &AppDirectoryEnvironment,
         runtime_fallback: Option<PathBuf>,
+    ) -> Result<Self, DirectoryError> {
+        Self::resolve_xdg_with_runtime_name(app_name, environment, runtime_fallback, app_name)
+    }
+
+    /// Resolve XDG roots. `temporary_runtime_name` names the runtime directory when the runtime
+    /// root falls back to the shared temporary directory instead of `XDG_RUNTIME_DIR`.
+    fn resolve_xdg_with_runtime_name(
+        app_name: &str,
+        environment: &AppDirectoryEnvironment,
+        runtime_fallback: Option<PathBuf>,
+        temporary_runtime_name: &str,
     ) -> Result<Self, DirectoryError> {
         validate_directory_name(app_name)?;
         let home = absolute_environment_path(environment.home.as_deref());
@@ -196,10 +221,14 @@ impl AppDirectories {
             app_name,
         )?;
         let temporary = runtime_fallback.filter(|path| is_absolute_normal_path(path));
-        let runtime = environment
-            .configured_runtime_root()
-            .or_else(|| temporary.clone())
-            .map(|root| root.join(app_name));
+        let configured_runtime = environment.configured_runtime_root();
+        let runtime_in_shared_temporary = configured_runtime.is_none() && temporary.is_some();
+        let runtime = match configured_runtime {
+            Some(root) => Some(root.join(app_name)),
+            None => temporary
+                .as_ref()
+                .map(|root| root.join(temporary_runtime_name)),
+        };
         Ok(Self {
             config,
             data,
@@ -208,6 +237,7 @@ impl AppDirectories {
             runtime,
             layout: DirectoryLayout::Xdg,
             temporary,
+            runtime_in_shared_temporary,
         })
     }
 
@@ -242,6 +272,7 @@ impl AppDirectories {
             runtime,
             layout: DirectoryLayout::Windows,
             temporary,
+            runtime_in_shared_temporary: false,
         })
     }
 
@@ -287,6 +318,13 @@ impl AppDirectories {
         self.temporary.as_deref()
     }
 
+    /// Whether `runtime` is the predictable name in a shared temporary root because
+    /// `XDG_RUNTIME_DIR` is unset. Another account can pre-create that name, so the write
+    /// boundary may need an unpredictable private sibling instead.
+    pub fn runtime_in_shared_temporary(&self) -> bool {
+        self.runtime_in_shared_temporary
+    }
+
     pub fn root(&self, root: AppDirectoryRoot) -> &Path {
         match root {
             AppDirectoryRoot::Config => &self.config,
@@ -317,6 +355,73 @@ pub enum DirectoryError {
     UnsupportedPlatform,
 }
 
+/// Read-only freedesktop locations of the host desktop's own resources, such as icon themes and
+/// desktop settings. They name no SpaceTerm directory and are never created or written.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct DesktopResourceDirectories {
+    home: Option<PathBuf>,
+    config_home: Option<PathBuf>,
+    data: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for DesktopResourceDirectories {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DesktopResourceDirectories(<redacted>)")
+    }
+}
+
+impl DesktopResourceDirectories {
+    pub fn capture() -> Self {
+        Self::resolve(
+            &AppDirectoryEnvironment::capture(),
+            std::env::var_os(XDG_DATA_DIRS_ENVIRONMENT_VARIABLE).as_deref(),
+        )
+    }
+
+    /// Resolve by the XDG Base Directory rules: relative or empty values are ignored, the data home
+    /// precedes the system data directories, and missing values use the specification defaults.
+    pub fn resolve(environment: &AppDirectoryEnvironment, data_dirs: Option<&OsStr>) -> Self {
+        let home = absolute_environment_path(environment.home.as_deref());
+        let config_home = absolute_environment_path(environment.xdg_config_home.as_deref())
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
+        let data_home = absolute_environment_path(environment.xdg_data_home.as_deref())
+            .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+        let mut system_data: Vec<PathBuf> = data_dirs
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                std::env::split_paths(value)
+                    .filter(|path| path.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if system_data.is_empty() {
+            system_data = DEFAULT_XDG_DATA_DIRS.map(PathBuf::from).to_vec();
+        }
+        Self {
+            home,
+            config_home,
+            data: data_home.into_iter().chain(system_data).collect(),
+        }
+    }
+
+    /// Icon theme base directories in lookup order: the legacy `~/.icons`, then `icons` in each
+    /// data directory.
+    pub fn icon_theme_roots(&self) -> Vec<PathBuf> {
+        self.home
+            .iter()
+            .map(|home| home.join(".icons"))
+            .chain(self.data.iter().map(|data| data.join("icons")))
+            .collect()
+    }
+
+    /// The desktop-wide KDE settings file.
+    pub fn kde_globals_file(&self) -> Option<PathBuf> {
+        self.config_home
+            .as_ref()
+            .map(|config| config.join("kdeglobals"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeDirectoryRoot {
     RoamingAppData,
@@ -329,6 +434,21 @@ fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+/// The runtime directory name inside the temporary root. macOS temporary roots are already
+/// per-user. Linux `/tmp` is shared, so the name carries the effective user so another account
+/// cannot pre-create the private runtime directory.
+#[cfg(target_os = "macos")]
+fn temporary_runtime_name(app_name: &str) -> String {
+    app_name.to_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn temporary_runtime_name(app_name: &str) -> String {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    format!("{app_name}-{user}")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -508,6 +628,53 @@ mod tests {
     use super::*;
 
     #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn desktop_resources_follow_xdg_order_and_ignore_relative_values() {
+        let environment = AppDirectoryEnvironment {
+            home: Some("/home/test".into()),
+            xdg_config_home: Some("relative/config".into()),
+            xdg_data_home: Some("/explicit/data".into()),
+            ..Default::default()
+        };
+        let resources = DesktopResourceDirectories::resolve(
+            &environment,
+            Some(OsStr::new("relative/share:/opt/share::/usr/share")),
+        );
+        assert_eq!(
+            resources.icon_theme_roots(),
+            [
+                "/home/test/.icons",
+                "/explicit/data/icons",
+                "/opt/share/icons",
+                "/usr/share/icons",
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            resources.kde_globals_file(),
+            Some(PathBuf::from("/home/test/.config/kdeglobals"))
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn desktop_resources_use_specification_defaults_without_a_home() {
+        let resources = DesktopResourceDirectories::resolve(
+            &AppDirectoryEnvironment::default(),
+            Some(OsStr::new("relative/share")),
+        );
+        assert_eq!(
+            resources.icon_theme_roots(),
+            ["/usr/local/share/icons", "/usr/share/icons"].map(PathBuf::from)
+        );
+        assert_eq!(resources.kde_globals_file(), None);
+        assert_eq!(
+            format!("{resources:?}"),
+            "DesktopResourceDirectories(<redacted>)"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn environment() -> AppDirectoryEnvironment {
         AppDirectoryEnvironment {
             home: Some("/home/test".into()),
@@ -549,6 +716,7 @@ mod tests {
             directories.temporary_directory(),
             Some(Path::new("/temporary"))
         );
+        assert!(directories.runtime_in_shared_temporary());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -569,6 +737,7 @@ mod tests {
             directories.runtime.as_deref(),
             Some(Path::new("/run/user/1000/spaceterm"))
         );
+        assert!(!directories.runtime_in_shared_temporary());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -613,14 +782,20 @@ mod tests {
         };
         let fallback_consulted = std::cell::Cell::new(false);
 
-        let directories = AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || {
-            fallback_consulted.set(true);
-            None
-        })
+        let runtime_name = temporary_runtime_name(APP_DIR_NAME);
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment,
+            || {
+                fallback_consulted.set(true);
+                None
+            },
+            &runtime_name,
+        )
         .unwrap();
 
         let expected = std::fs::canonicalize("/tmp").unwrap();
-        let expected_runtime = expected.join(APP_DIR_NAME);
+        let expected_runtime = expected.join(runtime_name);
         assert!(!fallback_consulted.get());
         assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
         assert_eq!(
@@ -637,16 +812,42 @@ mod tests {
             ..environment()
         };
         let expected = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let directories = AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || {
-            Some(std::env::temp_dir())
-        })
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment,
+            || Some(std::env::temp_dir()),
+            APP_DIR_NAME,
+        )
         .unwrap();
         assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
 
         let directories =
-            AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || None).unwrap();
+            AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || None, APP_DIR_NAME)
+                .unwrap();
         assert_eq!(directories.temporary_directory(), None);
         assert_eq!(directories.runtime, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_temporary_runtime_should_be_private_to_the_effective_user() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let user = unsafe { libc::geteuid() };
+        assert_eq!(
+            temporary_runtime_name(APP_DIR_NAME),
+            format!("{APP_DIR_NAME}-{user}")
+        );
+        let directories = AppDirectories::resolve_xdg_for_host(
+            APP_DIR_NAME,
+            &environment(),
+            || Some(PathBuf::from("/tmp")),
+            &temporary_runtime_name(APP_DIR_NAME),
+        )
+        .unwrap();
+        let expected = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("{APP_DIR_NAME}-{user}"));
+        assert_eq!(directories.runtime.as_deref(), Some(expected.as_path()));
     }
 
     #[test]

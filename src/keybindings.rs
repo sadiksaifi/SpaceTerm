@@ -17,7 +17,8 @@ pub use preferences::KeybindingPreferences;
 )]
 pub use preferences::KeybindingPreferencesError;
 pub use shortcut::{Shortcut, ShortcutRejection};
-pub use terminal_conventions::TerminalConvention;
+pub(crate) use terminal_conventions::is_presentable;
+pub use terminal_conventions::{TerminalConvention, TerminalConventions};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -51,7 +52,7 @@ macro_rules! commands {
         pub enum Command { $($command),+ }
 
         impl Command {
-            pub const ALL: [Self; 45] = [$(Self::$command),+];
+            pub const ALL: [Self; 54] = [$(Self::$command),+];
             pub const fn id(self) -> &'static str {
                 match self { $(Self::$command => $id),+ }
             }
@@ -101,6 +102,10 @@ commands! {
     ActivateTab7 => ("activate_tab7", "Tab 7", Tab, Workspace, crate::ui::ActivateTab7),
     ActivateTab8 => ("activate_tab8", "Tab 8", Tab, Workspace, crate::ui::ActivateTab8),
     ActivateTab9 => ("activate_tab9", "Tab 9", Tab, Workspace, crate::ui::ActivateTab9),
+    NextTab => ("next_tab", "Next Tab", Tab, Workspace, crate::ui::NextTab),
+    PreviousTab => ("previous_tab", "Previous Tab", Tab, Workspace, crate::ui::PreviousTab),
+    MoveTabRight => ("move_tab_right", "Move Tab Right", Tab, Workspace, crate::ui::MoveTabRight),
+    MoveTabLeft => ("move_tab_left", "Move Tab Left", Tab, Workspace, crate::ui::MoveTabLeft),
     ClosePane => ("close_pane", "Close Pane", Pane, Application, crate::ui::ClosePane),
     SplitRight => ("split_right", "Split Right", Pane, Workspace, crate::ui::SplitRight),
     SplitDown => ("split_down", "Split Down", Pane, Workspace, crate::ui::SplitDown),
@@ -115,11 +120,16 @@ commands! {
     FindNext => ("find_next", "Find Next", Terminal, Workspace, crate::ui::FindNext),
     FindPrevious => ("find_previous", "Find Previous", Terminal, Workspace, crate::ui::FindPrevious),
     ClearTerminalScreenAndScrollback => ("clear_terminal_screen_and_scrollback", "Clear Screen and Scrollback", Terminal, Workspace, crate::ui::ClearTerminalScreenAndScrollback),
+    ScrollPageUp => ("scroll_page_up", "Scroll Page Up", Terminal, Workspace, crate::ui::ScrollPageUp),
+    ScrollPageDown => ("scroll_page_down", "Scroll Page Down", Terminal, Workspace, crate::ui::ScrollPageDown),
+    ScrollToTop => ("scroll_to_top", "Scroll to Top", Terminal, Workspace, crate::ui::ScrollToTop),
+    ScrollToBottom => ("scroll_to_bottom", "Scroll to Bottom", Terminal, Workspace, crate::ui::ScrollToBottom),
     IncreaseTerminalFontSize => ("increase_terminal_font_size", "Increase Font Size", View, Workspace, crate::ui::IncreaseTerminalFontSize),
     DecreaseTerminalFontSize => ("decrease_terminal_font_size", "Decrease Font Size", View, Workspace, crate::ui::DecreaseTerminalFontSize),
     ResetTerminalFontSize => ("reset_terminal_font_size", "Reset Font Size", View, Workspace, crate::ui::ResetTerminalFontSize),
     ToggleSidebar => ("toggle_sidebar", "Toggle Sidebar", View, Workspace, crate::ui::ToggleSidebar),
     ToggleSidebarFocus => ("toggle_sidebar_focus", "Toggle Sidebar Focus", View, Workspace, crate::ui::ToggleSidebarFocus),
+    KeyboardShortcuts => ("keyboard_shortcuts", "Keyboard Shortcuts", View, Application, crate::ui::settings_window::OpenKeyboardShortcuts),
 }
 
 impl Command {

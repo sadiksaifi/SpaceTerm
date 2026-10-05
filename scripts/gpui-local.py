@@ -27,10 +27,14 @@ def without_owned_block(contents: str) -> tuple[str, bool]:
         return contents, False
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         raise ValueError("local GPUI patch markers are incomplete")
-    prefix = "".join(lines[: starts[0]])
+    start = sum(map(len, lines[: starts[0]]))
+    end = sum(map(len, lines[: ends[0] + 1]))
     if lines[starts[0]] == BLOCK_START_WITH_SEPARATOR:
-        prefix = prefix[:-1]
-    return prefix + "".join(lines[ends[0] + 1 :]), True
+        # This marker owns the newline immediately before it.
+        if start == 0 or contents[start - 1] != "\n":
+            raise ValueError("local GPUI patch separator is missing")
+        start -= 1
+    return contents[:start] + contents[end:], True
 
 
 def local_crates(checkout: Path) -> dict[str, Path]:
@@ -93,8 +97,9 @@ def main() -> None:
         path = crates[name].as_posix().replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{name} = {{ path = "{path}" }}')
     CONFIG.parent.mkdir(exist_ok=True)
-    separator = "\n" if remaining and not remaining.endswith("\n") else ""
-    marker = BLOCK_START_WITH_SEPARATOR if separator else BLOCK_START
+    # Each block owns its leading newline, including beside another owned block.
+    separator = "\n"
+    marker = BLOCK_START_WITH_SEPARATOR
     CONFIG.write_text(remaining + separator + marker + "\n".join(lines) + "\n" + BLOCK_END)
 
 

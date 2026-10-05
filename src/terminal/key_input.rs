@@ -2,6 +2,13 @@ use gpui::{Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersCh
 
 use super::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native key Adapter reports modifier transitions"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalKeyInputEventKind {
     KeyDown,
@@ -26,9 +33,35 @@ pub(crate) enum KeyTranslation {
 pub(crate) trait TerminalKeyInputAdapter {
     fn key_down(&mut self, event: &KeyDownEvent) -> KeyTranslation;
 
+    /// Native facts exist only during the window's platform input callback. Synthetic input
+    /// follows the ordinary adapter contract, and hosts with their own bridge keep that bridge.
+    fn key_down_with_native(
+        &mut self,
+        event: &KeyDownEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> KeyTranslation {
+        self.key_down(event)
+    }
+
     fn key_up(&mut self, event: &KeyUpEvent) -> KeyTranslation;
 
+    fn key_up_with_native(
+        &mut self,
+        event: &KeyUpEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> KeyTranslation {
+        self.key_up(event)
+    }
+
     fn modifiers_changed(&mut self, event: &ModifiersChangedEvent) -> Option<KeyTranslation>;
+
+    fn modifiers_changed_with_native(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _native: Option<gpui::NativeKeyEvent>,
+    ) -> Option<KeyTranslation> {
+        self.modifiers_changed(event)
+    }
 
     fn input_method_commit(&mut self, text: String) -> KeyTranslation;
 
@@ -416,6 +449,54 @@ pub(crate) fn assert_common_adapter_contract(mut adapter: Box<dyn TerminalKeyInp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_bracket_preserves_negotiated_protocols_through_the_shared_adapter() {
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        for policy in [OptionAsAltPolicy::None, OptionAsAltPolicy::Both] {
+            let mut adapter = GpuiTerminalKeyInputAdapter::new(policy);
+            let mut emulator =
+                crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+                    CellGridSize::new(80, 24),
+                    LogicalCellSize::new(10.0, 20.0),
+                    BackingScale::ONE,
+                ))
+                .unwrap();
+            for (mode, expected_press, expected_release) in [
+                (b"".as_slice(), b"\x1b".as_slice(), b"".as_slice()),
+                (b"\x1b[>4;2m", b"\x1b[27;5;91~", b""),
+                (b"\x1b[>4;0m", b"\x1b", b""),
+                (b"\x1b[>15u", b"\x1b[91;5u", b"\x1b[91;5:3u"),
+                (b"\x1b[<u", b"\x1b", b""),
+            ] {
+                emulator.feed(mode);
+                let mut keystroke = Keystroke::parse("ctrl-[").unwrap();
+                keystroke.key_char = Some("[".to_owned());
+                for is_held in [false, true] {
+                    let KeyTranslation::Encoded(input) = adapter.key_down(&KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held,
+                        prefer_character_input: false,
+                    }) else {
+                        panic!("expected encoded Ctrl+[");
+                    };
+                    let expected = if is_held && mode == b"\x1b[>15u" {
+                        b"\x1b[91;5:2u".as_slice()
+                    } else {
+                        expected_press
+                    };
+                    assert_eq!(emulator.key(input).unwrap().bytes, expected, "{policy:?}");
+                }
+                let KeyTranslation::Encoded(input) = adapter.key_up(&KeyUpEvent { keystroke })
+                else {
+                    panic!("expected encoded Ctrl+[ release");
+                };
+                assert_eq!(emulator.key(input).unwrap().bytes, expected_release);
+            }
+        }
+    }
 
     #[test]
     fn portable_gpui_adapter_satisfies_the_shared_contract() {

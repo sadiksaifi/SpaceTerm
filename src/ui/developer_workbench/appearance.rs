@@ -6,8 +6,9 @@ use gpui::{AnyElement, Window, div};
 use spaceterm_ui::{Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
-use super::preview::AppearancePreview;
-use crate::appearance::{Appearance, ChromeDensity, ResetTarget, SettingsDocument};
+use crate::appearance::{
+    Appearance, ChromeDensity, ResetTarget, SettingsDocument, UnavailableWindowEffect,
+};
 use crate::ui::appearance::gpui_color;
 use crate::ui::appearance::settings::SettingsAppearance;
 use crate::ui::appearance_runtime;
@@ -111,6 +112,15 @@ pub(super) fn render(
     let appearance = &surface.chrome;
     let document = workbench.preview.document();
     let window_preferences = &document.preferences.window;
+    let background = appearance_runtime::current(cx)
+        .chrome
+        .composition
+        .capabilities
+        .window_background(window_preferences);
+    let background_description = background.unavailable.map(|effect| match effect {
+        UnavailableWindowEffect::Transparency => "Desktop transparency is unavailable on this system, so the window stays opaque. Transparency and Blur use their defaults.",
+        UnavailableWindowEffect::Blur => "Desktop blur is unavailable on this system, so the window stays opaque. Transparency and Blur use their defaults.",
+    });
 
     let owner = cx.weak_entity();
     let density = SegmentedControl::new(
@@ -140,7 +150,7 @@ pub(super) fn render(
     let transparency = SegmentedControl::new(
         "workbench-transparency",
         "Transparency",
-        &TransparencyStop::of(window_preferences.transparency),
+        &TransparencyStop::of(background.transparency),
         TransparencyStop::ALL
             .into_iter()
             .map(|stop| {
@@ -149,6 +159,7 @@ pub(super) fn render(
             .collect(),
     )
     .expect("three stops are within the bounded option set")
+    .disabled(!background.adjustable())
     .debug_selector("workbench-transparency")
     .on_change(move |change, _, cx| {
         let Some(stop) = *change.requested() else {
@@ -163,9 +174,10 @@ pub(super) fn render(
         });
     });
     let owner = cx.weak_entity();
-    let blur = Switch::new("workbench-blur", "Blur", window_preferences.blur)
+    let blur = Switch::new("workbench-blur", "Blur", background.blur)
         .size(ToggleSize::Regular)
         .label_hidden(true)
+        .disabled(!background.adjustable())
         .debug_selector("workbench-blur")
         .on_change(move |change, _, cx| {
             let blur = change.requested();
@@ -196,7 +208,7 @@ pub(super) fn render(
     let alternate = Switch::new(
         "workbench-alternate-typography",
         "Alternate typography",
-        AppearancePreview::alternate_typography(&document),
+        workbench.preview.alternate_typography(&document),
     )
     .size(ToggleSize::Regular)
     .label_hidden(true)
@@ -221,18 +233,22 @@ pub(super) fn render(
             });
         });
 
+    let describe_background = |row: FormRow| match background_description {
+        Some(description) => row.description(description),
+        None => row,
+    };
     let window_rows = vec![
         FormRow::new("workbench-row-appearance-density", "Density", density)
             .render(appearance, window, cx)
             .into_any_element(),
-        FormRow::new(
+        describe_background(FormRow::new(
             "workbench-row-appearance-transparency",
             "Transparency",
             transparency,
-        )
+        ))
         .render(appearance, window, cx)
         .into_any_element(),
-        FormRow::new("workbench-row-appearance-blur", "Blur", blur)
+        describe_background(FormRow::new("workbench-row-appearance-blur", "Blur", blur))
             .render(appearance, window, cx)
             .into_any_element(),
     ];
@@ -249,7 +265,10 @@ pub(super) fn render(
             "Alternate typography",
             alternate,
         )
-        .description("Menlo at 22 points with a 1.35 line height, and the other density.")
+        .description(format!(
+            "{} at 22 points with a 1.35 line height.",
+            crate::host_fonts::HostFonts::get(cx).system_monospace_family,
+        ))
         .render(appearance, window, cx)
         .into_any_element(),
     ];

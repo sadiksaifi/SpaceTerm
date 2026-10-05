@@ -28,6 +28,13 @@ use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateServic
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native application menu shows the update command"
+    )
+)]
 pub(crate) const CHECK_FOR_UPDATES_TITLE: &str = "Check for Updates…";
 pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";
 const RELEASE_NOTES_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/latest";
@@ -281,7 +288,7 @@ fn present_result(state: UpdateState, cx: &mut App) {
 }
 
 /// Prompts belong to the Workspace window the user is looking at.
-fn front_workspace_window(cx: &App) -> Option<WindowHandle<WorkspaceManager>> {
+pub(crate) fn front_workspace_window(cx: &App) -> Option<WindowHandle<WorkspaceManager>> {
     cx.active_window()
         .and_then(|window| window.downcast::<WorkspaceManager>())
         .or_else(|| {

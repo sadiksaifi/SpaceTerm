@@ -11,6 +11,13 @@ use gpui::{Bounds, DisplayId, Pixels, Rgba, Size};
 
 /// Where System Settings presents the list a person drops SpaceTerm onto.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only the macOS Setup Guide host produces System Settings window observations in production"
+    )
+)]
 pub(crate) enum SystemSettingsWindow {
     /// System Settings is not running.
     Closed,

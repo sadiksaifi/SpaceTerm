@@ -15,8 +15,8 @@ pub(crate) mod geometry;
 mod graphics;
 pub(crate) use native_services::hyperlink;
 pub(crate) mod identity;
-mod key;
-mod key_input;
+pub(crate) mod key;
+pub(crate) mod key_input;
 mod keyboard_protocol;
 pub(crate) mod metadata;
 pub(crate) mod native_services;
@@ -32,10 +32,14 @@ pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
 #[cfg(test)]
-pub(crate) use accessibility::{AccessibilityCell, AccessibilityLine};
+pub(crate) use accessibility::{
+    AccessibilityCell, AccessibilityCellRef, AccessibilityLine, AccessibilityRowUpdate,
+    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilityUpdate,
+    TerminalAccessibilityState,
+};
 pub(crate) use accessibility::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications,
-    TerminalAccessibilityModel,
+    AccessibilityRowId, AccessibilityRowView, TerminalAccessibilityModel,
 };
 pub(crate) use attention::AttentionFacts;
 #[cfg(test)]
@@ -43,7 +47,8 @@ pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
     ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot,
     CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot,
-    TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+    ScrollbackMovement, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
+    TerminalUnderlineSnapshot,
 };
 #[cfg(test)]
 pub(crate) use failure::FailureClass;
@@ -56,15 +61,12 @@ pub(crate) use find::{
 };
 pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
-pub(crate) use key::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
-};
-#[cfg(all(test, feature = "macos-native-tests"))]
+pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) use key_input::assert_common_adapter_contract;
 pub(crate) use key_input::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, KeyTranslation,
     TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
-    UnhandledKeyEvent,
 };
 pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{

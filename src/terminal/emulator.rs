@@ -682,6 +682,7 @@ pub(crate) struct TerminalEmulator {
     local_file_emissions: Rc<RefCell<LocalFileEmissionRegistry>>,
     terminal: Terminal<'static, 'static>,
     ghostty_accessibility: ghostty_accessibility::State,
+    accessibility_capture_needed: bool,
     accessibility: TerminalAccessibilityState,
     accessibility_generation: PresentationGeneration,
     render_state: RenderState<'static>,
@@ -784,6 +785,15 @@ struct MouseModeState {
     sgr: bool,
     urxvt: bool,
     sgr_pixels: bool,
+}
+
+/// A keyboard movement through the Scrollback viewport, as the Scroll Commands request it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScrollbackMovement {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
 }
 
 #[derive(Debug)]
@@ -1111,6 +1121,7 @@ impl TerminalEmulator {
             local_file_emissions,
             terminal,
             ghostty_accessibility: ghostty_accessibility::State::new()?,
+            accessibility_capture_needed: true,
             accessibility: TerminalAccessibilityState::default(),
             accessibility_generation: PresentationGeneration::default(),
             render_state: RenderState::new()?,
@@ -1171,6 +1182,9 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
+        if !bytes.is_empty() {
+            self.accessibility_capture_needed = true;
+        }
         if !bytes.is_empty()
             && matches!(
                 self.active_pointer,
@@ -1255,6 +1269,7 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn clear_screen_and_scrollback(&mut self) -> EmulatorAction {
+        self.accessibility_capture_needed = true;
         let redraw_prompt = self.terminal.clear_screen(true);
         EmulatorAction {
             bytes: if redraw_prompt {
@@ -1351,8 +1366,11 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         if winsize_changed {
+            self.capture_accessibility_if_needed()?;
+            self.accessibility_capture_needed = true;
             self.terminal
                 .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+            self.capture_accessibility_if_needed()?;
         } else {
             debug_assert_eq!(grid, self.geometry.grid());
             debug_assert_eq!(cell, self.geometry.backing_cell_size());
@@ -1484,6 +1502,20 @@ impl TerminalEmulator {
     pub(crate) fn scroll_to(&mut self, offset_rows: u64) -> EmulatorAction {
         let row = usize::try_from(offset_rows).unwrap_or(usize::MAX);
         self.terminal.scroll_viewport(ScrollViewport::Row(row));
+        EmulatorAction::screen_changed()
+    }
+
+    /// Moves the viewport through Scrollback a page at a time or to either end, writing nothing
+    /// to the PTY. The alternate screen has no Scrollback, so its viewport stays put, as it does
+    /// for the wheel when the program has not requested alternate-scroll mode.
+    pub(crate) fn scroll_scrollback(&mut self, movement: ScrollbackMovement) -> EmulatorAction {
+        let page = isize::try_from(self.geometry.grid().rows.max(1)).unwrap_or(isize::MAX);
+        self.terminal.scroll_viewport(match movement {
+            ScrollbackMovement::PageUp => ScrollViewport::Delta(-page),
+            ScrollbackMovement::PageDown => ScrollViewport::Delta(page),
+            ScrollbackMovement::Top => ScrollViewport::Top,
+            ScrollbackMovement::Bottom => ScrollViewport::Bottom,
+        });
         EmulatorAction::screen_changed()
     }
 
@@ -2175,6 +2207,14 @@ impl TerminalEmulator {
         }
     }
 
+    fn capture_accessibility_if_needed(&mut self) -> Result<(), Error> {
+        if self.accessibility_capture_needed {
+            self.ghostty_accessibility.capture(&self.terminal)?;
+            self.accessibility_capture_needed = false;
+        }
+        Ok(())
+    }
+
     pub(crate) fn accessibility_snapshot(
         &mut self,
         bind_next_presentation: bool,
@@ -2199,6 +2239,7 @@ impl TerminalEmulator {
                 },
             )
             .map_err(|error| format!("failed to observe retained terminal text: {error}"))?;
+        self.accessibility_capture_needed = false;
         let more = snapshot.more;
         let update = accessibility_update(snapshot)?;
         let model = self
@@ -2242,6 +2283,10 @@ impl TerminalEmulator {
         let metadata = self.metadata.snapshot();
         let title = Arc::clone(&metadata.title.value);
         let title_changed = title != self.title;
+        // Rendering consumes Ghostty's dirty flags. Retain semantic invalidation
+        // now; the worker still extracts text only when accessibility is due.
+        // A semantic update may already have observed this content before rendering.
+        self.capture_accessibility_if_needed()?;
         let snapshot = self.render_state.update(&self.terminal)?;
         let dirty = snapshot.dirty()?;
         let rows = snapshot.rows()?;

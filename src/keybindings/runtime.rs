@@ -82,7 +82,7 @@ pub(crate) fn follow(settings: &UserSettings, cx: &mut App) {
 
 fn refresh_layout(cx: &mut App) {
     let mut profile = (*KeymapRuntime::profile(cx)).clone();
-    match profile.refresh_layout() {
+    match profile.refresh_layout(cx.keyboard_layout()) {
         Ok(false) => return,
         Err(error) => {
             eprintln!("failed to refresh shortcuts: {error}");
@@ -93,20 +93,22 @@ fn refresh_layout(cx: &mut App) {
     let runtime = cx.global_mut::<KeymapRuntime>();
     runtime.profile = Rc::new(profile);
     let preferences = runtime.applied.clone();
-    replace(&preferences, cx);
+    replace(&preferences, true, cx);
 }
 
 fn apply(preferences: &KeybindingPreferences, cx: &mut App) {
     if cx.global::<KeymapRuntime>().applied != *preferences {
-        replace(preferences, cx);
+        replace(preferences, false, cx);
     }
 }
 
-fn replace(preferences: &KeybindingPreferences, cx: &mut App) {
+fn replace(preferences: &KeybindingPreferences, layout_changed: bool, cx: &mut App) {
     let runtime = cx.global::<KeymapRuntime>();
     let resolved = runtime.profile.resolve(preferences);
     let effective_changed = *InstalledKeymap::get(cx) != resolved;
     let menu = runtime.menu.clone();
+    let controls = runtime.profile.control_bindings().to_vec();
+    let fixed = runtime.profile.fixed_bindings().to_vec();
     let mut bindings = cx
         .key_bindings()
         .borrow()
@@ -119,6 +121,20 @@ fn replace(preferences: &KeybindingPreferences, cx: &mut App) {
         .unwrap_or(runtime.segment_start);
     bindings.retain(|binding| binding.meta() != Some(CUSTOMIZABLE_BINDINGS));
     bindings.splice(segment_start..segment_start, resolved.key_bindings());
+    if layout_changed {
+        for (tag, replacement) in [
+            (super::keymap::CONTROL_BINDINGS, controls),
+            (super::keymap::FIXED_BINDINGS, fixed),
+        ] {
+            if let Some(index) = bindings
+                .iter()
+                .position(|binding| binding.meta() == Some(tag))
+            {
+                bindings.retain(|binding| binding.meta() != Some(tag));
+                bindings.splice(index..index, replacement);
+            }
+        }
+    }
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
     cx.update_global::<DesktopPresentation, _>(|presentation, cx| presentation.refresh(cx));
@@ -126,7 +142,7 @@ fn replace(preferences: &KeybindingPreferences, cx: &mut App) {
     runtime.applied = preferences.clone();
     runtime.segment_start = segment_start;
     cx.set_global(InstalledKeymap(Rc::new(resolved)));
-    if effective_changed
+    if (effective_changed || layout_changed)
         && let Some(menu) = menu
         && let Err(error) = menu.install(cx)
     {

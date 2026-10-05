@@ -31,9 +31,9 @@ use super::{
     CancelUnsafePaste, ClearTerminalScreenAndScrollback, CloseTerminalFind, ConfirmUnsafePaste,
     CopySelection, DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
     FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
-    OpenTerminalFind, PasteClipboard, ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT,
-    TERMINAL_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
-    TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
+    OpenTerminalFind, PasteClipboard, PasteSelection, ResetTerminalFontSize, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
+    TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT, TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
 use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
@@ -44,14 +44,14 @@ use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
-#[cfg(test)]
-use crate::terminal::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
 };
+#[cfg(test)]
+use crate::terminal::key_input::UnhandledKeyEvent;
 use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
 use crate::terminal::native_services::file_preview::{FilePreviewPanel, FilePreviewPresenter};
 use crate::terminal::native_services::{
@@ -66,10 +66,11 @@ use crate::terminal::{
     NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, PaneTerminalState,
     PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
     PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
-    TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionHandle,
-    UnhandledKeyDiagnostic, WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
+    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionEvent,
+    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
+    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
+    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 #[cfg(test)]
 use gpui::ClipboardItem;
@@ -131,6 +132,42 @@ impl FullscreenEscapeSequence {
 
     fn reset(&mut self) {
         self.first_press = None;
+    }
+}
+
+/// The physical keys a Terminal Session received a press for but no release yet.
+///
+/// A program reporting key events must only see releases of presses it received. Presses that a
+/// Command, an IME composition, or another surface consumed keep their releases out of the
+/// session. The record outlives Terminal Input Focus changes, so a key held across one still
+/// releases exactly what the program saw pressed.
+#[derive(Default)]
+struct DeliveredKeyPresses {
+    session_identity: u64,
+    keys: Vec<PhysicalKey>,
+}
+
+impl DeliveredKeyPresses {
+    fn press(&mut self, session_identity: u64, key: PhysicalKey) {
+        if self.session_identity != session_identity {
+            self.keys.clear();
+            self.session_identity = session_identity;
+        }
+        if !self.keys.contains(&key) {
+            self.keys.push(key);
+        }
+    }
+
+    /// Ends a press, reporting whether the session received it.
+    fn release(&mut self, session_identity: u64, key: PhysicalKey) -> bool {
+        if self.session_identity != session_identity {
+            return false;
+        }
+        let Some(index) = self.keys.iter().position(|pressed| *pressed == key) else {
+            return false;
+        };
+        self.keys.swap_remove(index);
+        true
     }
 }
 
@@ -582,12 +619,14 @@ pub(crate) struct TerminalPane {
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
+    primary_selection:
+        Option<Rc<dyn crate::terminal::native_services::clipboard::PrimarySelection>>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
     preedit_layout_key: Option<PreeditLayoutKey>,
     marked_revision: u64,
-    ime_suppressed_keys: Vec<PhysicalKey>,
+    delivered_key_presses: DeliveredKeyPresses,
     pending_file_insertion: Option<PastePayload>,
     pending_paste: Option<PasteConfirmation>,
     /// Permissions a Permission Request asked for that the person has not answered. The Pane
@@ -609,7 +648,10 @@ pub(crate) struct TerminalPane {
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
     )>,
+    file_preview_available: bool,
     file_preview: FilePreviewPresenter<Box<dyn FilePreviewPanel>>,
+    /// Awaits the latest deferred preview request so its failure reaches this Pane.
+    _file_preview_task: Option<Task<()>>,
     context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
     blink_generation: u64,
@@ -841,7 +883,11 @@ impl TerminalPane {
             attention: AttentionState::default(),
             attention_visual: false,
             attention_generation: 0,
-            native_attention_pane: Some(lifecycle_dependencies.attention.register_pane()),
+            native_attention_pane: Some(
+                lifecycle_dependencies
+                    .attention
+                    .register_pane(Some(window.window_handle())),
+            ),
             hidden_input: false,
             secure_input_pane: lifecycle_dependencies.secure_input.register_pane(),
             lifecycle_dependencies,
@@ -874,12 +920,13 @@ impl TerminalPane {
             ),
             file_insertion: native_service_adapters.file_insertion,
             file_clipboard: native_service_adapters.file_clipboard,
+            primary_selection: native_service_adapters.primary_selection,
             key_input_adapter,
             ime: TerminalIme::default(),
             preedit_layout: None,
             preedit_layout_key: None,
             marked_revision: 0,
-            ime_suppressed_keys: Vec::new(),
+            delivered_key_presses: DeliveredKeyPresses::default(),
             pending_file_insertion: None,
             pending_paste: None,
             requested_permissions: Vec::new(),
@@ -890,7 +937,9 @@ impl TerminalPane {
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
             pressed_link: None,
+            file_preview_available: native_service_adapters.file_preview.is_available(),
             file_preview: FilePreviewPresenter::new(native_service_adapters.file_preview.create()),
+            _file_preview_task: None,
             context_menu: None,
             blink_phase_visible: true,
             blink_generation: 0,
@@ -1045,18 +1094,22 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn find_next(&mut self, _: &FindNext, _window: &mut Window, _cx: &mut Context<Self>) {
-        if let Some(session) = &self.terminal_session.session
-            && self.find_input.is_some()
-        {
+    fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_input.is_none() {
+            cx.propagate();
+            return;
+        }
+        if let Some(session) = &self.terminal_session.session {
             session.navigate_find(self.find_generation, FindDirection::Next);
         }
     }
 
-    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, _cx: &mut Context<Self>) {
-        if let Some(session) = &self.terminal_session.session
-            && self.find_input.is_some()
-        {
+    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_input.is_none() {
+            cx.propagate();
+            return;
+        }
+        if let Some(session) = &self.terminal_session.session {
             session.navigate_find(self.find_generation, FindDirection::Previous);
         }
     }
@@ -1220,7 +1273,6 @@ impl TerminalPane {
                 }
                 self.ime.cancel();
                 self.invalidate_preedit_layout();
-                self.ime_suppressed_keys.clear();
             }
             if let Some(session) = &self.terminal_session.session {
                 session.focus(focused);
@@ -2314,20 +2366,26 @@ impl TerminalPane {
         } else {
             self.fullscreen_escape.reset();
         }
-        let input = self.key_input_adapter.key_down(event);
+        let input = self
+            .key_input_adapter
+            .key_down_with_native(event, window.native_key_event());
         if self.ime.marked_text().is_some() {
-            if let KeyTranslation::Encoded(input) = &input
-                && input.physical_key != PhysicalKey::Unidentified
-                && !self.ime_suppressed_keys.contains(&input.physical_key)
-            {
-                self.ime_suppressed_keys.push(input.physical_key);
-            }
             if !matches!(input, KeyTranslation::Unhandled(_)) {
                 cx.stop_propagation();
             }
             return;
         }
+        let press = match &input {
+            KeyTranslation::Encoded(input) => Some(input.physical_key),
+            KeyTranslation::TextInput(_) | KeyTranslation::Unhandled(_) => None,
+        };
         if self.send_key_translation(input, cx) {
+            if let Some(key) = press
+                && self.terminal_session.session.is_some()
+            {
+                self.delivered_key_presses
+                    .press(self.terminal_session.native_service_session_identity, key);
+            }
             cx.stop_propagation();
         }
     }
@@ -2336,14 +2394,15 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let input = self.key_input_adapter.key_up(event);
+        let input = self
+            .key_input_adapter
+            .key_up_with_native(event, window.native_key_event());
         if let KeyTranslation::Encoded(input) = &input
-            && let Some(index) = self
-                .ime_suppressed_keys
-                .iter()
-                .position(|key| *key == input.physical_key)
+            && !self.delivered_key_presses.release(
+                self.terminal_session.native_service_session_identity,
+                input.physical_key,
+            )
         {
-            self.ime_suppressed_keys.swap_remove(index);
             cx.stop_propagation();
             return;
         }
@@ -2372,7 +2431,10 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        if let Some(translation) = self.key_input_adapter.modifiers_changed(event) {
+        if let Some(translation) = self
+            .key_input_adapter
+            .modifiers_changed_with_native(event, window.native_key_event())
+        {
             self.send_key_translation(translation, cx);
         }
     }
@@ -2460,6 +2522,30 @@ impl TerminalPane {
         if let Some(session) = &self.terminal_session.session {
             session.clear_screen_and_scrollback();
             self.clear_attention(cx);
+        }
+    }
+
+    fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::PageUp, cx);
+    }
+
+    fn scroll_page_down(&mut self, _: &ScrollPageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::PageDown, cx);
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::Top, cx);
+    }
+
+    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_scrollback(ScrollbackMovement::Bottom, cx);
+    }
+
+    /// Moves the Scrollback viewport for a Scroll Command; nothing reaches the PTY.
+    fn scroll_scrollback(&mut self, movement: ScrollbackMovement, cx: &mut Context<Self>) {
+        if let Some(session) = &self.terminal_session.session {
+            session.scroll_scrollback(movement);
+            self.reveal_scrollbar(cx);
         }
     }
 
@@ -2585,8 +2671,23 @@ impl TerminalPane {
             return;
         };
 
+        // Shift overrides application mouse tracking for PRIMARY paste as it does for selection,
+        // so a Selection made with Shift-drag can be pasted the same way.
+        if button == PointerButton::Middle
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            )
+            && self.primary_selection.is_some()
+        {
+            self.paste_primary_selection(cx);
+            cx.stop_propagation();
+            return;
+        }
+
         if button == PointerButton::Left
-            && event.modifiers.platform
+            && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
         {
             self.pressed_link = Some((self.screen.generation, link));
@@ -2711,7 +2812,7 @@ impl TerminalPane {
                 &pressed,
                 self.screen.generation,
                 current.as_ref(),
-                event.modifiers.platform,
+                spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers),
             ) {
                 cx.open_url(&url);
             }
@@ -2744,6 +2845,11 @@ impl TerminalPane {
             }
         });
         if let Some(copy) = copy {
+            if let Some(primary) = &self.primary_selection
+                && let Ok(Some(copy)) = &copy
+            {
+                primary.publish(copy, cx);
+            }
             self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
@@ -2818,7 +2924,10 @@ impl TerminalPane {
         if self.synchronize_terminal_input_focus(window, cx)
             && let Some(session) = self.terminal_session.session.as_ref()
         {
-            let result = session.copy_or_forward();
+            let modifiers = crate::keybindings::runtime::KeymapRuntime::profile(cx)
+                .terminal_conventions()
+                .shortcut_modifiers();
+            let result = session.copy_or_forward(input_modifiers(modifiers));
             self.publish_selection_copy(result, None, cx);
         }
     }
@@ -2856,6 +2965,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.terminal_session.session.as_ref()?;
         self.selection_copy_from_result(session.copy_selection(), cx)
@@ -2890,6 +3006,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_selection(
         &mut self,
         origin: NativeServiceOrigin,
@@ -2908,11 +3031,32 @@ impl TerminalPane {
         }
     }
 
+    fn paste_selection(&mut self, _: &PasteSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window) && self.synchronize_terminal_input_focus(window, cx)
+        {
+            self.paste_primary_selection(cx);
+        }
+    }
+
+    /// Pastes the PRIMARY selection through the same confirmation and bracketed paste as the
+    /// Clipboard, for both middle-click and Paste Selection.
+    fn paste_primary_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .primary_selection
+            .as_ref()
+            .and_then(|primary| primary.read(cx))
+            && let Ok(payload) = PastePayload::service_text(text, self.terminal_input_focus)
+            && !payload.text().is_empty()
+        {
+            self.request_paste_text(payload, cx);
+        }
+    }
+
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let Ok(Some(insertion)) = PastePayload::clipboard(
             self.file_insertion,
-            self.file_clipboard.as_ref(),
+            || self.file_clipboard.read_files(cx),
             || cx.read_from_clipboard().and_then(|item| item.text()),
             terminal_input_focused,
             self.terminal_session.local_file_capabilities,
@@ -2924,6 +3068,13 @@ impl TerminalPane {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn insert_native_service_text(
         &mut self,
         origin: NativeServiceOrigin,
@@ -3002,11 +3153,13 @@ impl TerminalPane {
     }
 
     fn native_context_actions(&self) -> NativeContextActions {
-        NativeContextActions::from_presence(
+        let mut actions = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
             self.screen.selection_present,
             self.current_hovered_link(),
-        )
+        );
+        actions.file_preview &= self.file_preview_available;
+        actions
     }
 
     fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
@@ -3051,7 +3204,8 @@ impl TerminalPane {
             false,
             link.as_ref(),
         )
-        .file_preview;
+        .file_preview
+            && self.file_preview_available;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -3124,7 +3278,7 @@ impl TerminalPane {
             }
             TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
-                    self.preview_context_link(&link, cx);
+                    self.preview_context_link(&link, window, cx);
                 }
             }
             _ => {}
@@ -3135,6 +3289,7 @@ impl TerminalPane {
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(target) =
@@ -3143,10 +3298,27 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        if self.file_preview.preview(&target).is_err() {
-            self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
-            cx.notify();
+        match self.file_preview.preview_in_window(&target, window, cx) {
+            Ok(None) => {}
+            Ok(Some(completion)) => {
+                self._file_preview_task = Some(cx.spawn(async move |this, cx| {
+                    let Some(failure) = completion.failure().await else {
+                        return;
+                    };
+                    let _ = this.update(cx, |pane, cx| {
+                        if pane.file_preview.settle(failure).is_some() {
+                            pane.present_file_preview_failure(cx);
+                        }
+                    });
+                }));
+            }
+            Err(_) => self.present_file_preview_failure(cx),
         }
+    }
+
+    fn present_file_preview_failure(&mut self, cx: &mut Context<Self>) {
+        self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
+        cx.notify();
     }
 
     fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
@@ -3154,6 +3326,13 @@ impl TerminalPane {
             .map(|hovered| &hovered.target)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_status(
         &mut self,
         workspace_id: WorkspaceId,
@@ -3241,6 +3420,13 @@ impl TerminalPane {
             && self.native_service_hierarchy_generation == guard.hierarchy_generation
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_session.native_service_session_identity == origin.session_identity()
@@ -4113,7 +4299,11 @@ impl Render for TerminalPane {
                 active_hovered_link(
                     self.hovered_link.as_ref(),
                     self.screen.generation,
-                    self.pointer_modifiers.platform,
+                    spaceterm_ui::PointerConventions::get(cx).activates_link(gpui::Modifiers {
+                        control: self.pointer_modifiers.control,
+                        platform: self.pointer_modifiers.platform,
+                        ..Default::default()
+                    }),
                 )
                 .cloned()
             })
@@ -4254,7 +4444,7 @@ impl Render for TerminalPane {
                         super::appearance::chrome(cx),
                         cx,
                     );
-                    TERMINAL_PADDING.within_rim(frame.pane_rim_width(), frame.pane_inner_radius())
+                    TERMINAL_PADDING.within_pane(frame)
                 },
                 preedit,
                 focus_handle: self.focus_handle.clone(),
@@ -4345,7 +4535,7 @@ impl Render for TerminalPane {
             }
         });
 
-        div()
+        let pane_root = div()
             .debug_selector(move || native_context_selector.clone())
             .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
@@ -4366,10 +4556,13 @@ impl Render for TerminalPane {
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.focus_handle);
+        self.accessibility_element
+            .decorate(pane_root)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::paste_selection))
             .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
@@ -4381,6 +4574,10 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::clear_screen_and_scrollback))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
@@ -4794,23 +4991,6 @@ fn render_permission_request(
                     ),
             ),
     )
-}
-
-#[cfg(test)]
-fn select_terminal_font(font_names: &[String]) -> &'static str {
-    [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ]
-    .into_iter()
-    .find(|candidate| {
-        font_names
-            .iter()
-            .any(|available| available.eq_ignore_ascii_case(candidate))
-    })
-    .unwrap_or("Menlo")
 }
 
 fn measure_prepared_cell_width(

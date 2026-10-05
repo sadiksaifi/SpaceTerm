@@ -4,6 +4,7 @@ pub(crate) mod default_keymap;
 use std::rc::Rc;
 
 use crate::keybindings::{KeybindingPreferences, KeymapProfile, Shortcut};
+use crate::platform::keyboard_layout::KeyboardLayout;
 use gpui::{Action, App, KeyContext, Keymap, Modifiers, SharedString};
 use spaceterm_ui::{
     ComboBoxKeybindingProfile, CommandPaletteKeybindingProfile, MenuKeybindingProfile,
@@ -21,15 +22,64 @@ pub(crate) struct DesktopWording {
 pub(crate) trait ShortcutFormatter {
     /// Presents one key with its modifiers. The key is GPUI's lowercase key name, such as `k`,
     /// `enter`, or `f5`.
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString;
+    fn format_chord(
+        &self,
+        modifiers: Modifiers,
+        key: &str,
+        layout: &KeyboardLayout,
+    ) -> SharedString;
     fn format_modifiers(&self, modifiers: Modifiers) -> SharedString;
+}
+
+/// Uppercase shortcut keys without turning a single layout key into several characters.
+pub(crate) fn uppercase_shortcut_key(key: &str) -> String {
+    let uppercase = key.to_uppercase();
+    if key.chars().count() == 1 && uppercase.chars().count() != 1 {
+        key.to_owned()
+    } else {
+        uppercase
+    }
+}
+
+/// Which installed binding a desktop presents for an action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShortcutSelection {
+    /// The binding GPUI's native application menu shows, so hints agree with the menu bar.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop with a native menu bar composes this selection"
+        )
+    )]
+    NativeMenu,
+    /// The binding that reaches the terminal first, for a desktop without a native menu whose
+    /// text fields use other chords than the terminal.
+    #[allow(
+        dead_code,
+        reason = "only a desktop without a native menu bar composes this selection"
+    )]
+    TerminalSurface,
+}
+
+/// An application feature a desktop may have no equivalent for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HostFeature {
+    Updates,
+    MicrophoneAccess,
+    SystemPermissions,
 }
 
 #[derive(Clone)]
 pub(crate) struct DesktopPresentation {
     wording: DesktopWording,
     formatter: Rc<dyn ShortcutFormatter>,
+    selection: ShortcutSelection,
     shortcuts: Vec<PresentedShortcut>,
+    layout: KeyboardLayout,
+    /// Features this desktop has no equivalent for; their surfaces are omitted rather than shown
+    /// as unavailable.
+    absent_features: &'static [HostFeature],
 }
 
 struct PresentedShortcut {
@@ -47,12 +97,33 @@ impl Clone for PresentedShortcut {
 }
 
 impl DesktopPresentation {
-    pub(crate) fn new(wording: DesktopWording, formatter: Rc<dyn ShortcutFormatter>) -> Self {
+    pub(crate) fn new(
+        wording: DesktopWording,
+        formatter: Rc<dyn ShortcutFormatter>,
+        selection: ShortcutSelection,
+        absent_features: &'static [HostFeature],
+    ) -> Self {
         Self {
             wording,
             formatter,
+            selection,
             shortcuts: Vec::new(),
+            layout: KeyboardLayout::default(),
+            absent_features,
         }
+    }
+
+    /// Replaces the features this desktop has no equivalent for.
+    #[cfg(test)]
+    pub(crate) const fn without_features(mut self, absent: &'static [HostFeature]) -> Self {
+        self.absent_features = absent;
+        self
+    }
+
+    /// Whether this desktop has `feature`. A present feature keeps its surfaces even while its
+    /// capability is unavailable, so they can explain why.
+    pub(crate) fn has_feature(&self, feature: HostFeature) -> bool {
+        !self.absent_features.contains(&feature)
     }
 
     pub(crate) fn get(cx: &App) -> &Self {
@@ -72,13 +143,16 @@ impl DesktopPresentation {
 
     pub(crate) fn format(&self, shortcut: &Shortcut) -> SharedString {
         self.formatter
-            .format_chord(shortcut.modifiers(), shortcut.key())
+            .format_chord(shortcut.modifiers(), shortcut.key(), &self.layout)
     }
 
     /// Presents a chord that need not be a valid [`Shortcut`], such as one a recorder refused.
     pub(crate) fn format_keystroke(&self, keystroke: &gpui::Keystroke) -> SharedString {
-        self.formatter
-            .format_chord(keystroke.modifiers, &keystroke.key.to_ascii_lowercase())
+        self.formatter.format_chord(
+            keystroke.modifiers,
+            &keystroke.key.to_ascii_lowercase(),
+            &self.layout,
+        )
     }
 
     pub(crate) fn format_modifiers(&self, modifiers: Modifiers) -> SharedString {
@@ -86,6 +160,11 @@ impl DesktopPresentation {
     }
 
     pub(crate) fn refresh(&mut self, cx: &App) {
+        if cx.has_global::<crate::keybindings::runtime::KeymapRuntime>() {
+            self.layout = crate::keybindings::runtime::KeymapRuntime::profile(cx)
+                .layout()
+                .clone();
+        }
         self.refresh_keymap(&cx.key_bindings().borrow());
     }
 
@@ -100,7 +179,13 @@ impl DesktopPresentation {
             {
                 continue;
             }
-            if let Some(shortcut) = installed_shortcut(keymap, action) {
+            let shortcut = match self.selection {
+                ShortcutSelection::NativeMenu => installed_shortcut(keymap, action),
+                ShortcutSelection::TerminalSurface => {
+                    selected_shortcut(keymap, action, Some(crate::ui::TERMINAL_KEY_CONTEXT))
+                }
+            };
+            if let Some(shortcut) = shortcut {
                 self.shortcuts.push(PresentedShortcut {
                     action: action.boxed_clone(),
                     display: self.format(&shortcut),
@@ -110,29 +195,47 @@ impl DesktopPresentation {
     }
 }
 
-/// Match GPUI's native menu selection: first default-context match, or first binding.
+/// Match GPUI's native menu selection among presentable bindings: first default-context
+/// match, or first binding. Terminal chords are presented only when the host explicitly
+/// installed a fixed application binding, such as F11 for full screen.
 pub(crate) fn installed_shortcut(keymap: &Keymap, action: &dyn Action) -> Option<Shortcut> {
+    selected_shortcut(keymap, action, None)
+}
+
+/// The native menu selection with `surface` joining GPUI's default contexts.
+fn selected_shortcut(
+    keymap: &Keymap,
+    action: &dyn Action,
+    surface: Option<&str>,
+) -> Option<Shortcut> {
     let mut context = KeyContext::new_with_defaults();
-    for name in ["Workspace", "Pane", "Editor"] {
+    for name in ["Workspace", "Pane", "Editor"].into_iter().chain(surface) {
         context.add(name);
     }
     let contexts = [context];
-    let mut bindings = keymap.bindings_for_action(action);
+    let mut bindings = keymap.bindings_for_action(action).filter_map(|binding| {
+        let [keystroke] = binding.keystrokes() else {
+            return None;
+        };
+        let shortcut = Shortcut::from_keystroke(keystroke.inner()).ok()?;
+        (binding.meta() == Some(crate::keybindings::FIXED_BINDINGS)
+            || crate::keybindings::is_presentable(&shortcut))
+        .then_some((binding, shortcut))
+    });
     let first = bindings.next()?;
     let matches = |binding: &gpui::KeyBinding| {
         binding
             .predicate()
             .is_none_or(|predicate| predicate.eval(&contexts))
     };
-    let binding = if matches(first) {
+    let (_, shortcut) = if matches(first.0) {
         first
     } else {
-        bindings.find(|binding| matches(binding)).unwrap_or(first)
+        bindings
+            .find(|(binding, _)| matches(binding))
+            .unwrap_or(first)
     };
-    let [keystroke] = binding.keystrokes() else {
-        return None;
-    };
-    Shortcut::parse(&keystroke.unparse()).ok()
+    Some(shortcut)
 }
 impl gpui::Global for DesktopPresentation {}
 
@@ -142,6 +245,7 @@ pub(crate) struct DesktopProfile {
     control_keys: ControlKeybindingProfiles,
     keymap: KeymapProfile,
     locale: std::rc::Rc<dyn crate::platform::locale::LocaleDirection>,
+    fonts: crate::host_fonts::HostFonts,
 }
 
 #[derive(Clone, Copy)]
@@ -190,10 +294,34 @@ impl DesktopProfile {
             control_keys,
             keymap,
             locale,
+            fonts: crate::host_fonts::HostFonts::default(),
         }
     }
+
+    pub(crate) fn with_fonts(mut self, fonts: crate::host_fonts::HostFonts) -> Self {
+        self.fonts = fonts;
+        self
+    }
     pub(crate) fn install(&self, cx: &mut App) -> KeymapProfile {
-        cx.set_global(self.presentation.clone());
+        cx.set_global(self.fonts.clone());
+        let mut keymap = self.keymap.clone();
+        if let Err(error) = keymap.refresh_layout(cx.keyboard_layout()) {
+            eprintln!("failed to install keyboard layout: {error}");
+        }
+        let mut presentation = self.presentation.clone();
+        presentation.layout = keymap.layout().clone();
+        cx.set_global(presentation);
+        spaceterm_ui::install_pointer_conventions(
+            cx,
+            match keymap.terminal_conventions() {
+                crate::keybindings::TerminalConventions::CommandShortcuts => {
+                    spaceterm_ui::PointerConventions::ControlClickSecondary
+                }
+                crate::keybindings::TerminalConventions::ControlShiftShortcuts => {
+                    spaceterm_ui::PointerConventions::SecondaryButton
+                }
+            },
+        );
         spaceterm_ui::install_modal_policy(
             cx,
             self.modal_policy
@@ -208,13 +336,13 @@ impl DesktopProfile {
         spaceterm_ui::install_text_input_keybindings(cx, self.control_keys.text_input);
         spaceterm_ui::install_text_area_keybindings(cx, self.control_keys.text_input);
         cx.bind_keys(
-            self.keymap
+            keymap
                 .resolve(&KeybindingPreferences::default())
                 .key_bindings(),
         );
-        cx.bind_keys(self.keymap.control_bindings().iter().cloned());
-        cx.bind_keys(self.keymap.fixed_bindings().iter().cloned());
-        self.keymap.clone()
+        cx.bind_keys(keymap.control_bindings().iter().cloned());
+        cx.bind_keys(keymap.fixed_bindings().iter().cloned());
+        keymap
     }
 }
 
@@ -223,12 +351,12 @@ struct TestingShortcutFormatter;
 
 #[cfg(test)]
 impl ShortcutFormatter for TestingShortcutFormatter {
-    fn format_chord(&self, modifiers: Modifiers, key: &str) -> SharedString {
+    fn format_chord(&self, modifiers: Modifiers, key: &str, _: &KeyboardLayout) -> SharedString {
         let key = match key {
             "enter" => "Enter".to_owned(),
             "space" => "Space".to_owned(),
             "tab" => "Tab".to_owned(),
-            _ => key.to_uppercase(),
+            _ => uppercase_shortcut_key(key),
         };
         let modifiers = self.format_modifiers(modifiers);
         if modifiers.is_empty() {
@@ -271,6 +399,8 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             system_directory_selection: "Choose Directory…",
         },
         Rc::new(TestingShortcutFormatter),
+        ShortcutSelection::NativeMenu,
+        &[],
     );
     let profile = default_keymap::profile(
         crate::platform::keyboard_layout::testing::us(),
@@ -318,6 +448,31 @@ mod tests {
     use gpui::KeyBinding;
 
     #[gpui::test]
+    fn the_first_layout_snapshot_is_taken_at_installation(cx: &mut gpui::TestAppContext) {
+        #[derive(Debug)]
+        struct CountedLayout(Rc<std::cell::Cell<usize>>);
+        impl crate::platform::keyboard_layout::KeyboardLayoutAdapter for CountedLayout {
+            fn snapshot(
+                &self,
+                _: &dyn gpui::PlatformKeyboardLayout,
+            ) -> Result<KeyboardLayout, crate::platform::keyboard_layout::KeyboardLayoutUnavailable>
+            {
+                self.0.set(self.0.get() + 1);
+                Ok(KeyboardLayout::us_english())
+            }
+        }
+        let snapshots = Rc::new(std::cell::Cell::new(0));
+        let mut profile = testing_profile(spaceterm_ui::TextDirection::LeftToRight);
+        profile.keymap =
+            default_keymap::profile(Rc::new(CountedLayout(snapshots.clone())), vec![]).unwrap();
+        assert_eq!(snapshots.get(), 0);
+        cx.update(|cx| {
+            profile.install(cx);
+        });
+        assert_eq!(snapshots.get(), 1);
+    }
+
+    #[gpui::test]
     fn complete_profile_installs_the_expected_bindings(cx: &mut gpui::TestAppContext) {
         let actual = cx.update(|cx| {
             crate::ui::init(cx).unwrap();
@@ -336,7 +491,7 @@ mod tests {
             let tagged = keymap.bindings().enumerate().filter_map(|(index, binding)| {
                 (binding.meta() == Some(crate::keybindings::CUSTOMIZABLE_BINDINGS)).then_some(index)
             }).collect::<Vec<_>>();
-            assert_eq!(tagged.len(), 48);
+            assert_eq!(tagged.len(), 54);
             assert!(tagged.windows(2).all(|pair| pair[1] == pair[0] + 1));
             assert_eq!(DesktopPresentation::get(cx).shortcut(&crate::ui::IncreaseTerminalFontSize).as_deref(), Some("Primary+="));
             // Settings keeps its fixed Shortcut outside the customizable segment.
@@ -360,9 +515,18 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         });
+        // The baseline spells the platform modifier as "cmd"; GPUI spells it per host.
         let expected = include_str!("keybindings_baseline.txt")
             .lines()
-            .map(str::to_owned)
+            .map(|line| {
+                let (keys, rest) = line.split_once('\t').unwrap();
+                let keys = keys
+                    .split(' ')
+                    .map(|key| gpui::Keystroke::parse(key).unwrap().unparse())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{keys}\t{rest}")
+            })
             .collect::<Vec<_>>();
         #[cfg(feature = "developer-tools")]
         let expected = {
@@ -370,15 +534,18 @@ mod tests {
             let mut expected = expected;
             expected.extend([
                 format!(
-                    "alt-cmd-a\tNone\t{}",
+                    "{}\tNone\t{}",
+                    gpui::Keystroke::parse("alt-cmd-a").unwrap().unparse(),
                     crate::ui::developer_workbench::OpenDeveloperWorkbench.name()
                 ),
                 format!(
-                    "alt-cmd-c\tNone\t{}",
+                    "{}\tNone\t{}",
+                    gpui::Keystroke::parse("alt-cmd-c").unwrap().unparse(),
                     crate::ui::developer_workbench::ToggleAppearancePreview.name()
                 ),
                 format!(
-                    "cmd-w\tSome(Identifier(\"DeveloperWorkbench\"))\t{}",
+                    "{}\tSome(Identifier(\"DeveloperWorkbench\"))\t{}",
+                    gpui::Keystroke::parse("cmd-w").unwrap().unparse(),
                     crate::ui::developer_workbench::CloseDeveloperWorkbench.name()
                 ),
             ]);
@@ -413,10 +580,51 @@ mod tests {
             serde_json::from_str(r#"{"new_workspace":"cmd-alt-a"}"#).unwrap();
         let resolved = profile.resolve(&preferences);
         assert_eq!(
-            resolved.state(Command::NewWorkspace),
-            KeybindingState::Blocked(SystemReservation::DeveloperWorkbench)
+            resolved.inactive_override(Command::NewWorkspace),
+            Some(Reservation::System(SystemReservation::DeveloperWorkbench))
         );
-        assert!(resolved.shortcuts(Command::NewWorkspace).is_empty());
+        assert_eq!(
+            resolved.state(Command::NewWorkspace),
+            KeybindingState::Default
+        );
+        assert!(
+            !resolved
+                .shortcuts(Command::NewWorkspace)
+                .contains(&workbench)
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_surface_selection_presents_the_terminal_binding_over_text_field_chords(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-insert", NewWorkspace, Some("SpaceTermTextInput")),
+                KeyBinding::new(
+                    "ctrl-shift-y",
+                    NewWorkspace,
+                    Some(crate::ui::TERMINAL_KEY_CONTEXT),
+                ),
+            ]);
+            let mut native = testing_presentation();
+            native.refresh(cx);
+            assert_eq!(
+                native.shortcut(&NewWorkspace).as_deref(),
+                Some("Ctrl+INSERT")
+            );
+            let mut terminal = DesktopPresentation::new(
+                native.wording(),
+                Rc::new(TestingShortcutFormatter),
+                ShortcutSelection::TerminalSurface,
+                &[],
+            );
+            terminal.refresh(cx);
+            assert_eq!(
+                terminal.shortcut(&NewWorkspace).as_deref(),
+                Some("Ctrl+Shift+Y")
+            );
+        });
     }
 
     #[gpui::test]

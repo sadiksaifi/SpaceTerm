@@ -53,7 +53,10 @@ impl SettingsSectionId {
         }
     }
 
-    pub(super) const fn description(self) -> &'static str {
+    pub(super) fn description(
+        self,
+        desktop: &crate::desktop_profile::DesktopPresentation,
+    ) -> &'static str {
         match self {
             Self::Interface => "Density, transparency, and blur for SpaceTerm's windows.",
             Self::Font => "The typeface and text rendering in terminal panes.",
@@ -63,9 +66,12 @@ impl SettingsSectionId {
             Self::Keybindings => {
                 "Shortcuts for SpaceTerm commands. Click a shortcut, then press the new keys. Press Delete to remove it."
             }
-            Self::Privacy => {
+            Self::Privacy
+                if desktop.has_feature(crate::desktop_profile::HostFeature::SystemPermissions) =>
+            {
                 "Clipboard access and system permissions for programs running in SpaceTerm."
             }
+            Self::Privacy => "Clipboard access for programs running in SpaceTerm.",
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
@@ -684,6 +690,10 @@ shortcut_rows! {
     ActivateTab7 => "activate-tab-7",
     ActivateTab8 => "activate-tab-8",
     ActivateTab9 => "activate-tab-9",
+    NextTab => "next-tab",
+    PreviousTab => "previous-tab",
+    MoveTabRight => "move-tab-right",
+    MoveTabLeft => "move-tab-left",
     ClosePane => "close-pane",
     SplitRight => "split-right",
     SplitDown => "split-down",
@@ -698,11 +708,16 @@ shortcut_rows! {
     FindNext => "find-next",
     FindPrevious => "find-previous",
     ClearTerminalScreenAndScrollback => "clear-terminal-screen-and-scrollback",
+    ScrollPageUp => "scroll-page-up",
+    ScrollPageDown => "scroll-page-down",
+    ScrollToTop => "scroll-to-top",
+    ScrollToBottom => "scroll-to-bottom",
     IncreaseTerminalFontSize => "increase-terminal-font-size",
     DecreaseTerminalFontSize => "decrease-terminal-font-size",
     ResetTerminalFontSize => "reset-terminal-font-size",
     ToggleSidebar => "toggle-sidebar",
     ToggleSidebarFocus => "toggle-sidebar-focus",
+    KeyboardShortcuts => "keyboard-shortcuts",
 }
 
 #[cfg(test)]
@@ -710,6 +725,21 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn privacy_description_promises_only_host_features() {
+        let desktop = crate::desktop_profile::testing_presentation();
+        assert_eq!(
+            SettingsSectionId::Privacy.description(&desktop),
+            "Clipboard access and system permissions for programs running in SpaceTerm."
+        );
+        let desktop =
+            desktop.without_features(&[crate::desktop_profile::HostFeature::SystemPermissions]);
+        assert_eq!(
+            SettingsSectionId::Privacy.description(&desktop),
+            "Clipboard access for programs running in SpaceTerm."
+        );
+    }
 
     /// Searches as on macOS 27 and later; the naming tests below cover earlier systems.
     fn matching_rows(query: &str) -> Vec<SettingsRowId> {

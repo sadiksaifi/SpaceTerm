@@ -522,6 +522,18 @@
         "activate_tab9": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "next_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "previous_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "move_tab_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "move_tab_left": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "close_pane": {
           "$ref": "#/$defs/shortcutOverride"
         },
@@ -564,6 +576,18 @@
         "clear_terminal_screen_and_scrollback": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "scroll_page_up": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_page_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_to_top": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_to_bottom": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "increase_terminal_font_size": {
           "$ref": "#/$defs/shortcutOverride"
         },
@@ -577,6 +601,9 @@
           "$ref": "#/$defs/shortcutOverride"
         },
         "toggle_sidebar_focus": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "keyboard_shortcuts": {
           "$ref": "#/$defs/shortcutOverride"
         }
       }

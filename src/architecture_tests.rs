@@ -50,13 +50,23 @@ fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
                 "gpui::",
                 "cocoa::",
                 "objc::",
+                "gpui_linux",
+                "zbus::",
                 "std::env::",
                 "crate::ui::",
             ],
         ),
         (
             "src/settings",
-            &["gpui::", "cocoa::", "objc::", "std::env::", "crate::ui::"],
+            &[
+                "gpui::",
+                "cocoa::",
+                "objc::",
+                "gpui_linux",
+                "zbus::",
+                "std::env::",
+                "crate::ui::",
+            ],
         ),
         (
             "src/terminal",
@@ -136,7 +146,8 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "ui/pane_host.rs",
         "ui/tab_manager.rs",
     ] {
-        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let source =
+            without_host_lint_allowances(&std::fs::read_to_string(root.join(name)).unwrap());
         let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         for forbidden in [
             "std::os::unix",
@@ -150,6 +161,8 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
             "OpenOptionsExt",
             "PermissionsExt",
             "macos_local_identity",
+            "linux_local_identity",
+            "unix_local_identity",
             "target_os",
             "identity.device",
             "identity.inode",
@@ -244,12 +257,15 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     for path in sources {
         if path == root.join("architecture_tests.rs")
             || path == root.join("platform/mod.rs")
-            || path.starts_with(root.join("platform/macos_adapter_tests"))
+            || is_native_suite_source(&root, &path)
         {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        if source.contains("macos_adapter_tests/") {
+        if NativeSuitePlatform::ALL
+            .iter()
+            .any(|platform| source.contains(&format!("{}/", platform.suite())))
+        {
             files.push(path);
         }
     }
@@ -262,7 +278,9 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
             Some("conformance.rs" | "testing.rs")
         ) {
             assert!(
-                !source.contains("macos_adapter_tests"),
+                !NativeSuitePlatform::ALL
+                    .iter()
+                    .any(|platform| source.contains(platform.suite())),
                 "{} mounts native tests in shared facilities",
                 path.display()
             );
@@ -335,34 +353,65 @@ fn is_test_source(path: &std::path::Path) -> bool {
         || path.components().any(|part| part.as_os_str() == "tests")
 }
 
+/// The Operating-System family whose isolated Adapter suite a shared owner mounts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeSuitePlatform {
+    Macos,
+    Linux,
+    Unix,
+}
+
+impl NativeSuitePlatform {
+    const ALL: [Self; 3] = [Self::Macos, Self::Linux, Self::Unix];
+
+    const fn suite(self) -> &'static str {
+        match self {
+            Self::Macos => "macos_adapter_tests",
+            Self::Linux => "linux_adapter_tests",
+            Self::Unix => "unix_adapter_tests",
+        }
+    }
+}
+
+fn is_native_suite_source(root: &std::path::Path, path: &std::path::Path) -> bool {
+    NativeSuitePlatform::ALL
+        .iter()
+        .any(|platform| path.starts_with(root.join("platform").join(platform.suite())))
+}
+
 pub(crate) fn portable_verification_source(source: &str) -> String {
+    let source = without_host_lint_allowances(source);
     let lines: Vec<_> = source.lines().collect();
     let mut portable = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        let line = lines[index].trim();
-        if native_suite_gate(line)
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| native_suite_declaration(next.trim(), "#[path = \"", "\"]"))
-            && lines.get(index + 2).is_some_and(|next| {
-                matches!(
-                    next.trim(),
-                    "mod macos_adapter_tests;" | "pub(crate) mod macos_adapter_tests;"
-                )
-            })
-        {
-            index += 3;
-        } else if native_suite_gate(line)
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| next.trim() == "mod macos_adapter_tests {")
-            && lines
-                .get(index + 2)
-                .is_some_and(|next| native_suite_declaration(next.trim(), "include!(\"", "\");"))
-            && lines.get(index + 3).is_some_and(|next| next.trim() == "}")
-        {
-            index += 4;
+        let mounted = source_attribute(&lines, index).and_then(|(attribute, length)| {
+            let platform = native_suite_gate(&attribute)?;
+            let suite = platform.suite();
+            let end = index + length;
+            let path_mount = lines.get(end).is_some_and(|next| {
+                native_suite_declaration(next.trim(), "#[path = \"", "\"]", platform)
+            }) && lines.get(end + 1).is_some_and(|next| {
+                let next = next.trim();
+                next == format!("mod {suite};") || next == format!("pub(crate) mod {suite};")
+            });
+            let include_mount = lines
+                .get(end)
+                .is_some_and(|next| next.trim() == format!("mod {suite} {{"))
+                && lines.get(end + 1).is_some_and(|next| {
+                    native_suite_declaration(next.trim(), "include!(\"", "\");", platform)
+                })
+                && lines.get(end + 2).is_some_and(|next| next.trim() == "}");
+            if path_mount {
+                Some(length + 2)
+            } else if include_mount {
+                Some(length + 3)
+            } else {
+                None
+            }
+        });
+        if let Some(length) = mounted {
+            index += length;
         } else {
             portable.push(lines[index]);
             index += 1;
@@ -371,43 +420,121 @@ pub(crate) fn portable_verification_source(source: &str) -> String {
     portable.join("\n")
 }
 
-fn native_suite_gate(line: &str) -> bool {
+/// Removes only the exact lint attribute that lets a shared facility stay unused on desktops
+/// whose Adapters do not consume it. The attribute selects no code, so it is not host selection.
+fn without_host_lint_allowances(source: &str) -> String {
+    let lines: Vec<_> = source.lines().collect();
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let attribute = source_attribute(&lines, index)
+            .and_then(|(compact, length)| is_host_lint_allowance(&compact).then_some(length));
+        if let Some(length) = attribute {
+            index += length;
+        } else {
+            kept.push(lines[index]);
+            index += 1;
+        }
+    }
+    kept.join("\n")
+}
+
+/// Read a complete source attribute without depending on rustfmt's line wrapping. Consumers
+/// still accept only exact approved attributes; unrecognized attributes leave the source intact.
+fn source_attribute(lines: &[&str], index: usize) -> Option<(String, usize)> {
+    let first = lines.get(index)?.trim();
+    if !first.starts_with("#[") && !first.starts_with("#![") {
+        return None;
+    }
+    let length = lines[index..]
+        .iter()
+        .position(|line| line.trim_end().ends_with(']'))?
+        + 1;
+    let compact = lines[index..index + length]
+        .concat()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    Some((compact, length))
+}
+
+fn is_host_lint_allowance(compact: &str) -> bool {
+    let compact = compact.replace(",)", ")");
+    let Some(rest) = compact
+        .strip_prefix("#[")
+        .or_else(|| compact.strip_prefix("#!["))
+    else {
+        return false;
+    };
+    rest.strip_prefix("cfg_attr(not(target_os=\"macos\"),allow(dead_code,reason=\"")
+        .and_then(|reason| reason.strip_suffix("\"))]"))
+        .is_some_and(|reason| !reason.is_empty() && !reason.contains(['"', '\\']))
+}
+
+fn native_suite_gate(line: &str) -> Option<NativeSuitePlatform> {
     let compact: String = line
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    matches!(
-        compact.as_str(),
-        "#[cfg(all(test,target_os=\"macos\",feature=\"macos-native-tests\"))]"
-    )
+    match compact.replace(",)", ")").as_str() {
+        "#[cfg(all(test,target_os=\"macos\",feature=\"native-tests\"))]" => {
+            Some(NativeSuitePlatform::Macos)
+        }
+        "#[cfg(all(test,target_os=\"linux\",feature=\"native-tests\"))]" => {
+            Some(NativeSuitePlatform::Linux)
+        }
+        "#[cfg(all(test,any(target_os=\"macos\",target_os=\"linux\"),feature=\"native-tests\"))]" => {
+            Some(NativeSuitePlatform::Unix)
+        }
+        _ => None,
+    }
+}
+
+fn source_gate(line: &str, target: &str) -> bool {
+    let compact: String = line
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    [
+        format!("#[cfg({target})]"),
+        format!("#[cfg(all({target},not(test)))]"),
+        format!("#[cfg(all({target},test))]"),
+        format!("#[cfg(all(test,{target},feature=\"native-tests\"))]"),
+    ]
+    .contains(&compact)
 }
 
 fn positive_macos_source_gate(line: &str) -> bool {
-    let compact: String = line
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    matches!(
-        compact.as_str(),
-        "#[cfg(target_os=\"macos\")]"
-            | "#[cfg(all(target_os=\"macos\",not(test)))]"
-            | "#[cfg(all(target_os=\"macos\",test))]"
-            | "#[cfg(all(test,target_os=\"macos\",feature=\"macos-native-tests\"))]"
-    )
+    source_gate(line, "target_os=\"macos\"")
 }
 
-fn native_suite_declaration(line: &str, prefix: &str, suffix: &str) -> bool {
+fn positive_linux_source_gate(line: &str) -> bool {
+    source_gate(line, "target_os=\"linux\"")
+}
+
+fn positive_unix_source_gate(line: &str) -> bool {
+    source_gate(line, "any(target_os=\"macos\",target_os=\"linux\")")
+}
+
+fn native_suite_declaration(
+    line: &str,
+    prefix: &str,
+    suffix: &str,
+    platform: NativeSuitePlatform,
+) -> bool {
     let Some(path) = line
         .strip_prefix(prefix)
         .and_then(|value| value.strip_suffix(suffix))
     else {
         return false;
     };
-    let Some((directory, file)) = path.split_once("macos_adapter_tests/") else {
+    let Some((directory, file)) = path.split_once(&format!("{}/", platform.suite())) else {
         return false;
     };
-    matches!(directory, "" | "../" | "../platform/" | "../../platform/")
-        && file.ends_with(".rs")
+    matches!(
+        directory,
+        "" | "../" | "platform/" | "../platform/" | "../../platform/"
+    ) && file.ends_with(".rs")
         && file
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
@@ -426,7 +553,18 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
             "ComboBoxKeybindingProfile::MacOs",
             "ExplicitComboBoxProfile",
         )
-        .replace("TextInputKeybindingProfile::MacOs", "ExplicitTextProfile");
+        .replace("TextInputKeybindingProfile::MacOs", "ExplicitTextProfile")
+        .replace("ModalKeybindingProfile::Linux", "ExplicitModalProfile")
+        .replace("MenuKeybindingProfile::Linux", "ExplicitMenuProfile")
+        .replace(
+            "CommandPaletteKeybindingProfile::Linux",
+            "ExplicitCommandPaletteProfile",
+        )
+        .replace(
+            "ComboBoxKeybindingProfile::Linux",
+            "ExplicitComboBoxProfile",
+        )
+        .replace("TextInputKeybindingProfile::Linux", "ExplicitTextProfile");
     let compact: String = source
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -437,7 +575,15 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
         "Macos",
         "MacOs",
         "MacOS",
+        "linux_",
+        "Linux",
+        "platform::unix_",
         "std::os::unix",
+        "std::os::linux",
+        "gpui_linux",
+        "gpui_wgpu",
+        "zbus::",
+        "accesskit_unix",
         "std::os::windows",
         "libc::",
         "launch_host::",
@@ -479,6 +625,18 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod native_evidence;",
         "mod native_evidence {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
         "include!(\"../platform/macos_adapter_tests/session.rs\"); use libc::kill;",
+        "use crate::platform::linux_pty::LinuxPtyHost;",
+        "use crate::platform::unix_pty::UnixNativePtyAdapterFactory;",
+        "let profile = crate::keybindings::TerminalConventions::Linux;",
+        "use std::os::linux::fs::MetadataExt;",
+        "let connection = zbus::Connection::session();",
+        "#[cfg(all(test, target_os = \"linux\", feature = \"native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod linux_adapter_tests {\ninclude!(\"../platform/linux_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(test, target_os = \"linux\", feature = \"native-tests\"))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
+        "#[cfg_attr(not(target_os = \"macos\"), path = \"linux.rs\")]\nmod host;",
+        "#[cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"x\"))] use libc::kill;",
+        "#[cfg_attr(not(target_os = \"linux\"), allow(dead_code, reason = \"host\"))]\nstruct Host;",
+        "#[cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"a\\\"))] use libc::kill; //\"))]",
     ] {
         assert!(
             native_verification_dependency(&portable_verification_source(source)).is_some(),
@@ -486,16 +644,29 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         );
     }
     for wiring in [
-        "#[cfg(all(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
-        "#[cfg(all(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(\n    test,\n    any(target_os = \"macos\", target_os = \"linux\"),\n    feature = \"native-tests\",\n))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
+        "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(\n        dead_code,\n        reason = \"only a native Adapter consumes it\",\n    )\n)]\nstruct Endpoint;",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"platform/macos_adapter_tests/traffic_lights.rs\");\n}",
+        "#[cfg(all(test, target_os = \"linux\", feature = \"native-tests\"))]\n#[path = \"../platform/linux_adapter_tests/session.rs\"]\nmod linux_adapter_tests;",
+        "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
+        "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\nmod unix_adapter_tests {\ninclude!(\"../platform/unix_adapter_tests/session.rs\");\n}",
+        "#[cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]\nstruct Endpoint;",
+        "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(dead_code, reason = \"only a native Adapter consumes it\")\n)]\nstruct Endpoint;",
+        "#![cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]",
+        "let profile = TextInputKeybindingProfile::Linux;",
     ] {
-        assert!(native_verification_dependency(&portable_verification_source(wiring)).is_none());
+        assert!(
+            native_verification_dependency(&portable_verification_source(wiring)).is_none(),
+            "rejected {wiring}"
+        );
     }
     for wiring in [
         "#[cfg(test)]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;",
         "#[cfg(target_os = \"macos\")]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
-        "#[cfg(all(target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
-        "#[cfg(any(test, target_os = \"macos\", feature = \"macos-native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(all(target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
+        "#[cfg(any(test, target_os = \"macos\", feature = \"native-tests\"))]\nmod macos_adapter_tests {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
     ] {
         assert!(native_verification_dependency(&portable_verification_source(wiring)).is_some());
     }
@@ -507,54 +678,104 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
     let mut files = Vec::new();
     collect_rust_sources(&root, &mut files);
     for path in files {
-        if path == root.join("architecture_tests.rs")
-            || path.starts_with(root.join("platform/macos_adapter_tests"))
-        {
+        if path == root.join("architecture_tests.rs") || is_native_suite_source(&root, &path) {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        if !source.contains("macos_adapter_tests/") {
-            continue;
+        let portable = portable_verification_source(&source);
+        for platform in NativeSuitePlatform::ALL {
+            let mount = format!("{}/", platform.suite());
+            assert!(
+                !source.contains(&mount) || !portable.contains(&mount),
+                "{} mounts native evidence without the complete gate",
+                path.display()
+            );
         }
-        assert!(
-            !portable_verification_source(&source).contains("macos_adapter_tests/"),
-            "{} mounts native evidence without the complete gate",
-            path.display()
-        );
     }
 }
 
 #[test]
-fn macos_source_modules_are_target_gated_while_portable_policy_is_not() {
+fn platform_source_modules_are_target_gated_while_portable_policy_is_not() {
     let source = include_str!("platform/mod.rs");
     let lines = source.lines().collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
         let declaration = line.trim();
-        if (declaration.starts_with("mod macos_")
-            || declaration.starts_with("pub(crate) mod macos_")
-            || declaration.starts_with("pub(crate) use macos_"))
-            && !declaration.contains("macos_adapter_tests")
-        {
-            assert!(
-                index > 0 && positive_macos_source_gate(lines[index - 1]),
-                "{declaration} is not explicitly owned by the macOS source set"
-            );
-        }
+        let previous = index.checked_sub(1).map(|previous| lines[previous]);
+        let owned = |family: &str, main: Option<&str>, gate: fn(&str) -> bool| {
+            let declared = (declaration.starts_with(&format!("mod {family}_"))
+                || declaration.starts_with(&format!("pub(crate) mod {family}_"))
+                || declaration.starts_with(&format!("pub(crate) use {family}_"))
+                || main == Some(declaration))
+                && !declaration.contains(&format!("{family}_adapter_tests"));
+            !declared || previous.is_some_and(gate)
+        };
+        assert!(
+            owned(
+                "macos",
+                Some("pub(crate) use macos_composition::main;"),
+                positive_macos_source_gate
+            ),
+            "{declaration} is not explicitly owned by the macOS source set"
+        );
+        assert!(
+            owned(
+                "linux",
+                Some("pub(crate) use linux_composition::main;"),
+                positive_linux_source_gate
+            ),
+            "{declaration} is not explicitly owned by the Linux source set"
+        );
+        assert!(
+            owned("unix", None, positive_unix_source_gate),
+            "{declaration} is not explicitly owned by the shared Unix source set"
+        );
     }
     let askpass = lines
         .iter()
         .position(|line| line.trim() == "pub(crate) mod ssh_askpass;")
         .unwrap();
     assert!(!lines[askpass - 1].contains("target_os"));
-    assert!(source.contains("compile_error!(\"SpaceTerm currently supports macOS only\")"));
+    let guard = lines
+        .iter()
+        .position(|line| {
+            line.trim() == "compile_error!(\"SpaceTerm supports macOS and Linux only\");"
+        })
+        .unwrap();
+    assert_eq!(
+        lines[guard - 1].trim(),
+        "#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]"
+    );
 
     for invalid in [
         "#[cfg(not(target_os = \"macos\"))]",
         "#[cfg(any(target_os = \"macos\", test))]",
         "// target_os = \"macos\"",
-        "#[cfg(feature = \"macos-native-tests\")] // target_os = \"macos\"",
+        "#[cfg(feature = \"native-tests\")] // target_os = \"macos\"",
     ] {
         assert!(!positive_macos_source_gate(invalid), "accepted {invalid}");
+    }
+    for invalid in [
+        "#[cfg(not(target_os = \"linux\"))]",
+        "#[cfg(any(target_os = \"linux\", test))]",
+        "#[cfg(target_os = \"macos\")]",
+        "// target_os = \"linux\"",
+    ] {
+        assert!(!positive_linux_source_gate(invalid), "accepted {invalid}");
+    }
+    for invalid in [
+        "#[cfg(unix)]",
+        "#[cfg(target_os = \"linux\")]",
+        "#[cfg(any(target_os = \"macos\", target_os = \"linux\", test))]",
+        "#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]",
+    ] {
+        assert!(!positive_unix_source_gate(invalid), "accepted {invalid}");
+    }
+    for valid in [
+        "#[cfg(any(target_os = \"macos\", target_os = \"linux\"))]",
+        "#[cfg(all(any(target_os = \"macos\", target_os = \"linux\"), not(test)))]",
+        "#[cfg(all(any(target_os = \"macos\", target_os = \"linux\"), test))]",
+    ] {
+        assert!(positive_unix_source_gate(valid), "rejected {valid}");
     }
 }
 
@@ -570,6 +791,14 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
         "Quick Look",
         "this Mac",
         "macOS",
+        "Ctrl+",
+        "Super+",
+        "GNOME",
+        "Nautilus",
+        "Sushi",
+        "Linux",
+        "Menlo",
+        ".SystemUIFont",
     ]
     .into_iter()
     .find(|forbidden| source.contains(forbidden))
@@ -581,8 +810,14 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let mut files = Vec::new();
     collect_rust_sources(&root.join("ui"), &mut files);
     files.push(root.join("terminal/failure.rs"));
+    files.push(root.join("appearance/resolution.rs"));
+    files.push(root.join("../crates/spaceterm-ui/src/appearance.rs"));
     for path in files {
-        if is_test_source(&path) {
+        if is_test_source(&path)
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
+        {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
@@ -619,6 +854,13 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
         "let label = \"Quick Look\";",
         "let description = \"Pinned to a directory on this Mac\";",
         "let failure = \"macOS integration\";",
+        "tooltip.keyboard_equivalent(\"Ctrl+Shift+T\")",
+        "let label = \"Super+Space\";",
+        "let label = \"Preview with GNOME Sushi\";",
+        "let label = \"Show in Nautilus\";",
+        "let failure = \"Linux integration\";",
+        "let family = \"Menlo\";",
+        "let family = \".SystemUIFont\";",
     ] {
         assert!(
             shared_presentation_violation(source).is_some(),
@@ -626,6 +868,7 @@ fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
         );
     }
     assert!(shared_presentation_violation("profile.shortcut(&CreateTab)").is_none());
+    assert!(shared_presentation_violation("KeyBinding::new(\"ctrl-alt-n\", Next, None)").is_none());
 }
 
 #[test]
@@ -661,6 +904,13 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
             "QuickLook",
             "Quick Look",
             "quick_look",
+            "Nautilus",
+            "nautilus",
+            "Sushi",
+            "sushi",
+            "NautilusPreviewer",
+            "xdg-open",
+            "gio ",
         ] {
             assert!(!source.contains(forbidden), "{name} contains {forbidden}");
         }
@@ -688,9 +938,14 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
     }
     let ssh = std::fs::read_to_string(root.join("ssh/command.rs")).unwrap();
     assert!(!ssh.contains("/usr/bin/false"));
-    let composition = std::fs::read_to_string(root.join("platform/macos_composition.rs")).unwrap();
-    assert!(!composition.contains("GpuiDirectorySelection"));
-    assert!(!composition.contains("SystemDirectorySelection"));
+    for name in [
+        "platform/macos_composition.rs",
+        "platform/linux_composition.rs",
+    ] {
+        let composition = std::fs::read_to_string(root.join(name)).unwrap();
+        assert!(!composition.contains("GpuiDirectorySelection"), "{name}");
+        assert!(!composition.contains("SystemDirectorySelection"), "{name}");
+    }
     let platform = std::fs::read_to_string(root.join("platform/mod.rs")).unwrap();
     assert!(!platform.contains("mod directory_selection"));
     for name in [
@@ -706,7 +961,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
     }
     let pasteboard = std::fs::read_to_string(root.join("platform/macos_pasteboard.rs")).unwrap();
     let production = pasteboard
-        .split("#[cfg(all(test, feature = \"macos-native-tests\"))]")
+        .split("#[cfg(all(test, feature = \"native-tests\"))]")
         .next()
         .unwrap();
     assert!(!production.contains("LocalPathSemantics::Posix"));
@@ -740,13 +995,17 @@ fn main_thread_runner_lists_every_native_platform_fixture() {
     collect_rust_sources(&platform, &mut files);
     let mut fixture_count = 0;
     for path in files {
+        let module = path.file_stem().unwrap().to_str().unwrap();
+        // The runner owns the AppKit main thread; other desktops run fixtures under libtest.
+        if !module.starts_with("macos_") {
+            continue;
+        }
         let source = std::fs::read_to_string(&path).unwrap();
         let Some((_, fixtures)) =
-            source.split_once("#[cfg(all(test, feature = \"macos-native-tests\"))]")
+            source.split_once("#[cfg(all(test, feature = \"native-tests\"))]")
         else {
             continue;
         };
-        let module = path.file_stem().unwrap().to_str().unwrap();
         for line in fixtures.lines() {
             let Some(name) = line
                 .trim_start()

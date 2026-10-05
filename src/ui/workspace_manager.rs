@@ -46,10 +46,11 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    NewRemoteWorkspace, NewWorkspace, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind,
-    RemoteChildLaunchUnavailable, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT,
-    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
+    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
+    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -662,6 +663,13 @@ impl WorkspaceManager {
         });
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_status(
         &self,
         window: &Window,
@@ -693,6 +701,13 @@ impl WorkspaceManager {
             .native_service_target(origin, cx)
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_selection(
         &self,
         origin: NativeServiceOrigin,
@@ -705,6 +720,13 @@ impl WorkspaceManager {
             })
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn insert_native_service_text(
         &self,
         origin: NativeServiceOrigin,
@@ -849,6 +871,15 @@ impl WorkspaceManager {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -2543,6 +2574,12 @@ impl WorkspaceManager {
         }
     }
 
+    fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.should_close_window(window, cx) {
+            window.remove_window();
+        }
+    }
+
     pub(crate) fn should_close_window(
         &mut self,
         window: &mut Window,
@@ -3114,6 +3151,7 @@ impl WorkspaceManager {
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
         let toggle_manager = manager.clone();
+        let close_owner = manager.clone();
         let combo_lifecycle_manager = manager.clone();
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
@@ -3274,6 +3312,12 @@ impl WorkspaceManager {
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         });
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
+        });
+        let leading_controls = spaceterm_ui::ClientWindowControls::new(close)
+            .side(spaceterm_ui::WindowControlSide::Left)
+            .surface_color(gpui_color(appearance.colors.title_bar_background));
         let content = div().relative().size_full().child(
             layout.render_controls(
                 IconButton::new("toggle-sidebar-button", toggle_label, move |foreground| {
@@ -3296,6 +3340,7 @@ impl WorkspaceManager {
                     });
                 }),
                 chooser,
+                leading_controls,
                 cx,
             ),
         );
@@ -3304,6 +3349,10 @@ impl WorkspaceManager {
             "Move Operating-System Window from Workspace chrome",
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
             right: super::resize_handle_theme::spacious_target_half_thickness(cx),
@@ -3431,6 +3480,10 @@ impl WorkspaceManager {
         let chrome =
             WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
         let update_control = gpui::AnyView::from(self.update_control.clone());
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
+        });
         active_tab_manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(
                 sidebar_layout.visible,
@@ -3439,6 +3492,7 @@ impl WorkspaceManager {
                 cx,
             );
             manager.set_trailing_accessory(Some(update_control), cx);
+            manager.set_window_close_handler(close);
         });
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
@@ -3484,7 +3538,7 @@ impl WorkspaceManager {
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.pin_picker.iter().cloned());
-        ModalLayer::new(content).transient(transients)
+        ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
     }
 }
 
@@ -3523,6 +3577,14 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab7>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab8>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab9>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<NextTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<PreviousTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabRight>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<MoveTabLeft>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollPageUp>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollPageDown>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollToTop>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ScrollToBottom>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ClosePane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<SplitRight>))
@@ -3751,4 +3813,4 @@ impl WorkspaceManager {
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]
-mod tests;
+pub(crate) mod tests;

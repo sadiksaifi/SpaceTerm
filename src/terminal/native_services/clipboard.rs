@@ -22,15 +22,51 @@ impl Default for ClipboardPreferences {
     }
 }
 
-/// Plain text only. This Interface carries no local file authority.
+/// The independently owned text selection chosen by the host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TextClipboardTarget {
+    Clipboard,
+    #[allow(
+        dead_code,
+        reason = "not every host exposes an independent PRIMARY selection"
+    )]
+    Primary,
+}
+
+/// Plain text only. Target resolution follows the Session's focus and Settings checks.
+/// This Interface carries no local file authority and never falls back to another selection.
 pub(crate) trait TextClipboard {
-    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError>;
-    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError>;
+    fn resolve(&self, target: super::osc52::Osc52Target) -> TextClipboardTarget;
+    fn read(
+        &self,
+        target: TextClipboardTarget,
+        cx: &mut App,
+    ) -> Result<Option<String>, ClipboardError>;
+    fn write(
+        &self,
+        target: TextClipboardTarget,
+        text: &str,
+        cx: &mut App,
+    ) -> Result<(), ClipboardError>;
 }
 
 pub(crate) const PLAIN_TEXT_MIME: &str = "text/plain;charset=utf-8";
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
+)]
 pub(crate) const HTML_MIME: &str = "text/html;charset=utf-8";
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
+)]
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct PasteboardRepresentation<'a> {
     pub(crate) mime: &'static str,
@@ -45,6 +81,13 @@ impl std::fmt::Debug for PasteboardRepresentation<'_> {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter publishes typed representations"
+    )
+)]
 pub(crate) fn selection_representations<'a>(
     plain_text: &'a str,
     html: Option<&'a str>,
@@ -62,6 +105,13 @@ pub(crate) fn selection_representations<'a>(
     representations
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native pasteboard Adapter reports clipboard failures"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClipboardError {
     Unavailable,
@@ -76,7 +126,13 @@ pub(crate) trait SelectionClipboard {
 
 /// Discovers ordered file paths without granting authority to insert them.
 pub(crate) trait FileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError>;
+    fn read_files(&self, cx: &App) -> Result<Vec<PathBuf>, ClipboardError>;
+}
+
+/// The host's optional PRIMARY selection, independent of explicit Copy.
+pub(crate) trait PrimarySelection {
+    fn publish(&self, copy: &SelectionCopy, cx: &mut App);
+    fn read(&self, cx: &App) -> Option<String>;
 }
 
 pub(crate) struct SelectionPublication {
@@ -119,7 +175,7 @@ impl PastePayload {
     /// Focus and local authority are checked before consulting either clipboard source.
     pub(crate) fn clipboard(
         policy: super::file_insertion::FileInsertionPolicy,
-        files: &dyn FileClipboard,
+        files: impl FnOnce() -> Result<Vec<PathBuf>, ClipboardError>,
         text: impl FnOnce() -> Option<String>,
         focused: bool,
         local: TerminalLocalFileCapabilities,
@@ -155,7 +211,7 @@ mod tests {
         paths: Vec<PathBuf>,
         fail: bool,
     }
-    impl FileClipboard for Files {
+    impl Files {
         fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
             self.reads.set(self.reads.get() + 1);
             if self.fail {
@@ -181,7 +237,7 @@ mod tests {
         assert!(
             PastePayload::clipboard(
                 crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-                &files,
+                || files.read_files(),
                 text,
                 false,
                 TerminalLocalFileCapabilities::Enabled
@@ -191,7 +247,7 @@ mod tests {
         assert_eq!((files.reads.get(), text_reads.get()), (0, 0));
         let remote = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Disabled,
@@ -202,7 +258,7 @@ mod tests {
         assert_eq!((files.reads.get(), text_reads.get()), (0, 1));
         let local = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             text,
             true,
             TerminalLocalFileCapabilities::Enabled,
@@ -222,7 +278,7 @@ mod tests {
         };
         let result = PastePayload::clipboard(
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &files,
+            || files.read_files(),
             || panic!("unexpected clipboard read"),
             true,
             TerminalLocalFileCapabilities::Enabled,

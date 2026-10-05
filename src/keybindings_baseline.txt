@@ -175,6 +175,8 @@ cmd-6	Some(Identifier("TerminalPane"))	terminal::ActivateTab6
 cmd-7	Some(Identifier("TerminalPane"))	terminal::ActivateTab7
 cmd-8	Some(Identifier("TerminalPane"))	terminal::ActivateTab8
 cmd-9	Some(Identifier("TerminalPane"))	terminal::ActivateTab9
+cmd-}	Some(Identifier("TerminalPane"))	terminal::NextTab
+cmd-{	Some(Identifier("TerminalPane"))	terminal::PreviousTab
 cmd-w	None	terminal::ClosePane
 cmd-d	Some(Identifier("TerminalPane"))	terminal::SplitRight
 cmd-shift-d	Some(Identifier("TerminalPane"))	terminal::SplitDown
@@ -192,6 +194,10 @@ cmd-g	Some(Identifier("TerminalFind"))	terminal::FindNext
 cmd-shift-g	Some(Identifier("TerminalPane"))	terminal::FindPrevious
 cmd-shift-g	Some(Identifier("TerminalFind"))	terminal::FindPrevious
 cmd-k	Some(Identifier("TerminalPane"))	terminal::ClearTerminalScreenAndScrollback
+cmd-pageup	Some(Identifier("TerminalPane"))	terminal::ScrollPageUp
+cmd-pagedown	Some(Identifier("TerminalPane"))	terminal::ScrollPageDown
+cmd-home	Some(Identifier("TerminalPane"))	terminal::ScrollToTop
+cmd-end	Some(Identifier("TerminalPane"))	terminal::ScrollToBottom
 cmd-=	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd-+	Some(Identifier("TerminalPane"))	terminal::IncreaseTerminalFontSize
 cmd--	Some(Identifier("TerminalPane"))	terminal::DecreaseTerminalFontSize

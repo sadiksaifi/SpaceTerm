@@ -9,7 +9,10 @@ use super::keyboard_layout::{KeyboardLayout, KeyboardLayoutAdapter, KeyboardLayo
 pub(crate) struct MacosKeyboardLayout;
 
 impl KeyboardLayoutAdapter for MacosKeyboardLayout {
-    fn snapshot(&self) -> Result<KeyboardLayout, KeyboardLayoutUnavailable> {
+    fn snapshot(
+        &self,
+        _: &dyn gpui::PlatformKeyboardLayout,
+    ) -> Result<KeyboardLayout, KeyboardLayoutUnavailable> {
         // TIS returns the backing keyboard layout even when an input method is selected.
         let source = Source(
             NonNull::new(unsafe { TISCopyCurrentKeyboardLayoutInputSource() })
@@ -135,12 +138,10 @@ unsafe extern "C" {
     fn CFRelease(value: *const c_void);
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 pub(crate) mod tests {
     use super::*;
-    use crate::keybindings::{
-        Command, KeybindingPreferences, KeybindingState, Shortcut, SystemReservation,
-    };
+    use crate::keybindings::{Command, KeybindingPreferences, Shortcut, SystemReservation};
     use std::rc::Rc;
 
     #[link(name = "Carbon", kind = "framework")]
@@ -208,17 +209,24 @@ pub(crate) mod tests {
             );
         }
         let german = layout("com.apple.keylayout.German");
-        let profile = crate::desktop_profile::default_keymap::profile(
+        let mut profile = crate::desktop_profile::default_keymap::profile(
             Rc::new(german),
             super::super::macos_reserved_shortcuts::shortcuts(),
         )
         .unwrap();
+        profile
+            .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+            .unwrap();
         for source in ["shift-cmd-3", "cmd-§"] {
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
             assert_eq!(
-                profile.resolve(&preferences).state(Command::NewWorkspace),
-                KeybindingState::Blocked(SystemReservation::Screenshot)
+                profile
+                    .resolve(&preferences)
+                    .inactive_override(Command::NewWorkspace),
+                Some(crate::keybindings::Reservation::System(
+                    SystemReservation::Screenshot
+                ))
             );
         }
         for (id, source, key, modifiers) in [
@@ -247,11 +255,14 @@ pub(crate) mod tests {
                 gpui::Modifiers::control(),
             ),
         ] {
-            let profile = crate::desktop_profile::default_keymap::profile(
+            let mut profile = crate::desktop_profile::default_keymap::profile(
                 Rc::new(layout(id)),
                 super::super::macos_reserved_shortcuts::shortcuts(),
             )
             .unwrap();
+            profile
+                .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
+                .unwrap();
             let preferences: KeybindingPreferences =
                 serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
             let native = gpui::Keystroke {

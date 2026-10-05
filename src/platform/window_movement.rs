@@ -2,6 +2,13 @@ use gpui::Window;
 #[cfg(test)]
 use std::cell::Cell;
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "desktops whose toolkit owns window moves report no native failures"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum OperatingSystemWindowDragError {
     #[error("the application is unavailable")]
@@ -17,6 +24,7 @@ pub(crate) enum OperatingSystemWindowDragError {
 pub(crate) trait OperatingSystemWindowDragPlatform {
     fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError>;
     fn start_window_move(&self, window: &Window) -> Result<(), OperatingSystemWindowDragError>;
+    fn show_window_menu(&self, _: &Window, _: gpui::Point<gpui::Pixels>) {}
     fn interaction_finished(&self);
 }
 

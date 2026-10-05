@@ -4,8 +4,6 @@ use gpui::{Keystroke, Modifiers};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::TerminalConvention;
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Shortcut {
     modifiers: Modifiers,
@@ -24,8 +22,6 @@ pub enum ShortcutRejection {
     FunctionModifier,
     #[error("unsupported shortcut key")]
     UnsupportedKey,
-    #[error("shortcut is reserved for terminal input")]
-    TerminalReserved(TerminalConvention),
 }
 
 impl Shortcut {
@@ -114,14 +110,10 @@ impl Shortcut {
         if !printable && !named {
             return Err(ShortcutRejection::UnsupportedKey);
         }
-        let shortcut = Self {
+        Ok(Self {
             modifiers,
             key: key.into(),
-        };
-        if let Some(convention) = super::terminal_conventions::reservation(&shortcut) {
-            return Err(ShortcutRejection::TerminalReserved(convention));
-        }
-        Ok(shortcut)
+        })
     }
 
     pub(crate) fn resolve(
@@ -236,7 +228,7 @@ mod tests {
         ] {
             let retained = Shortcut::parse(&format!("shift-cmd-{base}")).unwrap();
             let layout = crate::platform::keyboard_layout::testing::us()
-                .snapshot()
+                .snapshot(&crate::platform::keyboard_layout::testing::UnknownLayout)
                 .unwrap();
             let shortcut = retained.resolve(&layout);
             let native = Keystroke::parse(&format!("cmd-{symbol}")).unwrap();
@@ -272,10 +264,6 @@ mod tests {
             ("cmd-f21", ShortcutRejection::UnsupportedKey),
             ("cmd-unknown", ShortcutRejection::UnsupportedKey),
             ("cmd-\u{7}", ShortcutRejection::UnsupportedKey),
-            (
-                "k",
-                ShortcutRejection::TerminalReserved(TerminalConvention::TextInput),
-            ),
         ] {
             assert_eq!(Shortcut::parse(source), Err(rejection), "{source}");
             assert!(

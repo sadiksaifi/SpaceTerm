@@ -1,4 +1,4 @@
-#[cfg(feature = "macos-native-tests")]
+#[cfg(feature = "native-tests")]
 use std::fs;
 
 use super::*;
@@ -115,6 +115,233 @@ fn accessibility_snapshot_preserves_production_soft_wraps() {
     assert_eq!(accessibility.text(), "abcdef");
     assert_eq!(accessibility.range_for_line(0), Some(0..3));
     assert_eq!(accessibility.range_for_line(1), Some(3..6));
+}
+
+#[test]
+fn accessibility_text_survives_visual_snapshots_before_semantic_publication() {
+    let mut emulator = emulator(32, 3);
+    emulator.snapshot().unwrap().unwrap();
+    let (initial, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(more);
+    assert!(initial.is_none());
+    let (initial, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(!more);
+    assert_eq!(initial.unwrap().text(), "\n\n");
+
+    emulator.feed(b"first");
+    emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"\r\nfixture");
+    let screen = emulator.snapshot().unwrap().unwrap();
+
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\n");
+    assert_eq!(current.generation(), screen.generation);
+
+    emulator.feed(b"\r\nchanged");
+    emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"\r\nlast");
+    let scrolled = emulator.snapshot().unwrap().unwrap();
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(more);
+    assert!(current.is_none());
+    let (current, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\nchanged\nlast");
+    assert_eq!(current.generation(), scrolled.generation);
+
+    emulator.feed(b"\rupdated");
+    let (current, more) = emulator.accessibility_snapshot(true).unwrap();
+    assert!(!more);
+    assert_eq!(current.unwrap().text(), "first\nfixture\nchanged\nupdated");
+    emulator.feed(b"\rnewest!");
+    let screen = emulator.snapshot().unwrap().unwrap();
+    let (current, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    let current = current.unwrap();
+    assert_eq!(current.text(), "first\nfixture\nchanged\nnewest!");
+    assert_eq!(current.generation(), screen.generation);
+}
+
+fn drain_accessibility(emulator: &mut TerminalEmulator) -> Arc<TerminalAccessibilityModel> {
+    for _ in 0..128 {
+        let (model, more) = emulator
+            .accessibility_snapshot_for_current_presentation()
+            .unwrap();
+        if !more {
+            return model.expect("completed native publication must produce the current model");
+        }
+    }
+    panic!("bounded native accessibility publication did not converge");
+}
+
+#[test]
+fn accessibility_retains_an_edited_row_scrolled_into_history_in_one_feed() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(b"\rnew\r\n1\r\n2\r\n3\r\n4");
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.text(), "new\n1\n2\n3\n4");
+}
+
+#[test]
+fn accessibility_retains_an_edited_row_compressed_before_observation() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(format!("\rnew{}", "\r\nrow".repeat(5_000)).as_bytes());
+    assert_eq!(
+        emulator
+            .terminal
+            .compress(libghostty_vt::terminal::CompressionMode::Full)
+            .unwrap(),
+        libghostty_vt::terminal::CompressionResult::Complete,
+    );
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.rows().count(), 5_001);
+    assert_eq!(current.text().lines().next(), Some("new"));
+    assert_eq!(current.text(), format!("new{}", "\nrow".repeat(5_000)));
+}
+
+#[test]
+fn accessibility_retains_primary_edits_when_compression_runs_on_alternate_screen() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old");
+    emulator.snapshot().unwrap().unwrap();
+    let initial = drain_accessibility(&mut emulator);
+    let first_id = initial.rows().next().unwrap().id;
+
+    emulator.feed(
+        format!(
+            "\rnew{}\x1b[?1049h\x1b[2J\x1b[Halternate",
+            "\r\nrow".repeat(5_000)
+        )
+        .as_bytes(),
+    );
+    for step in 0..128 {
+        match emulator.compress_scrollback().unwrap() {
+            libghostty_vt::terminal::CompressionResult::Pending => assert!(step < 127),
+            libghostty_vt::terminal::CompressionResult::Complete => break,
+            other => panic!("unexpected native compression result: {other:?}"),
+        }
+    }
+    emulator.snapshot().unwrap().unwrap();
+    assert!(
+        drain_accessibility(&mut emulator)
+            .text()
+            .starts_with("alternate")
+    );
+    emulator.feed(b"\x1b[?1049l");
+    emulator.snapshot().unwrap().unwrap();
+    let current = drain_accessibility(&mut emulator);
+
+    assert_eq!(current.rows().next().unwrap().id, first_id);
+    assert_eq!(current.rows().count(), 5_001);
+    assert!(current.text().starts_with("new\nrow\n"));
+    assert!(!current.text().contains("old"));
+}
+
+#[test]
+fn accessibility_retains_bounded_progress_with_offscreen_dirty_rows_and_new_input() {
+    let mut emulator = emulator(512, 25);
+    emulator.feed("row\r\n".repeat(80).as_bytes());
+    emulator.snapshot().unwrap().unwrap();
+    drain_accessibility(&mut emulator);
+    emulator
+        .terminal
+        .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Top);
+    emulator.feed(b"changed");
+    emulator.snapshot().unwrap().unwrap();
+
+    let (_, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(
+        more,
+        "wide rows must use multiple bounded extraction passes"
+    );
+    emulator.feed(b"\rnewest!");
+    // The viewport is unchanged by this offscreen write. Rendering can return
+    // None while capture must still retain the native semantic invalidation.
+    emulator.snapshot().unwrap();
+    let current = drain_accessibility(&mut emulator);
+    assert!(current.text().ends_with("newest!"));
+    assert_eq!(current.rows().count(), 81);
+
+    // No new input must complete immediately even though offscreen renderer
+    // dirty flags remain set. A fresh native observer confirms the exact text.
+    let (unchanged, more) = emulator
+        .accessibility_snapshot_for_current_presentation()
+        .unwrap();
+    assert!(!more);
+    assert!(
+        unchanged.is_none(),
+        "unchanged semantics reuse the existing model"
+    );
+    let mut fresh = ghostty_accessibility::State::new().unwrap();
+    let mut state = TerminalAccessibilityState::default();
+    for _ in 0..128 {
+        let update = fresh
+            .update(
+                &emulator.terminal,
+                ghostty_accessibility::UpdateOptions {
+                    max_cells: 16_384,
+                    max_rows: 256,
+                },
+            )
+            .unwrap();
+        let more = update.more;
+        if let Some(model) = state.apply(
+            accessibility_update(update).unwrap(),
+            emulator.presentation_generation,
+        ) {
+            assert_eq!(model.text(), current.text());
+            assert!(!more);
+            return;
+        }
+    }
+    panic!("fresh native observer did not converge");
+}
+
+#[test]
+fn accessibility_retains_edits_after_history_rows_become_active_on_resize() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"old\r\n1\r\n2\r\n3\r\n4");
+    emulator.snapshot().unwrap().unwrap();
+    drain_accessibility(&mut emulator);
+    emulator.resize(geometry(32, 5, 10.0, 20.0)).unwrap();
+    // Edit the newly active first row, then move it back into history before
+    // either the visual snapshot or the semantic observer runs.
+    emulator.feed(b"\x1b[1;1Hnew\x1b[5;1H\r\n5\r\n6\r\n7");
+    emulator.resize(geometry(32, 3, 10.0, 20.0)).unwrap();
+    emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        drain_accessibility(&mut emulator).text(),
+        "new\n1\n2\n3\n4\n5\n6\n7"
+    );
 }
 
 #[test]
@@ -1710,6 +1937,20 @@ fn tall_zsh_prompt_round_trips_do_not_add_blank_scrollback() {
     }
 }
 
+/// The first row a full history retains, for each Ghostty page layout.
+///
+/// Ghostty prunes history a whole page at a time, and its page layout rounds up to the target's
+/// minimum memory page: 16 KiB on Apple silicon and 4 KiB on the other supported targets. A page
+/// therefore holds a different number of rows, so each expectation names the exact boundary
+/// under both layouts.
+const fn first_retained_row(small_pages: usize, large_pages: usize) -> usize {
+    if cfg!(all(target_vendor = "apple", target_arch = "aarch64")) {
+        large_pages
+    } else {
+        small_pages
+    }
+}
+
 fn numbered_history(start: usize, end: usize, cols: usize) -> Vec<String> {
     (start..end)
         .map(|row| format!("{:<cols$}", format!("H{row:04}")))
@@ -1762,7 +2003,8 @@ fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
     terminal.vt_write(b"\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
-    let mut expected_before = numbered_history(591, 1600, 80);
+    let first = first_retained_row(578, 591);
+    let mut expected_before = numbered_history(first, 1600, 80);
     expected_before.push("P".repeat(80));
     expected_before.push(format!("{:<80}", "P".repeat(20)));
     expected_before.push(format!("{:<80}", "> "));
@@ -1773,7 +2015,7 @@ fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
     terminal.vt_write(b"\r\r\x1b[2A\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A;redraw=1\x07");
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
-    let mut expected_after = numbered_history(591, 1600, 160);
+    let mut expected_after = numbered_history(first, 1600, 160);
     expected_after.push(format!("{:<160}", "P".repeat(100)));
     expected_after.push(format!("{:<160}", "> "));
     expected_after.push(" ".repeat(160));
@@ -1799,7 +2041,11 @@ fn background_output_at_prompt_keeps_default_history_bounded() {
             terminal.vt_write(format!("BG{row:05}\r\n").as_bytes());
         }
         let rows = all_limited_terminal_rows(&terminal, 160);
-        let first = if end == 1000 { 290 } else { 10388 };
+        let first = if end == 1000 {
+            first_retained_row(272, 290)
+        } else {
+            first_retained_row(10166, 10388)
+        };
         let mut expected: Vec<_> = (first..end)
             .map(|row| format!("{:<160}", format!("BG{row:05}")))
             .collect();
@@ -1822,7 +2068,7 @@ fn pre_reflow_prompt_clear_loses_at_most_one_old_page_at_history_limit() {
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    let mut expected = numbered_history(297, 507, 160);
+    let mut expected = numbered_history(first_retained_row(291, 297), 507, 160);
     expected.push("P".repeat(160));
     expected.push(format!("{:<160}", "P".repeat(140)));
     expected.push(format!("{:<160}", "> "));
@@ -1853,7 +2099,7 @@ fn tall_prompt_at_history_limit_only_prunes_oldest_page() {
     terminal.vt_write(prompt.as_bytes());
     terminal.vt_write(b"\x1b]133;B\x07");
     let rows = all_limited_terminal_rows(&terminal, 160);
-    let mut expected = numbered_history(297, 480, 160);
+    let mut expected = numbered_history(first_retained_row(291, 297), 480, 160);
     expected.extend(std::iter::repeat_n(" ".repeat(160), 21));
     expected.extend(std::iter::repeat_n("P".repeat(160), 15));
     expected.push(format!("{:<160}", "> "));
@@ -1880,7 +2126,7 @@ fn tall_prompt_cycles_keep_bounded_exact_scrollback() {
             terminal.vt_write(b"\x1b]133;B\x07");
         }
         let rows = all_limited_terminal_rows(&terminal, 80);
-        let mut expected = numbered_history(297, 480, 80);
+        let mut expected = numbered_history(first_retained_row(291, 297), 480, 80);
         expected.extend(std::iter::repeat_n(" ".repeat(80), 27 * (cycle + 1)));
         expected.extend(std::iter::repeat_n("P".repeat(80), 30));
         expected.push(format!("{:<80}", "> "));
@@ -2697,12 +2943,13 @@ fn fixterms_disambiguates_control_keys_that_overlap_legacy_bytes() {
     let cases = [
         (PhysicalKey::I, "i", 'i', false, b"\x1b[105;5u".as_slice()),
         (PhysicalKey::M, "m", 'm', false, b"\x1b[109;5u".as_slice()),
+        // Ctrl+[ keeps xterm's Escape even when the layout reports its text.
         (
             PhysicalKey::BracketLeft,
             "[",
             '[',
             false,
-            b"\x1b[91;5u".as_slice(),
+            b"\x1b".as_slice(),
         ),
         (PhysicalKey::M, "M", 'm', true, b"\x1b[109;6u".as_slice()),
     ];
@@ -3696,6 +3943,73 @@ fn scrollback_wheel_changes_visible_rows() {
     assert!(row_text(&restored, 0).starts_with("two"));
     assert_eq!(restored.cursor.position.unwrap().row, 1);
     assert!(row_text(&restored, 1).starts_with("three"));
+}
+
+#[test]
+fn scroll_commands_page_through_scrollback_without_writing_to_the_pty() {
+    let mut emulator = emulator(10, 3);
+    for line in 0..12 {
+        emulator.feed(format!("line {line}\r\n").as_bytes());
+    }
+    // A snapshot is published only when the screen changed, so an unmoved viewport keeps the last.
+    let mut latest = emulator.snapshot().unwrap().unwrap();
+    let mut offset = |emulator: &mut TerminalEmulator| {
+        if let Some(snapshot) = emulator.snapshot().unwrap() {
+            latest = snapshot;
+        }
+        latest.scrollbar.offset_rows
+    };
+    let bottom = offset(&mut emulator);
+    assert_eq!(bottom, 13 - 3);
+
+    let mut offsets = Vec::new();
+    for movement in [
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::Top,
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::PageDown,
+        ScrollbackMovement::Bottom,
+        ScrollbackMovement::PageDown,
+    ] {
+        let action = emulator.scroll_scrollback(movement);
+        assert!(action.bytes.is_empty(), "{movement:?}");
+        assert!(action.screen_changed, "{movement:?}");
+        offsets.push(offset(&mut emulator));
+    }
+
+    assert_eq!(
+        offsets,
+        [bottom - 3, bottom - 6, 0, 0, 3, bottom, bottom],
+        "a page is the visible rows, and neither end wraps"
+    );
+}
+
+#[test]
+fn scroll_commands_leave_the_alternate_screen_and_its_program_alone() {
+    // With alternate-scroll mode the wheel sends arrow keys here; a Scroll Command never writes
+    // to the PTY, and the alternate screen has no Scrollback to move through.
+    let mut emulator = emulator(10, 3);
+    for line in 0..12 {
+        emulator.feed(format!("line {line}\r\n").as_bytes());
+    }
+    emulator.feed(b"\x1b[?1049h\x1b[?1007h\x1b[Halt");
+    let before = emulator.snapshot().unwrap().unwrap();
+    assert!(row_text(&before, 0).starts_with("alt"));
+
+    for movement in [
+        ScrollbackMovement::PageUp,
+        ScrollbackMovement::Top,
+        ScrollbackMovement::PageDown,
+        ScrollbackMovement::Bottom,
+    ] {
+        let action = emulator.scroll_scrollback(movement);
+        assert!(action.bytes.is_empty(), "{movement:?}");
+        if let Some(after) = emulator.snapshot().unwrap() {
+            assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
+            assert!(row_text(&after, 0).starts_with("alt"), "{movement:?}");
+        }
+    }
 }
 
 #[test]
@@ -4912,7 +5226,11 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
     assert_eq!(third.graphics.images[0].rgba.as_ref(), &[9, 10, 11, 12]);
 }
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
-mod macos_adapter_tests {
-    include!("../../platform/macos_adapter_tests/emulator.rs");
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+mod unix_adapter_tests {
+    include!("../../platform/unix_adapter_tests/emulator.rs");
 }

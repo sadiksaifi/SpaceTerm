@@ -1,4 +1,11 @@
 //! Explicit application shortcut policy shared by host composition and test fixtures.
+#![cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the Command-key desktop composes this table; other desktops use it only as a test fixture"
+    )
+)]
 use crate::app::*;
 use crate::keybindings::{
     Command, DefaultBinding, KeymapProfile, KeymapProfileError, SystemReserved,
@@ -122,6 +129,16 @@ pub(crate) fn profile(
             Command::ActivateTab9,
             Some(DefaultBinding::new("cmd-9", &[])),
         ),
+        (
+            Command::NextTab,
+            Some(DefaultBinding::new("cmd-shift-]", &[])),
+        ),
+        (
+            Command::PreviousTab,
+            Some(DefaultBinding::new("cmd-shift-[", &[])),
+        ),
+        (Command::MoveTabRight, None),
+        (Command::MoveTabLeft, None),
         (Command::ClosePane, Some(DefaultBinding::new("cmd-w", &[]))),
         (Command::SplitRight, Some(DefaultBinding::new("cmd-d", &[]))),
         (
@@ -170,6 +187,22 @@ pub(crate) fn profile(
             Some(DefaultBinding::new("cmd-k", &[])),
         ),
         (
+            Command::ScrollPageUp,
+            Some(DefaultBinding::new("cmd-pageup", &[])),
+        ),
+        (
+            Command::ScrollPageDown,
+            Some(DefaultBinding::new("cmd-pagedown", &[])),
+        ),
+        (
+            Command::ScrollToTop,
+            Some(DefaultBinding::new("cmd-home", &[])),
+        ),
+        (
+            Command::ScrollToBottom,
+            Some(DefaultBinding::new("cmd-end", &[])),
+        ),
+        (
             Command::IncreaseTerminalFontSize,
             Some(DefaultBinding::new("cmd-=", &["cmd-+", "shift-cmd-="])),
         ),
@@ -189,9 +222,11 @@ pub(crate) fn profile(
             Command::ToggleSidebarFocus,
             Some(DefaultBinding::new("cmd-shift-e", &[])),
         ),
+        (Command::KeyboardShortcuts, None),
     ];
     KeymapProfile::new(
         layout,
+        crate::keybindings::TerminalConventions::CommandShortcuts,
         defaults,
         system_reserved,
         fixed_bindings(),

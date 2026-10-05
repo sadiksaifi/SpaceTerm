@@ -90,11 +90,18 @@ mod tests {
         )
         .unwrap();
         let resolved = profile.resolve(&KeybindingPreferences::default());
-        assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
+        let unassigned = [
+            Command::CloseWorkspace,
+            Command::MoveTabRight,
+            Command::MoveTabLeft,
+            Command::KeyboardShortcuts,
+        ];
         for command in Command::ALL {
-            if command != Command::CloseWorkspace {
-                assert!(resolved.shortcut(command).is_some(), "{command:?}");
-            }
+            assert_eq!(
+                resolved.shortcut(command).is_none(),
+                unassigned.contains(&command),
+                "{command:?}"
+            );
             for shortcut in resolved.shortcuts(command) {
                 assert_eq!(profile.check(shortcut), Ok(()));
             }
@@ -145,11 +152,14 @@ mod tests {
                     let mut preferences: KeybindingPreferences =
                         serde_json::from_value(serde_json::json!({"new_workspace": source}))
                             .unwrap();
+                    let resolved = profile.resolve(&preferences);
                     assert_eq!(
-                        profile
-                            .resolve(&preferences)
-                            .shortcut(Command::NewWorkspace),
-                        None
+                        resolved.shortcut(Command::NewWorkspace),
+                        Some(&Shortcut::parse("cmd-n").unwrap())
+                    );
+                    assert_eq!(
+                        resolved.inactive_override(Command::NewWorkspace),
+                        Some(Reservation::System(reason))
                     );
                     assert_eq!(
                         profile.assign(

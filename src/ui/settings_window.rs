@@ -56,8 +56,9 @@ use spaceterm_ui::{
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
     FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
-    ThemeId,
+    ThemeId, UnavailableWindowEffect, WindowBackgroundChoices,
 };
+use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
 use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
@@ -90,6 +91,7 @@ actions!(
     spaceterm,
     [
         OpenSettings,
+        OpenKeyboardShortcuts,
         CloseSettingsWindow,
         FocusSettingsSearch,
         ClearSettingsSearch
@@ -152,8 +154,8 @@ fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
         .then_some(handle)
 }
 
-/// Opens Settings, or activates it when it is already open.
-pub(crate) fn open_or_activate(cx: &mut App) {
+/// Opens Settings, or activates it when it is already open, showing `section` when one is given.
+pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
         // Settings edits the retained document through the appearance runtime. Without it there is
         // nothing to present, so declining is the honest outcome rather than an empty window.
@@ -162,7 +164,12 @@ pub(crate) fn open_or_activate(cx: &mut App) {
     }
     if let Some(existing) = open_settings_window(cx) {
         cx.defer(move |cx| {
-            let _ = existing.update(cx, |_, window, _| window.activate_window());
+            let _ = existing.update(cx, |settings, window, cx| {
+                if let Some(section) = section {
+                    settings.select_section(section, cx);
+                }
+                window.activate_window();
+            });
         });
         return;
     }
@@ -181,13 +188,17 @@ pub(crate) fn open_or_activate(cx: &mut App) {
         ),
         |window, cx| {
             let settings = cx.new(|cx| {
-                SettingsWindow::new_with_capabilities(
+                let mut settings = SettingsWindow::new_with_capabilities(
                     Rc::clone(&window_drag),
                     permissions.clone(),
                     theme_registry.clone(),
                     window,
                     cx,
-                )
+                );
+                if let Some(section) = section {
+                    settings.select_section(section, cx);
+                }
+                settings
             });
             let closing = settings.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
@@ -232,7 +243,10 @@ enum CloseIntent {
 
 /// Registers the application-scoped Settings actions.
 pub(crate) fn init(cx: &mut App) {
-    cx.on_action(|_: &OpenSettings, cx| open_or_activate(cx));
+    cx.on_action(|_: &OpenSettings, cx| open_or_activate(None, cx));
+    cx.on_action(|_: &OpenKeyboardShortcuts, cx| {
+        open_or_activate(Some(SettingsSectionId::Keybindings), cx);
+    });
 }
 
 fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
@@ -264,6 +278,10 @@ pub(crate) struct SettingsWindow {
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
     microphone_access: MicrophoneAccessRow,
+    /// The sections and rows this desktop presents. A desktop omits only the surfaces of features
+    /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
+    available_sections: Vec<SettingsSectionId>,
+    omitted_rows: Vec<SettingsRowId>,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
     theme_gallery: ThemeGallery,
@@ -288,7 +306,7 @@ impl SidebarOwner for SettingsWindow {
 
     /// The sections the current query left something to present.
     fn navigable_sections(&self) -> Vec<SettingsSectionId> {
-        let matching = catalog::matching_rows(&self.query, self.permission_access.naming());
+        let matching = self.matching_rows();
         SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -304,6 +322,22 @@ impl SidebarOwner for SettingsWindow {
         self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
+    }
+}
+
+/// The host feature a whole section presents, if any.
+fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
+    (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
+}
+
+/// The host feature one row presents, if any.
+fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
+    if let Some(feature) = section_feature(row.descriptor().section) {
+        Some(feature)
+    } else if row == SettingsRowId::MicrophoneAccess {
+        Some(HostFeature::MicrophoneAccess)
+    } else {
+        permission_access::row_permission(row).map(|_| HostFeature::SystemPermissions)
     }
 }
 
@@ -483,6 +517,19 @@ impl SettingsWindow {
             })
             .detach();
         }
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let available_sections = SettingsSectionId::ALL
+            .into_iter()
+            .filter(|section| {
+                section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
+            })
+            .collect();
+        let omitted_rows = catalog::rows()
+            .map(|row| row.id)
+            .filter(|row| {
+                row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
+            })
+            .collect();
         Self {
             window_appearance,
             window_traffic_lights,
@@ -498,6 +545,8 @@ impl SettingsWindow {
             focus_handle,
             navigation,
             window_movement,
+            available_sections,
+            omitted_rows,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
@@ -608,15 +657,25 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+    fn matching_rows(&self) -> Vec<SettingsRowId> {
         catalog::matching_rows(&self.query, self.permission_access.naming())
+            .into_iter()
+            .filter(|row| {
+                self.available_sections.contains(&row.descriptor().section)
+                    && !self.omitted_rows.contains(row)
+            })
+            .collect()
+    }
+
+    fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
+        self.matching_rows()
             .into_iter()
             .filter(|row| row.descriptor().section == section)
             .collect()
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = catalog::matching_rows(&self.query, self.permission_access.naming());
+        let matching = self.matching_rows();
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -664,6 +723,12 @@ impl SettingsWindow {
         }
         if let Some(differs) = self.clipboard_preference_differs(row) {
             return differs.then_some(RowReset::Clipboard);
+        }
+        if matches!(row, SettingsRowId::Transparency | SettingsRowId::Blur)
+            && !self.window_background(cx).adjustable()
+        {
+            // The row already shows its default and cannot change, so there is nothing to offer.
+            return None;
         }
         let target = row.reset_target(self.fixed_appearance())?;
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
@@ -771,27 +836,40 @@ impl SettingsWindow {
                     .child(self.render_detail(&settings, window, cx))
                     .child(self.render_footer(&settings)),
             );
-        ModalLayer::new(content).into_any_element()
+        ModalLayer::new(super::window_shell::render(content, window, cx)).into_any_element()
     }
 }
 
 impl SettingsWindow {
     /// The active section's large title and description at the head of the content surface.
-    fn render_detail_heading(&self, settings: &SettingsAppearance) -> AnyElement {
+    fn render_detail_heading(
+        &self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let section = self.active_section;
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         DetailHeading::new(
             "settings",
             section_heading(
                 section.selector(),
                 section.title(),
-                section.description(),
+                section.description(crate::desktop_profile::DesktopPresentation::get(cx)),
                 &settings.chrome,
             ),
             &self.window_movement,
+            close,
         )
         .scrolled(scrolled)
-        .render(settings)
+        .render(settings, window, cx)
     }
 
     fn render_sidebar(
@@ -801,8 +879,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let available = self.navigable_sections();
-        let entries = SettingsSectionId::ALL
-            .into_iter()
+        let entries = self
+            .available_sections
+            .iter()
+            .copied()
             .map(|section| NavigationEntry {
                 section,
                 title: section.title(),
@@ -820,7 +900,15 @@ impl SettingsWindow {
             })
             .collect();
         let movement = self.window_movement.clone();
+        let closing = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = closing.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
         Sidebar::new("settings", entries, &movement)
+            .window_controls(close)
             .header(
                 SearchField::new("settings-search-frame", self.search.clone())
                     .debug_selectors("settings-search-frame", "settings-search-clear"),
@@ -850,7 +938,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings))
+            .child(self.render_detail_heading(settings, window, cx))
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1313,12 +1401,25 @@ impl SettingsWindow {
         .into_any_element()
     }
 
+    /// Transparency and Blur as the window presents them on this desktop.
+    ///
+    /// Where a window effect is unavailable, both rows show the defaults that render and cannot
+    /// change, while the retained choices wait in the document for a desktop that presents them.
+    fn window_background(&self, cx: &App) -> WindowBackgroundChoices {
+        super::appearance_runtime::current(cx)
+            .chrome
+            .composition
+            .capabilities
+            .window_background(&self.editor.document().preferences.window)
+    }
+
     fn render_transparency(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let value = self.editor.document().preferences.window.transparency;
+        let background = self.window_background(cx);
+        let value = background.transparency;
         let owner = cx.weak_entity();
         Stepper::new(
             "settings-transparency",
@@ -1326,7 +1427,7 @@ impl SettingsWindow {
             format!("{value:.2}"),
         )
         .bounds(value > 0.0, value < 1.0)
-        .enabled(self.editor.editable())
+        .enabled(self.editor.editable() && background.adjustable())
         .on_step(move |delta, _, cx| {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
@@ -1343,12 +1444,12 @@ impl SettingsWindow {
     }
 
     fn render_blur(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let value = self.editor.document().preferences.window.blur;
+        let background = self.window_background(cx);
         let owner = cx.weak_entity();
-        Switch::new("settings-blur", "Blur background", value)
+        Switch::new("settings-blur", "Blur background", background.blur)
             .size(ToggleSize::Regular)
             .label_hidden(true)
-            .disabled(!self.editor.editable())
+            .disabled(!self.editor.editable() || !background.adjustable())
             .debug_selector("settings-blur")
             .on_change(move |change, _, cx| {
                 let blur = change.requested();
@@ -1696,12 +1797,39 @@ impl SettingsWindow {
         }
     }
 
+    fn reset_all_detail(&self) -> String {
+        let mut detail = String::from(
+            "This cannot be undone. Themes can be installed again from their Zed extension or file.",
+        );
+        let mut permissions = Vec::new();
+        if !self.omitted_rows.contains(&SettingsRowId::MicrophoneAccess) {
+            permissions.push("Microphone");
+        }
+        for (row, permission) in [
+            (
+                SettingsRowId::ScreenRecordingAccess,
+                SystemPermission::ScreenRecording,
+            ),
+            (
+                SettingsRowId::AccessibilityAccess,
+                SystemPermission::Accessibility,
+            ),
+        ] {
+            if !self.omitted_rows.contains(&row) {
+                permissions.push(self.permission_access.row(permission).copy().name);
+            }
+        }
+        match permissions.as_slice() {
+            [] => {}
+            [permission] => detail.push_str(&format!(" {permission} access is a system permission and is not affected.")),
+            [first, second] => detail.push_str(&format!(" {first} and {second} access are system permissions and are not affected.")),
+            [first, second, third] => detail.push_str(&format!(" {first}, {second}, and {third} access are system permissions and are not affected.")),
+            _ => unreachable!("Settings presents at most three system permission rows"),
+        }
+        detail
+    }
+
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let accessibility = self
-            .permission_access
-            .row(SystemPermission::Accessibility)
-            .copy()
-            .name;
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
@@ -1728,11 +1856,7 @@ impl SettingsWindow {
         .intent(AlertIntent::Critical)
         // Installed themes are the one thing here the reset cannot give back, so the alert says
         // so rather than leaving that to be discovered.
-        .detail(format!(
-            "This cannot be undone. Themes can be installed again from their Zed extension or file. \
-             Microphone, Screen Recording, and {accessibility} access are system permissions and \
-             are not affected."
-        ))
+        .detail(self.reset_all_detail())
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -1925,41 +2049,58 @@ impl SettingsWindow {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
             SettingsRowId::Transparency | SettingsRowId::Blur => {
-                let zero_transparency =
-                    self.editor.document().preferences.window.transparency == 0.0;
+                let background = self.window_background(cx);
+                let zero_transparency = background.transparency == 0.0;
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
                     !zero_transparency && composition.floating_materials.is_opaque();
-                let native_unavailable = !zero_transparency
-                    && composition.effective
-                        == crate::appearance::WindowBackgroundAppearance::Opaque
-                    && !composition.floating_materials.is_opaque();
-                Some(match row {
-                    SettingsRowId::Transparency if zero_transparency => {
-                        "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
-                    }
-                    SettingsRowId::Transparency if accessibility_forced_opaque => {
-                        "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
-                    }
-                    SettingsRowId::Transparency if native_unavailable => {
-                        "Desktop transparency is unavailable on this system. Floating surfaces still use your transparency choice."
-                    }
-                    SettingsRowId::Transparency => {
-                        "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
-                    }
-                    _ if zero_transparency => {
-                        "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
-                    }
-                    _ if accessibility_forced_opaque => {
-                        "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
-                    }
-                    _ if native_unavailable => {
-                        "Desktop blur is unavailable on this system. Floating surfaces still use your blur choice."
-                    }
-                    _ => {
-                        "Soften the desktop behind the window and content behind floating surfaces."
-                    }
-                })
+                let transparency = row == SettingsRowId::Transparency;
+                Some(
+                    match (background.unavailable, accessibility_forced_opaque) {
+                        (Some(UnavailableWindowEffect::Transparency), false) if transparency => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), false) => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), true) if transparency => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                        }
+                        (Some(UnavailableWindowEffect::Transparency), true) => {
+                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), false) if transparency => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), false) => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), true) if transparency => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                        }
+                        (Some(UnavailableWindowEffect::Blur), true) => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                        }
+                        (None, _) if transparency && zero_transparency => {
+                            "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
+                        }
+                        (None, true) if transparency => {
+                            "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
+                        }
+                        (None, _) if transparency => {
+                            "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
+                        }
+                        (None, _) if zero_transparency => {
+                            "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
+                        }
+                        (None, true) => {
+                            "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
+                        }
+                        (None, false) => {
+                            "Soften the desktop behind the window and content behind floating surfaces."
+                        }
+                    },
+                )
             }
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::AutomaticUpdateDownloads

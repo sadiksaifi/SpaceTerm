@@ -82,6 +82,10 @@ impl std::fmt::Debug for FileInsertion {
 }
 
 /// Parses only local absolute file URLs before shell conversion, without filesystem access.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a native pasteboard Adapter reads file URLs")
+)]
 pub(crate) fn parse_file_urls(
     semantics: crate::local_path::LocalPathSemantics,
     urls: &[String],

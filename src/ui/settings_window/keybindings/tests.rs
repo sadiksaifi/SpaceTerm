@@ -27,6 +27,15 @@ fn open_keybindings_with(
     storage: Arc<MemoryStorage>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
+    open_keybindings_on(storage, |_| {}, cx)
+}
+
+/// Opens Keybindings after `install_desktop` replaces the testing Desktop Profile.
+fn open_keybindings_on(
+    storage: Arc<MemoryStorage>,
+    install_desktop: impl FnOnce(&mut gpui::App),
+    cx: &mut TestAppContext,
+) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings = crate::settings::UserSettings::load(storage);
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
@@ -34,6 +43,7 @@ fn open_keybindings_with(
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
+        install_desktop(cx);
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -275,6 +285,144 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     assert_eq!(description(&window, Command::NewWorkspace, cx), None);
 }
 
+/// Replaces the key bindings with a Keymap Profile on US English that follows the Control-Shift
+/// conventions and reserves the chords those desktops keep for themselves.
+fn install_control_shift_profile(cx: &mut gpui::App) {
+    use crate::keybindings::{
+        KeymapProfile, Shortcut, SystemReservation, SystemReserved, TerminalConventions,
+    };
+    let reserved = |chord: &str, reason| SystemReserved {
+        shortcut: Shortcut::parse(chord).expect("the reserved chord parses"),
+        reason,
+    };
+    let profile = KeymapProfile::new(
+        crate::platform::keyboard_layout::testing::us(),
+        TerminalConventions::ControlShiftShortcuts,
+        [],
+        vec![
+            reserved("ctrl-shift-u", SystemReservation::InputMethod),
+            reserved("ctrl-insert", SystemReservation::Copy),
+            reserved("shift-insert", SystemReservation::PasteSelection),
+            reserved("ctrl-,", SystemReservation::Settings),
+        ],
+        vec![],
+        vec![],
+    )
+    .expect("the Control-Shift profile is valid");
+    cx.clear_key_bindings();
+    cx.bind_keys(profile.control_bindings().iter().cloned());
+    cx.bind_keys(profile.fixed_bindings().iter().cloned());
+    crate::keybindings::runtime::install(profile, cx);
+}
+
+#[gpui::test]
+fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings_on(
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        install_control_shift_profile,
+        cx,
+    );
+    // The profile has no defaults, so each recording only replaces the previous one.
+    for chord in [
+        "alt-1",
+        "ctrl-alt-1",
+        "ctrl-pageup",
+        "ctrl-=",
+        "ctrl-0",
+        "ctrl--",
+        "ctrl-f5",
+        "shift-pageup",
+        "shift-home",
+        "f9",
+        "shift-f3",
+        "ctrl-shift-y",
+    ] {
+        record(&window, Command::CloseWorkspace, chord, cx);
+        assert!(
+            !is_recording(&window, Command::CloseWorkspace, cx),
+            "{chord}"
+        );
+        assert_eq!(
+            retained(&window, Command::CloseWorkspace, cx),
+            Some(Some(shortcut(chord))),
+            "{chord}"
+        );
+    }
+
+    let accepted = retained(&window, Command::CloseWorkspace, cx);
+    for (chord, refusal) in [
+        (
+            "ctrl-c",
+            "Ctrl+C is reserved for programs running in the terminal.",
+        ),
+        (
+            "ctrl-2",
+            "Ctrl+2 is reserved for programs running in the terminal.",
+        ),
+        (
+            "ctrl-[",
+            "Ctrl+[ is reserved for programs running in the terminal.",
+        ),
+        (
+            "alt-b",
+            "Alt+B is reserved for programs running in the terminal.",
+        ),
+        (
+            "alt-f4",
+            "Alt+F4 is reserved for programs running in the terminal.",
+        ),
+        (
+            "ctrl-alt-left",
+            "Ctrl+Alt+LEFT is reserved for programs running in the terminal.",
+        ),
+        (
+            "shift-left",
+            "Shift+LEFT is sent to the terminal. Add Ctrl+Shift to use it as a shortcut.",
+        ),
+        (
+            "ctrl-shift-u",
+            "Ctrl+Shift+U is reserved by Operating System for the input method.",
+        ),
+        (
+            "ctrl-insert",
+            "Ctrl+INSERT is reserved by Operating System for Copy.",
+        ),
+        (
+            "shift-insert",
+            "Shift+INSERT is reserved by Operating System for Paste Selection.",
+        ),
+        (
+            "ctrl-,",
+            "Ctrl+, is reserved by Operating System for Settings.",
+        ),
+        (
+            "cmd-t",
+            "Primary+T is reserved by Operating System for desktop shortcuts.",
+        ),
+    ] {
+        record(&window, Command::CloseWorkspace, chord, cx);
+        assert!(
+            is_recording(&window, Command::CloseWorkspace, cx),
+            "{chord}"
+        );
+        assert_eq!(
+            description(&window, Command::CloseWorkspace, cx),
+            Some(ShortcutDescription {
+                text: refusal.into(),
+                tone: CaptionTone::Error,
+            }),
+            "{chord}"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            retained(&window, Command::CloseWorkspace, cx),
+            accepted,
+            "{chord}"
+        );
+    }
+}
+
 #[gpui::test]
 fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
@@ -368,6 +516,51 @@ fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(
+        with_keybindings(r#"{"create_tab":"ctrl-c","close_workspace":"cmd-q"}"#),
+        cx,
+    );
+
+    assert_eq!(
+        description(&window, Command::CreateTab, cx),
+        Some(ShortcutDescription {
+            text: "Ctrl+C is reserved for terminal input here, so the default shortcut is active."
+                .into(),
+            tone: CaptionTone::Warning,
+        })
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        Some(shortcut("cmd-t"))
+    );
+    // Close Workspace has no default to fall back to.
+    assert_eq!(
+        description(&window, Command::CloseWorkspace, cx),
+        Some(ShortcutDescription {
+            text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
+                .into(),
+            tone: CaptionTone::Error,
+        })
+    );
+    // Both overrides stay retained until the person changes them.
+    assert_eq!(
+        retained(&window, Command::CreateTab, cx),
+        Some(Some(shortcut("ctrl-c")))
+    );
+    assert_eq!(
+        retained(&window, Command::CloseWorkspace, cx),
+        Some(Some(shortcut("cmd-q")))
+    );
+    click("settings-row-shortcut-create-tab-reset", cx);
+    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(description(&window, Command::CreateTab, cx), None);
+}
+
+#[gpui::test]
 fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(with_keybindings(r#"{"close_workspace":"cmd-n"}"#), cx);
 
@@ -383,6 +576,76 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
     assert_eq!(retained(&window, Command::CloseWorkspace, cx), None);
     assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+}
+
+#[gpui::test]
+fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut TestAppContext) {
+    let document = with_keybindings(r#"{"create_tab":"cmd-t","split_right":"ctrl-shift-t"}"#);
+    let (window, cx) = open_keybindings_on(
+        MemoryStorage::with_document(&document),
+        |cx| {
+            use crate::keybindings::{DefaultBinding, KeymapProfile, TerminalConventions};
+            let profile = KeymapProfile::new(
+                crate::platform::keyboard_layout::testing::us(),
+                TerminalConventions::ControlShiftShortcuts,
+                [
+                    (
+                        Command::CreateTab,
+                        Some(DefaultBinding::new("ctrl-shift-t", &[])),
+                    ),
+                    (
+                        Command::SplitRight,
+                        Some(DefaultBinding::new("ctrl-shift-d", &[])),
+                    ),
+                ],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            cx.clear_key_bindings();
+            crate::keybindings::runtime::install(profile, cx);
+        },
+        cx,
+    );
+
+    assert_eq!(
+        description(&window, Command::CreateTab, cx),
+        Some(ShortcutDescription {
+            text: "Primary+T is reserved by Operating System for desktop shortcuts here. Its default shortcut is assigned to Split Right.".into(),
+            tone: CaptionTone::Warning,
+        })
+    );
+    assert_eq!(
+        retained(&window, Command::CreateTab, cx),
+        Some(Some(shortcut("cmd-t")))
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        None
+    );
+    click("settings-row-shortcut-create-tab-reset", cx);
+
+    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(retained(&window, Command::SplitRight, cx), Some(None));
+    assert_eq!(description(&window, Command::CreateTab, cx), None);
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CreateTab)
+            .cloned()),
+        Some(shortcut("ctrl-shift-t"))
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::SplitRight)
+            .cloned()),
+        None
+    );
 }
 
 #[gpui::test]

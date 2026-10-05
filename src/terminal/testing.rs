@@ -8,10 +8,10 @@ use super::geometry::TerminalGeometry;
 use super::{
     FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, PasteConfirmationId,
     PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
-    SelectionCopy, SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalKeyInputAdapter,
-    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionError, SessionEvent,
+    StartedTerminalSession, TerminalAccessibilityModel, TerminalAppearanceUpdate,
+    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalLaunchPlan,
+    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 
@@ -141,11 +141,13 @@ pub(crate) enum RecordedSessionCommand {
     PointerAndCopySelection(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
+    ScrollScrollback(ScrollbackMovement),
     SetFindQuery(FindQueryGeneration, String),
     NavigateFind(FindQueryGeneration, FindDirection),
     EndFind(FindQueryGeneration),
     RequestPaste(String),
     ResolvePaste(PasteConfirmationId, PasteDecision),
+    CopyOrForward(super::InputModifiers),
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
     SetPresentable(bool),
@@ -543,6 +545,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
     }
 
+    fn scroll_scrollback(&self, movement: ScrollbackMovement) {
+        self.record(RecordedSessionCommand::ScrollScrollback(movement));
+    }
+
     fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
         self.record(RecordedSessionCommand::SetFindQuery(generation, query));
     }
@@ -583,6 +589,14 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
             .borrow_mut()
             .pop_front()
             .map_or_else(|| self.selection_response.clone(), Ok)
+    }
+
+    fn copy_or_forward(
+        &self,
+        modifiers: super::InputModifiers,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.record(RecordedSessionCommand::CopyOrForward(modifiers));
+        self.copy_selection()
     }
 
     fn copy_selection_at(

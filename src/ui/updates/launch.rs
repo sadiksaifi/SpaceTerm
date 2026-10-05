@@ -60,21 +60,27 @@ fn open_window(cx: &mut App) {
     }
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let opened = cx.open_window(
-        WindowOptions {
-            window_background: crate::ui::appearance_runtime::window_background(cx),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("SpaceTerm".into()),
-                appears_transparent: true,
-                traffic_light_position: None,
-            }),
-            kind: WindowKind::Normal,
-            is_movable: true,
-            is_resizable: false,
-            is_minimizable: false,
-            tabbing_identifier: None,
-            ..WindowOptions::default()
-        },
+        cx.global::<crate::platform::window_chrome::WindowChrome>()
+            .options(
+                crate::platform::window_chrome::WindowRole::Launch,
+                WindowOptions {
+                    app_id: crate::app::window_application_id(),
+                    window_background: crate::ui::appearance_runtime::window_background(cx),
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("SpaceTerm".into()),
+                        appears_transparent: true,
+                        traffic_light_position: None,
+                    }),
+                    kind: WindowKind::Normal,
+                    is_movable: true,
+                    is_resizable: false,
+                    is_minimizable: false,
+                    tabbing_identifier: None,
+                    ..WindowOptions::default()
+                },
+                cx,
+            ),
         |window, cx| {
             // The service decides when the launch continues. Closing the view would only hide
             // that progress, so the window stays until the gate opens. Quit remains available.
@@ -218,7 +224,7 @@ impl Render for LaunchView {
         let presentation = LaunchPresentation::resolve(updates.launch_state(), updates.state());
         let appearance = crate::ui::appearance::chrome(cx);
         let Some(presentation) = presentation else {
-            return activity.mount(div().into_any_element());
+            return activity.mount(div().into_any_element()).into_any_element();
         };
         let secondary = gpui_color(appearance.colors.text_secondary);
         let progress = match presentation
@@ -290,7 +296,7 @@ impl Render for LaunchView {
                             ),
                     ),
             );
-        activity.mount(content.into_any_element())
+        super::super::window_shell::render(activity.mount(content.into_any_element()), window, cx)
     }
 }
 

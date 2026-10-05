@@ -3,25 +3,49 @@ use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPast
 use objc2_foundation::{NSArray, NSString, NSURL, NSUTF8StringEncoding};
 use std::path::PathBuf;
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard, TextClipboard,
-    selection_representations,
+    TextClipboardTarget, selection_representations,
 };
 use crate::terminal::native_services::file_insertion::{
     MAX_FILE_INSERTION_BYTES, MAX_FILE_ITEMS, parse_file_urls,
 };
-use crate::terminal::osc52::MAX_OSC52_CONTENT_BYTES;
+use crate::terminal::osc52::{MAX_OSC52_CONTENT_BYTES, Osc52Target};
 
 pub(crate) struct MacosTextClipboard;
 impl TextClipboard for MacosTextClipboard {
-    fn read(&self, _: &mut gpui::App) -> Result<Option<String>, ClipboardError> {
+    fn resolve(&self, target: Osc52Target) -> TextClipboardTarget {
+        match target {
+            Osc52Target::Default
+            | Osc52Target::Standard
+            | Osc52Target::Primary
+            | Osc52Target::Selection => TextClipboardTarget::Clipboard,
+        }
+    }
+
+    fn read(
+        &self,
+        target: TextClipboardTarget,
+        _: &mut gpui::App,
+    ) -> Result<Option<String>, ClipboardError> {
+        if target != TextClipboardTarget::Clipboard {
+            return Err(ClipboardError::Unavailable);
+        }
         MainThreadMarker::new().ok_or(ClipboardError::Unavailable)?;
         read_text_from_pasteboard(&NSPasteboard::generalPasteboard())
     }
 
-    fn write(&self, text: &str, _: &mut gpui::App) -> Result<(), ClipboardError> {
+    fn write(
+        &self,
+        target: TextClipboardTarget,
+        text: &str,
+        _: &mut gpui::App,
+    ) -> Result<(), ClipboardError> {
+        if target != TextClipboardTarget::Clipboard {
+            return Err(ClipboardError::Unavailable);
+        }
         write_selection(text, None).map_err(|_| ClipboardError::Unavailable)
     }
 }
@@ -64,7 +88,7 @@ pub(crate) struct MacosFileClipboard {
     pub(crate) paths: crate::local_path::LocalPathSemantics,
 }
 impl FileClipboard for MacosFileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
+    fn read_files(&self, _: &gpui::App) -> Result<Vec<PathBuf>, ClipboardError> {
         read_file_urls(self.paths)
     }
 }
@@ -200,7 +224,7 @@ fn write_selection_to_pasteboard(
     Ok(())
 }
 
-#[cfg(all(test, feature = "macos-native-tests"))]
+#[cfg(all(test, feature = "native-tests"))]
 #[allow(dead_code)]
 pub(in crate::platform) mod tests {
     use super::*;
@@ -211,6 +235,21 @@ pub(in crate::platform) mod tests {
     };
     use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSURL};
     use std::cell::Cell;
+
+    #[test]
+    fn macos_osc52_selectors_keep_system_clipboard_aliases() {
+        for target in [
+            Osc52Target::Default,
+            Osc52Target::Standard,
+            Osc52Target::Primary,
+            Osc52Target::Selection,
+        ] {
+            assert_eq!(
+                MacosTextClipboard.resolve(target),
+                TextClipboardTarget::Clipboard
+            );
+        }
+    }
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements; the provider owns its read counter.

@@ -1,7 +1,7 @@
 //! Immutable geometry supplied by the host for application-owned window content and native
 //! titlebar controls.
 
-use gpui::{Pixels, Point, point, px};
+use gpui::{Pixels, Point, Window, point, px};
 
 /// A native traffic-light position anchored to one client titlebar height.
 ///
@@ -11,16 +11,26 @@ use gpui::{Pixels, Point, point, px};
 pub(crate) struct TrafficLightPlacement {
     compact_position: Point<Pixels>,
     compact_titlebar_height: Pixels,
+    leading_clearance: Pixels,
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only desktops with native window controls place them"
+    )
+)]
 impl TrafficLightPlacement {
     pub(crate) const fn new(
         compact_position: Point<Pixels>,
         compact_titlebar_height: Pixels,
+        leading_clearance: Pixels,
     ) -> Self {
         Self {
             compact_position,
             compact_titlebar_height,
+            leading_clearance,
         }
     }
 
@@ -28,6 +38,12 @@ impl TrafficLightPlacement {
         let delta = (f32::from(titlebar_height) - f32::from(self.compact_titlebar_height)) / 2.0;
         point(self.compact_position.x, self.compact_position.y + px(delta))
     }
+}
+
+/// Moves the native traffic lights of `window`. Only hosts that supply a
+/// [`TrafficLightPlacement`] produce a position, so other hosts never reach a native effect.
+pub(crate) fn place_traffic_lights(window: &Window, position: Point<Pixels>) {
+    window.set_traffic_light_position(position);
 }
 
 /// Geometry the application needs to make inset surfaces follow their hosting window.
@@ -53,11 +69,25 @@ impl WindowFrameGeometry {
     }
 
     /// Records the edge the window paints over the outermost points of its own content.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only desktops with native window controls describe frame placement"
+        )
+    )]
     pub(crate) const fn with_outer_edge_width(mut self, width: f32) -> Self {
         self.outer_edge_width = width;
         self
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only desktops with native window controls place them"
+        )
+    )]
     pub(crate) const fn with_traffic_lights(
         mut self,
         workspace: TrafficLightPlacement,
@@ -75,6 +105,19 @@ impl WindowFrameGeometry {
     /// Width of the window's own edge inside its content bounds; zero when the host paints none.
     pub(crate) const fn outer_edge_width(self) -> f32 {
         self.outer_edge_width
+    }
+
+    /// Leading titlebar space occupied by visible native controls.
+    pub(crate) fn leading_titlebar_clearance(self, fullscreen: bool) -> Option<Pixels> {
+        (!fullscreen)
+            .then_some(self.workspace_traffic_lights)
+            .flatten()
+            .map(|placement| placement.leading_clearance)
+    }
+
+    pub(crate) fn sidebar_window_titlebar_clearance(self) -> Option<Pixels> {
+        self.sidebar_window_traffic_lights
+            .map(|placement| placement.leading_clearance)
     }
 
     pub(crate) fn workspace_traffic_light_position(
@@ -102,8 +145,8 @@ mod tests {
 
     fn geometry() -> WindowFrameGeometry {
         WindowFrameGeometry::new(Some(16.0)).with_traffic_lights(
-            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0)),
-            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+            TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(42.0), px(78.0)),
+            TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
         )
     }
 
@@ -149,6 +192,17 @@ mod tests {
                 geometry.sidebar_window_traffic_light_position(px(36.0)),
             ),
             (None, None)
+        );
+    }
+
+    #[test]
+    fn titlebar_clearance_only_reserves_visible_native_controls() {
+        let geometry = geometry();
+        assert_eq!(geometry.leading_titlebar_clearance(false), Some(px(78.0)));
+        assert_eq!(geometry.leading_titlebar_clearance(true), None);
+        assert_eq!(
+            WindowFrameGeometry::new(Some(16.0)).leading_titlebar_clearance(false),
+            None
         );
     }
 }

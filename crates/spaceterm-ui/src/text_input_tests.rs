@@ -104,6 +104,70 @@ fn obscured_input<'a>(
     (input, cx)
 }
 
+#[gpui::test]
+fn native_text_input_callbacks_keep_the_rendered_font_and_size(cx: &mut TestAppContext) {
+    struct StyledInput(Entity<TextInput>, Pixels);
+    impl Render for StyledInput {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().text_size(self.1).child(self.0.clone())
+        }
+    }
+    install_theme(cx);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        StyledInput(
+            cx.new(|cx| TextInput::new("styled-input", "Styled input", "abc", window, cx)),
+            px(27.0),
+        )
+    });
+    let input = root.read_with(cx, |root, _| root.0.clone());
+    cx.update(|window, cx| {
+        window.activate_window();
+        input.read(cx).focus_handle().focus(window, cx);
+    });
+    cx.run_until_parked();
+    let (font, font_size, bounds, character_width) = input.read_with(cx, |input, _| {
+        let geometry = input.geometry.as_ref().unwrap();
+        (
+            geometry.key.font.clone(),
+            geometry.key.font_size,
+            input.last_bounds.unwrap(),
+            geometry.line.x_for_index(1) - geometry.line.x_for_index(0),
+        )
+    });
+    assert_eq!(font_size, px(27.0));
+    cx.update(|window, cx| {
+        // Native input callbacks run outside the rendered element's text-style scope.
+        assert_ne!(window.text_style().font(), font);
+        input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "d", window, cx);
+            let geometry = input.geometry.as_ref().unwrap();
+            assert_eq!(geometry.key.font, font);
+            assert_eq!(geometry.key.font_size, font_size);
+            let range = input.bounds_for_range(0..1, bounds, window, cx).unwrap();
+            assert_eq!(range.size.width, character_width);
+            input.replace_and_mark_text_in_range(None, "e", Some(1..1), window, cx);
+            let geometry = input.geometry.as_ref().unwrap();
+            assert_eq!(geometry.key.font, font);
+            assert_eq!(geometry.key.font_size, font_size);
+            let range = input.bounds_for_range(0..1, bounds, window, cx).unwrap();
+            assert_eq!(range.size.width, character_width);
+        });
+    });
+    root.update(cx, |root, cx| {
+        root.1 = px(19.0);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "f", window, cx);
+            let geometry = input.geometry.as_ref().unwrap();
+            assert_eq!(geometry.key.font, font);
+            assert_eq!(geometry.key.font_size, px(19.0));
+        });
+    });
+}
+
 fn input_with_events<'a>(
     cx: &'a mut TestAppContext,
     value: &'static str,

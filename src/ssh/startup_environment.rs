@@ -293,6 +293,10 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
-#[path = "../platform/macos_adapter_tests/startup_environment.rs"]
-mod macos_adapter_tests;
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+#[path = "../platform/unix_adapter_tests/startup_environment.rs"]
+mod unix_adapter_tests;

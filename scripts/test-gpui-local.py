@@ -4,6 +4,7 @@
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,40 @@ class GpuiLocalTests(unittest.TestCase):
             cwd=self.root,
             check=True,
         )
+
+    def test_interleaved_overrides_restore_configuration_in_either_order(self):
+        accesskit = self.root / "accesskit"
+        (accesskit / "SPACETERM.md").parent.mkdir()
+        (accesskit / "SPACETERM.md").touch()
+        crates = {"accesskit": "common", "accesskit_consumer": "consumer",
+                  "accesskit_atspi_common": "platforms/atspi-common"}
+        for name, directory in crates.items():
+            manifest = accesskit / directory / "Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(f'[package]\nname = "{name}"\n')
+        script = self.root / "scripts/accesskit-local.py"
+        script.write_bytes(SCRIPT.with_name("accesskit-local.py").read_bytes())
+        self.config.parent.mkdir()
+        for original in ('[env]\nX = "1"', '[env]\nX = "1"\n', ""):
+            for first, second in (("gpui", "accesskit"), ("accesskit", "gpui")):
+                for removal in ((first, second), (second, first)):
+                    with self.subTest(original=original, first=first, removal=removal):
+                        self.config.write_text(original)
+                        def run(name, mode):
+                            result = subprocess.run([
+                                sys.executable, str(self.root / f"scripts/{name}-local.py"),
+                                mode, "first" if name == "gpui" else "accesskit",
+                            ], capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                        run(first, "on")
+                        run(second, "on")
+                        run(removal[0], "off")
+                        patches = tomllib.loads(self.config.read_text())["patch"]
+                        retained = "crates-io" if removal[1] == "accesskit" else FORK_URL
+                        self.assertEqual(set(patches), {retained})
+                        run(removal[1], "on")
+                        run(removal[1], "off")
+                        self.assertEqual(self.config.read_text() if self.config.exists() else "", original)
 
     def test_repeated_on_keeps_patch_after_lockfile_sources_change(self):
         self.run_script("on")

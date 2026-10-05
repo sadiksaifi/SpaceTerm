@@ -55,6 +55,8 @@ pub enum ComboBoxKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
     /// and performs no operating-system detection.
     MacOs,
+    /// The same Control-N and Control-P navigation on Linux desktops.
+    Linux,
 }
 
 /// Installs the platform-specific key equivalents for `profile`.
@@ -63,7 +65,7 @@ pub enum ComboBoxKeybindingProfile {
 /// before calling this function. Both sets remain scoped to an open ComboBox.
 pub fn install_combo_box_keybindings(cx: &mut App, profile: ComboBoxKeybindingProfile) {
     match profile {
-        ComboBoxKeybindingProfile::MacOs => cx.bind_keys([
+        ComboBoxKeybindingProfile::MacOs | ComboBoxKeybindingProfile::Linux => cx.bind_keys([
             KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
         ]),
@@ -2365,8 +2367,8 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
                 let hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || event.modifiers.control
+                        || !crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers)
                         || !hitbox.is_hovered(window)
                         || !enabled
                     {
@@ -2739,7 +2741,8 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let Some(target) = snapshot.trigger_bounds else {
         return div().into_any_element();
     };
-    let viewport = window.viewport_size();
+    let content_viewport = crate::content_viewport(window);
+    let viewport = content_viewport.size;
     let content_height = if snapshot.busy || snapshot.matches.is_empty() {
         theme.metrics.row_height
     } else {
@@ -2785,7 +2788,9 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         viewport,
         snapshot.placement.viewport_margin,
     );
-    let bounds = place_anchored(target, panel_size, viewport, snapshot.placement);
+    let local_target = Bounds::new(target.origin - content_viewport.origin, target.size);
+    let mut bounds = place_anchored(local_target, panel_size, viewport, snapshot.placement);
+    bounds.origin += content_viewport.origin;
     let popup_focus = snapshot.popup_focus.clone();
     let outside_state = state.downgrade();
     let outside = canvas(
@@ -3285,8 +3290,8 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                     let down_hitbox = hitbox.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
-                            || event.button != MouseButton::Left
-                            || event.modifiers.control
+                            || !crate::PointerConventions::get(cx)
+                                .primary(event.button, event.modifiers)
                             || !down_hitbox.is_hovered(window)
                         {
                             return;
@@ -3305,12 +3310,11 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                         {
                             return;
                         }
+                        let primary = crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers);
                         let accepted = up_state
                             .update(cx, |state, _| {
-                                state.pointer_up(
-                                    &up_id,
-                                    !event.modifiers.control && up_hitbox.is_hovered(window),
-                                )
+                                state.pointer_up(&up_id, primary && up_hitbox.is_hovered(window))
                             })
                             .unwrap_or(false);
                         if accepted {

@@ -9,6 +9,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn compress_scrollback(&mut self) -> Result<CompressionResult, Error> {
+        // Compression can discard dirty row headers even when a pane is hidden.
+        self.capture_accessibility_if_needed()?;
         self.terminal.compress(CompressionMode::Incremental)
     }
 }

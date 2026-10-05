@@ -48,6 +48,7 @@ pub fn focus_ring(
         visibility: Visibility::Shown,
         target: None,
         debug_selector: None,
+        outline: None,
     }
 }
 
@@ -65,6 +66,7 @@ pub struct FocusRing {
     visibility: Visibility,
     target: Option<FocusRingTarget>,
     debug_selector: Option<String>,
+    outline: Option<(Pixels, Pixels)>,
 }
 
 /// Bounds a wrapped control reports while it prepaints, for a ring around one of its parts.
@@ -82,6 +84,13 @@ enum Visibility {
 }
 
 impl FocusRing {
+    /// Paints a desktop outline with its own geometry and a simple native fade.
+    pub(crate) fn outline(mut self, width: Pixels, outset: Pixels, radius: Pixels) -> Self {
+        self.outline = Some((width, outset));
+        self.corner_radii = Corners::all(radius);
+        self
+    }
+
     /// Shows the ring only while `focus` is the window's focused handle.
     ///
     /// `pinned` keeps the ring at rest regardless of focus, for development previews.
@@ -120,6 +129,12 @@ impl FocusRing {
 
     /// The band's resting bounds and outer corner radii around a control's border box.
     fn resting(&self, control: Bounds<Pixels>) -> (Bounds<Pixels>, Corners<Pixels>) {
+        if let Some((_, outset)) = self.outline {
+            return (
+                control.dilate(outset),
+                self.corner_radii.map(|radius| *radius + outset),
+            );
+        }
         let reach = px(REACH) - self.border_width;
         let radii = self
             .corner_radii
@@ -342,7 +357,12 @@ impl FocusRing {
                     if motion == ControlMotion::Reduced || pinned {
                         1.0
                     } else {
-                        entrance_progress(now.saturating_duration_since(since))
+                        let elapsed = now.saturating_duration_since(since);
+                        if self.outline.is_some() {
+                            (elapsed.as_secs_f32() / 0.2).min(1.0)
+                        } else {
+                            entrance_progress(elapsed)
+                        }
                     }
                 });
                 (progress, state)
@@ -357,7 +377,14 @@ impl FocusRing {
         if progress < 1.0 {
             window.request_animation_frame();
         }
-        let band = Band::at(progress);
+        let band = if self.outline.is_some() {
+            Band {
+                spread: 0.0,
+                opacity: progress,
+            }
+        } else {
+            Band::at(progress)
+        };
         let color = Rgba {
             a: self.color.a * band.opacity,
             ..self.color
@@ -371,7 +398,7 @@ impl FocusRing {
             resting.dilate(spread),
             radii.map(|radius| *radius + spread),
             gpui::transparent_black(),
-            px(WIDTH) + spread,
+            self.outline.map_or(px(WIDTH), |(width, _)| width) + spread,
             color,
             gpui::BorderStyle::Solid,
         ));
@@ -416,6 +443,16 @@ impl Band {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_focus_outline_stays_inside_the_native_pointer_target() {
+        let control = Bounds::new(
+            gpui::point(px(20.0), px(30.0)),
+            gpui::size(px(34.0), px(34.0)),
+        );
+        let ring = focus_ring("native", RING, px(12.0), px(0.0)).outline(px(2.0), px(0.0), px(9.0));
+        assert_eq!(ring.resting(control), (control, Corners::all(px(9.0))));
+    }
 
     #[test]
     fn entrance_contracts_onto_the_control_and_fades_in() {

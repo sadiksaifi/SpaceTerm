@@ -393,7 +393,10 @@ impl DeveloperWorkbench {
         })
         .detach();
         let settings = cx.global::<AppearanceRuntime>().settings.clone();
-        let preview = AppearancePreview::new(settings);
+        let preview = AppearancePreview::new(
+            settings,
+            crate::host_fonts::HostFonts::get(cx).system_monospace_family,
+        );
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let navigation = SidebarNavigation::new(focus_handle.clone(), window, cx);
@@ -748,7 +751,7 @@ impl DeveloperWorkbench {
                     .child(self.render_detail(&surface, window, cx))
                     .child(self.render_footer(&surface, cx)),
             );
-        ModalLayer::new(content)
+        ModalLayer::new(super::window_shell::render(content, window, cx))
             .transient(self.palette.clone())
             .into_any_element()
     }
@@ -770,7 +773,15 @@ impl DeveloperWorkbench {
             })
             .collect();
         let movement = self.window_movement.clone();
-        Sidebar::new(PREFIX, entries, &movement).render(self, surface, window, cx)
+        let closing = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = closing.update(cx, |workbench, cx| {
+                workbench.close(&CloseDeveloperWorkbench, window, cx)
+            });
+        });
+        Sidebar::new(PREFIX, entries, &movement)
+            .window_controls(close)
+            .render(self, surface, window, cx)
     }
 
     /// Window-wide controls: the previewed Appearance Mode and simulated system settings.
@@ -861,6 +872,12 @@ impl DeveloperWorkbench {
             WorkbenchSection::Document => self.document.render(surface, window, cx),
         };
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
+        let closing = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let _ = closing.update(cx, |workbench, cx| {
+                workbench.close(&CloseDeveloperWorkbench, window, cx);
+            });
+        });
         let heading = DetailHeading::new(
             PREFIX,
             section_heading(
@@ -870,10 +887,11 @@ impl DeveloperWorkbench {
                 appearance,
             ),
             &self.window_movement,
+            close,
         )
         .toolbar(self.render_toolbar(cx))
         .scrolled(scrolled)
-        .render(surface);
+        .render(surface, window, cx);
         let revealing = cx.weak_entity();
         div()
             .debug_selector(|| "workbench-canvas".to_owned())

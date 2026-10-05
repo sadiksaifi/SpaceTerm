@@ -21,9 +21,10 @@ use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusC
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
-    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
-    PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError,
-    TERMINAL_KEY_CONTEXT, TabIdentity, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
+    NextTab, PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, PreviousTab,
+    RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -56,7 +57,9 @@ pub(crate) struct PreparedTabManagerRemoteRestart {
 }
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{CloseTabOutcome, PaneId, TabCollection, TabError, TabId, WorkspaceId};
+use crate::domain::{
+    CloseTabOutcome, PaneId, TabCollection, TabError, TabId, TabStep, WorkspaceId,
+};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
@@ -420,6 +423,7 @@ pub(crate) struct TabManager {
     sidebar_width: Pixels,
     top_chrome_width: Pixels,
     trailing_accessory: Option<gpui::AnyView>,
+    window_close_handler: Option<spaceterm_ui::WindowCloseHandler>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
@@ -505,6 +509,7 @@ impl TabManager {
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             trailing_accessory: None,
+            window_close_handler: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
@@ -581,6 +586,13 @@ impl TabManager {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_status(
         &self,
         workspace_id: WorkspaceId,
@@ -597,6 +609,13 @@ impl TabManager {
         })
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only a desktop Services Adapter queries Services state"
+        )
+    )]
     pub(crate) fn native_service_target(
         &self,
         origin: NativeServiceOrigin,
@@ -900,6 +919,10 @@ impl TabManager {
     /// Places the Operating-System Window's own control at the trailing end of the Tab bar.
     ///
     /// The Workspace manager owns one per window and hands it to whichever Tab manager is active.
+    pub(crate) fn set_window_close_handler(&mut self, handler: spaceterm_ui::WindowCloseHandler) {
+        self.window_close_handler = Some(handler);
+    }
+
     pub(crate) fn set_trailing_accessory(
         &mut self,
         accessory: Option<gpui::AnyView>,
@@ -975,6 +998,15 @@ impl TabManager {
                         WindowDragRegionResponse::Continue
                     }
                 }
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.operating_system_window_drag_platform
+                    .show_window_menu(window, position);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
@@ -1312,6 +1344,21 @@ impl TabManager {
         }
     }
 
+    fn step_active_tab(&mut self, step: TabStep, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.tabs.neighbor_of_active_tab(step);
+        if tab_id != self.tabs.active_tab_id() {
+            self.activate_tab(tab_id, window, cx);
+        }
+    }
+
+    fn move_active_tab(&mut self, step: TabStep, cx: &mut Context<Self>) {
+        if self.tabs.move_active_tab(step) {
+            self.scroll_active_tab_into_view();
+            cx.emit(TabManagerEvent::PresentationChanged);
+            cx.notify();
+        }
+    }
+
     fn close_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_workspace_requested {
             return;
@@ -1403,6 +1450,22 @@ impl TabManager {
 
     fn on_activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_tab_at(8, window, cx);
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_active_tab(TabStep::Next, window, cx);
+    }
+
+    fn on_previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_active_tab(TabStep::Previous, window, cx);
+    }
+
+    fn on_move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Next, cx);
+    }
+
+    fn on_move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Previous, cx);
     }
 
     /// The copy of a dragged Tab that follows the pointer, at the size its Tab was painted.
@@ -1829,11 +1892,12 @@ impl TabManager {
                         }),
                     ),
             )
+            .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
                 // The Tabs give up room to the accessory rather than scrolling beneath it, and the
                 // space between them stays draggable. The accessory owns its own edge spacing, so
                 // an empty accessory reserves nothing.
-                content.child(div().flex_1().min_w_0()).child(
+                content.child(
                     div()
                         .debug_selector(|| "tab-bar-trailing-accessory".to_owned())
                         .flex_none()
@@ -1842,13 +1906,39 @@ impl TabManager {
                         .items_center()
                         .child(accessory),
                 )
-            });
+            })
+            .when_some(
+                self.window_close_handler.clone().filter(|_| {
+                    matches!(
+                        window.window_decorations(),
+                        gpui::Decorations::Client { .. }
+                    ) && !window.is_fullscreen()
+                }),
+                |content, close| {
+                    content.child(
+                        div()
+                            .flex_none()
+                            .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
+                                .control_metrics()
+                                .edge_margin))
+                            .child(spaceterm_ui::ControlHost::TitleBar.mount(
+                                spaceterm_ui::ClientWindowControls::new(close).surface_color(
+                                    gpui_color(appearance.colors.title_bar_background),
+                                ),
+                            )),
+                    )
+                },
+            );
 
         let drag_region = WindowDragRegion::new(
             "tab-bar-drag-region",
             "Move Operating-System Window from Tab chrome",
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
             left: super::resize_handle_theme::spacious_target_half_thickness(cx),
@@ -1932,6 +2022,10 @@ impl Render for TabManager {
             .on_action(cx.listener(Self::on_activate_tab_7))
             .on_action(cx.listener(Self::on_activate_tab_8))
             .on_action(cx.listener(Self::on_activate_tab_9))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_previous_tab))
+            .on_action(cx.listener(Self::on_move_tab_right))
+            .on_action(cx.listener(Self::on_move_tab_left))
             .on_action(cx.listener(Self::on_close_tab))
             .child(
                 div()
@@ -3868,6 +3962,96 @@ mod tests {
         }
 
         assert_eq!(active_tab_ids, (1..=9).map(TabId::new).collect::<Vec<_>>());
+    }
+
+    #[gpui::test]
+    fn next_and_previous_tab_should_wrap_around_the_workspace(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+
+        let mut active_tab_ids = Vec::new();
+        for shortcut in ["cmd-}", "cmd-}", "cmd-{", "cmd-{", "cmd-{"] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
+        }
+
+        assert_eq!(
+            active_tab_ids,
+            [1, 2, 1, 3, 2].map(TabId::new),
+            "Next Tab and Previous Tab should step through the Tab order and wrap at both ends"
+        );
+    }
+
+    #[gpui::test]
+    fn command_key_profile_should_leave_control_tab_to_the_terminal(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+        let active_tab_id = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id());
+        let key_inputs = |records: &TestTerminalSessionRecords| {
+            records
+                .commands()
+                .into_iter()
+                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .count()
+        };
+        let before = key_inputs(&records);
+
+        let mut active_tab_ids = Vec::new();
+        for shortcut in ["ctrl-tab", "ctrl-shift-tab"] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
+        }
+
+        assert_eq!(
+            active_tab_ids, [active_tab_id; 2],
+            "Control-Tab is not a Tab navigation Shortcut in the Command-key profile"
+        );
+        assert_eq!(
+            key_inputs(&records) - before,
+            2,
+            "Control-Tab and Control-Shift-Tab should reach the focused terminal session"
+        );
+    }
+
+    #[gpui::test]
+    fn move_tab_should_reorder_the_active_tab_and_stop_at_the_ends(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+        let order =
+            |cx: &mut VisualTestContext| manager.read_with(cx, |manager, _| manager.tab_ids());
+
+        let mut orders = Vec::new();
+        for right in [true, false, false, false] {
+            if right {
+                cx.dispatch_action(MoveTabRight);
+            } else {
+                cx.dispatch_action(MoveTabLeft);
+            }
+            cx.run_until_parked();
+            orders.push(order(cx));
+        }
+
+        assert_eq!(
+            orders,
+            [[1, 2, 3], [1, 3, 2], [3, 1, 2], [3, 1, 2]]
+                .map(|order| order.map(TabId::new).to_vec()),
+        );
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(3),
+            "moving a Tab should keep it active"
+        );
     }
 
     #[gpui::test]

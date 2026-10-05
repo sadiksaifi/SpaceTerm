@@ -2,8 +2,8 @@
 //!
 //! A sidebar window is a fixed-size, modeless Operating-System Window. Its sidebar lists sections,
 //! and its content column presents one section at a time under a fixed heading. Both columns run
-//! beneath the transparent native titlebar, so this module also owns the client chrome standing in
-//! for that titlebar: the traffic-light strip and the window-movement regions.
+//! beneath the titlebar, so this module also owns its client surface: the window-control space and
+//! the window-movement regions.
 //!
 //! The owner keeps its sections, its content, and its policy. This module keeps the geometry, the
 //! navigation list's keyboard and pointer behavior, and window movement, so every sidebar window
@@ -19,7 +19,8 @@ use gpui::{
     Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use spaceterm_ui::{
-    HoverFade, Icon, IconName, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    ClientWindowControls, HoverFade, Icon, IconName, WindowCloseHandler, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::platform::window_movement::{
@@ -48,6 +49,12 @@ pub(crate) const CONTENT_GUTTER: f32 = 26.0;
 
 /// The space between consecutive groups in the content column.
 const GROUP_SPACING: f32 = 26.0;
+
+/// The row client-drawn Window Controls center in: the sidebar's first row with its inset above and
+/// below, so the controls share a center line with Search, the way a desktop header bar holds both.
+fn client_control_row_height(appearance: &ChromeAppearance) -> Pixels {
+    appearance.spacing(SIDEBAR_INSET * 2.0 + NAVIGATION_ROW_HEIGHT)
+}
 
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
 ///
@@ -83,24 +90,30 @@ pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) 
         .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
         .and_then(|geometry| geometry.sidebar_window_traffic_light_position(titlebar_height));
     let bounds = Bounds::centered(None, size, cx);
-    WindowOptions {
-        window_background: crate::ui::appearance_runtime::window_background(cx),
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            // Retain the native title for the Window menu and accessibility while drawing the
-            // visible section title in the client surface.
-            appears_transparent: true,
-            traffic_light_position,
-        }),
-        kind: WindowKind::Normal,
-        is_movable: true,
-        is_resizable: false,
-        is_minimizable: false,
-        tabbing_identifier: None,
-        ..WindowOptions::default()
-    }
+    cx.global::<crate::platform::window_chrome::WindowChrome>()
+        .options(
+            crate::platform::window_chrome::WindowRole::SidebarWindow,
+            WindowOptions {
+                app_id: crate::app::window_application_id(),
+                window_background: crate::ui::appearance_runtime::window_background(cx),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(title.into()),
+                    // Retain the native title for the Window menu and accessibility while drawing the
+                    // visible section title in the client surface.
+                    appears_transparent: true,
+                    traffic_light_position,
+                }),
+                kind: WindowKind::Normal,
+                is_movable: true,
+                is_resizable: false,
+                is_minimizable: false,
+                tabbing_identifier: None,
+                ..WindowOptions::default()
+            },
+            cx,
+        )
 }
 
 /// Renders a sidebar window's surface inside its window-activity and control-theme scopes.
@@ -299,6 +312,7 @@ impl WindowMovement {
         id: String,
         content: impl IntoElement,
         pointer_insets: Edges<Pixels>,
+        window: &Window,
     ) -> WindowDragRegion {
         let movement = self.clone();
         WindowDragRegion::new(
@@ -309,6 +323,10 @@ impl WindowMovement {
             ),
             content,
         )
+        .middle_activation(matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ))
         .pointer_insets(pointer_insets)
         .debug_selector(id)
         .on_event(move |event, window, cx| movement.handle(*event, window, cx))
@@ -322,7 +340,9 @@ impl WindowMovement {
     ) -> WindowDragRegionResponse {
         match event {
             WindowDragRegionEvent::InteractionStarted { .. } => {
-                self.window_focus.focus(window, cx);
+                if !spaceterm_ui::window_modal_is_open(window, cx) {
+                    self.window_focus.focus(window, cx);
+                }
                 if let Err(error) = self.platform.interaction_started() {
                     self.report("begin", error);
                 }
@@ -337,8 +357,16 @@ impl WindowMovement {
                     }
                 }
             }
+            WindowDragRegionEvent::MiddleActivationRequested => {
+                window.titlebar_middle_click();
+                WindowDragRegionResponse::Continue
+            }
             WindowDragRegionEvent::DoubleActivationRequested => {
                 window.titlebar_double_click();
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::SecondaryActivationRequested { position } => {
+                self.platform.show_window_menu(window, position);
                 WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::InteractionFinished { .. } => {
@@ -420,6 +448,7 @@ pub(crate) struct Sidebar<'a, T: SidebarOwner> {
     entries: Vec<NavigationEntry<T::Section>>,
     header: Option<AnyElement>,
     movement: &'a WindowMovement,
+    close: Option<WindowCloseHandler>,
 }
 
 impl<'a, T: SidebarOwner> Sidebar<'a, T> {
@@ -434,7 +463,13 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
             entries,
             header: None,
             movement,
+            close: None,
         }
+    }
+
+    pub(crate) fn window_controls(mut self, close: WindowCloseHandler) -> Self {
+        self.close = Some(close);
+        self
     }
 
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
@@ -451,19 +486,54 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
     ) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
+        // Traffic lights need their own strip. Client-drawn controls need one only when they lead;
+        // otherwise the strip shrinks to the inset above Search, which stays window-movement space.
+        let client = matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        );
+        let leading_controls = self.close.is_some()
+            && ClientWindowControls::width(spaceterm_ui::WindowControlSide::Left, window, cx)
+                > px(0.0);
+        let titlebar_height = match (client, leading_controls) {
+            (false, _) => appearance.top_height(),
+            (true, true) => client_control_row_height(appearance),
+            (true, false) => appearance.spacing(SIDEBAR_INSET),
+        };
         let titlebar = div()
             .debug_selector(move || format!("{prefix}-sidebar-titlebar"))
             .flex_none()
             .w_full()
-            .h(appearance.top_height())
-            .child(self.movement.region(
-                format!("{prefix}-sidebar-drag-region"),
-                div().size_full(),
-                Edges {
-                    left: px(super::workspace_chrome::TRAFFIC_LIGHT_CLEARANCE),
-                    ..Edges::default()
-                },
-            ));
+            .h(titlebar_height)
+            .child(
+                self.movement.region(
+                    format!("{prefix}-sidebar-drag-region"),
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .pl(px(spaceterm_ui::DesktopWindowStyle::current(cx)
+                            .control_metrics()
+                            .edge_margin))
+                        .when_some(self.close, |titlebar, close| {
+                            titlebar.child(
+                                ClientWindowControls::new(close)
+                                    .side(spaceterm_ui::WindowControlSide::Left)
+                                    .surface_color(gpui_color(
+                                        appearance.colors.title_bar_background,
+                                    )),
+                            )
+                        }),
+                    Edges {
+                        left: cx
+                            .try_global::<crate::platform::window_frame::WindowFrameGeometry>()
+                            .and_then(|geometry| geometry.sidebar_window_titlebar_clearance())
+                            .unwrap_or(px(0.0)),
+                        ..Edges::default()
+                    },
+                    window,
+                ),
+            );
         let list = render_navigation_list(prefix, self.entries, owner, appearance, window, cx);
         let sidebar = div()
             .debug_selector(move || format!("{prefix}-sidebar"))
@@ -497,7 +567,9 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                     .flex_1()
                     .min_h_0()
                     .px(appearance.spacing(SIDEBAR_INSET))
-                    .pt(appearance.spacing(SIDEBAR_INSET))
+                    .when(!client || leading_controls, |column| {
+                        column.pt(appearance.spacing(SIDEBAR_INSET))
+                    })
                     .children(self.header.map(|header| {
                         // The header belongs to the window, not to the list under it, so the break
                         // between them is wider than the spacing inside the list.
@@ -674,6 +746,7 @@ pub(crate) struct DetailHeading<'a> {
     toolbar: Option<AnyElement>,
     scrolled: bool,
     movement: &'a WindowMovement,
+    close: WindowCloseHandler,
 }
 
 impl<'a> DetailHeading<'a> {
@@ -681,6 +754,7 @@ impl<'a> DetailHeading<'a> {
         prefix: &'static str,
         heading: impl IntoElement,
         movement: &'a WindowMovement,
+        close: WindowCloseHandler,
     ) -> Self {
         Self {
             prefix,
@@ -688,6 +762,7 @@ impl<'a> DetailHeading<'a> {
             toolbar: None,
             scrolled: false,
             movement,
+            close,
         }
     }
 
@@ -704,9 +779,17 @@ impl<'a> DetailHeading<'a> {
         self
     }
 
-    pub(crate) fn render(self, surface: &SettingsAppearance) -> AnyElement {
+    pub(crate) fn render(
+        self,
+        surface: &SettingsAppearance,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
+        let client_controls =
+            ClientWindowControls::width(spaceterm_ui::WindowControlSide::Right, window, cx)
+                > px(0.0);
         let heading = div()
             .size_full()
             .px(appearance.spacing(CONTENT_GUTTER))
@@ -717,6 +800,7 @@ impl<'a> DetailHeading<'a> {
             format!("{prefix}-detail-drag-region"),
             heading,
             Edges::default(),
+            window,
         );
         div()
             .debug_selector(move || format!("{prefix}-detail-heading"))
@@ -735,9 +819,26 @@ impl<'a> DetailHeading<'a> {
                     .items_start()
                     .gap(appearance.spacing(8.0))
                     .pt(appearance.spacing(HEADING_TOP_INSET))
-                    .pr(appearance.spacing(CONTENT_GUTTER))
+                    .pr(appearance.spacing(if client_controls { 8.0 } else { CONTENT_GUTTER }))
                     .child(toolbar)
             }))
+            .when(client_controls, |heading| {
+                heading.child(
+                    div()
+                        .debug_selector(move || format!("{prefix}-window-controls"))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(client_control_row_height(appearance))
+                        .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
+                            .control_metrics()
+                            .edge_margin))
+                        .child(
+                            ClientWindowControls::new(self.close)
+                                .surface_color(gpui_color(appearance.colors.title_bar_background)),
+                        ),
+                )
+            })
             .when(self.scrolled, |heading| {
                 heading.child(
                     div()

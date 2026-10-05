@@ -13,6 +13,8 @@ mod combo_box;
 #[cfg(test)]
 mod combo_box_tests;
 mod command_palette;
+mod content_viewport;
+pub use content_viewport::content_viewport;
 mod field_frame;
 mod floating_surface;
 #[cfg(test)]
@@ -28,6 +30,7 @@ mod middle_truncated_text;
 mod modal;
 mod optical_text;
 mod overlay_scrollbar;
+mod pointer_conventions;
 mod progress;
 #[cfg(test)]
 mod progress_tests;
@@ -43,9 +46,16 @@ mod text_editing;
 mod text_input;
 mod toggle;
 mod tooltip;
+mod window_controls;
 mod window_drag_region;
+pub use window_controls::{
+    ClientWindowControls, DesktopControlMetrics, DesktopWindowControls, DesktopWindowStyle,
+    WindowCloseHandler, WindowControlSide, window_controls_dark,
+};
 
 use gpui::App;
+
+pub use pointer_conventions::{PointerConventions, install_pointer_conventions};
 
 pub use anchored_placement::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, AnchoredTextDirection,

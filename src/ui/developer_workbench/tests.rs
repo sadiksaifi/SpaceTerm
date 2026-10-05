@@ -36,11 +36,12 @@ impl crate::settings::storage::SettingsStorage for ReadOnlyStorage {
     }
 }
 
-struct RecordingMovement;
+#[derive(Default)]
+struct RecordingMovement(Rc<RecordingOperatingSystemWindowDragPlatform>);
 
 impl WindowMovementFactory for RecordingMovement {
     fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
-        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+        self.0.clone()
     }
 }
 
@@ -81,6 +82,77 @@ fn status(workbench: &Entity<DeveloperWorkbench>, cx: &mut VisualTestContext) ->
     cx.update(|_, cx| workbench.read(cx).status.to_string())
 }
 
+#[gpui::test]
+fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut TestAppContext) {
+    let (_, platform) = install(cx);
+    let (workbench, cx) = open_workbench_window(cx);
+    workbench.update(cx, |workbench, cx| {
+        workbench.apply(
+            |preview| preview.set_transparency(0.8),
+            "Fixture transparency",
+            cx,
+        );
+        workbench.apply(|preview| preview.set_blur(false), "Fixture blur", cx);
+    });
+    cx.run_until_parked();
+    for (transparency, blur) in [(false, false), (true, false), (false, true)] {
+        platform.set_native_window_transparency_supported(transparency);
+        platform.set_native_window_blur_supported(blur);
+        cx.run_until_parked();
+        let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
+        let before_status = status(&workbench, cx);
+        let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+        let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+        assert!(
+            thumb.center().x > track.center().x,
+            "Blur must show its effective default"
+        );
+        // The disabled selected segment still presents the effective Default stop.
+        let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
+        let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
+        cx.update(|window, _| {
+            let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                    .map(|quad| quad.background)
+            };
+            assert_ne!(
+                fill(default_bounds),
+                fill(maximum_bounds),
+                "Default must be the selected stop"
+            );
+        });
+        for selector in [
+            "workbench-transparency-opaque",
+            "workbench-transparency-maximum",
+            "workbench-blur",
+        ] {
+            click(selector, cx);
+        }
+        assert_eq!(
+            workbench.read_with(cx, |workbench, _| workbench.preview.document()),
+            before
+        );
+        assert_eq!(status(&workbench, cx), before_status);
+    }
+    // Once both effects return, the controls present and edit the retained choices again.
+    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_blur_supported(true);
+    cx.run_until_parked();
+    let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+    let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+    assert!(thumb.center().x < track.center().x);
+    click("workbench-transparency-maximum", cx);
+    click("workbench-blur", cx);
+    let preferences = workbench.read_with(cx, |workbench, _| {
+        workbench.preview.document().preferences.window
+    });
+    assert_eq!(preferences.transparency, 1.0);
+    assert!(preferences.blur);
+}
+
 #[test]
 fn every_section_is_reachable_by_its_launch_argument() {
     for section in WorkbenchSection::ALL {
@@ -97,7 +169,7 @@ fn every_section_is_reachable_by_its_launch_argument() {
 fn opening_twice_keeps_one_window_and_selects_the_requested_section(cx: &mut TestAppContext) {
     install(cx);
     cx.update(|cx| {
-        configure_window_chrome(Rc::new(RecordingMovement), cx);
+        configure_window_chrome(Rc::new(RecordingMovement::default()), cx);
         open_or_activate(None, cx);
     });
     cx.run_until_parked();
@@ -224,6 +296,108 @@ fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppCont
     assert_eq!(status(&workbench, cx), "Preview cancelled.");
 }
 
+fn open_framed_workbench(
+    movement: Rc<RecordingOperatingSystemWindowDragPlatform>,
+    cx: &mut TestAppContext,
+) -> WindowHandle<DeveloperWorkbench> {
+    cx.update(|cx| {
+        configure_window_chrome(Rc::new(RecordingMovement(movement)), cx);
+        open_or_activate(None, cx);
+        cx.global::<OpenWorkbench>().0
+    })
+}
+
+#[gpui::test]
+fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut TestAppContext) {
+    install(cx);
+    let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let window = open_framed_workbench(movement.clone(), cx);
+    let workbench = window.root(cx).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, _| window.activate_window());
+
+    for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+        workbench.update(cx, |workbench, cx| {
+            workbench.apply(
+                |preview| preview.set_density(density),
+                "Density changed",
+                cx,
+            );
+        });
+        for client in [false, true] {
+            let inset = if client {
+                crate::platform::window_chrome::CLIENT_FRAME_INSET * 2.0
+            } else {
+                0.0
+            };
+            cx.simulate_decorations(if client {
+                gpui::Decorations::Client {
+                    tiling: gpui::Tiling::default(),
+                }
+            } else {
+                gpui::Decorations::Server
+            });
+            cx.simulate_resize(size(px(WINDOW_WIDTH + inset), px(WINDOW_HEIGHT + inset)));
+            workbench.update(cx, |workbench, cx| {
+                workbench.set_mode(AppearanceMode::Dark, cx)
+            });
+            cx.run_until_parked();
+
+            let surface = cx.debug_bounds("workbench-window-surface").unwrap();
+            let heading = cx.debug_bounds("workbench-detail-heading").unwrap();
+            let drag = cx
+                .debug_bounds("workbench-detail-drag-region-hitbox")
+                .unwrap();
+            let toolbar = cx.debug_bounds("workbench-toolbar").unwrap();
+            let simulate = cx.debug_bounds("workbench-simulate").unwrap();
+            let gutter = cx.update(|_, cx| super::super::appearance::chrome(cx).spacing(26.0));
+            assert_eq!(surface.size, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+            assert!(drag.size.width > px(0.0));
+            assert!(
+                drag.right() <= toolbar.left(),
+                "drag {drag:?} overlaps toolbar {toolbar:?}"
+            );
+            assert!(toolbar.right() <= heading.right());
+            if client {
+                let controls = cx.debug_bounds("workbench-window-controls").unwrap();
+                let close = cx.debug_bounds("window-close").unwrap();
+                assert!(toolbar.right() <= controls.left());
+                assert!(
+                    simulate.right() < close.left(),
+                    "toolbar {simulate:?} overlaps Close {close:?}"
+                );
+                assert!(heading.contains(&close.center()));
+                let edge_margin = cx.update(|_, cx| {
+                    spaceterm_ui::DesktopWindowStyle::current(cx)
+                        .control_metrics()
+                        .edge_margin
+                });
+                assert!((heading.right() - close.right() - px(edge_margin)).abs() < px(0.5));
+                assert!(cx.debug_bounds("window-minimize").is_none());
+                assert!(cx.debug_bounds("window-maximize").is_none());
+            } else {
+                assert!(cx.debug_bounds("window-close").is_none());
+                assert!(cx.debug_bounds("workbench-window-controls").is_none());
+                assert_eq!(toolbar.right(), heading.right());
+                assert!((heading.right() - simulate.right() - gutter).abs() < px(0.5));
+            }
+
+            click("workbench-appearance-mode-light", cx);
+            cx.update(|_, cx| {
+                assert_eq!(
+                    appearance_runtime::current(cx).chrome.appearance,
+                    Appearance::Light
+                );
+            });
+            assert_eq!(
+                movement.counts(),
+                (0, 0, 0, 0),
+                "toolbar clicks must not move the window"
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
     let (_, platform) = install(cx);
@@ -331,6 +505,64 @@ fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut Test
         .unwrap();
     cx.run_until_parked();
 
+    cx.update(|cx| {
+        let current = appearance_runtime::current(cx);
+        assert_eq!(current.chrome.appearance, Appearance::Dark);
+        assert!(!current.chrome.composition.capabilities.increase_contrast);
+        assert!(caption_fixture(cx).is_none());
+        assert!(link_preview_fixture(cx).is_none());
+    });
+    let revision = settings.snapshot().committed.revision;
+    assert!(settings.begin_preview(revision).is_ok());
+}
+
+#[gpui::test]
+fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
+    cx: &mut TestAppContext,
+) {
+    let (settings, _) = install(cx);
+    let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+    let window = open_framed_workbench(movement.clone(), cx);
+    window
+        .update(cx, |workbench, _, cx| {
+            workbench.set_mode(AppearanceMode::Light, cx);
+            workbench.simulate(
+                Simulation::Accessibility(AccessibilityPreviewFact::IncreaseContrast),
+                cx,
+            );
+            terminal::set_caption_fixture(true, cx);
+            terminal::set_link_preview_fixture(true, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            appearance_runtime::current(cx).chrome.appearance,
+            Appearance::Light
+        );
+        assert!(
+            appearance_runtime::current(cx)
+                .chrome
+                .composition
+                .capabilities
+                .increase_contrast
+        );
+        assert!(caption_fixture(cx).is_some());
+        assert!(link_preview_fixture(cx).is_some());
+    });
+
+    {
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_decorations(gpui::Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        click("window-close", cx);
+    }
+
+    assert!(!cx.windows().contains(&window.into()));
+    assert_eq!(movement.counts(), (0, 0, 0, 0));
     cx.update(|cx| {
         let current = appearance_runtime::current(cx);
         assert_eq!(current.chrome.appearance, Appearance::Dark);

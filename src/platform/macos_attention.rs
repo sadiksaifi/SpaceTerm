@@ -7,7 +7,7 @@ use crate::terminal::attention_runtime::{AttentionFailure, AudioBell, DockAttent
 pub(crate) struct AppKitAudioBell;
 
 impl AudioBell for AppKitAudioBell {
-    fn play(&mut self) {
+    fn play(&mut self, _window: Option<gpui::AnyWindowHandle>) {
         unsafe extern "C" {
             fn NSBeep();
         }

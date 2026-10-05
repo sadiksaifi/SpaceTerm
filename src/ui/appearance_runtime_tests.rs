@@ -54,6 +54,80 @@ fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform)
     (settings, platform)
 }
 
+#[gpui::test]
+fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(crate::host_fonts::HostFonts {
+            ui_family: "Chrome Test".into(),
+            system_monospace_family: "Terminal Test".into(),
+            terminal_families: &[crate::bundled_font::FAMILY],
+            emoji_family: "Emoji Test".into(),
+            bundled_ui_faces: &[],
+        });
+    });
+    start(cx);
+    cx.update(|cx| {
+        enum Snapshot {
+            Initial,
+            CompleteCatalog,
+            #[cfg(feature = "developer-tools")]
+            Reload,
+        }
+        for snapshot in [
+            Snapshot::Initial,
+            Snapshot::CompleteCatalog,
+            #[cfg(feature = "developer-tools")]
+            Snapshot::Reload,
+        ] {
+            match snapshot {
+                Snapshot::Initial => {}
+                Snapshot::CompleteCatalog => {
+                    complete_font_catalog(cx);
+                    refresh(cx).unwrap();
+                }
+                #[cfg(feature = "developer-tools")]
+                Snapshot::Reload => reload_fonts(cx).unwrap(),
+            }
+            let resolved = current(cx);
+            assert_eq!(
+                resolved.chrome.typography.body.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.chrome.typography.heading.primary_family,
+                "Chrome Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.primary_family,
+                "Terminal Test"
+            );
+            assert_eq!(
+                resolved.terminal.typography.regular.fallback_families,
+                ["Emoji Test", "SpaceTerm Default"]
+            );
+            assert_eq!(
+                crate::ui::appearance::chrome(cx)
+                    .typography
+                    .style(crate::ui::chrome_typography::TextRole::Body)
+                    .font
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+            assert_eq!(
+                cx.global::<spaceterm_ui::ControlThemeCatalog>()
+                    .installed_typography()
+                    .regular()
+                    .family
+                    .as_ref(),
+                "Chrome Test"
+            );
+        }
+    });
+}
+
 struct CatalogTextSystem {
     base: gpui::NoopTextSystem,
     terminal_fonts_registered: std::sync::atomic::AtomicBool,
@@ -341,7 +415,9 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     cx.update(|cx| {
         let current = current(cx);
         assert!(current.chrome.composition.materials.is_opaque());
-        assert_eq!(floating(&current), preview_floating);
+        // Without desktop transparency the retained choices cannot take effect, so floating
+        // surfaces follow the defaults the Settings rows then show.
+        assert_eq!(floating(&current), floating(&before));
         assert_eq!(
             window_background(cx),
             gpui::WindowBackgroundAppearance::Opaque
@@ -349,7 +425,10 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     });
     platform.set_native_window_transparency_supported(true);
     cx.run_until_parked();
-    cx.update(|cx| assert_eq!(shell(&current(cx)), preview_shell));
+    cx.update(|cx| {
+        assert_eq!(shell(&current(cx)), preview_shell);
+        assert_eq!(floating(&current(cx)), preview_floating);
+    });
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell(&current(cx)), shell(&before)));
@@ -727,8 +806,8 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             WindowFrameGeometry::new(Some(16.0))
                 .with_outer_edge_width(1.0)
                 .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
                 ),
         );
     });
@@ -822,8 +901,8 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
             WindowFrameGeometry::new(Some(16.0))
                 .with_outer_edge_width(1.0)
                 .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
+                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
+                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
                 ),
         );
         cx.set_global(InstalledChrome::single(std::sync::Arc::new(
@@ -855,44 +934,10 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
     );
 }
 
-/// Re-applying an unchanged density costs no native work; the owner records the applied row.
-#[gpui::test]
-fn traffic_light_owner_should_apply_each_row_once(cx: &mut TestAppContext) {
-    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
-    use gpui::{point, px};
-
-    let _ = start(cx);
-    cx.update(|cx| {
-        cx.set_global(
-            WindowFrameGeometry::new(Some(16.0))
-                .with_outer_edge_width(1.0)
-                .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0)),
-                ),
-        );
-    });
-    let test_window = cx.add_window(|_, _| gpui::EmptyView);
-    let mut owner = WindowTrafficLightOwner::workspace();
-    test_window
-        .update(cx, |_, window, cx| owner.apply(window, cx))
-        .unwrap();
-    assert_eq!(
-        cx.traffic_light_position_updates(test_window.into()),
-        vec![point(px(15.5), px(14.0))]
-    );
-
-    // A repeat apply with unchanged chrome records the same row without native work.
-    test_window
-        .update(cx, |_, window, cx| owner.apply(window, cx))
-        .unwrap();
-    assert_eq!(
-        cx.traffic_light_position_updates(test_window.into()),
-        vec![point(px(15.5), px(14.0))]
-    );
-}
-
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
-    include!("../platform/macos_adapter_tests/terminal_fonts.rs");
+    include!("../platform/macos_adapter_tests/appearance_runtime.rs");
 }
+#[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+#[path = "../platform/linux_adapter_tests/fonts.rs"]
+mod linux_adapter_tests;

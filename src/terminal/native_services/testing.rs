@@ -4,16 +4,26 @@ use std::rc::Rc;
 use gpui::{App, ClipboardItem};
 
 use super::NativeServiceAdapters;
-use super::clipboard::{ClipboardError, FileClipboard, SelectionClipboard, TextClipboard};
+use super::clipboard::{
+    ClipboardError, FileClipboard, SelectionClipboard, TextClipboard, TextClipboardTarget,
+};
 use super::file_preview::{FilePreviewError, FilePreviewFactory, FilePreviewPanel};
 use crate::terminal::SelectionCopy;
 
 struct TestTextClipboard;
 impl TextClipboard for TestTextClipboard {
-    fn read(&self, cx: &mut App) -> Result<Option<String>, ClipboardError> {
+    fn resolve(&self, _: super::osc52::Osc52Target) -> TextClipboardTarget {
+        TextClipboardTarget::Clipboard
+    }
+    fn read(&self, _: TextClipboardTarget, cx: &mut App) -> Result<Option<String>, ClipboardError> {
         Ok(cx.read_from_clipboard().and_then(|item| item.text()))
     }
-    fn write(&self, text: &str, cx: &mut App) -> Result<(), ClipboardError> {
+    fn write(
+        &self,
+        _: TextClipboardTarget,
+        text: &str,
+        cx: &mut App,
+    ) -> Result<(), ClipboardError> {
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
         Ok(())
     }
@@ -29,7 +39,7 @@ impl SelectionClipboard for TestSelectionClipboard {
 
 struct EmptyFileClipboard;
 impl FileClipboard for EmptyFileClipboard {
-    fn read_files(&self) -> Result<Vec<PathBuf>, ClipboardError> {
+    fn read_files(&self, _: &gpui::App) -> Result<Vec<PathBuf>, ClipboardError> {
         Ok(Vec::new())
     }
 }
@@ -50,6 +60,7 @@ impl FilePreviewFactory for UnavailablePreview {
 pub(crate) fn adapters() -> NativeServiceAdapters {
     NativeServiceAdapters {
         text_clipboard: Rc::new(TestTextClipboard),
+        primary_selection: None,
         selection_clipboard: Rc::new(TestSelectionClipboard),
         file_insertion:
             crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),

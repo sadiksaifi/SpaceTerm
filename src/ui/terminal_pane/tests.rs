@@ -12,6 +12,7 @@ use gpui::{
 use super::*;
 use crate::appearance::{Color, TerminalColors};
 use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     test_local_directory,
@@ -20,6 +21,22 @@ use crate::terminal::{
     LocalTerminalLaunchPlan, RemoteTerminalChannelProvider, ScrollbarSnapshot, SessionExit,
     SessionFailure, TerminalLaunchPlan, TerminalSessionFactory,
 };
+
+pub(super) fn select_terminal_font(font_names: &[String]) -> &'static str {
+    [
+        "JetBrainsMono Nerd Font",
+        "JetBrainsMono Nerd Font Mono",
+        "JetBrains Mono",
+        "Menlo",
+    ]
+    .into_iter()
+    .find(|candidate| {
+        font_names
+            .iter()
+            .any(|available| available.eq_ignore_ascii_case(candidate))
+    })
+    .unwrap_or("Menlo")
+}
 
 #[gpui::test]
 fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
@@ -120,6 +137,33 @@ impl FilePreviewPanel for RecordingFilePreviewPanel {
     ) -> Result<(), crate::terminal::native_services::file_preview::FilePreviewError> {
         self.previews.set(self.previews.get() + 1);
         Ok(())
+    }
+
+    fn dismiss(&mut self) {
+        self.dismissals.set(self.dismissals.get() + 1);
+    }
+}
+
+/// A deferred adapter whose failure the test sends after the request returns.
+struct DeferredFilePreviewPanel {
+    pending: Rc<std::cell::RefCell<Vec<async_channel::Sender<FilePreviewError>>>>,
+    dismissals: Rc<Cell<usize>>,
+}
+
+impl FilePreviewPanel for DeferredFilePreviewPanel {
+    fn preview_file(&mut self, _: &std::path::Path) -> Result<(), FilePreviewError> {
+        unreachable!("the deferred adapter previews in a window")
+    }
+
+    fn preview_file_in_window(
+        &mut self,
+        _: FilePreviewTarget,
+        _: &Window,
+        _: &mut App,
+    ) -> Result<FilePreviewSubmission, FilePreviewError> {
+        let (failure, pending) = async_channel::bounded(1);
+        self.pending.borrow_mut().push(failure);
+        Ok(FilePreviewSubmission::Pending(pending))
     }
 
     fn dismiss(&mut self) {
@@ -1517,6 +1561,70 @@ fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
 }
 
 #[gpui::test]
+fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_panes(
+    cx: &mut TestAppContext,
+) {
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(records)),
+        test_local_directory(PathBuf::from("/")),
+    );
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        TerminalPane::new_with_services(
+            session_factory,
+            None,
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
+            crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true, 0);
+            pane.handle_accessibility(accessibility_model(42));
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.activate_accessibility();
+    cx.run_until_parked();
+    let tree: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    let nodes = tree["nodes"].as_object().unwrap();
+    let (terminal_id, terminal) = nodes
+        .iter()
+        .find(|(_, node)| node["aria"]["role"] == "Terminal")
+        .expect("the Pane must publish a Terminal node after activation");
+    assert_eq!(terminal["aria"]["label"], "Terminal Pane");
+    assert_eq!(tree["gpui_focus"], *terminal_id);
+    let runs: Vec<_> = nodes
+        .values()
+        .filter(|node| node["aria"]["role"] == "TextRun")
+        .collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["aria"]["value"], "update-42x");
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(false, usize::MAX);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let hidden: serde_json::Value = cx
+        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
+    assert!(
+        hidden["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|node| node["aria"]["role"] != "Terminal")
+    );
+}
+
+#[gpui::test]
 fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut TestAppContext) {
     let (_, cx) = terminal_pane(cx);
     let factory =
@@ -2198,33 +2306,48 @@ fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppCon
     )));
 }
 
+#[gpui::test]
+fn scroll_shortcuts_move_scrollback_without_sending_keys(cx: &mut TestAppContext) {
+    use crate::terminal::ScrollbackMovement;
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let before = records.commands().len();
+
+    for shortcut in ["cmd-pageup", "cmd-pagedown", "cmd-home", "cmd-end"] {
+        cx.simulate_keystrokes(shortcut);
+    }
+
+    let commands = records.commands();
+    assert_eq!(
+        commands[before..]
+            .iter()
+            .map(|call| &call.command)
+            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .collect::<Vec<_>>(),
+        [
+            ScrollbackMovement::PageUp,
+            ScrollbackMovement::PageDown,
+            ScrollbackMovement::Top,
+            ScrollbackMovement::Bottom,
+        ]
+        .map(RecordedSessionCommand::ScrollScrollback)
+        .iter()
+        .collect::<Vec<_>>(),
+        "Scroll Commands move the viewport and send the terminal no key"
+    );
+}
+
 fn publish_terminal_preferences(
     preferences: crate::appearance::AppearancePreferences,
     cx: &mut App,
 ) {
-    use crate::appearance::{
-        AppearanceGeneration, AvailableFont, AvailableFonts, FontClass, SystemAppearance,
-        ThemeCatalog,
-    };
+    use crate::appearance::{AppearanceGeneration, SystemAppearance, ThemeCatalog};
     let previous = super::super::appearance_runtime::current(cx);
     let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::new(previous.generation.get() + 1),
             &preferences,
             SystemAppearance::unavailable(),
-            &AvailableFonts {
-                system_ui: AvailableFont {
-                    family: ".SystemUIFont".into(),
-                    class: FontClass::Proportional,
-                    resolution_identity: "ui".into(),
-                },
-                system_monospace: AvailableFont {
-                    family: "Menlo".into(),
-                    class: FontClass::Monospace,
-                    resolution_identity: "system-monospace".into(),
-                },
-                installed: Vec::new(),
-            },
+            &super::super::appearance_runtime::available_fonts(cx),
         )
         .unwrap();
     cx.set_global(super::super::appearance_runtime::InstalledAppearance(
@@ -4548,6 +4671,97 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
     assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
 }
 
+#[gpui::test]
+fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestAppContext) {
+    use crate::terminal::ScrollbackMovement;
+    use crate::terminal::geometry::{
+        BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+    };
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let before = records.commands().len();
+    let key = |cx: &mut VisualTestContext, keystroke: &str, pressed: bool| {
+        let keystroke = Keystroke::parse(keystroke).unwrap();
+        if pressed {
+            cx.simulate_event(KeyDownEvent {
+                keystroke,
+                prefer_character_input: false,
+                is_held: false,
+            });
+        } else {
+            cx.simulate_event(KeyUpEvent { keystroke });
+        }
+        cx.run_until_parked();
+    };
+
+    let leave_and_return = |cx: &mut VisualTestContext| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_tab: false,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+        });
+        cx.run_until_parked();
+    };
+
+    // A Scroll Command consumes its press, so its release must not reach the program, even
+    // after a Tab change.
+    key(cx, "cmd-pageup", true);
+    key(cx, "cmd-pageup", false);
+    key(cx, "cmd-pageup", true);
+    leave_and_return(cx);
+    key(cx, "cmd-pageup", false);
+    // An ordinary key reaches the program as a whole gesture, even across a Tab change.
+    key(cx, "a", true);
+    key(cx, "a", false);
+    key(cx, "b", true);
+    leave_and_return(cx);
+    key(cx, "b", false);
+
+    let commands = records.commands();
+    assert!(
+        commands[before..].iter().any(|call| call.command
+            == RecordedSessionCommand::ScrollScrollback(ScrollbackMovement::PageUp))
+    );
+    let mut emulator =
+        crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        ))
+        .unwrap();
+    emulator.feed(b"\x1b[>11u");
+    let mut bytes = Vec::new();
+    for call in &commands[before..] {
+        if let RecordedSessionCommand::Key(input) = &call.command {
+            bytes.extend(emulator.key(input.clone()).unwrap().bytes);
+        }
+    }
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "\x1b[97u\x1b[97;1:3u\x1b[98u\x1b[98;1:3u"
+    );
+}
+
+#[test]
+fn delivered_key_presses_belong_to_one_terminal_session() {
+    let mut presses = DeliveredKeyPresses::default();
+    presses.press(1, PhysicalKey::A);
+    presses.press(1, PhysicalKey::A);
+    assert!(presses.release(1, PhysicalKey::A));
+    assert!(!presses.release(1, PhysicalKey::A));
+
+    // A replacement session never received the previous session's presses.
+    presses.press(1, PhysicalKey::B);
+    assert!(!presses.release(2, PhysicalKey::B));
+    presses.press(2, PhysicalKey::C);
+    assert!(!presses.release(2, PhysicalKey::B));
+    assert!(presses.release(2, PhysicalKey::C));
+}
+
 #[test]
 fn escape_pair_within_window_requests_fullscreen_exit() {
     let start = Instant::now();
@@ -5849,6 +6063,80 @@ fn file_preview_command_revalidates_then_calls_the_retained_presenter(cx: &mut T
 }
 
 #[gpui::test]
+fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut TestAppContext) {
+    let directory = std::env::temp_dir().join(format!(
+        "spaceterm-deferred-file-preview-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("preview.txt"), b"preview").unwrap();
+    let link = crate::terminal::HyperlinkTarget::osc8(
+        "file:preview.txt",
+        &directory,
+        None,
+        TerminalLocalFileCapabilities::Enabled,
+    )
+    .unwrap();
+    let pending = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let dismissals = Rc::new(Cell::new(0));
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let preview = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.preview_context_link(&link, window, cx);
+            });
+        });
+    };
+    let failure = |pane: &Entity<TerminalPane>, cx: &mut gpui::VisualTestContext| {
+        pane.read_with(cx, |pane, _| pane.pane_state.failure().cloned())
+    };
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, _| {
+            pane.file_preview = FilePreviewPresenter::new(Box::new(DeferredFilePreviewPanel {
+                pending: Rc::clone(&pending),
+                dismissals: Rc::clone(&dismissals),
+            }));
+        });
+    });
+
+    preview(cx);
+    preview(cx);
+    pending.borrow()[0]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(failure(&pane, cx), None, "a superseded request stays quiet");
+    assert_eq!(dismissals.get(), 0);
+
+    pending.borrow()[1]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        failure(&pane, cx),
+        Some(TerminalFailure::platform("preview-local-file"))
+    );
+    assert_eq!(
+        dismissals.get(),
+        1,
+        "a failed request releases its presentation"
+    );
+
+    preview(cx);
+    pane.update(cx, |pane, _| pane.file_preview.dismiss());
+    pending.borrow()[2]
+        .try_send(FilePreviewError::PlatformUnavailable)
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        dismissals.get(),
+        2,
+        "only the explicit dismissal releases it"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
 fn stale_context_generation_never_reaches_the_presenter(cx: &mut TestAppContext) {
     let directory = std::env::temp_dir().join(format!(
         "spaceterm-stale-context-file-preview-{}",
@@ -6923,9 +7211,13 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
     cx.run_until_parked();
     assert!(cx.did_prompt_for_new_path());
 }
-#[cfg(all(test, target_os = "macos", feature = "macos-native-tests"))]
-mod macos_adapter_tests {
-    include!("../../platform/macos_adapter_tests/terminal_pane.rs");
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+mod unix_adapter_tests {
+    include!("../../platform/unix_adapter_tests/terminal_pane.rs");
 }
 
 #[gpui::test]
@@ -7291,6 +7583,176 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
 
     assert_eq!(glyph(StatusIntent::Warning, cx), ["TriangleAlert"]);
     assert_eq!(glyph(StatusIntent::Error, cx), ["CircleAlert"]);
+}
+
+#[gpui::test]
+fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_tracking(
+    cx: &mut TestAppContext,
+) {
+    struct Primary(Rc<std::cell::RefCell<Option<String>>>);
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, copy: &SelectionCopy, _: &mut App) {
+            *self.0.borrow_mut() = Some(copy.plain_text.clone());
+        }
+        fn read(&self, _: &App) -> Option<String> {
+            self.0.borrow().clone()
+        }
+    }
+    let primary = Rc::new(std::cell::RefCell::new(None));
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "primary selection".into(),
+            html: None,
+        },
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary(primary.clone())))
+    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    assert_eq!(primary.borrow().as_deref(), Some("primary selection"));
+    let before = records.commands().len();
+    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
+    assert!(
+        records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| record.command
+                == RecordedSessionCommand::RequestPaste("primary selection".into()))
+    );
+    pane.update(cx, |pane, _| {
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true
+    });
+    let before = records.commands().len();
+    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| matches!(record.command, RecordedSessionCommand::RequestPaste(_)))
+    );
+    assert!(
+        records
+            .commands()
+            .iter()
+            .skip(before)
+            .any(|record| matches!(
+                record.command,
+                RecordedSessionCommand::Pointer(PointerInput {
+                    button: Some(PointerButton::Middle),
+                    ..
+                })
+            ))
+    );
+}
+
+#[gpui::test]
+fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
+    cx: &mut TestAppContext,
+) {
+    struct Primary;
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, _: &SelectionCopy, _: &mut App) {}
+        fn read(&self, _: &App) -> Option<String> {
+            Some("primary selection".into())
+        }
+    }
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "unused".into(),
+            html: None,
+        },
+    );
+    let paste_selection = |cx: &mut VisualTestContext| {
+        let before = records.commands().len();
+        cx.dispatch_action(crate::ui::PasteSelection);
+        cx.run_until_parked();
+        records
+            .commands()
+            .into_iter()
+            .skip(before)
+            .map(|record| record.command)
+            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        paste_selection(cx),
+        [],
+        "a host without PRIMARY pastes nothing"
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary));
+        // Mouse tracking changes what middle-click means, but not Paste Selection.
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+    });
+    assert_eq!(
+        paste_selection(cx),
+        [RecordedSessionCommand::RequestPaste(
+            "primary selection".into()
+        )]
+    );
+}
+
+#[gpui::test]
+fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_it(
+    cx: &mut TestAppContext,
+) {
+    struct Primary;
+    impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
+        fn publish(&self, _: &SelectionCopy, _: &mut App) {}
+        fn read(&self, _: &App) -> Option<String> {
+            Some("primary selection".into())
+        }
+    }
+    let (pane, cx, records) = terminal_pane_with_selection_copy(
+        cx,
+        SelectionCopy {
+            plain_text: "unused".into(),
+            html: None,
+        },
+    );
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(Primary));
+        Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    let shift_middle_click = |cx: &mut VisualTestContext| {
+        let before = records.commands().len();
+        cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::shift());
+        cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::shift());
+        let commands = records.commands();
+        let pasted = commands.iter().skip(before).any(|record| {
+            record.command == RecordedSessionCommand::RequestPaste("primary selection".into())
+        });
+        let reported = commands.iter().skip(before).any(|record| {
+            matches!(
+                record.command,
+                RecordedSessionCommand::Pointer(PointerInput {
+                    button: Some(PointerButton::Middle),
+                    ..
+                })
+            )
+        });
+        (pasted, reported)
+    };
+
+    pane.update(cx, |pane, _| {
+        pane.shift_selection = ShiftSelectionPolicy::OverrideApplicationMouse
+    });
+    assert_eq!(shift_middle_click(cx), (true, false));
+
+    pane.update(cx, |pane, _| {
+        pane.shift_selection = ShiftSelectionPolicy::ReportToApplication
+    });
+    assert_eq!(shift_middle_click(cx), (false, true));
 }
 
 mod permission_requests {
