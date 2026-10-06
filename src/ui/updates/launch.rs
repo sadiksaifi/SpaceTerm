@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, Global, SharedString, TitlebarOptions, Window, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, px, size,
+    App, Bounds, Context, Entity, Global, SharedString, Text, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, accesskit, div, px, size,
 };
 use spaceterm_ui::{DeterminateProgress, ProgressBar, ProgressSize, ProgressState};
 
@@ -248,6 +248,10 @@ impl Render for LaunchView {
                     .gap(appearance.spacing(4.0))
                     .child(
                         div()
+                            .id("update-launch-title")
+                            .role(accesskit::Role::Heading)
+                            .aria_level(1)
+                            .aria_label(presentation.title)
                             .debug_selector(|| "update-launch-title".to_owned())
                             .chrome_text(appearance.typography.style(TextRole::Section))
                             .child(presentation.title),
@@ -257,7 +261,7 @@ impl Render for LaunchView {
                             .debug_selector(|| "update-launch-message".to_owned())
                             .text_color(secondary)
                             .whitespace_normal()
-                            .child(message)
+                            .child(Text::new("update-launch-message".into(), message))
                     })),
             )
             .child(
@@ -282,12 +286,19 @@ impl Render for LaunchView {
                                     .debug_selector(|| "update-launch-status".to_owned())
                                     .min_w_0()
                                     .truncate()
-                                    .child(presentation.status),
+                                    .child(Text::new(
+                                        "update-launch-status".into(),
+                                        presentation.status,
+                                    )),
                             )
                             .children(
                                 presentation
                                     .detail
-                                    .map(|detail| div().flex_none().child(detail)),
+                                    .map(|detail| {
+                                        div()
+                                            .flex_none()
+                                            .child(Text::new("update-launch-detail".into(), detail))
+                                    }),
                             ),
                     ),
             );
@@ -394,6 +405,42 @@ mod tests {
                 assert!(!text.contains(internal), "{state:?} mentions {internal}");
             }
         }
+    }
+
+    #[gpui::test]
+    fn launch_view_publishes_its_title_and_status(cx: &mut gpui::TestAppContext) {
+        use crate::settings::storage::testing::MemoryStorage;
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(
+            &crate::settings::SettingsDocument::default(),
+        ));
+        let adapter = std::rc::Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| {
+            crate::ui::appearance_runtime::install(
+                settings,
+                std::rc::Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
+                cx,
+            )
+            .expect("appearance runtime should install");
+            crate::ui::init(cx).expect("UI initialization should succeed");
+            ApplicationUpdates::install(adapter, cx);
+        });
+        let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
+        updates.update(cx, |updates, cx| {
+            updates.begin_launch(std::rc::Rc::new(|_| {}), cx)
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| LaunchView::new(updates, window, cx));
+        let tree = A11yTree::read(cx);
+        let title = tree.node("Checking for Updates");
+        assert_eq!(title["aria"]["role"], "Heading");
+        assert!(
+            tree.with_role("Label")
+                .iter()
+                .any(|label| label["aria"]["value"] == "SpaceTerm opens in a moment.")
+        );
     }
 
     #[test]
