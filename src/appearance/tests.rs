@@ -133,11 +133,7 @@ fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppea
         .unwrap()
 }
 
-/// A Dark Pane reads as the window's own surface, one quiet step above the window root.
-///
-/// The step is measured against the opaque theme reference, which every material derives from,
-/// so it holds whatever the desktop behind the window happens to be. The material keeps the step
-/// subtle as the window transmits.
+/// A Dark Pane sits one quiet step above the window root, measured against the opaque reference.
 #[test]
 fn dark_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
@@ -162,11 +158,7 @@ fn dark_pane_rests_one_subtle_step_above_the_window_root() {
     }
 }
 
-/// The Transparency Setting owns the Terminal surface as much as it owns the chrome.
-///
-/// A Pane covers the largest part of the window, so a Pane that held its own backing would answer
-/// the Setting with a slab the reader never asked for. It transmits with the window instead, and
-/// keeps only the sliver of ink its step below the root costs.
+/// A Dark Pane transmits with the window and keeps only the ink its step below the root costs.
 #[test]
 fn dark_pane_transmits_what_the_transparency_setting_asks() {
     let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
@@ -397,13 +389,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
     }
 }
 
-/// A Light Pane reads as the window's own surface, one quiet step above the chrome around it.
-///
-/// The step is measured against the opaque theme reference, which every material derives from.
-/// It is the full authored 1.21 while the window is opaque and narrows as glass engages, because
-/// a bright rung may spend no more than the ladder ceiling once the window transmits. Over a real
-/// desktop darker than the theme, the same overlay covers more distance and the step widens
-/// again, so the narrowed reference figure is the floor rather than the typical case.
+/// A Light Pane sits one quiet step above the chrome: the authored 1.21 while opaque, narrowing
+/// to the ladder ceiling as glass engages.
 #[test]
 fn light_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
@@ -428,14 +415,8 @@ fn light_pane_rests_one_subtle_step_above_the_window_root() {
     }
 }
 
-/// The Transparency Setting owns the Light Terminal surface as much as it owns the chrome.
-///
-/// A Pane covers the largest part of the window. Holding its authored step against the opaque
-/// host would cost an almost opaque white that the Setting never reaches, which is the slab the
-/// Light window used to paint. It transmits with the window instead and keeps only the overlay
-/// its step above the root costs. That overlay is wider than a Dark Pane's, because a bright
-/// theme needs more ink to say the same thing, so a Light Pane admits a smaller share of what
-/// the chrome admits.
+/// A Light Pane transmits with the window and keeps only the overlay its step above the root
+/// costs, which is wider than a Dark Pane's.
 #[test]
 fn light_pane_transmits_what_the_transparency_setting_asks() {
     let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
@@ -456,9 +437,7 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
             );
         }
         previous = Some(terminal);
-        // Bright Chrome reconstructs its Pane with near-white ink over a near-white root, which
-        // costs more coverage than a dark rung's sliver, so this bound sits below the Dark one
-        // rather than sharing it.
+        // Near-white ink over a near-white root costs more coverage, so this bound is below Dark's.
         assert!(
             terminal >= chrome * 0.6,
             "a Light Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
@@ -470,17 +449,8 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
     }
 }
 
-/// A Light selected chip spends one overlay for its step and transmits the rest.
-///
-/// This is the shape of the bug it guards: a chip that holds its step against the opaque host
-/// keeps its ink while the shell under it goes on fading, so what it renders climbs with the
-/// Setting until the chip is the loudest thing in a window that was asked for glass. The same
-/// chip painted as a resting surface thins as the Setting rises and stays within reach of the
-/// authored 1.21. It does drift upward over a desktop darker than the theme, because equal ink
-/// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
-/// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
-/// above it, where a chip now reads 1.92 at that Setting and peaks at 2.31 with the shell most of
-/// the way cleared.
+/// A Light selected chip spends one overlay for its step and transmits the rest, so its contrast
+/// stays within a band as the Setting rises.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
@@ -609,9 +579,7 @@ fn selected_surfaces_follow_transparency_in_both_appearances() {
                     selected.a > 0 && selected.a < 255,
                     "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
                 );
-                // A transmitting selection is read against the shell the window actually
-                // renders, not against the opaque reference it was solved from, so the bound it
-                // can promise there is the ink it spends rather than a fixed ratio.
+                // Against the rendered shell, the promised bound is the ink spent, not a ratio.
                 let host = prepared.colors.panel_background;
                 assert!(
                     selected.source_over(host).contrast_ratio(host) > 1.0,

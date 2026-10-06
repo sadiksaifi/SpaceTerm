@@ -1,10 +1,5 @@
-//! The Zed extension registry as a source of Terminal Themes.
-//!
-//! This Module owns the registry protocol: which requests exist, how large each response may be,
-//! and how an extension archive reduces to its theme family documents. Requests go through an
-//! injected [`RegistryTransport`], so the network stays behind one Seam and the protocol is
-//! testable without it. SpaceTerm contacts the registry only when the user asks it to, and an
-//! archive is read in memory: nothing it contains reaches the filesystem.
+//! Owns the Zed extension registry protocol as a source of Terminal Themes. Archives are read in
+//! memory, and nothing they contain reaches the filesystem.
 
 use std::io::Read as _;
 use std::sync::Arc;

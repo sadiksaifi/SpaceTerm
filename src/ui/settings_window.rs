@@ -1,9 +1,5 @@
 //! The Settings Window: a separate, modeless Operating-System Window for SpaceTerm Settings.
-//!
-//! Settings is its own window rather than a Workspace panel because it is application scoped: it
-//! outlives any one Workspace and must stay reachable when no Workspace window exists. It follows
-//! the desktop convention for a settings window while remaining entirely GPUI-rendered, so nothing
-//! here depends on a host settings surface and the layout stays portable.
+//! It is application scoped so it stays reachable when no Workspace window exists.
 
 mod advanced;
 mod catalog;
@@ -102,8 +98,6 @@ struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
 impl Global for OpenSettingsWindow {}
 
 /// The system permissions the Privacy section reads and recovers.
-///
-/// A host without one of these authorizations composes none, and the Privacy section says so.
 #[derive(Clone, Default)]
 pub(crate) struct PermissionCapabilities {
     pub(crate) microphone: Option<Rc<dyn MicrophoneAccess>>,
@@ -113,9 +107,6 @@ pub(crate) struct PermissionCapabilities {
 }
 
 /// Host-owned capabilities needed by the Settings window's app-drawn titlebar and Privacy section.
-///
-/// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
-/// Settings portable and gives each opened window one independent pointer-interaction owner.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
     permissions: PermissionCapabilities,
@@ -317,7 +308,6 @@ impl SidebarOwner for SettingsWindow {
     }
 }
 
-/// The host feature a whole section presents, if any.
 fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
     (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
 }
@@ -466,10 +456,9 @@ impl SettingsWindow {
             },
         )
         .detach();
-        // Authorization can change in the system's settings while this window is in the background,
-        // most often right after the Denied recovery sent the person there.
-        // Leaving the window also ends searching by Shortcut, which keeps focus but must not keep
-        // taking the chords pressed on return.
+        // Authorization can change in System Settings while this window is in the background.
+        // Leaving the window also ends searching by Shortcut, so chords pressed on return are not
+        // captured.
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
@@ -717,9 +706,8 @@ impl SettingsWindow {
             return None;
         }
         let target = row.reset_target(self.fixed_appearance())?;
-        // Every resettable row asks this on every frame, so only preferences are copied. Cloning
-        // the document would copy the whole installed theme catalog to answer a question about
-        // one field.
+        // Only preferences are copied, because cloning the document every frame would copy the
+        // installed theme catalog.
         let current = &self.editor.document().appearance;
         let mut reset = current.clone();
         reset.reset(target.clone());
@@ -1248,9 +1236,8 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Each miniature previews built-in Chrome and its matching Terminal slot.
-    ///
-    /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
+    /// Each miniature previews built-in Chrome and its matching Terminal slot. Auto shows both
+    /// slots side by side, light leading.
     fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
         let document = self.editor.document();
         let catalog =
@@ -1381,10 +1368,9 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    /// Transparency and Blur as the window presents them on this desktop.
-    ///
-    /// Where a window effect is unavailable, both rows show the defaults that render and cannot
-    /// change, while the retained choices wait in the document for a desktop that presents them.
+    /// Transparency and Blur as the window presents them on this desktop. Where a window effect is
+    /// unavailable, both rows show the rendering defaults and the retained choices wait in the
+    /// document.
     fn window_background(&self, cx: &App) -> WindowBackgroundChoices {
         super::appearance_runtime::current(cx)
             .chrome
@@ -1514,9 +1500,6 @@ impl SettingsWindow {
     }
 
     /// Renders one font-weight row.
-    ///
-    /// Weight uses the same selector family as the theme and font rows. One dropdown family for
-    /// every "choose one" row keeps a single form from presenting two different control shapes.
     fn render_weight(
         &mut self,
         row: SettingsRowId,
@@ -1648,9 +1631,6 @@ impl SettingsWindow {
                 .flex_row()
                 .items_start()
                 .gap(appearance.spacing(8.0))
-                // The same inset notice the Themes page carries, at the window's own scope
-                // rather than the page's. A strip ruled off across the pane would be the one square
-                // edge left on a surface made of cards.
                 .mx(card_gutter(appearance))
                 .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
@@ -1688,8 +1668,6 @@ impl SettingsWindow {
                                 .child(explanation),
                         ),
                 )
-                // The glyph and text start at the top, beside the title. The actions answer the
-                // whole notice, so they center on its height.
                 .child(
                     div()
                         .flex()
@@ -1864,9 +1842,6 @@ struct ModePreviewPalette {
 }
 
 /// A miniature SpaceTerm window for each palette, split evenly when there is more than one.
-///
-/// Each part clips one full-size miniature from its own side, so a split reads as one window
-/// crossing from light to dark. A hairline edge keeps a light miniature visible on a light surface.
 fn mode_preview(
     palettes: &[ModePreviewPalette],
     edge: Color,
@@ -1942,10 +1917,8 @@ fn mode_miniature(
         )
 }
 
-/// The families the terminal font list offers.
-///
-/// Only monospaced families are offered: a proportional terminal font resolves to a fallback and
-/// reports a diagnostic, so it is not a choice worth presenting in the first place.
+/// The families the terminal font list offers. Only monospaced families are offered, because a
+/// proportional terminal font resolves to a fallback.
 fn terminal_font_families(fonts: &crate::appearance::AvailableFonts) -> Vec<String> {
     fonts
         .installed
@@ -1964,9 +1937,6 @@ fn retain_selected_item<I: Eq>(items: &mut Vec<ComboBoxItem<I>>, current: ComboB
 }
 
 /// One settings selector, decorated the same way wherever the form offers a choice.
-///
-/// Every selector filters a list, so its popup carries the same search glyph as the window's own
-/// search field, and the control marks the current value in its list.
 fn settings_selector<I: Clone + Eq + 'static>(
     selector: String,
     accessibility_name: impl Into<SharedString>,
@@ -1994,18 +1964,11 @@ fn settings_selector<I: Clone + Eq + 'static>(
     .debug_selector(selector)
 }
 
-/// The selector of the control inside one row.
-///
-/// A row and the control it holds are separate elements, so they carry separate selectors and a
-/// test can address either one.
 fn control_selector(row: SettingsRowId) -> String {
     format!("{}-control", row.descriptor().selector)
 }
 
 /// Where a row's label sits.
-///
-/// The theme preview, the gallery, and the settings file present themselves under their group's title,
-/// so they span the row without a label.
 fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
@@ -2017,8 +1980,6 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
 
 impl SettingsWindow {
     /// One line of guidance for the rows that warrant it.
-    ///
-    /// Guidance follows effective appearance and system access without changing retained choices.
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),

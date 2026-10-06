@@ -1104,18 +1104,15 @@ pub(super) struct AskPassAttemptObservationState {
 }
 
 impl AskPassAttemptObservation {
-    /// Reports whether any prompt in this attempt reached the presenter.
     #[cfg(test)]
     pub(crate) fn prompt_started(&self) -> bool {
         self.state.prompt_started.load(Ordering::Acquire)
     }
 
-    /// Reports whether an authentication prompt is currently active for this attempt.
     pub(crate) fn prompt_active(&self) -> bool {
         self.state.prompt_active.load(Ordering::Acquire)
     }
 
-    /// Reports whether any prompt in this attempt was cancelled.
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
     }

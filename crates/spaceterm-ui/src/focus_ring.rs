@@ -1,13 +1,7 @@
 //! The keyboard focus ring every focusable control draws around itself.
 //!
-//! One band, measured from AppKit on macOS: its outer edge sits 3pt outside the control's fill and
-//! it runs 3.5pt inward, so it overlaps the fill by half a point and covers any border drawn around
-//! the fill. Its corners stay concentric with the control's. The ring wraps its control and paints
-//! after it, and the control's border fades out as the band fades in, so neither the border nor
-//! anything else the control draws shows through the translucent band. The control otherwise keeps
-//! its resting appearance; the ring alone states focus. On gaining focus the band starts wide
-//! and far out, faint, and contracts onto the control while it fades in. On losing focus it
-//! disappears at once.
+//! The band geometry is measured from AppKit on macOS. The ring paints after its control and fades
+//! the control's border out, so nothing shows through the translucent band.
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};

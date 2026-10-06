@@ -592,9 +592,6 @@ fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() 
                     }
                 }
                 if transparency == 1.0 {
-                    // The maximum setting keeps a faint fill rather than none, so a row
-                    // that states a state still states it. A row that matches the surface
-                    // it rests on still paints nothing at all.
                     assert!(
                         expected.fill.a < 255,
                         "{appearance:?}: a row state must still transmit its backing: {:?}",
@@ -922,9 +919,6 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
-    // A selection and the reading surface take the brightest rung a transmitting surface can
-    // hold, one above the raised tone that controls and grouped content share. Neither reaches
-    // white, which no transmitting surface can reproduce.
     let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
     assert_eq!(
@@ -1271,9 +1265,6 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
                     );
                     assert_eq!(sidebar.paint.a, canvas.paint.a);
                 } else {
-                    // A bright scheme's navigation rests on the window root, so its canvas
-                    // cannot thin toward that root without merging into the column beside it.
-                    // It holds its own rung instead, at whatever ink that costs.
                     assert_eq!(
                         canvas
                             .background
@@ -1700,9 +1691,6 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                                 )
                                 .source_over(row_host),
                         ];
-                        // An unfocused selection is asked for the separation the focused one
-                        // actually has, which is all a translucent fill can promise, and never
-                        // for more than the subdued bound.
                         let focused_backgrounds = [
                             active
                                 .selection_surface(semantic_host, focused_fill)
@@ -2614,10 +2602,6 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
 }
 
 /// Resolves a black or white GPUI-content endpoint through the tone box and elevation wash.
-///
-/// The renderer may reduce that content's alpha afterward so the semantic native Light or Dark
-/// material contributes the final backdrop. Arbitrary native pixels are outside this helper's
-/// contrast contract.
 fn shell_endpoint_background(shell: FloatingShell, underlay: Color) -> Color {
     assert!(
         underlay == Color::BLACK || underlay == Color::WHITE,

@@ -281,18 +281,14 @@ fn prepare_surfaces(
 ) {
     let root = chrome.colors.background;
     let light_content_hierarchy = chrome.appearance == Appearance::Light;
-    // Navigation stays muted, and a group rises from the canvas it sits on. Light once sank its
-    // groups instead, to keep them off the tone a selected control takes, which left grey wells
-    // cut into a white page while Dark raised the same groups. A group is elevated in both.
     let sidebar_semantic = if chrome.appearance == Appearance::Light {
         chrome.colors.panel_background
     } else {
         root.mix(Color::WHITE, 0.10)
     };
     let elevated = chrome.colors.elevated_surface_background;
-    // Dark seats the canvas on the window root, which its lifted navigation already clears. A
-    // Light navigation rests on that root, so the canvas takes the rung between root
-    // and group instead, leaving one step on either side of it.
+    // A Light navigation rests on the window root, so its canvas takes the rung between root and
+    // group.
     let canvas_semantic = if light_content_hierarchy {
         root.mix(elevated, 0.5)
     } else {
@@ -310,10 +306,7 @@ fn prepare_surfaces(
             });
     let sidebar_paint = sidebar_materials.paint(SurfaceRole::Sheet, root, sidebar_semantic);
     let canvas_paint = if light_content_hierarchy {
-        // A bright canvas sits one rung above the navigation beside it and one below the groups
-        // on it. Both steps are small, and a sheet that thins with the Setting gives up the
-        // first of them: the navigation column would merge into the page it borders. Hold the
-        // rung instead, the way a group holds its own step from this canvas.
+        // A bright canvas holds its rung so the navigation column does not merge into the page.
         super::prominent_surface_with(chrome.materials, root, canvas_semantic)
     } else {
         // This column is a window backing, not a nested card. Keep the same requested

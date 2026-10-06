@@ -70,11 +70,9 @@ impl ChordCapture {
 
 /// Holds back the auto-repeat of a chord a capture accepted until the chord is let go.
 ///
-/// A capture accepts a chord on its key-down, while the keys are still held. Once the capture ends,
-/// the key's auto-repeat would perform what the chord already means, such as closing the window.
-/// The owner keeps the guard until the chord's key is released, the held modifiers change, or focus
-/// leaves; the platform may not report the key's release while Command is held, so the modifiers
-/// changing also lets go. Any other keystroke ends the guard and continues to key bindings.
+/// Without it, the key's auto-repeat after the capture ends would perform the chord's meaning, such
+/// as closing the window. A modifier change also ends the guard, because the platform may not
+/// report a key release while Command is held.
 pub(crate) struct ChordRelease {
     key: String,
     _interceptor: Subscription,
@@ -103,7 +101,6 @@ impl ChordRelease {
         }
     }
 
-    /// Whether `event` releases the held chord's key.
     pub(crate) fn is_released_by(&self, event: &KeyUpEvent) -> bool {
         event.keystroke.key == self.key
     }

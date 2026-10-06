@@ -1,9 +1,4 @@
-//! The About Operating-System Window presents SpaceTerm's application information.
-//!
-//! It reproduces AppKit's standard About panel: a small, fixed, modeless window presenting the
-//! application icon, the name in bold, the version in secondary text, the description, and the
-//! copyright, centered one above the other. The whole surface moves the window, as a panel
-//! without controls of its own should, and only the close control is offered.
+//! The About Operating-System Window, reproducing AppKit's standard About panel.
 
 mod application_icon;
 

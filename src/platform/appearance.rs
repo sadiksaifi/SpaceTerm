@@ -41,11 +41,9 @@ pub(crate) struct NativeWindowComposition {
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
-    /// Whether the user asks application motion to be reduced.
     fn prefers_reduced_motion(&self) -> bool {
         false
     }
-    /// Whether this Adapter can present a translucent native Operating-System Window.
     fn supports_native_window_transparency(&self) -> bool {
         false
     }

@@ -1,9 +1,5 @@
-//! Get More Themes: a sheet that finds Zed extensions and installs their themes, or imports a Zed
-//! theme file.
-//!
-//! SpaceTerm contacts the registry only when the sheet opens, and only once per window: the
-//! listing is small, searched locally, and discarded with the window. Installing downloads one
-//! extension, translates its themes, and adds them to the installed themes without applying any.
+//! Get More Themes: a sheet that installs themes from Zed extensions or imports a Zed theme file.
+//! SpaceTerm contacts the registry only when the sheet opens, once per window.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

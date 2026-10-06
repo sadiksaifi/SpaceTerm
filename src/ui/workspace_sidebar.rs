@@ -61,16 +61,8 @@ pub(super) const SIDEBAR_ROW_TITLE_LINE_PADDING: f32 = 6.0;
 pub(super) const SIDEBAR_ROW_DETAIL_LINE_PADDING: f32 = 3.0;
 pub(super) const SIDEBAR_ROW_LINE_GAP: f32 = 2.0;
 /// The air a row's content keeps inside the chip that carries its selection.
-///
-/// The row's own padding is this padding plus the chip inset on that side, so the content stays
-/// balanced inside the chip even though the chip's two insets differ.
 pub(super) const SIDEBAR_ROW_CHIP_PADDING: f32 = 6.0;
 /// The vertical inset of the chip that carries a row's selection.
-///
-/// The horizontal insets come from the Workspace frame, which knows what the chip rests against on
-/// each side: the window edge on the leading side and the floating content stage on the trailing
-/// one. The radius comes from the same frame, so a selected Workspace, an Active Tab, and a
-/// floating Pane are one family of shapes.
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
 pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
@@ -536,10 +528,6 @@ impl WorkspaceSidebar {
 impl WorkspaceSidebar {
     /// Lifts a Workspace row to move it in the list. A press that becomes a drag never activates
     /// it.
-    ///
-    /// The row keeps its place until release, and an exact copy of it follows the pointer. The
-    /// motion that starts the drag already marks a slot, so a quick drag released on its first move
-    /// still lands.
     fn begin_workspace_drag(
         &mut self,
         workspace_id: WorkspaceId,

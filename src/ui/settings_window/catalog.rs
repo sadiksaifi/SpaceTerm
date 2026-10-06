@@ -1,8 +1,5 @@
 //! The identity, order, and search vocabulary of every Settings Row.
-//!
-//! One table owns row identity so navigation, search, rendering, and reset all agree. A row that
-//! is not listed here cannot be found by Settings Search, so the suite asserts that every
-//! [`SettingsRowId`] appears exactly once.
+//! A row not listed here cannot be found by Settings Search.
 
 use spaceterm_ui::{FuzzyTarget, fuzzy_filter};
 
@@ -148,10 +145,7 @@ impl SettingsRowId {
             .expect("every row identity is listed in the catalog")
     }
 
-    /// The reset target restoring this row alone, when the row holds a resettable preference.
-    ///
-    /// A theme row restores its own theme and leaves the appearance mode alone, because the mode
-    /// belongs to the shared Appearance control.
+    /// The reset target restoring this row alone. A theme row leaves the appearance mode alone.
     pub(super) fn reset_target(self, appearance: Appearance) -> Option<ResetTarget> {
         Some(match self {
             Self::AppearanceMode => ResetTarget::AppearanceMode,
@@ -196,10 +190,8 @@ impl SettingsRowId {
 pub(super) struct SettingsRowDescriptor {
     pub(super) id: SettingsRowId,
     pub(super) section: SettingsSectionId,
-    /// The titled box this row shares with the rows next to it in the table.
-    ///
-    /// Rows carrying the same group title in one section render as one box, so the order here is
-    /// also the grouping: a row that leaves its neighbours starts a new box.
+    /// The titled box this row shares with adjacent rows in the table; a row that leaves its
+    /// neighbours starts a new box.
     pub(super) group: &'static str,
     /// The row's name. [`Self::label`] presents it, naming a permission as the running system does.
     label: &'static str,

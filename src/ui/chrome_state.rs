@@ -47,9 +47,6 @@ impl ChromeStatePolicy {
 }
 
 /// Resolves disabled content against the surface it actually paints on.
-///
-/// Disabled fills use the ordinary disabled seed across intents and window activity. Content is
-/// moved when its authored paint falls below the disabled readability floor.
 fn disabled_content(c: &mut ChromeColors, host: Color, minimum: f64) {
     macro_rules! on_host {
         ($($role:ident),+ $(,)?) => { $(

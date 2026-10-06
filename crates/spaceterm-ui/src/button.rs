@@ -54,12 +54,10 @@ pub struct ButtonActivation {
 }
 
 impl ButtonActivation {
-    /// Returns the input path that activated the button.
     pub fn source(self) -> ButtonActivationSource {
         self.source
     }
 
-    /// Returns the semantic role assigned to the button.
     pub fn role(self) -> ButtonRole {
         self.role
     }
@@ -165,28 +163,23 @@ impl ButtonPaint {
         }
     }
 
-    /// Returns the state's background color.
     pub fn background(self) -> Rgba {
         self.background
     }
 
-    /// Returns the state's foreground color.
     pub fn foreground(self) -> Rgba {
         self.foreground
     }
 
-    /// Sets the foreground for icon-only controls independently of text buttons.
     pub fn icon_foreground(mut self, foreground: Rgba) -> Self {
         self.icon_foreground = foreground;
         self
     }
 
-    /// Returns the state's icon foreground.
     pub fn icon_color(self) -> Rgba {
         self.icon_foreground
     }
 
-    /// Returns the state's border color.
     pub fn border(self) -> Rgba {
         self.border
     }
@@ -235,22 +228,18 @@ impl ButtonVariantStyle {
         }
     }
 
-    /// Returns the normal-state paint.
     pub fn normal(self) -> ButtonPaint {
         self.normal
     }
 
-    /// Returns the hover-state paint.
     pub fn hovered(self) -> ButtonPaint {
         self.hovered
     }
 
-    /// Returns the pressed-state paint.
     pub fn pressed(self) -> ButtonPaint {
         self.pressed
     }
 
-    /// Returns the disabled-state paint.
     pub fn disabled(self) -> ButtonPaint {
         self.disabled
     }
@@ -304,37 +293,31 @@ impl ButtonMetrics {
         self
     }
 
-    /// Sets horizontal padding for text buttons.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
     }
 
-    /// Sets spacing between a text button's label and decorations.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
     }
 
-    /// Sets the rounded shape's corner radius.
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.corner_radius = radius;
         self
     }
 
-    /// Sets the stable border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
         self
     }
 
-    /// Sets the text label size.
     pub fn font_size(mut self, size: Pixels) -> Self {
         self.font_size = size;
         self
     }
 
-    /// Sets relative line heights for single-line and multiline labels.
     pub fn line_heights(mut self, single_line: f32, multiline: f32) -> Self {
         self.single_line_height = single_line.clamp(1.0, 2.0);
         self.multiline_line_height = multiline.clamp(1.0, 2.0);
@@ -466,7 +449,6 @@ impl ButtonTheme {
         }
     }
 
-    /// Returns the resolved state paints for a semantic variant.
     pub fn paints(self, variant: ButtonVariant) -> ButtonVariantStyle {
         self.variants.resolve(variant)
     }
@@ -503,18 +485,15 @@ impl ButtonTheme {
         self
     }
 
-    /// Returns the outer side length of an icon button in this theme.
     pub fn icon_button_size(self, size: ButtonSize) -> Pixels {
         let metrics = self.sizes.resolve(size);
         metrics.icon_button_size.unwrap_or(metrics.height)
     }
 
-    /// Returns the outer height of a text button in this theme.
     pub fn control_height(self, size: ButtonSize) -> Pixels {
         self.sizes.resolve(size).height
     }
 
-    /// Returns the keyboard focus-ring paint.
     #[cfg(test)]
     pub(crate) fn focus_border(self) -> Rgba {
         self.focus_border
@@ -1011,7 +990,6 @@ impl Button {
         self
     }
 
-    /// Makes the button fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
         self
@@ -1024,31 +1002,26 @@ impl Button {
         self
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.core.variant = variant;
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
         self
     }
 
-    /// Assigns the semantic intent of the action.
     pub fn role(mut self, role: ButtonRole) -> Self {
         self.core.role = role;
         self
     }
 
-    /// Controls whether the button can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
@@ -1063,13 +1036,11 @@ impl Button {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -1195,8 +1166,7 @@ impl RenderOnce for Button {
 
 /// A reusable icon-only action button.
 ///
-/// The logical accessibility name is mandatory for this icon-only control. It prevents unnamed
-/// actions and remains available when the control publishes a native accessibility node.
+/// The logical accessibility name is mandatory, so no icon-only action is unnamed.
 #[derive(IntoElement)]
 pub struct IconButton {
     core: ButtonCore,
@@ -1230,13 +1200,11 @@ impl IconButton {
         }
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.core.variant = variant;
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.core.size = size;
         self
@@ -1248,7 +1216,6 @@ impl IconButton {
         self
     }
 
-    /// Fits the control's rounded shape to its host's corner geometry.
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.core.corner_radius = Some(radius.max(px(0.0)));
         self
@@ -1260,7 +1227,6 @@ impl IconButton {
         self
     }
 
-    /// Overrides the border independently from the pointer target and visual fill.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.core.border_width = Some(width.max(px(0.0)));
         self
@@ -1272,25 +1238,21 @@ impl IconButton {
         self
     }
 
-    /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
         self
     }
 
-    /// Assigns the semantic intent of the action.
     pub fn role(mut self, role: ButtonRole) -> Self {
         self.core.role = role;
         self
     }
 
-    /// Controls whether the button can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on this button.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -1311,13 +1273,11 @@ impl IconButton {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self

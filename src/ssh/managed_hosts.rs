@@ -137,7 +137,6 @@ pub(crate) struct ManagedHostsStore<'a> {
 }
 
 impl<'a> ManagedHostsStore<'a> {
-    /// Binds the store to application paths carrying the selected secure filesystem.
     pub(crate) const fn new(paths: &'a AppPaths) -> Self {
         Self { paths }
     }

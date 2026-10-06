@@ -1,7 +1,6 @@
 //! AppKit Services responder registration and native pasteboard conversion.
 //!
-//! Request policy and lifetime authority live in the portable Services owner. This adapter
-//! connects those operations to AppKit's responder chain and supplied pasteboard.
+//! Request policy and lifetime authority live in the portable Services owner.
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};

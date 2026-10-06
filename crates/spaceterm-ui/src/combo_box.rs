@@ -1,9 +1,6 @@
 //! A controlled, searchable, single-value selector with an anchored popup.
 //!
-//! The Module owns provisional navigation and popup lifecycle. Callers own the committed value and
-//! receive acceptance only after the popup has closed. [`TextInput`] owns editing, clipboard,
-//! grapheme, and input-method behavior. This control retains selection and active-option facts for
-//! its own behavior. It does not yet publish listbox nodes to the native accessibility tree.
+//! Callers own the committed value and receive acceptance only after the popup has closed.
 
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
@@ -109,17 +106,14 @@ pub struct ComboBoxAcceptance<I> {
 }
 
 impl<I> ComboBoxAcceptance<I> {
-    /// Returns the caller-owned stable item identity.
     pub fn item_id(&self) -> &I {
         &self.item_id
     }
 
-    /// Returns the input path that accepted the item.
     pub fn source(&self) -> ComboBoxActivationSource {
         self.source
     }
 
-    /// Consumes the event and returns its caller-owned identity.
     pub fn into_item_id(self) -> I {
         self.item_id
     }
@@ -252,7 +246,6 @@ impl<I> ComboBoxItem<I> {
         }
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(mut self, value: impl Into<SharedString>) -> Self {
         self.description = Some(value.into());
         self
@@ -285,7 +278,6 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Adds standardized semantic content at the trailing edge.
     pub fn trailing(mut self, accessory: ComboBoxAccessory) -> Self {
         self.trailing = Some(accessory);
         self
@@ -297,28 +289,23 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the stable caller-owned identity.
     pub fn id(&self) -> &I {
         &self.id
     }
 
-    /// Returns the primary label.
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    /// Returns the secondary description, when present.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
-    /// Returns whether the item is visible but inert.
     pub const fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -363,7 +350,6 @@ impl<C> ComboBoxCommand<C> {
         Self(ComboBoxItem::new(id, label))
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(self, value: impl Into<SharedString>) -> Self {
         Self(self.0.description(value))
     }
@@ -378,7 +364,6 @@ impl<C> ComboBoxCommand<C> {
         Self(self.0.leading_icon(build))
     }
 
-    /// Adds standardized semantic content at the trailing edge.
     pub fn trailing(self, accessory: ComboBoxAccessory) -> Self {
         Self(self.0.trailing(accessory))
     }
@@ -388,13 +373,11 @@ impl<C> ComboBoxCommand<C> {
         Self(self.0.shortcut(shortcut))
     }
 
-    /// Starts a new command group, separated from the commands before it.
     pub fn starts_group(mut self) -> Self {
         self.0.starts_group = true;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(self, selector: impl Into<String>) -> Self {
         Self(self.0.debug_selector(selector))
     }
@@ -409,7 +392,6 @@ pub struct ComboBoxCommandActivation<C> {
 }
 
 impl<C> ComboBoxCommandActivation<C> {
-    /// Returns the caller-owned command identity.
     pub fn command(&self) -> &C {
         &self.command
     }
@@ -419,7 +401,6 @@ impl<C> ComboBoxCommandActivation<C> {
         &self.query
     }
 
-    /// Returns the input path that ran the command.
     pub fn source(&self) -> ComboBoxActivationSource {
         self.source
     }
@@ -625,32 +606,27 @@ impl ComboBoxPaint {
         }
     }
 
-    /// Installs complete semantic list row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Sets row hover independently of the provisional selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
         self
     }
 
-    /// Sets the foreground paired with the row hover background.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
     }
 
-    /// Sets icon-only trigger colors independently of text and popup row foregrounds.
     pub fn trigger_icon_colors(mut self, normal: Rgba, disabled: Rgba) -> Self {
         self.trigger_icon_foreground = normal;
         self.trigger_icon_disabled = disabled;
         self
     }
 
-    /// Sets the pressed and disabled fills for the trigger independently from hover.
     pub fn trigger_state_backgrounds(mut self, pressed: Rgba, disabled: Rgba) -> Self {
         self.trigger_pressed_background = pressed;
         self.trigger_disabled_background = disabled;
@@ -765,7 +741,6 @@ impl ComboBoxMetrics {
         }
     }
 
-    /// Sets the square target size used by icon-only triggers.
     pub fn icon_trigger_size(mut self, size: Pixels) -> Self {
         self.icon_trigger_size = size.max(px(0.0));
         self
@@ -814,13 +789,11 @@ impl ComboBoxMetrics {
         self
     }
 
-    /// Sets the corner radius of the trigger that opens the popup.
     pub fn trigger_shape(mut self, corner_radius: Pixels) -> Self {
         self.trigger_corner_radius = corner_radius;
         self
     }
 
-    /// Sets primary and secondary font sizes.
     pub fn font_sizes(mut self, label: Pixels, secondary: Pixels) -> Self {
         self.label_size = label;
         self.secondary_size = secondary;
@@ -963,7 +936,6 @@ impl ComboBoxTheme {
         content_width + self.metrics.border_width * 2.0
     }
 
-    /// Sets interaction-state borders for non-custom triggers.
     pub fn ordinary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
         self.paint.trigger_state_borders = Some(borders);
         self
@@ -1162,7 +1134,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Controls whether the complete selector is inert.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -1180,7 +1151,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Selects the shared anchored placement policy.
     pub fn placement(mut self, placement: AnchoredPlacementConfig) -> Self {
         self.placement = placement;
         self
@@ -1295,7 +1265,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self

@@ -27,12 +27,10 @@ use spaceterm_ui::{
 use super::*;
 use crate::domain::{PaneId, TabId};
 
-/// The resolved Workspace frame for the installed Chrome appearance.
 fn workspace_frame(cx: &mut VisualTestContext) -> WorkspaceFrame {
     cx.update(|_, cx| WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx))
 }
 
-/// The one measurement every visible gap in the Workspace uses.
 fn frame_space(cx: &mut VisualTestContext) -> Pixels {
     workspace_frame(cx).space()
 }
@@ -4969,12 +4967,6 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     }
 }
 
-/// The workspace chooser's glyph is one size in both of its states.
-///
-/// Open, the chooser is an icon beside the sidebar toggle; closed, it widens into the chip naming
-/// the active Workspace. It is the same control and the same glyph either way, so taking the
-/// selector's generic icon size in one state and the top chrome's in the other made it change size
-/// as the sidebar came and went.
 #[gpui::test]
 fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -5002,10 +4994,6 @@ fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &m
     );
 }
 
-/// The sidebar's cog asks for Settings the same way the menu item and the Shortcut do.
-///
-/// It dispatches the application action rather than opening a window itself, so the one Settings
-/// Window, and the decision to activate it when it already exists, stay in one place.
 #[gpui::test]
 fn sidebar_settings_button_should_request_the_application_settings_action(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
@@ -5859,12 +5847,7 @@ fn workspace_frame_omits_structural_divider_elements(cx: &mut TestAppContext) {
     );
 }
 
-/// Every visible gap around the Pane stage measures one frame space from surface to surface.
-///
-/// The distances are taken between painted bounds, not between layout properties: beside a sidebar
-/// the gap is painted once, by the sidebar chip's own margin, and the stage adds nothing that would
-/// double it. The stage has no top gap at all, because the chrome above already carries that space
-/// in its own height.
+/// The distances are taken between painted bounds, not between layout properties.
 #[gpui::test]
 fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -5897,9 +5880,6 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
             root.origin.x
         };
 
-        // The Pane's leading neighbour is the sidebar chip when the sidebar is shown and the window
-        // edge when it is hidden. Either way exactly one space is painted between them; the window
-        // paints its own edge inside the window-facing insets.
         let (leading_neighbour, leading_inset) = if sidebar_visible {
             (
                 cx.debug_bounds("workspace-row-selection-1")
@@ -5932,10 +5912,6 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
     }
 }
 
-/// The first Tab keeps one visible space from the Workspace identity beside it.
-///
-/// A chip is inset inside its item, so the strip pulls that inset back: the identity's own trailing
-/// margin is then the whole gap, and the first Tab's paint lands on the Pane's leading vertical.
 #[gpui::test]
 fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -6573,9 +6549,6 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         ),
         "the selected Workspace material should float inside its row"
     );
-    // The chip's two margins are the frame's one measurement, and each is measured to the surface
-    // actually beside it: the window's own painted edge on one side, the floating Pane on the
-    // other.
     let pane = cx
         .debug_bounds("pane-surface-1")
         .expect("the floating Pane surface was rendered");
@@ -6657,13 +6630,8 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
     assert_eq!(panel.top(), chooser.bottom() + px(4.0));
 }
 
-/// The footer plus menu mirrors the switcher's creation rows.
-///
-/// It opens as a button-triggered menu (not a filterable combo box) with the same rows in the same
-/// order the switcher offers, so the two creation paths cannot drift apart. Both surfaces build
-/// from the shared creation descriptors; disabled parity while Remote is unavailable is exercised
-/// by `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
-/// which rejects both remote rows and their Shortcuts on each surface.
+/// Disabled parity while Remote is unavailable is covered by
+/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`.
 #[gpui::test]
 fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
     use crate::desktop_profile::testing_presentation;
@@ -10044,8 +10012,7 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
 }
 
 /// The first Tab's leading inset reaches under the top-left chrome, so the mark before an inactive
-/// first Tab paints in the chrome's bounds. An opaque material gives the chrome an opaque title-bar
-/// surface, and nothing the Workspace paints afterwards may cover the mark.
+/// first Tab paints in the chrome's bounds.
 #[gpui::test]
 fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);

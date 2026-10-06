@@ -1,7 +1,5 @@
 //! Prepared semantic typography for application chrome.
-//!
-//! A caller chooses a role, never a point size. The catalog retains the resolved font family,
-//! fallbacks, style, and authored OpenType features while owning size, weight, and line height.
+//! A caller chooses a role, never a point size.
 
 use std::sync::Arc;
 

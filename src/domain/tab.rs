@@ -388,10 +388,8 @@ impl<T> Tab<T> {
     /// Moves a Pane beside `target_pane_id`, splitting the target so the Pane takes `edge`, and
     /// reports whether the arrangement changed.
     ///
-    /// The Split that held the Pane collapses into its other child. The moved Pane keeps its
-    /// Terminal Session and becomes the Focused Pane; the Root Pane is unchanged. A move that
-    /// rebuilds the same arrangement, including a move onto the Pane itself, changes nothing and
-    /// keeps every Split ratio.
+    /// The moved Pane keeps its Terminal Session and becomes the Focused Pane. A move that
+    /// rebuilds the same arrangement changes nothing and keeps every Split ratio.
     pub(crate) fn move_pane(
         &mut self,
         pane_id: PaneId,

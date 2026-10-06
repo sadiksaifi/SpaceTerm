@@ -1,12 +1,5 @@
-//! The Developer Workbench: one window for inspecting SpaceTerm's appearance, controls, and
-//! floating surfaces against the production Interfaces.
-//!
-//! Only SpaceTerm Development contains it. It uses the sidebar window layout the Settings Window
-//! uses: each section presents one family of fixtures, and the toolbar holds the controls that
-//! apply to every section, such as the previewed Appearance Mode and simulated system settings.
-//!
-//! Edits preview the Settings Document without saving it. Commit saves the preview through the
-//! same path the Settings Window uses, and closing the window cancels an unsaved preview.
+//! The Developer Workbench: a Development-only window for inspecting appearance, controls, and
+//! floating surfaces. Edits preview the Settings Document unsaved; closing cancels the preview.
 
 #[cfg(test)]
 #[path = "developer_workbench/tests.rs"]
@@ -210,7 +203,6 @@ pub(crate) fn configure_window_chrome(
     cx.set_global(WorkbenchComposition { window_movement });
 }
 
-/// Registers the application-scoped Developer Workbench actions.
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &OpenDeveloperWorkbench, cx| open_or_activate(None, cx));
     cx.on_action(|_: &ToggleAppearancePreview, cx| toggle_appearance_preview(cx));
@@ -530,9 +522,8 @@ impl DeveloperWorkbench {
         self.report(status, cx);
     }
 
-    /// Saves the preview. The document is small, so the write runs synchronously, as the Settings
-    /// Window's close does: no save is still running when the window closes or the application
-    /// quits.
+    /// Saves the preview synchronously, as the Settings Window's close does, so no save still runs
+    /// when the window closes.
     fn commit(&mut self, cx: &mut Context<Self>) {
         let status = match self.preview.commit() {
             Ok(outcome) if outcome.reload_required => {

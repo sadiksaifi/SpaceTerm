@@ -19,7 +19,6 @@ pub(super) const SURFACE_BAND: SeparatorBand = SeparatorBand {
     ceiling: 1.30,
 };
 
-/// Whether the window uses Light appearance.
 pub(super) fn applies(resolved: &ResolvedChromeAppearance) -> bool {
     resolved.appearance == Appearance::Light
 }
@@ -53,11 +52,9 @@ pub(super) fn control_paints(
     paint
 }
 
-/// Applies the built-in Light window-state policy after the shared state compiler.
-///
-/// The shared inactive resolver may choose the dark endpoint when an almost-white selection is
-/// too close to its host. Built-in Light instead owns an explicit inactive selection on the same
-/// raised side as the active state. Increase Contrast keeps the shared resolver's stronger result.
+/// Applies the built-in Light window-state policy after the shared state compiler. Built-in Light
+/// keeps an inactive selection on the active state's raised side; Increase Contrast keeps the
+/// shared result.
 pub(super) fn prepare_state_colors(
     state: ChromeStatePolicy,
     source: &ChromeColors,

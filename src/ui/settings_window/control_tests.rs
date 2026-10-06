@@ -208,10 +208,6 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// The navigation list is one keyboard stop whose arrows move between sections.
-///
-/// Tab reaching every entry in turn would make the keyboard walk the sidebar before it could reach
-/// a setting, and it is what gave an ordinary pointer click somewhere to leave a focus ring.
 #[gpui::test]
 fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);

@@ -30,13 +30,9 @@ pub struct SearchFieldPaint {
 impl SearchFieldPaint {
     /// Creates the complete bounded search-field paint catalog.
     ///
-    /// The clear mark is a filled disc struck through by a glyph, and the pointer target around it
-    /// stays invisible, so `clear` supplies the disc fill for every interactive state through each
-    /// state's icon foreground rather than a target surface. `clear_glyph` is the contrasting glyph
-    /// struck through that disc.
-    ///
-    /// A [`SearchFieldToggle`] paints its target and glyph from `toggle_off` while off and from
-    /// `toggle_on` while on, so an active search mode reads from the field at a glance.
+    /// `clear` supplies the clear disc fill through each state's icon foreground, and `clear_glyph`
+    /// is the glyph struck through it. A [`SearchFieldToggle`] paints from `toggle_off` or
+    /// `toggle_on`.
     pub fn new(
         icon: Rgba,
         clear: ButtonVariantStyle,
@@ -125,13 +121,10 @@ impl SearchFieldMetrics {
         self
     }
 
-    /// Sets the visible clear mark: the disc diameter, the glyph struck through it, and the space
-    /// the field keeps between its own trailing edge and the mark's pointer target.
+    /// Sets the clear mark's disc diameter, glyph size, pointer target size, and trailing inset.
     ///
-    /// The mark stays smaller than the pointer target it is centered in, so the field keeps a
-    /// comfortable target for a small affordance. The trailing inset therefore replaces the
-    /// field's own trailing padding while the mark is present: the target already carries the air
-    /// around the mark, and counting both would push the mark away from the edge it belongs to.
+    /// The trailing inset replaces the field's trailing padding while the mark is present, because
+    /// the pointer target already carries the space around the mark.
     pub fn clear_mark(
         mut self,
         diameter: Pixels,
@@ -243,19 +236,10 @@ impl gpui::Global for SearchFieldTheme {}
 /// A standard search field: a leading search glyph, one editor, a trailing clear action, and an
 /// optional trailing [`SearchFieldToggle`].
 ///
-/// The field owns presentation and the clear interaction. Its consumer owns the query and every
-/// search semantic: it creates and retains the [`TextInput`], subscribes to
-/// [`TextInputEvent::ValueChanged`](crate::TextInputEvent::ValueChanged), and updates results from
-/// the editor's current value as that value changes. The field never reports query contents of its
-/// own, so an editor built with
-/// [`emit_programmatic_changes(true)`](TextInput::emit_programmatic_changes) reports the clear
-/// through the same event as typing, and one subscription answers both.
-///
-/// The trailing action appears only while the value is nonempty, clears the editor through its
-/// public Interface, and returns keyboard focus to it, so clearing leaves the reader where they
-/// were typing. Configure the editor itself for search: a
-/// [`Bare`](crate::TextInputVariant::Bare) variant, because the field paints the surrounding
-/// surface, and a placeholder.
+/// The consumer creates the [`TextInput`] and owns the query; the field reports nothing itself.
+/// Build the editor with [`emit_programmatic_changes(true)`](TextInput::emit_programmatic_changes)
+/// so a clear arrives through the same `ValueChanged` event as typing, and use the
+/// [`Bare`](crate::TextInputVariant::Bare) variant because the field paints the surface.
 #[derive(IntoElement)]
 pub struct SearchField {
     id: ElementId,
@@ -271,10 +255,7 @@ type ToggleHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// A trailing toggle inside a [`SearchField`] that switches how the field searches, such as
 /// searching by a recorded shortcut rather than by text.
 ///
-/// The consumer owns the mode: it passes whether the toggle is on and switches the mode when the
-/// toggle activates. The toggle sits at the field's trailing edge, after the clear action, and is
-/// painted from the installed theme's off or on paints. Unlike the clear action, it switches a
-/// mode nothing else reaches, so it takes the keyboard traversal stop after the editor.
+/// The consumer owns the mode. The toggle takes the keyboard traversal stop after the editor.
 pub struct SearchFieldToggle {
     icon: IconName,
     accessibility_name: SharedString,
@@ -300,7 +281,6 @@ impl SearchFieldToggle {
         }
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -319,7 +299,6 @@ impl SearchField {
         }
     }
 
-    /// Places a toggle at the field's trailing edge.
     pub fn toggle(mut self, toggle: SearchFieldToggle) -> Self {
         self.toggle = Some(toggle);
         self

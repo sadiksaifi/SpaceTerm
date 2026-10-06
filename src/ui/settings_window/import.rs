@@ -1,8 +1,5 @@
-//! Reading one user-chosen file: a Zed theme file or an exported Settings Document.
-//!
-//! Importing a theme file and importing settings are the only Settings operations that read a file
-//! the user picked rather than a file SpaceTerm owns. The read has a fixed byte bound and reports
-//! only a typed classification, so a failure carries no path and no native error text.
+//! Reads one user-chosen file, a Zed theme or an exported Settings Document, with a byte bound.
+//! Failures carry only a typed classification, never a path or native error text.
 
 use std::{fs::File, io::Read, path::Path};
 
@@ -29,9 +26,8 @@ impl ImportError {
     }
 }
 
-/// Reads one chosen file, refusing anything that is not a bounded regular file.
-///
-/// Type and size checks use the opened file, and the read stays bounded if that file grows.
+/// Reads one chosen file, refusing anything that is not a bounded regular file. Checks use the
+/// opened file, and the read stays bounded if that file grows.
 pub(super) fn read_selected_document(
     path: &Path,
     opener: &dyn SelectedFileOpener,

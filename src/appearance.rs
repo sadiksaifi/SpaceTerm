@@ -1,8 +1,5 @@
-//! Portable appearance policy, Zed terminal theme translation, and pure resolution.
-//!
-//! This Module deliberately contains no GPUI, terminal-engine, filesystem, or
-//! native platform types. Callers supply catalogs and availability facts, then
-//! receive immutable requested-versus-effective rendering specifications.
+//! Portable appearance policy, Zed terminal theme translation, and pure resolution, free of GPUI,
+//! terminal-engine, filesystem, and native platform types.
 
 macro_rules! chrome_color_fields {
     ($macro:ident) => {

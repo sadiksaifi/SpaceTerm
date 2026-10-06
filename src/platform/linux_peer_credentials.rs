@@ -8,7 +8,6 @@ use std::mem::size_of;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
-/// The effective user of the connected peer.
 pub(super) fn peer_user(stream: &UnixStream) -> io::Result<libc::uid_t> {
     peer_credentials(stream).map(|credentials| credentials.uid)
 }

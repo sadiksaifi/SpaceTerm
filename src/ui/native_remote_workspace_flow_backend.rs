@@ -62,12 +62,8 @@ pub(crate) struct RemoteWorkspaceSshRuntime<A: SshProcessAdapter> {
     pub(crate) host_config_filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
-/// Production SSH adapter for the window-independent remote Workspace flow.
-///
-/// The backend shares captured startup paths, environment, capability, and alias registry. Every
-/// connection creates a fresh AskPass attempt, sanitized process backend, private control master,
-/// and request-cancellable utility provider. Typed UI errors never retain raw prompts, secrets, or
-/// remote output beyond the bounded sanitized connection-detail value.
+/// Production SSH adapter for the window-independent remote Workspace flow. Typed UI errors never
+/// retain raw prompts, secrets, or remote output beyond the bounded sanitized connection detail.
 pub(super) struct NativeRemoteWorkspaceFlowBackend<A: SshProcessAdapter> {
     runtime: RemoteWorkspaceSshRuntime<A>,
     askpass: Arc<dyn AskPassAttemptFactory>,
@@ -145,9 +141,7 @@ fn acquire_destination_alias(
 }
 
 /// Main-thread factory that gates Remote availability using the pinned startup SSH capability.
-///
-/// Creating a backend captures only an attempt factory from the live window. Background connect
-/// futures do not retain the `Window` or access ambient process state.
+/// Background connect futures do not retain the `Window`.
 pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory<A: SshProcessAdapter> {
     runtime: RemoteWorkspaceSshRuntime<A>,
     askpass: Arc<dyn AskPassWindowFactory>,
@@ -437,12 +431,8 @@ fn map_control_connection_error(
     }
 }
 
-/// Non-clone owner of one Control Connection's control, authentication, alias, and cancellation.
-///
-/// The owner pairs its lifecycle observer with the same control generation. Close cancels work,
-/// transfers bounded control shutdown and AskPass teardown to retained background ownership, and
-/// releases its alias lease only after cleanup. Workspace-lifetime alias pins are acquired
-/// as independent registry counts.
+/// Non-clone owner of one Control Connection's control, authentication, alias, and cancellation. It
+/// releases its alias lease only after cleanup.
 struct NativeControlConnectionOwner {
     resources: Arc<NativeControlConnectionResources>,
     lifecycle: Option<ControlConnectionObserver>,
@@ -625,10 +615,8 @@ impl Drop for NativeControlConnectionOwner {
     }
 }
 
-/// Fallible Terminal Session Channel source bound to live control authority.
-///
-/// Each selected directory is validated independently. Explicit pins also require a matching
-/// physical identity. Grants authorize one preparation for that directory and connection generation.
+/// Fallible Terminal Session Channel source bound to live control authority. Each grant authorizes
+/// one preparation for its directory and connection generation.
 struct NativeTerminalSessionChannelProvider {
     control: Weak<Mutex<Option<Box<dyn NativeControlConnectionControl>>>>,
     utility: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
@@ -761,8 +749,6 @@ impl TerminalSessionChannelProvider for NativeTerminalSessionChannelProvider {
 }
 
 /// Narrow object-safe control boundary retained only by the native Control Connection owner.
-///
-/// UI-facing providers receive a weak reference and can neither clone nor shut down the control.
 trait NativeControlConnectionControl: Send {
     fn is_ready(&self) -> bool;
 

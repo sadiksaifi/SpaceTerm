@@ -259,7 +259,6 @@ impl LocalFilesystemAuthority {
         fs::read_dir(path).map(drop).map_err(classify_io_error)
     }
 
-    /// Creates `path` and every missing directory that encloses it.
     pub(crate) fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {
         validate_absolute_path(self.paths, path)?;
         fs::create_dir_all(path).map_err(classify_io_error)

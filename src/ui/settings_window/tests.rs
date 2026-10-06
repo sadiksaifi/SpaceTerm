@@ -133,9 +133,8 @@ fn missing_desktop_blur_shows_disabled_window_effect_defaults(cx: &mut TestAppCo
     );
 }
 
-/// Where the desktop cannot present a window effect, the window stays opaque and neither
-/// Transparency nor Blur can change it. Both rows show their defaults, which are what render,
-/// in the disabled state, and the retained choices return once the desktop can present them.
+/// Where the desktop cannot present a window effect, both rows show their disabled defaults and the
+/// retained choices return once the desktop can present them.
 fn assert_unavailable_window_effects_show_disabled_defaults(
     transparency: bool,
     unavailable: crate::appearance::UnavailableWindowEffect,
@@ -246,9 +245,6 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
         assert_eq!(harness.storage.writes(), 0, "{case}");
         assert!(blur_switch_shows_on(cx), "{case}");
 
-        // The keyboard cannot reach the decrement, the increment, the switch, or a reset. Once
-        // the desktop presents both effects, all five become stops: the retained choices differ
-        // from the defaults, so each row offers its reset again.
         let locked_stops = keyboard_stops(cx);
         set_window_effects(&harness, true, true, cx);
         assert_eq!(keyboard_stops(cx), locked_stops + 5, "{case}");
@@ -1051,11 +1047,6 @@ fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &m
     }));
 }
 
-/// A reset follows the name it restores, and the control holds the row's right edge either way.
-///
-/// Most rows never carry a reset. A column held open for one would stop every control short of
-/// the edge and leave more space on the right of the form than on its left, and a reset that took
-/// its place only when present would move the control out from under the pointer that changed it.
 #[gpui::test]
 fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
@@ -1119,13 +1110,6 @@ fn a_row_reset_follows_its_label_and_leaves_the_control_on_the_row_edge(cx: &mut
     assert_eq!(bounds("settings-terminal-italic", cx), control);
 }
 
-/// A reset that appears beside a label never changes where that label wraps.
-///
-/// A long label at a large size sits at its wrapping threshold across a band of window widths. If
-/// the reset took its space only when present, the label would gain a line inside that band as
-/// soon as the setting changed, growing the row and moving the control centered beside it. The
-/// reset scales with the type, so its held slot has to scale with it too, or the visible button
-/// would spill out of the slot and over the gap beside the label.
 #[gpui::test]
 fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestAppContext) {
     const ROW: &str = "settings-row-terminal-bold-as-bright";
@@ -1247,9 +1231,8 @@ fn a_row_reset_leaves_a_wrapping_label_and_its_control_in_place(cx: &mut TestApp
     }
 }
 
-/// Reset All says "all", so the imported catalog goes back to empty alongside the preferences.
-/// The two reset together: a selection naming an imported theme is valid only while that theme
-/// is installed, so clearing one without the other would leave the document contradicting itself.
+/// Reset All also empties the imported catalog, because a selection naming an imported theme is
+/// valid only while that theme is installed.
 #[gpui::test]
 fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     cx: &mut TestAppContext,
@@ -2053,10 +2036,6 @@ fn the_default_themes_page_has_no_warning(cx: &mut TestAppContext) {
 
 // Layout ---------------------------------------------------------------------------------------
 
-/// Every row belongs to a titled box, and every box frames the rows the catalog put in it.
-///
-/// Grouping is the structure the page is read by, so a row that escapes its box, or a box drawn
-/// for rows that are not inside it, is a layout defect rather than a matter of taste.
 #[gpui::test]
 fn every_row_sits_inside_the_titled_group_that_names_it(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
@@ -2452,11 +2431,6 @@ fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
     );
 }
 
-/// A run's title outranks every label inside it, and shares the labels' left edge.
-///
-/// The card edge bounds the run, while the title still establishes its name and rank. A title a
-/// label outweighs inverts that reading, and it is the kind of inversion that survives review
-/// because each piece looks reasonable on its own.
 #[gpui::test]
 fn a_group_title_outranks_the_labels_it_contains(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
@@ -2621,11 +2595,6 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
     }
 }
 
-/// Guidance stays with the setting it explains rather than coming to rest between two rows.
-///
-/// Under a tall control, a caption on the row's own line ends up nearer the row below it than the
-/// one it belongs to, and runs the width of the page on the way. Stacked under its label it stays
-/// anchored and it stops where the control begins.
 #[gpui::test]
 fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
@@ -2740,10 +2709,6 @@ fn a_selector_aligns_with_the_stepper_beside_it(cx: &mut TestAppContext) {
     );
 }
 
-/// A selector shows its value next to its chevron rather than at the far end of an empty bezel.
-///
-/// A reserving trigger is as wide as its popup whatever it holds, which reads as an empty field
-/// with a stranded chevron. Hugging is what makes a column of them read as values.
 #[gpui::test]
 fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);

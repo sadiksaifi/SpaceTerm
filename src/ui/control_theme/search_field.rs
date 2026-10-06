@@ -16,11 +16,7 @@ const FIELD_HEIGHT: f32 = 28.0;
 /// The ordinary control radius, which the sidebar chip this field shares its column with also
 /// takes. It is named through the shared scale so the two cannot drift apart by one point.
 const FIELD_RADIUS: f32 = RadiusRole::Control.points();
-/// The clear mark: a compact disc struck through by a glyph that keeps a ring of fill around it
-/// while staying heavy enough to read at a glance. The pointer target around the mark stays larger
-/// and invisible, so a small affordance is still comfortable to hit, and the inset is measured to
-/// that target rather than to the mark, which sits nearer the field's trailing edge than the
-/// leading glyph sits to its own.
+/// The clear mark's inset, measured to its larger invisible pointer target rather than to the mark.
 const CLEAR_TRAILING_INSET: f32 = 2.0;
 
 pub(super) fn prepared(
@@ -66,11 +62,6 @@ pub(super) fn prepared(
 }
 
 /// The disc fill for every state of the clear mark.
-///
-/// The mark rests at the neutral weight the placeholder and the search glyph already carry, so it
-/// reads as part of the field rather than as a control competing with the value beside it. Pointing
-/// at it and pressing it darken the disc toward the value's own weight. Nothing else paints: the
-/// target around the mark is transparent in every state.
 fn clear_mark_fills(colors: &ChromeColors) -> ButtonVariantStyle {
     let fill = |color: Color| ButtonPaint::new(rgba(0), gpui_color(color), rgba(0));
     ButtonVariantStyle::new(
@@ -119,13 +110,8 @@ fn toggle_on(colors: &ChromeColors) -> ButtonVariantStyle {
     )
 }
 
-/// The glyph struck through the clear mark.
-///
-/// It reads as the field showing through the disc rather than as ink on it, so it starts from the
-/// field's own fill and is then resolved to stay legible on the disc itself. Resolving against the
-/// opaque presentation keeps one readable glyph while a translucent window moves the fills under
-/// it, and the disc's own states only ever move further from the field's fill, so the glyph that
-/// answers the resting disc answers the pointed-at and pressed ones too.
+/// The glyph struck through the clear mark, resolved against the opaque presentation so it stays
+/// legible on the disc in every state.
 fn clear_glyph(reference: &ChromeColors) -> Color {
     let disc = reference.input_placeholder.source_over(
         reference

@@ -38,8 +38,6 @@ pub(crate) enum RemoteTabViewLifecycleError {
 }
 
 /// Move-only restart reservations for every Pane in one unchanged Tab hierarchy.
-///
-/// The token is valid only while Tab, Pane, and session-epoch identities remain unchanged.
 pub(crate) struct PreparedTabViewRemoteRestart {
     tab_id: TabId,
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
@@ -64,9 +62,6 @@ use spaceterm_ui::{
 };
 
 /// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
-///
-/// Rendering, minimum sizing, Split creation, resizing, and restored-leaf sizing all read this one
-/// resolved frame gap, so a nested Split keeps the same rhythm as its parent.
 fn pane_gap(cx: &App) -> f32 {
     f32::from(
         super::workspace_frame::WorkspaceFrame::for_appearance(super::appearance::chrome(cx), cx)
@@ -87,10 +82,8 @@ const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
 #[cfg(test)]
 const PANE_CONTROL_SIZE: f32 = 20.0;
 const PANE_CONTROL_GAP: f32 = 2.0;
-/// How much narrower the gap before Close Pane is than every other Pane control gap.
-///
-/// The small Zoom Pane glyph and the open Close Pane glyph leave more air between their strokes, so
-/// the eye reads that gap as wider at the same measurement.
+/// How much narrower the gap before Close Pane is than every other Pane control gap, because the
+/// open Close Pane glyph reads as wider.
 const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
 /// The share of the accent color that fills the half of a Pane a dragged Pane would take.
@@ -107,11 +100,8 @@ enum PaneCaptionAction {
     Close,
 }
 
-/// Which caption segments this frame's Pane width can hold.
-///
-/// The Pane name and status glyph are never dropped. Segments leave in order of how little they
-/// identify the Pane: the running label first, then the account, then the leading directory, then
-/// the machine, and finally the directory-status separator.
+/// Which caption segments this frame's Pane width can hold. The Pane name and status glyph are
+/// never dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaptionLayout {
     show_status_separator: bool,
@@ -588,10 +578,8 @@ impl TabView {
         self.session_factory.set_pinned_directory(directory);
     }
 
-    /// What this Tab presents about the Terminal Session it is focused on.
-    ///
-    /// The Tab reads the Focused Pane's own caption facts rather than a second title pipeline, so a
-    /// Tab and the Pane Caption under it always describe the same Terminal Session.
+    /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
+    /// Pane's caption facts.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
         let caption = self
             .pane_captions
@@ -632,7 +620,6 @@ impl TabView {
         cx.notify();
     }
 
-    /// The Tab's identity as one line, for callers that can only carry text.
     #[cfg(test)]
     pub(crate) fn tab_title(&self) -> gpui::SharedString {
         self.tab_identity().one_line()
@@ -677,10 +664,8 @@ impl TabView {
         }
     }
 
-    /// Atomically marks every Pane in this Tab disconnected for one generation.
-    ///
-    /// All Panes are prevalidated before any mutation. The Pane tree, focus, zoom, and retained
-    /// presentations remain intact, while new child launches and terminal input are blocked.
+    /// Atomically marks every Pane in this Tab disconnected for one generation. All Panes are
+    /// prevalidated before any mutation.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -714,10 +699,8 @@ impl TabView {
         Ok(())
     }
 
-    /// Binds one already-reserved launch to every existing Pane without mutating the hierarchy.
-    ///
-    /// The launch count and Pane identities must match exactly. Any failure drops the aggregate
-    /// token and leaves all Panes disconnected and unchanged.
+    /// Binds one already-reserved launch to every existing Pane without mutating the hierarchy. Any
+    /// failure drops the aggregate token and leaves all Panes disconnected.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -787,11 +770,8 @@ impl TabView {
         Ok(())
     }
 
-    /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
-    ///
-    /// Tab, Pane-tree, focus, and zoom identities are preserved. Once commit begins, later
-    /// Terminal Session startup failure belongs to its individual Pane rather than rolling back
-    /// already committed siblings.
+    /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds. A
+    /// later startup failure belongs to its Pane rather than rolling back committed siblings.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedTabViewRemoteRestart,
@@ -1140,12 +1120,9 @@ impl TabView {
         })
     }
 
-    /// The copy of a dragged Pane's caption that follows the pointer.
-    ///
-    /// It shows the Pane's identity exactly as the caption does, without the controls, which act
-    /// on a Pane in place. A caption wider than a card lifts a card's width of itself, placed so
-    /// the pointer keeps its share of the caption's width. `caption` is where the caption was
-    /// painted and `grab` where the pointer took it, both in window coordinates.
+    /// The copy of a dragged Pane's caption that follows the pointer, without the controls.
+    /// `caption` is where the caption was painted and `grab` where the pointer took it, in window
+    /// coordinates.
     fn render_lifted_caption(
         &self,
         pane_id: PaneId,
@@ -1279,9 +1256,6 @@ impl TabView {
     }
 
     /// The Pane under `pointer` that can take the dragged Pane, and the edge it would take.
-    ///
-    /// A Pane offers no target to itself, while zoomed, or when it is too small to split along
-    /// the edge's axis.
     fn drop_target(
         &self,
         pane_id: PaneId,
@@ -1821,9 +1795,8 @@ impl TabView {
                 gpui::canvas(
                     |_, _, _| (),
                     move |bounds, (), window, cx| {
-                        // The terminal chooses its accepted presentation during prepaint. Read its
-                        // surface at paint time so recovery and OSC changes share this frame's
-                        // presentation. Its color overlay rests on the shared window tint.
+                        // Read the surface at paint time because the terminal chooses its
+                        // presentation during prepaint.
                         let color = surface_appearance
                             .pane_surface(surface_terminal.read(cx).surface_background());
                         window
@@ -1914,10 +1887,8 @@ impl TabView {
             .and_then(|bounds| split_content_extent(axis, *bounds, gap))
             .map_or(0.0, |extent| extent * ratio);
 
-        // The spacer owns the gap's base surface; no root or stage fill lies beneath the Panes.
-        // The resize target is centred over the gap and painted after both Panes, but before
-        // sibling popovers; a deferred target would paint through command palettes, whose own
-        // menus are deferred overlays.
+        // The resize target paints after both Panes but before sibling popovers; a deferred target
+        // would paint through command palettes.
         let resize_target = div()
             .id(("split-gap", split_id.get()))
             .debug_selector(move || format!("split-gap-{}", split_id.get()))
@@ -2073,12 +2044,8 @@ impl Render for TabView {
     }
 }
 
-/// What one Tab presents about the Terminal Session its Focused Pane runs.
-///
-/// The Tab is a compact restatement of that Pane's own caption: what the Terminal Session is doing,
-/// then where it is. Every segment is a fact the Pane already resolved and sanitized for
-/// presentation; a Tab never composes a path, names its Workspace, or interprets a title, and
-/// leaves a segment empty rather than inventing one.
+/// What one Tab presents about the Terminal Session its Focused Pane runs. A Tab never composes a
+/// path or interprets a title, and leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TabIdentity {
     /// Local or Remote, as the Terminal Session classified itself.
@@ -2147,12 +2114,6 @@ impl TabIdentity {
 }
 
 /// One Pane caption split into the segments the header renders and drops independently.
-///
-/// `origin` is the account and machine the Terminal Session runs on, `directory` the leading path
-/// up to and including its last separator, `name` the directory leaf that identifies the Pane, and
-/// `label` the Terminal title or running command. `has_directory` distinguishes a promoted label
-/// from a root directory with no leading path. `running` marks a label that is a live command, and
-/// `progress` the status the Terminal Session reported independently of its title.
 #[derive(Clone, Default, Eq, PartialEq)]
 struct PaneCaptionText {
     origin: PaneOrigin,
@@ -2345,11 +2306,9 @@ fn render_pane_caption_content(
         button_paint(paint.control_pressed),
         button_paint(paint.control_disabled),
     );
-    // The native Window may become active before GPUI dispatches its accepts-first-mouse event.
-    // Retain whether the action was visible in the pre-activation frame and disable it before
-    // pointer-down so an opacity-zero unfocused Pane control cannot arm at its stale hitbox.
-    // Focused controls remain available on that same activation click, and active-window hover
-    // behavior is unchanged.
+    // The native Window may become active before GPUI dispatches its accepts-first-mouse event, so
+    // an opacity-zero unfocused Pane control is disabled before pointer-down to avoid its stale
+    // hitbox.
     let caption_action_available = focused || appearance.active;
     let focus_view = view.clone();
     let drag_view = view.clone();
@@ -2745,9 +2704,6 @@ fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoEleme
 }
 
 /// The Split's resize interaction, owned by the empty gap between its Panes.
-///
-/// The handle keeps its pointer target, cursor, double-click reset, and keyboard focus. The gap is
-/// the only visible separation until keyboard focus reveals the handle's restrained indicator.
 fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
@@ -2811,10 +2767,7 @@ fn restored_leaf_size(
     }
 }
 
-/// The edge of a Pane nearest `point`, measured relative to the Pane's own proportions.
-///
-/// The Pane's diagonals divide it into four triangles, one per edge, so a wide Pane and a tall
-/// Pane each offer every edge an equal share of their area.
+/// The edge of a Pane nearest `point`, by the four triangles its diagonals divide it into.
 fn drop_edge(bounds: Bounds<Pixels>, point: Point<Pixels>) -> PaneEdge {
     let center = bounds.center();
     let horizontal = f32::from(point.x - center.x) / f32::from(bounds.size.width).max(f32::EPSILON);
@@ -3342,8 +3295,6 @@ mod tests {
     }
 
     /// Presses a Pane's caption beside its name and moves the pointer along `path`.
-    ///
-    /// The first move leaves the caption, so the drag starts over whatever lies beneath it.
     fn drag_pane_caption(
         caption: Bounds<Pixels>,
         path: &[Point<Pixels>],

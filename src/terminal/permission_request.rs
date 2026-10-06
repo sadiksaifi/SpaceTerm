@@ -1,9 +1,7 @@
 //! Permission Request filtering: a program in a Terminal Session asks SpaceTerm to set up System
 //! Permissions with `OSC 7701 ; permissions=<list> ST`.
 //!
-//! `<list>` is a comma-separated set of `screen-recording` and `accessibility`. The filter removes
-//! every Permission Request from the output before the Terminal Emulator sees it. A request only
-//! offers a Permission Setup; the person decides whether to start one.
+//! `<list>` is a comma-separated set of `screen-recording` and `accessibility`.
 
 use std::mem;
 

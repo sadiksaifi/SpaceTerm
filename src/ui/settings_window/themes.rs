@@ -15,9 +15,6 @@ use crate::ui::appearance::gpui_color;
 
 impl SettingsWindow {
     /// The warning the Themes page carries when something selected could not be resolved.
-    ///
-    /// It is a notice at the top of the page rather than a labeled row: when nothing is wrong
-    /// there is nothing to say, and a row whose value reads "everything is fine" is noise.
     pub(super) fn render_diagnostics_notice(
         &mut self,
         appearance: &ChromeAppearance,

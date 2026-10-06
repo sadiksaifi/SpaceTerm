@@ -1,8 +1,5 @@
 //! Portable authorization seam for the System Permissions that programs in a Terminal Session
 //! inherit from SpaceTerm.
-//!
-//! A program running in a Terminal Session takes screenshots and sends input through SpaceTerm's
-//! grants, so SpaceTerm reads, sets up, and recovers them for the program.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -285,12 +282,10 @@ pub(crate) mod testing {
             })
         }
 
-        /// How many authorization reads were made. A native read can start a verification.
         pub(crate) fn reads(&self) -> usize {
             self.reads.get()
         }
 
-        /// How many observations are alive.
         pub(crate) fn observers(&self) -> usize {
             self.observers.get()
         }

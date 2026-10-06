@@ -168,10 +168,9 @@ fn prepare_state<const N: usize>(
     let selection_floor = if increase_contrast {
         super::SUBDUED_SELECTION_CONTRAST
     } else {
-        // A translucent selected fill cannot promise its opaque reference contrast. Retain the
-        // visible active step instead of flipping a raised selection into a dark recess, and ask
-        // an unfocused selection for no more separation than the focused one actually has: a
-        // fixed floor above that step is only reachable by leaving the window's material behind.
+        // A translucent selected fill cannot promise its opaque reference contrast, so it retains
+        // the visible active step and asks no more of an unfocused selection than the focused one
+        // has.
         backgrounds(active_fill)
             .into_iter()
             .zip(hosts)
@@ -241,9 +240,8 @@ fn prepare_state<const N: usize>(
             .map(|(prepared, _)| prepared)
     });
     let (fill, resolved) = prepared.unwrap_or_else(|| {
-        // Opaque opposite endpoints are the strongest possible presentation. This branch is a
-        // deterministic best effort for a genuinely contradictory set of multiple backgrounds;
-        // it never leaves the original unreadable active ink in the prepared pair.
+        // Best effort for a contradictory set of backgrounds: it never keeps the original
+        // unreadable ink.
         let score = |fill: Color, ink: Color| {
             backgrounds(fill)
                 .into_iter()

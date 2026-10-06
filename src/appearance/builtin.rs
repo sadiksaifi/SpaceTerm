@@ -61,39 +61,9 @@ impl Default for TerminalColors {
 fn spaceterm_dark_chrome() -> ChromeColors {
     super::compiler::compile_builtin_chrome(Appearance::Dark)
 }
-/// The authored SpaceTerm Chrome identity: one achromatic surface ladder per appearance plus a
-/// small set of restrained semantic accents.
-///
-/// Light and dark are a paired tonal system rather than an inversion. Each appearance authors the
-/// same ladder (root, chrome shell, raised surface, field, hover, pressed, persistent selection)
-/// as small luminance steps over true gray, so adjacent structural surfaces separate by weight
-/// alone.
-///
-/// Cards and floating surfaces lighten in both appearances. Light selections share one brighter
-/// fill across navigation, popup rows, and segmented options; action presses move toward text.
-///
-/// Every resting surface, separator, text gray, and shadow is authored with equal channels:
-/// a cool or warm cast in a resting role reads as a tinted window over any desktop, so hue belongs
-/// only to what it communicates. Persistent selection is a neutral step on that ladder: it must
-/// never read as a call to action, so it stays out of the accent family entirely. Blue is reserved
-/// for emphasis, links, focus, and small active indicators; red stays destructive; the remaining
-/// status hues are desaturated enough to sit beside the neutrals.
-///
-/// Separators are authored low-contrast because a Chrome that outlines every region reads as a grid
-/// of boxes. Roles that communicate state, namely focus, invalid, and the active indicator, stay
-/// obvious, and raised surfaces earn their separation from `shadow` plus a slightly stronger
-/// `border` rather than from a heavier hairline everywhere.
-///
-/// Roles absent here keep deriving from these seeds, and every derived resting role mixes only
-/// these grays, so it stays achromatic too. What is authored beyond the ladder is the set the
-/// compiler would otherwise hold to a readability floor against its own fill: control outlines,
-/// switch indicators, and the labels on filled actions. Those floors protect a glyph, and applying
-/// them to a ring or a knob collapses a quiet palette into pure black and white.
-/// The boundary rungs of built-in Light, authored as ink rather than as grays.
-///
-/// Ink over the final host states the same step on the base, on the content tone, and on whatever
-/// the desktop transmits through them, so one value serves every host. The Light palette and the
-/// edges UI preparation adds to Light controls both read these rungs.
+
+/// The boundary rungs of built-in Light, authored as ink rather than as grays so one value states
+/// the same step over every host, including a transmitting one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BoundaryInk {
     /// Separators inside an already-bounded surface.
@@ -152,10 +122,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             control_outline: Color::rgb(0x313131),
             control_outline_strong: Color::rgb(0x3e3e3e),
             tab_separator: Color::rgb(0x363636),
-            // A chip is lifted rather than outlined. The rim catches the light the way a raised
-            // edge would, so a Tab and a sidebar row read as sitting above the strip behind them
-            // without a drawn line around them; Dark states it faintest, where an outline reads
-            // as a frame. The fill alone states keyboard focus.
+            // Dark states the rim faintest, where an outline reads as a frame.
             selected_rim: Color::rgba(0xffffff0a),
             selected_rim_hover: Color::rgba(0xffffff10),
             selected_rim_inactive: Color::rgba(0xffffff0a),
@@ -195,10 +162,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             control_pressed: 0xdcdcdc,
             ghost_hover: 0xd2d2d2,
             ghost_pressed: 0xc4c4c4,
-            // A selection sits one rung above the raised tone that controls, grouped content and
-            // the Terminal share, so a selected Tab or row is the brightest thing in the window.
-            // It stops short of white: reproducing pure white takes an ink no window can see
-            // through, and a selection transmits like every other resting surface.
+            // Short of white: reproducing pure white takes an ink no window can see through.
             selected: 0xfdfdfd,
             selected_inactive: 0xf4f4f4,
             row_hover: 0xf4f4f4,
@@ -221,14 +185,8 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             control_outline: LIGHT_BOUNDARY_INK.control,
             control_outline_strong: LIGHT_BOUNDARY_INK.strong,
             tab_separator: Color::rgba(0x00000028),
-            // The rim belongs to the chip, not to the strip behind it. Dark states it
-            // as light on the far side of the fill, where it reads as the chip's own lit edge
-            // and the chip gains a little mass. A bright fill sits at the top of the range with
-            // no room above it, so this states the same edge inward instead, and it has to stop
-            // early: the fill's own step over the strip collapses as the window transmits, and
-            // an edge that outruns it lands on the strip's tone and draws a line around the
-            // chip. At the default Setting this covers about a third of that step.
-            // A chip keeps it whether or not its collection holds the keyboard; the fill dims.
+            // A bright fill has no room above it, so the rim steps inward and stays faint: an
+            // edge that outruns the fill's collapsing step draws a line around the chip.
             selected_rim: Color::rgba(0x00000004),
             selected_rim_hover: Color::rgba(0x00000006),
             selected_rim_inactive: Color::rgba(0x00000004),
@@ -271,9 +229,6 @@ struct ChromePalette {
     raised: u32,
     field: u32,
     /// The resting fill of an ordinary bordered control.
-    ///
-    /// Floating preparation may strengthen the equivalent overlay without changing this authored
-    /// composite when a transmitting host would otherwise make its content unreadable.
     control_fill: u32,
     /// An explicit track gives selected chips their own host, independent of button fills.
     segmented_track: Option<u32>,
@@ -285,10 +240,8 @@ struct ChromePalette {
     ghost_pressed: u32,
     /// Persistent selection: a neutral rung, never an accent.
     selected: u32,
-    /// The Active Tab's chip in an unfocused window: the same shape, a shorter step off the bar.
-    ///
-    /// It stays on the same side of the chrome shell as the focused chip rather than crossing to
-    /// the other side of it, so an unfocused window reads as quieter rather than as inverted.
+    /// The Active Tab's chip in an unfocused window: a shorter step off the bar, on the same side
+    /// of the shell as the focused chip.
     selected_inactive: u32,
     /// Row hover steps in the same direction from both the shell and raised menu surface.
     row_hover: u32,
@@ -311,11 +264,6 @@ struct ChromePalette {
     text_placeholder: u32,
     text_disabled: u32,
     /// The hairline around a raised surface, and the outer edge of a structural region.
-    ///
-    /// Boundaries may be authored as ink rather than as a gray. A gray states one step off one
-    /// host, so a palette whose surfaces sit at different weights needs a different gray for each.
-    /// Ink over the final host states the same step on every one of them, and keeps stating it when
-    /// the host transmits the desktop.
     separator: Color,
     /// Separators inside an already-bounded surface.
     separator_quiet: Color,
@@ -323,17 +271,10 @@ struct ChromePalette {
     field_outline: Color,
     control_outline: Color,
     control_outline_strong: Color,
-    /// The short hairline between two neighbouring inactive Tabs.
-    ///
-    /// It is authored apart from `separator` because a full-length divider disappears at this
-    /// length, and apart from `control_outline` because retuning an outlined action must not move
-    /// the Tab strip. It sits a visible step off both title-bar surfaces and well under the titles.
+    /// The short hairline between two neighbouring inactive Tabs, authored apart from
+    /// `separator` and `control_outline` so retuning either does not move the Tab strip.
     tab_separator: Color,
-    /// The rim a persistent selection carries, at rest, on hover, and in an unfocused window.
-    ///
-    /// A selection that shares its appearance's content tone cannot state its shape with fill
-    /// alone, because the surfaces it lands on carry that tone too. Where the fill already states
-    /// its shape, the rim is absent rather than decorative.
+    /// The rim a persistent selection carries where its fill alone cannot state its shape.
     selected_rim: Color,
     selected_rim_hover: Color,
     selected_rim_inactive: Color,
@@ -499,15 +440,12 @@ impl ChromePalette {
             ghost_element_active: opaque(self.ghost_pressed),
             selection_background: opaque(self.selected),
             row_background: opaque(self.shell),
-            // A persistent list row is authored apart from the shared selection rung. Deriving it
-            // would tie the Workspace sidebar, the Settings sections, and every menu row to the
-            // fill a segmented option needs against its own track, and those surfaces differ.
+            // Authored apart from the selection rung, which segmented options need on their track.
             row_hover_background: opaque(self.row_hover),
             row_selected_background: opaque(self.row_selected),
             row_selected_hover_background: self.row_selected_hover.map(Color::rgb),
             navigation_selected_background: self.navigation_selected.map(Color::rgb),
-            // A rim appears only where the fill cannot state the chip's shape by itself, and it
-            // steps up on hover because the fill of a selected row has nowhere left to move.
+            // The rim steps up on hover because a selected row's fill has nowhere left to move.
             row_selected_border: self.selected_rim,
             row_selected_hover_border: self.selected_rim_hover,
             row_selected_foreground: opaque(self.row_selected_text),
@@ -517,8 +455,6 @@ impl ChromePalette {
             // Tabs and navigation rows share the appearance's selection direction.
             tab_active_background: opaque(self.tab_active),
             tab_active_hover_background: self.tab_active_hover.map(Color::rgb),
-            // The label hierarchy comes along with the chip, so a Tab and a navigation row answer
-            // hover identically, and both take the same rim.
             tab_active_foreground: opaque(self.row_selected_text),
             tab_active_border: self.selected_rim,
             tab_active_hover_foreground: opaque(self.row_selected_text),
@@ -541,9 +477,7 @@ impl ChromePalette {
             destructive_pressed_foreground: on_emphasis,
 
             toggle_off_background: opaque(self.mark_track),
-            // The compiler reads this role as a glyph and would hold it to text weight against its
-            // own track. That is right for a checkmark and wrong for the dot on a switch, which
-            // turns into a solid blob, so both appearances author the softer indicator directly.
+            // Authored directly: the compiler's glyph readability floor turns a switch dot into a blob.
             toggle_off_mark: opaque(self.mark_indicator),
             toggle_off_hover_mark: opaque(self.mark_indicator_strong),
             toggle_off_pressed_mark: opaque(self.mark_indicator_strong),
@@ -559,9 +493,7 @@ impl ChromePalette {
             toggle_on_mark: on_emphasis,
             toggle_on_hover_mark: on_emphasis,
             toggle_on_pressed_mark: on_emphasis,
-            // A faded switch is still a switch. Deriving this mark against the faded fill passes
-            // the readability floor with ordinary text, which swaps the knob for a solid dark disc
-            // and makes a disabled control look like a different one.
+            // Deriving this against the faded fill turns the knob into a solid dark disc.
             toggle_on_disabled_mark: on_emphasis,
 
             scrollbar_thumb_background: opaque(self.scrollbar_thumb),
@@ -577,15 +509,6 @@ impl ChromePalette {
 }
 
 /// The authored SpaceTerm Terminal palettes, paired with the Chrome ladder of the same appearance.
-///
-/// The default background, foreground, and grays share Chrome's achromatic family, so a Pane reads
-/// as part of the window rather than as a tinted inset. Dark seats its background a single small
-/// step below the Chrome root: far enough that the reading surface is deliberately quieter than
-/// the shell around it, near enough that the two still read as one window. ANSI hues stay distinct
-/// and are tuned to read over their own background and over the translucent Pane backdrop at every
-/// transparency; dim colors keep their hue at a lower weight instead of fading toward gray.
-/// Selection answers a reader's action and takes a restrained accent blue; find matches keep the
-/// familiar yellow and orange so they never compete with selection.
 fn spaceterm_dark_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0xd8d8d8),
@@ -620,9 +543,7 @@ fn spaceterm_dark_terminal() -> TerminalColors {
 fn spaceterm_light_terminal() -> TerminalColors {
     TerminalColors {
         foreground: Color::rgb(0x242424),
-        // The reading surface takes the brightest rung a transmitting surface can hold, the same
-        // one a selection takes. Pure white costs an ink of alpha 251 over the window root, and a
-        // Pane that opaque stops answering the Transparency Setting at all.
+        // Pure white costs an ink of alpha 251 over the root, which ignores the Transparency Setting.
         background: Color::rgb(0xfdfdfd),
         normal: [
             0x2e2e2e, 0xb3313c, 0x2a7a3b, 0x8c5a00, 0x2d62a8, 0x8a4ba0, 0x16767e, 0x6e6e6e,
@@ -668,13 +589,8 @@ mod tests {
         0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
     }
 
-    /// How far a surface departs from gray, as a share of the full channel range.
-    ///
-    /// Colored grays are what make a neutral Chrome read as tinted, so this is the measure the
-    /// surface ladder is held to rather than a hue angle, which stays unstable near gray. The
-    /// spread is absolute because a fixed channel offset is equally visible at either end of the
-    /// ramp, while the same offset taken as a fraction of the brightest channel would forgive a
-    /// light surface and condemn a dark one for the same departure.
+    /// How far a surface departs from gray, as an absolute share of the full channel range, since
+    /// hue angle is unstable near gray.
     fn tint(color: Color) -> f64 {
         let channels = [color.r, color.g, color.b].map(f64::from);
         let high = channels.into_iter().fold(f64::MIN, f64::max);
@@ -686,10 +602,6 @@ mod tests {
     const NEUTRAL_TINT: f64 = 2.0 / 255.0;
 
     /// Every resting role of a built-in appearance is gray; hue is kept for what it communicates.
-    ///
-    /// A cast in surfaces, text grays, separators, or shadow tints the whole window, and it is
-    /// most visible over a translucent backdrop where nothing else carries color. The Terminal's
-    /// default backdrop and text belong to the same family, so a Pane never reads as a tinted inset.
     #[test]
     fn resting_roles_should_stay_achromatic_in_both_appearances() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -751,11 +663,6 @@ mod tests {
     }
 
     /// Every built-in chrome interaction fill stays in the neutral surface family.
-    ///
-    /// The fills a reader sees while pointing at a list row, a selected element, or a scrollbar
-    /// thumb are surfaces, so they come from this palette's own surface ramp. Reaching for an
-    /// unrelated role, such as a terminal selection color, produces a fill from another hue family
-    /// and a state that reads as a different control.
     #[test]
     fn selected_and_ghost_fills_remain_opaque_with_distinct_selection_hover() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -777,11 +684,6 @@ mod tests {
     }
 
     /// Persistent selection reads as a neutral rung of the surface ladder, not as an action.
-    ///
-    /// A selected Tab or Workspace row is a resting state that stays on screen, so tinting it with
-    /// the accent gives every list a colored cast and makes selection compete with the one control
-    /// the reader is meant to press. Holding the fill near gray, and far from the emphasis fill,
-    /// is what keeps a quiet selection distinguishable from a call to action.
     #[test]
     fn persistent_selection_should_stay_a_neutral_surface_rather_than_an_emphasized_action() {
         for appearance in [Appearance::Light, Appearance::Dark] {
@@ -812,8 +714,6 @@ mod tests {
         }
     }
 
-    /// The Active Tab and selected rows carry the same content hierarchy with distinct materials.
-    ///
     /// Light adds quiet rims; Dark keeps fill-only chips. An unfocused Tab uses a smaller step.
     #[test]
     fn the_active_tab_should_share_row_selection_direction_and_theme_edge_policy() {
@@ -911,10 +811,6 @@ mod tests {
     }
 
     /// Structural separators organize without outlining, while stateful borders stay obvious.
-    ///
-    /// Dividers, field outlines, and resize handles appear at nearly every seam, so drawing them at
-    /// the contrast a state deserves turns the window into a grid of boxes. Focus and invalid say
-    /// something the reader has to act on, so they keep the contrast a signal needs.
     #[test]
     fn structural_separators_should_stay_quieter_than_the_borders_that_report_state() {
         for appearance in [Appearance::Light, Appearance::Dark] {

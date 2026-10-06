@@ -1,11 +1,6 @@
 //! Shared Workspace gaps, optical Split trim, native edge insets, and derived Pane radii.
-//!
-//! Perimeter, sidebar, and Tab chip gaps share one measurement. Split gaps are two points
-//! narrower because the lighter band and adjacent rounded corners make them appear wider.
-//! Outer insets include the native window edge width, which covers the content's outer point.
-//! The top chrome height supplies the top gap because the Pane frame paints no top edge.
-//!
-//! Consumers share one resolved [`WorkspaceFrame`] so spacing, radii, and chrome height agree.
+//! Split gaps are two points narrower because the lighter band and adjacent rounded corners make
+//! them appear wider.
 
 use gpui::{App, Bounds, Pixels, point, px};
 
@@ -15,9 +10,6 @@ use crate::ui::chrome_geometry::{RadiusRole, pane_radius};
 
 /// The one continuous Chrome surface beneath the Workspace: the sidebar region, the content stage
 /// insets, and the gaps between Panes.
-///
-/// This selects an existing Chrome role rather than introducing one, so the sidebar, the stage, and
-/// each Pane's corner mask cannot disagree about the surface they share.
 pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
     colors.panel_background
 }
@@ -25,12 +17,8 @@ pub(crate) fn base_surface(colors: &ChromeColors) -> Color {
 /// The Compact-density measurement of every visible gap in the Workspace.
 const SPACE: f32 = 5.0;
 /// How much shorter a top chip is than the base top-chrome height, at Compact density.
-///
-/// A chip's height is a control size, not a gap, so the frame's gap never resizes a Tab.
 const TOP_CHIP_TRIM: f32 = 6.0;
 /// How much narrower the gap between Split Panes is than every other gap, at every density.
-///
-/// The eye reads the Split gap as wider at the same measurement, so it gives these points back.
 const SPLIT_GAP_OPTICAL_TRIM: f32 = 2.0;
 /// Used when the hosting platform cannot supply an outer window radius.
 const FALLBACK_WINDOW_RADIUS: f32 = 12.0;
@@ -56,10 +44,8 @@ pub(crate) struct PanePaintInterior {
 }
 
 impl WorkspaceFrame {
-    /// Resolves the frame for a Chrome density scale and the hosting window's geometry.
-    ///
-    /// Each length is rounded to a whole point so Comfortable density never leaves a fractional,
-    /// blurry edge between a Pane and the base surface.
+    /// Resolves the frame for a Chrome density scale and the hosting window's geometry. Lengths
+    /// round to whole points so Comfortable density never leaves a blurry edge.
     pub(crate) fn resolve(spacing_scale: f32, window: WindowFrameGeometry) -> Self {
         let scale = if spacing_scale.is_finite() && spacing_scale > 0.0 {
             spacing_scale
@@ -71,9 +57,7 @@ impl WorkspaceFrame {
             width if width.is_finite() && width >= 0.0 => width.round(),
             _ => 0.0,
         };
-        // Selection is a fixed semantic control radius. A Pane is the native window corner carried
-        // inward by its window-edge inset, so its radius follows the changing inset instead of
-        // selecting an independent density-scaled value.
+        // A Pane radius follows the native window corner carried inward by its inset.
         let chip_radius = RadiusRole::Control.points();
         let window_radius = match window.outer_corner_radius() {
             Some(radius) if radius.is_finite() && radius >= 0.0 => radius,
@@ -103,10 +87,7 @@ impl WorkspaceFrame {
     }
 
     /// The one visible gap in the Workspace: stage perimeter, Split gap, and sidebar chip margin.
-    ///
-    /// It is a distance between painted surfaces, not a layout property. Two insets of this size
-    /// may never meet, because the base surface is continuous and adjacent insets would read as one
-    /// gap of twice the size.
+    /// Two insets of this size may never meet, or they read as one gap of twice the size.
     pub(crate) const fn space(self) -> Pixels {
         self.space
     }
@@ -116,55 +97,37 @@ impl WorkspaceFrame {
         self.window_edge
     }
 
-    /// The inset of a surface that faces the window's outer edge.
-    ///
-    /// The window's own edge is the painted surface on that side, so the inset carries the edge
-    /// and then the one visible gap.
     pub(crate) fn window_edge_inset(self) -> Pixels {
         self.window_edge + self.space
     }
 
-    /// What a chip in a strip keeps on its leading side of the gap to its neighbour.
-    ///
-    /// Chips in one strip are inset inside their own items, so both sides of a boundary contribute.
-    /// The two shares split one whole-point gap, so the visible gap between two chips is
-    /// [`WorkspaceFrame::space`] again even when that gap is odd.
+    /// What a chip in a strip keeps on its leading side of the gap to its neighbour. Two shares
+    /// split one whole-point gap, so the visible gap stays [`WorkspaceFrame::space`] even when it
+    /// is odd.
     pub(crate) const fn strip_chip_leading_inset(self) -> Pixels {
         self.strip_chip_leading_inset
     }
 
-    /// What a chip in a strip keeps on its trailing side of the gap to its neighbour.
     pub(crate) fn strip_chip_trailing_inset(self) -> Pixels {
         self.space - self.strip_chip_leading_inset
     }
 
     /// Base surface between two Split Panes; it also owns the Split's resize hit target.
-    ///
-    /// It is two points narrower than [`WorkspaceFrame::space`], so it looks equal to the
-    /// gaps at the window edge and around the top chrome.
     pub(crate) fn pane_gap(self) -> Pixels {
         self.space - px(SPLIT_GAP_OPTICAL_TRIM)
     }
 
-    /// The margin a sidebar item's chip keeps on its leading side, facing the window edge.
     pub(crate) fn sidebar_chip_leading_inset(self) -> Pixels {
         self.window_edge_inset()
     }
 
     /// The margin a sidebar item's chip keeps on its trailing side, facing the Pane.
-    ///
-    /// The Pane beside the sidebar is a painted surface rather than a chip, so the chip carries the
-    /// whole gap and the stage adds nothing where they meet.
     pub(crate) const fn sidebar_chip_trailing_inset(self) -> Pixels {
         self.space
     }
 
-    /// The Pane stage's leading perimeter.
-    ///
-    /// With a sidebar present the visible gap is already painted by the sidebar chip's own trailing
-    /// margin, so the stage adds nothing: two insets of the same base surface would otherwise merge
-    /// into one gap of twice the size. Without a sidebar the stage carries the window-edge
-    /// perimeter itself.
+    /// The Pane stage's leading perimeter. With a sidebar present the sidebar chip's trailing
+    /// margin already paints that gap, so the stage adds nothing.
     pub(crate) fn stage_leading_inset(self, sidebar_visible: bool) -> Pixels {
         if sidebar_visible {
             px(0.0)
@@ -174,11 +137,6 @@ impl WorkspaceFrame {
     }
 
     /// The height of the top chrome, which absorbs the frame's top space.
-    ///
-    /// Nothing is painted between the titlebar and the Pane. The chrome is the window's own edge
-    /// over a band, and every top control centres in that band. The band holds one
-    /// [`WorkspaceFrame::top_chip_height`] chip with one visible gap above it and one between it
-    /// and the Pane.
     pub(crate) fn top_chrome_height(self, base_height: Pixels) -> Pixels {
         self.window_edge + self.top_band_height(base_height)
     }
@@ -193,7 +151,6 @@ impl WorkspaceFrame {
         base_height - self.top_chip_trim
     }
 
-    /// Corner radius of every floating Pane surface.
     pub(crate) const fn pane_radius(self) -> Pixels {
         self.pane_radius
     }
@@ -203,10 +160,8 @@ impl WorkspaceFrame {
         px(PANE_RIM_WIDTH)
     }
 
-    /// Resolves the terminal's paint interior against the rim's painted edges and inner arc.
-    ///
-    /// `bounds` shares the Pane's side and bottom edges, but starts below its Caption. This only
-    /// resolves paint geometry; the terminal's logical grid insets stay independent of the rim.
+    /// Resolves the terminal's paint interior against the rim's painted edges and inner arc. The
+    /// terminal's logical grid insets stay independent of the rim.
     pub(crate) fn pane_paint_interior(
         self,
         bounds: Bounds<Pixels>,
@@ -244,11 +199,6 @@ impl WorkspaceFrame {
     }
 
     /// The offset a chip strip takes so its first chip paints on the strip's own leading edge.
-    ///
-    /// A chip is inset inside its item, which would add to the gap the control before the strip
-    /// already leaves. The strip pulls that inset back instead, so the visible distance from the
-    /// preceding control to the first chip is one [`WorkspaceFrame::space`], and the first Tab's
-    /// paint lines up with the Pane beneath it.
     pub(crate) fn chip_strip_leading_offset(self) -> Pixels {
         px(0.0) - self.strip_chip_leading_inset
     }

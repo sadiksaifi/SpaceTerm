@@ -1,7 +1,5 @@
 //! The Controls section: every production control family pinned in each interaction state.
-//!
-//! Columns pin visual states only; focus and drag handlers stay unarmed, so a capture shows the
-//! paint of a state without the pointer or keyboard producing it.
+//! Focus and drag handlers stay unarmed so a capture shows a state's paint without input.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Div, Entity, SharedString, Window, div, px};

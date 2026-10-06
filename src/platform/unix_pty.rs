@@ -104,7 +104,6 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
-    /// Classify a PTY master read failure.
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
 
@@ -995,7 +994,6 @@ fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
     command
 }
 
-/// The factory the running Operating System composes, for OS-backed verification.
 #[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn test_factory() -> UnixNativePtyAdapterFactory {
     UnixNativePtyAdapterFactory::new(test_host())

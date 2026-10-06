@@ -1,24 +1,7 @@
-//! Shared progress values, presentation state, and the reusable progress indicators.
+//! Progress values and the reusable progress indicators.
 //!
-//! The indicators paint one operation's extent and nothing else. They carry no task name, no
-//! percentage, no elapsed or remaining time, and no success, warning, paused, or error intent:
-//! every visible word and every outcome color belongs to the surface that owns the operation and
-//! sits outside the primitive. Reaching the maximum value neither completes nor hides an
-//! indicator, so the owner decides when the work is over and the indicator goes away.
-//!
-//! The linear bar and the circular ring are separate types with separate treatments, so one
-//! operation keeps one shape from start to finish. Determinate work fills a restrained track:
-//! leading to trailing on the bar, clockwise from twelve o'clock on the ring. Indeterminate work
-//! is activity rather than extent: the bar fills end to end and animates its shade along its
-//! length, and the ring becomes a small spinner with no track behind it.
-//!
-//! [`FrameSpinner`] is a separate glyph-sized activity mark for terminal status slots, where it
-//! sits among reported glyphs and drawn icons. Every other indeterminate surface uses the ring or
-//! the bar.
-//!
-//! Both indicators paint in the application's installed colors. A ring may instead inherit the
-//! semantic foreground of the surface it is embedded in, for a slot whose contrast the embedder
-//! has already resolved against the one background under it.
+//! Indicators paint one operation's extent and nothing else. The owning surface supplies every word
+//! and outcome color and decides when the indicator goes away.
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -68,7 +51,6 @@ impl DeterminateProgress {
         Ok(Self(value.clamp(0.0, 1.0) as f32))
     }
 
-    /// Returns the normalized finite value.
     pub const fn value(self) -> f32 {
         self.0
     }
@@ -167,7 +149,6 @@ pub struct ProgressSizes {
 }
 
 impl ProgressSizes {
-    /// Creates the complete catalog of named progress geometries.
     pub const fn new(compact: ProgressMetrics, regular: ProgressMetrics) -> Self {
         Self { compact, regular }
     }
@@ -222,19 +203,14 @@ const BAR_CREST_PASS: Duration = Duration::from_millis(1_100);
 const BAR_RESTING_OPACITY: f32 = 0.55;
 
 /// The crest's stacked shade layers: each layer's share of the layer around it, then its opacity
-/// over that layer.
+/// over that layer. The outermost share is the crest's share of the bar.
 ///
-/// The outermost share is the crest's own share of the bar. Nesting the layers instead of stepping
-/// one band's color keeps the crest's ends soft without a gradient, so the shade rises and falls
-/// along the fill rather than sliding across it as a segment.
+/// Nesting the layers keeps the crest's ends soft without a gradient.
 const BAR_CREST_LAYERS: [(f32, f32); 3] = [(0.46, 0.18), (0.56, 0.22), (0.3, 0.3)];
 
 /// Monochrome frames from the `Dots` visual reference credited in packaged notices.
 ///
-/// The sequence lights the six-dot ring and walks the unlit gap around it, so what travels is the
-/// gap and the ring itself stays whole. That is what reads as rotation. A sequence that instead
-/// lights one column solid and walks a single dot beside it reads as a bar with a mark sliding
-/// past it, which is not the same motion.
+/// The unlit gap walks around a whole six-dot ring, which reads as rotation.
 pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
 
@@ -260,20 +236,14 @@ const SPINNER_ROWS: f32 = 3.0;
 
 /// A dot's diameter as a share of the distance between neighboring dot centers.
 ///
-/// Physical Braille sets a 1.5 mm dot on a 2.5 mm pitch. Holding near that ratio leaves a gap
-/// between every pair of neighbors in both axes, so lit dots stay countable instead of fusing
-/// into a bar. The ratio sits slightly under the physical one because these dots are painted a
-/// few pixels wide, where antialiasing spreads each edge and closes a gap the geometry still has.
+/// Physical Braille uses 1.5 mm dots on a 2.5 mm pitch. The ratio sits slightly under that because
+/// antialiasing spreads each painted edge and would close the gap between neighbors.
 const SPINNER_DOT_PITCH_RATIO: f32 = 0.55;
 
 /// The cell's height as a share of the square the spinner occupies.
 ///
-/// The spinner takes the same slot as a drawn icon or a reported glyph, and neither of those fills
-/// its box: a glyph set at the slot's size inks roughly two thirds of that height and leaves the
-/// rest to ascent and descent. Reaching the square's edges instead would put the spinner on a
-/// heavier optical weight than everything it sits beside, which is the whole complaint against a
-/// spinner that looks too big. Insetting to a glyph's ink proportion settles it onto the same
-/// weight, and the dots shrink with the cell because one pitch derives them both.
+/// A glyph set at the slot's size inks about two thirds of its height, so a spinner that reached
+/// the square's edges would look heavier than the glyphs and icons beside it.
 const SPINNER_CELL_HEIGHT_RATIO: f32 = 0.7;
 
 /// One complete revolution of the indeterminate ring.
@@ -289,20 +259,10 @@ const RING_TRAIL_STROKES: usize = 6;
 const RING_TRAIL_OPACITY: f32 = 0.3;
 
 /// An inherited ring's determinate track, as a share of the inherited color's own opacity.
-///
-/// An inherited ring has one color to work from, so the extent still to come is that same color
-/// held well back rather than a second color introduced here. Holding it back this far keeps the
-/// circle behind the accent arc at a small diameter instead of competing with it, while leaving
-/// enough of the circle visible that a low extent still reads as progress along a track.
 const INHERITED_TRACK_OPACITY: f32 = 0.28;
 
-/// A horizontal progress bar for determinate and indeterminate work.
-///
-/// The bar fills the width it is given and keeps the thin thickness its installed size supplies,
-/// so callers control its length through their own layout. Determinate progress fills the track
-/// from the leading edge of the reading order. Indeterminate progress fills the complete track and
-/// runs one soft shade crest along it, or holds that crest still at the center under reduced
-/// motion.
+/// A horizontal progress bar for determinate and indeterminate work. It fills the width its parent
+/// gives it.
 ///
 /// ```ignore
 /// ProgressBar::new("restore", "Restoring session", state).size(ProgressSize::Compact)
@@ -337,7 +297,6 @@ impl ProgressBar {
         }
     }
 
-    /// Selects one installed geometry.
     pub fn size(mut self, size: ProgressSize) -> Self {
         self.size = size;
         self
@@ -403,14 +362,9 @@ impl RenderOnce for ProgressBar {
     }
 }
 
-/// A small GPUI-native frame spinner for indeterminate terminal activity.
+/// A glyph-sized frame spinner for terminal status slots in tab items and Pane Captions.
 ///
-/// The spinner is reserved for terminal status slots in tab items and Pane Captions, where it
-/// shares one square with reported glyphs and the drawn terminal icon. Controls, rows, and sheets
-/// show indeterminate work with an indeterminate [`ProgressRing`] or [`ProgressBar`]. The spinner
-/// inherits the surrounding semantic foreground color, holds a fixed square extent,
-/// and advances only while its element remains in the tree. Reduced Motion keeps the first frame
-/// visible without installing an animation.
+/// Other surfaces show indeterminate work with [`ProgressRing`] or [`ProgressBar`].
 #[derive(IntoElement)]
 pub struct FrameSpinner {
     id: ElementId,
@@ -430,13 +384,11 @@ impl FrameSpinner {
         }
     }
 
-    /// Selects one installed compact or regular geometry.
     pub fn size(mut self, size: ProgressSize) -> Self {
         self.size = size;
         self
     }
 
-    /// Overrides the stable selector prefix used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -506,10 +458,8 @@ fn spinner_frame(selector: SharedString, extent: Pixels, index: usize) -> gpui::
 
 /// Active dots for one `Dots` frame, laid out on a centered Braille lattice.
 ///
-/// One pitch governs both axes, so the two columns sit exactly as far apart as consecutive rows
-/// and the cell keeps the tall, narrow proportion a Braille glyph has. The cell is centered in the
-/// square at a glyph's ink height rather than stretched to the square's edges. Stretching it is
-/// what turns each column into a solid bar and the ring into an exclamation mark.
+/// One pitch governs both axes, so the cell keeps a Braille glyph's tall, narrow proportion. The
+/// cell is centered at a glyph's ink height rather than stretched to the square's edges.
 pub(crate) fn spinner_dot_bounds(
     bounds: Bounds<Pixels>,
     index: usize,
@@ -559,8 +509,6 @@ fn bar_fill(
                 .debug_selector(move || format!("{indicator_selector}-indicator"))
                 .flex_none()
                 .h(metrics.bar_thickness)
-                // The fill measures the track it sits in, so one normalized value is the whole
-                // geometry and no call site converts progress into pixels.
                 .w(relative(progress.value()))
                 .rounded(metrics.bar_corner_radius)
                 .bg(theme.paint.indicator)
@@ -661,15 +609,7 @@ fn shaded(paint: Rgba, opacity: f32) -> Rgba {
 
 /// A circular progress indicator for determinate and indeterminate work.
 ///
-/// The ring keeps the small square extent its installed size supplies and never stretches, so it
-/// sits inside rows and beside text without changing their height. Determinate progress sweeps one
-/// continuous accent arc clockwise from twelve o'clock over a complete neutral circle.
-/// Indeterminate progress revolves one tapered accent trail with no circle behind it, or holds
-/// that trail still under reduced motion. Prefer the ring for progress in rows and controls too
-/// constrained for a bar.
-///
-/// The ring paints in the installed progress colors unless the embedding surface claims that
-/// decision with [`ProgressRing::inherited`].
+/// The ring keeps a fixed square extent, so it fits rows and controls too constrained for a bar.
 #[derive(IntoElement)]
 pub struct ProgressRing {
     id: ElementId,
@@ -700,21 +640,16 @@ impl ProgressRing {
         }
     }
 
-    /// Selects one installed geometry.
     pub fn size(mut self, size: ProgressSize) -> Self {
         self.size = size;
         self
     }
 
-    /// Paints the ring in the semantic foreground of the surface around it, and derives its
-    /// determinate track from that same color.
+    /// Paints the ring in the semantic foreground of the surface around it instead of the installed
+    /// progress colors.
     ///
-    /// Use this where the embedding surface rather than the application catalog owns the contrast
-    /// decision: a status slot whose foreground is already resolved against the one background it
-    /// rests on, which an installed accent cannot know. The caller still hands the ring no color.
-    /// The ring reads the text color in effect where it paints, so it follows that surface's
-    /// active, inactive, and hovered paints on its own, and it carries no more outcome meaning
-    /// than a themed ring does.
+    /// Use it where the embedding surface has already resolved its foreground against its own
+    /// background, which an installed accent cannot know.
     pub fn inherited(mut self) -> Self {
         self.inherited = true;
         self

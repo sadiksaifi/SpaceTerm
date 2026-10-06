@@ -1,8 +1,5 @@
 //! Follows the Settings Document file while another program edits it.
-//!
-//! A person edits settings.json in their own editor. Every save SpaceTerm did not make is adopted
-//! the way an explicit reload adopts it, so every window follows the file and a malformed save
-//! keeps the last valid settings until a valid one arrives.
+//! A malformed save keeps the last valid settings until a valid one arrives.
 
 #[cfg(test)]
 #[path = "settings_file_tests.rs"]
@@ -64,10 +61,8 @@ impl SettingsFile {
         cx.try_global::<Self>().map(|file| file.access.location())
     }
 
-    /// Opens the file in the program the Operating System assigns to it.
-    ///
-    /// The file must already exist. Its directory exists by then too, so a watch that could not
-    /// start at launch starts here.
+    /// Opens the file in the program the Operating System assigns to it. The file must already
+    /// exist.
     pub(crate) fn open(cx: &mut App) -> bool {
         let Some(access) = cx.try_global::<Self>().map(|file| Rc::clone(&file.access)) else {
             return false;

@@ -155,7 +155,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
         None
     }
 
-    /// Signals the private process group owned by `child`.
     fn signal_process_group(
         &self,
         child: &mut Self::Child,

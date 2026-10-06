@@ -1,7 +1,5 @@
 //! Product-owned Chrome radii and structural edge width, in GPUI logical points.
-//! Density changes spacing and control heights, but leaves these values unchanged. The Pane is the
-//! single named exception: its radius follows the native outer corner after the density-scaled
-//! frame inset, bounded by the Control and SurfaceLarge roles.
+//! Density leaves these unchanged; the Pane radius follows the native corner after the frame inset.
 
 use gpui::{Pixels, px};
 

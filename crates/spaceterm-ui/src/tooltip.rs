@@ -281,12 +281,8 @@ fn tooltip_theme(cx: &App) -> TooltipTheme {
 
 /// Short, semantic contextual help for one noninteractive desktop tooltip.
 ///
-/// A tooltip is delayed, transient, pointer-transparent, and scoped to one Operating-System
-/// Window. It never receives focus or pointer input and must not contain actions. `text` is required;
-/// optional detail and Shortcut text remain bounded and are presented through fixed
-/// semantic slots rather than arbitrary popup children. A tooltip supplements, but never replaces,
-/// the target control's logical accessibility name. Use a Menu or another interactive popover when
-/// content must accept focus or input.
+/// A tooltip never receives focus or pointer input and never replaces the target's logical
+/// accessibility name. Use a Menu or another interactive popover for content that accepts input.
 #[derive(Clone)]
 pub struct Tooltip {
     id: ElementId,
@@ -308,19 +304,16 @@ impl Tooltip {
         }
     }
 
-    /// Adds secondary detail such as a Workspace path.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = nonempty_bounded_text(detail.into(), MAX_DETAIL_CHARACTERS);
         self
     }
 
-    /// Adds a compact Shortcut label.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = nonempty_bounded_text(shortcut.into(), MAX_KEYBOARD_CHARACTERS);
         self
     }
 
-    /// Sets the stable selector exposed by the presented tooltip surface.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = selector.into();
         self
@@ -386,7 +379,6 @@ pub struct TooltipTarget {
 }
 
 impl TooltipTarget {
-    /// Controls whether the target may present its tooltip.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -403,7 +395,6 @@ pub struct TooltipLayer {
 }
 
 impl TooltipLayer {
-    /// Wraps the complete content of one Operating-System Window.
     pub fn new(content: impl IntoElement) -> Self {
         Self {
             content: content.into_any_element(),

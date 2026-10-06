@@ -1,9 +1,4 @@
 //! The Themes section: a preview of the Terminal Theme in use and a list of installed themes.
-//!
-//! A row's Use button applies its theme to the appearance the list is showing. Under Auto the
-//! preview shows the Light and Dark slots side by side, and selecting one points the list at it.
-//! A row's removal button removes every theme installed with it: its extension's themes, or the
-//! themes of the family imported from its file.
 
 use gpui::prelude::*;
 use gpui::{
@@ -397,9 +392,7 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// One installed theme: its preview, its name, and where it came from, then its actions. The
-    /// theme in use says so where the others offer Use, and a theme SpaceTerm did not ship offers
-    /// removal at the row's end.
+    /// One installed theme: its preview, its name, its origin, and its actions.
     fn render_theme_row(
         &self,
         summary: &ThemeSummary,

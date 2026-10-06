@@ -62,12 +62,10 @@ impl CheckboxChange {
         self.previous
     }
 
-    /// Returns the next state requested by the user.
     pub const fn requested(self) -> CheckboxState {
         self.requested
     }
 
-    /// Returns the input path that requested the change.
     pub const fn source(self) -> ToggleActivationSource {
         self.source
     }
@@ -87,12 +85,10 @@ impl SwitchChange {
         self.previous
     }
 
-    /// Returns the next on/off value requested by the user.
     pub const fn requested(self) -> bool {
         self.requested
     }
 
-    /// Returns the input path that requested the change.
     pub const fn source(self) -> ToggleActivationSource {
         self.source
     }
@@ -149,7 +145,6 @@ impl TogglePaint {
         self.border
     }
 
-    /// Returns the visible label color.
     pub const fn label(self) -> Rgba {
         self.label
     }
@@ -253,31 +248,26 @@ impl ToggleMetrics {
         }
     }
 
-    /// Sets the spacing between the indicator and visible label.
     pub fn label_gap(mut self, gap: Pixels) -> Self {
         self.label_gap = gap;
         self
     }
 
-    /// Sets checkbox corner rounding independently from the pill-shaped switch.
     pub fn checkbox_radius(mut self, radius: Pixels) -> Self {
         self.checkbox_radius = radius;
         self
     }
 
-    /// Sets the switch thumb inset from the inside of its track.
     pub fn switch_inset(mut self, inset: Pixels) -> Self {
         self.switch_inset = inset;
         self
     }
 
-    /// Sets the stable indicator border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
         self
     }
 
-    /// Sets visible-label typography.
     pub fn typography(mut self, font_size: Pixels, line_height: f32) -> Self {
         self.font_size = font_size;
         self.line_height = line_height.clamp(1.0, 2.0);
@@ -309,7 +299,6 @@ pub struct ToggleSizes {
 }
 
 impl ToggleSizes {
-    /// Creates a complete size catalog.
     pub const fn new(compact: ToggleMetrics, regular: ToggleMetrics) -> Self {
         Self { compact, regular }
     }
@@ -405,7 +394,6 @@ impl ToggleTheme {
         paints.resolve(on)
     }
 
-    /// Returns the independent keyboard focus outline color.
     pub fn focus_border(self) -> Rgba {
         self.focus_border
     }
@@ -453,19 +441,16 @@ impl Checkbox {
         }
     }
 
-    /// Selects a standard desktop control size.
     pub fn size(mut self, size: ToggleSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Controls whether the checkbox can request a state change.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the checkbox.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -480,25 +465,21 @@ impl Checkbox {
         self
     }
 
-    /// Makes the labeled hit target fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
         self
     }
 
-    /// Mirrors indicator placement for a right-to-left surrounding layout.
     pub fn right_to_left(mut self, right_to_left: bool) -> Self {
         self.core.right_to_left = right_to_left;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -563,19 +544,16 @@ impl Switch {
         }
     }
 
-    /// Selects a standard desktop control size.
     pub fn size(mut self, size: ToggleSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Controls whether the switch can request a state change.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the switch.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -590,7 +568,6 @@ impl Switch {
         self
     }
 
-    /// Makes the label and trailing switch fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
         self
@@ -602,13 +579,11 @@ impl Switch {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self

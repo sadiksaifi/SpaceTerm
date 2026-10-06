@@ -299,9 +299,7 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         3.0,
     );
     let inactive_selection_border = authored.inactive_selection_border;
-    // The mark between two inactive Tabs is its own decision rather than a control outline or a
-    // full-length divider. Missing, it takes the inactive title a step back into the bar it rests
-    // on, so it follows the built-in title weight: seen as a short hairline, quieter than text.
+    // When not authored, the inactive Tab separator steps the inactive title back into the bar.
     let tab_separator = authored.tab_separator;
     let link_text_pressed = authored.link_text_pressed;
     let link_text_disabled = text_disabled;

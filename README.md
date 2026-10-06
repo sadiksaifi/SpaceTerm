@@ -25,6 +25,8 @@ Or install with Homebrew:
 brew install --cask sadiksaifi/tap/spaceterm
 ```
 
+On Linux, [build from source](docs/development.md). SpaceTerm provides no Linux packages or updates.
+
 ## Workspace hierarchy
 
 ```mermaid

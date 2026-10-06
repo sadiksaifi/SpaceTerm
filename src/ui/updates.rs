@@ -1,8 +1,5 @@
-//! Update presentation: the title bar control, the application menu commands, their prompts, and
-//! the launch view.
-//!
-//! [`crate::updates`] owns update policy and state. This module renders that state, turns user
-//! commands into its operations, and settles every install confirmation it claims.
+//! Update presentation: the title bar control, menu commands, prompts, and launch view.
+//! [`crate::updates`] owns update policy and state.
 
 mod launch;
 
@@ -40,10 +37,8 @@ pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";
 const RELEASE_NOTES_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/latest";
 const CURRENT_VERSION: &str = env!("SPACETERM_VERSION");
 
-/// Installs the menu commands and the one application-wide owner of update prompts.
-///
-/// The update service must already be installed. Without it, the commands explain that updates
-/// are unavailable and no window shows an update control.
+/// Installs the menu commands and the one application-wide owner of update prompts. The update
+/// service must already be installed.
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
     cx.on_action(|_: &OpenReleaseNotes, cx| cx.open_url(RELEASE_NOTES_URL));
@@ -80,11 +75,8 @@ enum InstallRequest {
 
 impl Global for UpdatePrompts {}
 
-/// Decides which results reach the user, each exactly once.
-///
-/// The service changes its state and then emits a notice and notifies observers. GPUI may deliver
-/// those two in either order, and a menu check that joins a scheduled check receives no notice. So
-/// both deliveries claim the current result here, and the second finds it already presented.
+/// Decides which results reach the user, each exactly once. GPUI may deliver the service's notice
+/// and its observer notification in either order, so both claim the current result here.
 #[derive(Debug, Default)]
 struct CheckResults {
     /// A menu check is waiting for its result, including one that joined a scheduled check.
@@ -124,9 +116,6 @@ impl CheckResults {
     }
 
     /// An unrequested failure is presented too, because it interrupts a download the user began.
-    ///
-    /// A failed check interrupts nobody: it is reported only to a menu check awaiting it, and
-    /// Settings shows it in place.
     fn notice(&mut self, notice: UpdateNotice, state: &UpdateState) -> Option<UpdateState> {
         let unawaited = match notice {
             UpdateNotice::CheckFinished => false,
@@ -652,15 +641,8 @@ enum ControlCommand {
     RetryInstall,
 }
 
-/// One frame of the title bar control.
-///
-/// The label names the current step and the release version. Accent paint appears only when the
-/// next step is the user's. Action glyphs are unframed so the capsule is the only outline; the
-/// warning glyph keeps its own circle so it reads as a warning.
-///
-/// The control has no dismiss affordance. It stays for as long as an update is pending, through
-/// checks, failures, and a stopped download. It lives in the title bar, so it never covers or
-/// moves a Pane and never takes focus.
+/// One frame of the title bar control. It has no dismiss affordance and stays while an update is
+/// pending.
 #[derive(Clone, Debug, PartialEq)]
 struct ControlPresentation {
     label: SharedString,
@@ -820,9 +802,6 @@ impl ControlPresentation {
 }
 
 /// The update control at the trailing end of one window's title bar.
-///
-/// Every window shows the same application update. The control is absent unless an update is
-/// pending.
 pub(super) struct UpdateControl {
     _subscription: Option<Subscription>,
 }
@@ -914,10 +893,8 @@ impl Render for UpdateControl {
                 ControlGlyph::Warning => {
                     Icon::new(IconName::CircleAlert, glyph_size, foreground).into_any_element()
                 }
-                // The ring keeps the installed accent rather than the button's foreground. Checking
-                // and Stopping disable the button, and its disabled foreground is too faint for a
-                // fading trail. The accent stays readable on the ordinary button fill in every
-                // state, and one download keeps one color once its size becomes known.
+                // The ring keeps the installed accent because the disabled foreground of Checking
+                // and Stopping is too faint for a fading trail.
                 ControlGlyph::Progress(fraction) => {
                     let state = DeterminateProgress::new(f64::from(fraction))
                         .map_or(ProgressState::Indeterminate, ProgressState::Determinate);

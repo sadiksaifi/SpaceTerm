@@ -226,12 +226,8 @@ fn take_aligned_row<T>(
     None
 }
 
-/// The margin a terminal keeps between its layout edges and its cell grid.
-///
-/// Text, the cursor, hit testing, and IME geometry stay inside the grid. Edge-cell backgrounds
-/// extend across the margin up to the enclosing shape's rim, so a program that paints its own
-/// background fills the shape's interior. The terminal paints nothing in the rim band and
-/// rounds its fills at the rim's inner bottom corners.
+/// The margin a terminal keeps between its layout edges and its cell grid. Edge-cell backgrounds
+/// extend across the margin up to the enclosing shape's rim.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TerminalPadding {
     side: Pixels,
@@ -284,12 +280,8 @@ impl TerminalPadding {
     }
 }
 
-/// The rounded bottom corners of the region a terminal may paint.
-///
-/// GPUI content masks are rectangular, and Chrome painted over a corner is translucent, so it
-/// tints terminal fills instead of hiding them. The terminal therefore clips its own fills: a
-/// fill reaching a corner paints as a quad rounded at that exact corner, masked back to the
-/// fill's rectangle.
+/// The rounded bottom corners of the region a terminal may paint. GPUI content masks are
+/// rectangular and Chrome over a corner is translucent, so the terminal clips its own fills.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct BottomCorners {
     bounds: Bounds<Pixels>,
@@ -363,10 +355,7 @@ impl BottomCorners {
 }
 
 /// The content mask that admits exactly the device pixels GPUI paints a quad with `bounds` into.
-///
-/// GPUI rounds quad edges to the nearest device pixel, halves toward zero, but expands content
-/// masks outward to whole device pixels. A mask with fractional bounds would admit one device
-/// pixel of the neighboring fill, so each mask edge sits just inside the quad's own pixels.
+/// GPUI rounds quad edges halves toward zero but expands masks outward to whole device pixels.
 fn device_pixel_mask(bounds: Bounds<Pixels>, scale_factor: f32) -> Option<Bounds<Pixels>> {
     const INSIDE: f32 = 1.0 / 64.0;
     let snap = |value: Pixels| {
@@ -1504,9 +1493,8 @@ fn prepare_row_text(
     PreparedRowText { text }
 }
 
-/// Resolve each glyph from its absolute terminal column, never from a preceding
-/// fragment or glyph. Fractional fitted cell widths must use identical arithmetic
-/// even when an application redraw inserts a symbol and splits a shaping run.
+/// Resolves each glyph from its absolute terminal column, never from a preceding fragment or glyph,
+/// so a redraw that splits a shaping run keeps identical fractional cell arithmetic.
 fn terminal_glyph_origins(
     fragment: &TextFragment,
     line: &ShapedLine,
@@ -2090,18 +2078,12 @@ struct RowPaintInput {
 struct RowPadding {
     leading: Option<Color>,
     trailing: Option<Color>,
-    /// Whether this row may extend its backgrounds below the grid when it is the last row.
-    ///
-    /// Follows Ghostty's `neverExtendBg`: a default background already matches the padding,
-    /// and prompts and perfect-fit Powerline glyphs look wrong stretched.
+    /// Whether this row may extend its backgrounds below the grid when it is the last row. Follows
+    /// Ghostty's `neverExtendBg`.
     extends_below: bool,
 }
 
 /// Extends edge-cell backgrounds across the padding between `grid_bounds` and `bounds`.
-///
-/// Every visible row extends sideways. The last row extends downward, corners included, only
-/// when it is the viewport's last row, at least partly visible, and [`RowPadding::extends_below`]
-/// allows it.
 fn prepare_padding_background_geometry(
     rows: &[Arc<RowPaintInput>],
     reaches_last_row: bool,

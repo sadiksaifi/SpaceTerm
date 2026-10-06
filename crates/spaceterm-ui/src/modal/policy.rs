@@ -78,13 +78,8 @@ impl ArrangementActionFacts for super::core::ModalRenderAction {
 
 /// Immutable installed logical desktop policy, separate from paint and metrics.
 ///
-/// Policy validates action identity, role, intent, enabled/default facts, facade-specific safe
-/// dismissal, Alert bounds, and programmatic-only deadlines. It also selects initial focus, logical
-/// leading/trailing action placement, right-to-left mirroring, and adaptive action axis.
-/// Callers keep typed identity and logical order; physical order never changes result identity.
-///
-/// The application must explicitly install one policy with [`install_modal_policy`]. Production
-/// uses [`Self::mac_os`].
+/// The policy selects focus entry, physical action placement, and action axis; physical order never
+/// changes result identity. Install it with [`install_modal_policy`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModalDesktopPolicy {
     text_direction: TextDirection,
@@ -92,14 +87,7 @@ pub struct ModalDesktopPolicy {
 }
 
 impl ModalDesktopPolicy {
-    /// Returns the macOS logical policy used by production application installation.
-    ///
-    /// In horizontal left-to-right rows Cancel is leading and the explicit default is trailing;
-    /// right-to-left layout mirrors physical placement while retaining logical traversal and typed
-    /// identity. Return activates an enabled focused action before falling back to an explicit
-    /// enabled default, and cancellation actions route only to the enabled safe Cancel path. The
-    /// separately installed macOS modal keybinding profile adds Command-Period. Programmatic-only
-    /// progress is capped at thirty minutes.
+    /// Returns the macOS logical policy used in production.
     pub const fn mac_os() -> Self {
         Self {
             text_direction: TextDirection::LeftToRight,

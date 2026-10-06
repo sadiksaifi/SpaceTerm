@@ -463,17 +463,14 @@ pub struct CommandPaletteActivation<I> {
 }
 
 impl<I> CommandPaletteActivation<I> {
-    /// Returns the caller-owned item identity.
     pub fn item_id(&self) -> &I {
         &self.item_id
     }
 
-    /// Returns the input path that activated the item.
     pub fn source(&self) -> CommandPaletteActivationSource {
         self.source
     }
 
-    /// Consumes the activation and returns its caller-owned item identity.
     pub fn into_item_id(self) -> I {
         self.item_id
     }
@@ -595,19 +592,16 @@ impl CommandPaletteAction {
         }
     }
 
-    /// Controls whether the control can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
     }
@@ -615,11 +609,8 @@ impl CommandPaletteAction {
 
 /// The search line's primary command, presented as a labeled button at its trailing edge.
 ///
-/// The confirm key activates it while it is enabled, and so does Return while no result is
-/// presented. Related commands join the button as a menu segment, which stays available while the
-/// action is disabled. Activating the action or a menu item emits
-/// [`CommandPaletteEvent::HeaderAction`] with the caller's identity and leaves the palette open;
-/// the caller decides what follows.
+/// Activating it or one of its menu items emits [`CommandPaletteEvent::HeaderAction`] and leaves
+/// the palette open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
@@ -652,7 +643,6 @@ impl CommandPalettePrimaryAction {
         self
     }
 
-    /// Controls whether the action can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -668,13 +658,11 @@ impl CommandPalettePrimaryAction {
         self
     }
 
-    /// Controls whether the action's menu can open, independently of the action itself.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu_disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -704,19 +692,16 @@ impl CommandPaletteEmptyAction {
         }
     }
 
-    /// Controls whether the action can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
     }
@@ -764,12 +749,10 @@ impl CommandPaletteEmpty {
         self
     }
 
-    /// Returns the title.
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// Returns the optional description.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_deref()
     }
@@ -843,7 +826,6 @@ impl<I> CommandPaletteItem<I> {
         }
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(mut self, value: impl Into<SharedString>) -> Self {
         self.description = Some(value.into());
         self
@@ -876,7 +858,6 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Controls whether navigation and activation may reach this item.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -896,34 +877,28 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Adds one standardized trailing accessory.
     pub fn trailing(mut self, accessory: CommandPaletteAccessory) -> Self {
         self.trailing = Some(accessory);
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity.
     pub fn id(&self) -> &I {
         &self.id
     }
 
-    /// Returns the primary label.
     pub fn label(&self) -> &str {
         self.label.as_ref()
     }
 
-    /// Returns the optional description.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
-    /// Returns whether navigation and activation skip this item.
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -1041,7 +1016,6 @@ impl CommandPalettePaint {
         }
     }
 
-    /// Installs complete semantic row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
@@ -1105,7 +1079,6 @@ impl CommandPalettePaint {
         )
     }
 
-    /// Sets normal and disabled icon colors independently of result text.
     pub fn icons(mut self, normal: Rgba, disabled: Rgba) -> Self {
         self.icon_foreground = normal;
         self.disabled_icon_foreground = disabled;
@@ -1118,13 +1091,11 @@ impl CommandPalettePaint {
         self
     }
 
-    /// Sets the foreground of a pointer-highlighted result independently of keyboard selection.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
     }
 
-    /// Sets the section heading foreground.
     pub fn section_foreground(mut self, color: Rgba) -> Self {
         self.section_foreground = color;
         self
@@ -1223,20 +1194,17 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the maximum panel height and top offset.
     pub fn panel_geometry(mut self, maximum_height: Pixels, top_offset: Pixels) -> Self {
         self.maximum_height = maximum_height;
         self.top_offset = top_offset;
         self
     }
 
-    /// Sets the minimum panel distance from viewport edges.
     pub fn viewport_margin(mut self, margin: Pixels) -> Self {
         self.viewport_margin = margin;
         self
     }
 
-    /// Sets the editor height.
     pub fn editor_height(mut self, input_height: Pixels) -> Self {
         self.input_height = input_height;
         self
@@ -1255,13 +1223,11 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the gap between a row's label line and its description line.
     pub fn row_line_gap(mut self, gap: Pixels) -> Self {
         self.row_line_gap = gap;
         self
     }
 
-    /// Sets section heading and section separator heights.
     pub fn section_spacing(mut self, section_height: Pixels, separator_height: Pixels) -> Self {
         self.section_height = section_height;
         self.separator_height = separator_height;
@@ -1276,7 +1242,6 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the group-heading size independently from row descriptions.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_size = size;
         self
@@ -1303,7 +1268,6 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the search-line glyph size independently of result-row icons.
     pub fn input_icon_size(mut self, size: Pixels) -> Self {
         self.input_icon_size = size;
         self
@@ -1375,7 +1339,6 @@ impl CommandPaletteMetrics {
         }
     }
 
-    /// Returns the empty state's icon size, which leads the title as its most prominent element.
     fn empty_icon_size(&self) -> Pixels {
         self.body_line_height * 2.0
     }
@@ -1389,7 +1352,6 @@ impl CommandPaletteMetrics {
         self.panel_padding + self.horizontal_padding
     }
 
-    /// Returns the concentric radius for an inset row inside the outer panel.
     fn row_corner_radius(&self) -> Pixels {
         (self.corner_radius - self.panel_padding).max(px(0.0))
     }
@@ -1442,10 +1404,6 @@ fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
 }
 
 /// A reusable entity-backed command palette with typed semantic items.
-///
-/// Its [`TextInput`] supplies native editable-text semantics. The API requires logical row labels
-/// and keeps arbitrary row painting outside the accessibility seam. Result rows do not yet publish
-/// listbox and option nodes to the native accessibility tree.
 pub struct CommandPalette<I: Clone + Eq + 'static> {
     empty: CommandPaletteEmpty,
     items: Rc<[CommandPaletteItem<I>]>,
@@ -2225,22 +2183,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         Some(CommandPaletteReplacementFocus { restore_focus })
     }
 
-    /// Returns whether the transient overlay is open.
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    /// Returns the current editor query.
     pub fn query(&self) -> &str {
         &self.query
     }
 
-    /// Returns the selected enabled item identity, if any.
     pub fn selected_item_id(&self) -> Option<&I> {
         self.selected.as_ref()
     }
 
-    /// Returns the caption presented after the last result, if any.
     pub fn results_note(&self) -> Option<&SharedString> {
         self.results_note.as_ref()
     }

@@ -508,10 +508,6 @@ fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
     assert_eq!(status(&window, cx), MicrophoneAccessStatus::Unsupported);
 }
 
-/// Wrapped guidance beside the badge and action once stretched the row, and its card, hundreds of
-/// pixels below the content. Every state keeps the row at its natural height: equal padding above
-/// the label and below the guidance, with the control centered on the same row, and the card ends
-/// with the group's last row.
 #[gpui::test]
 fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut TestAppContext) {
     const GROUP_SELECTOR: &str = "settings-section-privacy-group-permissions-card";
@@ -571,7 +567,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
             );
         }
     }
-    // The narrowest window wraps the guidance, which is the layout that once stretched.
+    // The narrowest window wraps the guidance.
     cx.simulate_resize(gpui::size(
         gpui::px(super::super::WINDOW_WIDTH),
         gpui::px(super::super::WINDOW_HEIGHT),

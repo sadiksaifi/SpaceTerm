@@ -37,10 +37,6 @@ fn status_mark_size(appearance: &ChromeAppearance) -> Pixels {
     }
 }
 
-/// The air the top-left chrome keeps at its trailing edge.
-///
-/// It is the Workspace frame's one measurement, the same margin a selected sidebar row's chip keeps
-/// beside it, so the identity area and the list under it stop on one vertical.
 fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
     super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx).space()
 }
@@ -159,10 +155,8 @@ impl WorkspaceChromeLayout {
             .child(switcher);
         div()
             .absolute()
-            // The chrome now carries the frame's top space in its own height, so its controls ride
-            // the middle of that height below the window's own edge rather than a fixed inset from
-            // its upper edge. Tab chips centre in the same band, so identity and Tabs stay on one
-            // line.
+            // Controls center in the chrome's height below the window edge, the same band Tab chips
+            // use.
             .top(window_edge)
             .bottom_0()
             .left(if self.client_controls_width > px(0.0) {
@@ -208,10 +202,8 @@ impl WorkspaceChromeStatusHosts {
     }
 }
 
-/// The one status the collapsed Workspace identity presents.
-///
-/// An unavailable directory takes precedence over the Remote connection, because no Terminal
-/// Session can start in the Workspace until it is resolved.
+/// The one status the collapsed Workspace identity presents. An unavailable directory takes
+/// precedence over the Remote connection because no Terminal Session can start until it resolves.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceChromeStatus {
     Unavailable,
@@ -272,9 +264,6 @@ impl WorkspaceChromeStatus {
     }
 
     /// The glyph that replaces the dot under Differentiate Without Color.
-    ///
-    /// Each status color has its own shape. Disconnected and Closing share a color, so they share
-    /// a glyph too.
     const fn glyph(self) -> IconName {
         match self {
             Self::Unavailable => IconName::TriangleAlert,
@@ -296,8 +285,6 @@ impl WorkspaceChromeStatus {
     }
 
     /// The status mark: a dot, or the status's own glyph under Differentiate Without Color.
-    ///
-    /// The mark takes its hovered paint while the pointer is over `hover_group`.
     pub(super) fn mark(
         self,
         appearance: &ChromeAppearance,
@@ -331,9 +318,7 @@ impl WorkspaceChromeStatus {
         }
     }
 
-    /// The dot's paint on the chip's resting and hovered surfaces.
-    ///
-    /// The dot is a graphical object, so it meets graphical-object contrast against each surface.
+    /// The dot's paint on the chip's resting and hovered surfaces, at graphical-object contrast.
     fn paint(
         self,
         appearance: &ChromeAppearance,
@@ -357,10 +342,6 @@ pub(super) struct WorkspaceChromeIdentity {
 
 impl WorkspaceChromeIdentity {
     /// Renders the collapsed identity: the Workspace glyph, its name, and a trailing status mark.
-    ///
-    /// The glyph and name keep the title bar's own paint in every state. Only the mark carries the
-    /// status, so the identity reads the same for a Local Workspace and a healthy Remote one. The
-    /// mark is a dot, or the status's own glyph under Differentiate Without Color.
     pub(super) fn render(
         self,
         switcher_color: Rgba,

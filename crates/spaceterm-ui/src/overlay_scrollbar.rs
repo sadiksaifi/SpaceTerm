@@ -235,7 +235,6 @@ impl ScrollbarMetrics {
         self
     }
 
-    /// Sets the minimum thumb height and idle hide delay.
     pub fn behavior(mut self, minimum_height: Pixels, hide_delay: Duration) -> Self {
         self.minimum_thumb_height = minimum_height.max(px(1.0));
         self.hide_delay = hide_delay;
@@ -292,13 +291,11 @@ impl ScrollbarTheme {
         self
     }
 
-    /// Sets the track fill independently of its border and the scrolling thumb.
     pub fn track_background(mut self, color: Rgba) -> Self {
         self.track_background = color;
         self
     }
 
-    /// Sets complete bounded scrollbar geometry and lifecycle timing.
     pub fn metrics(mut self, metrics: ScrollbarMetrics) -> Self {
         self.metrics = metrics;
         self

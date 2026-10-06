@@ -39,14 +39,12 @@ pub enum AlertIntent {
 pub enum AlertAccessory {
     /// A compact symbolic icon with a mandatory logical name.
     Icon {
-        /// Logical name retained for future native accessibility publication.
         accessibility_name: SharedString,
         /// Optional caller-owned image rendered inside the bounded accessory slot.
         image: Option<Arc<RenderImage>>,
     },
     /// Bounded noninteractive media with a mandatory logical name.
     Media {
-        /// Logical name retained for future native accessibility publication.
         accessibility_name: SharedString,
         /// Caller-owned image rendered inside the bounded accessory slot.
         image: Arc<RenderImage>,
@@ -101,7 +99,6 @@ impl AlertSuppression {
         }
     }
 
-    /// Returns the localized visible label.
     pub fn label(&self) -> &str {
         self.label.as_ref()
     }
@@ -133,20 +130,10 @@ pub enum AlertOutcome<A> {
     },
 }
 
-/// A concise, window-modal desktop decision or acknowledgement.
+/// A concise, window-modal desktop decision or acknowledgement with one to three actions.
 ///
-/// Alert accepts one to three decision actions. It never
-/// dismisses from an outside press. Initial focus prefers an explicit default or sole ordinary
-/// acknowledgement, but a destructive Alert enters on the enabled safe Cancel path. Return
-/// activates the enabled focused action first, then only an explicit enabled default after a
-/// focused body control declines it. Escape and an installed platform cancellation Shortcut use
-/// only the enabled Cancel action.
-/// Caller action order is preserved as logical identity while [`ModalDesktopPolicy`] owns physical
-/// placement and the renderer traverses the complete current-frame GPUI tab-stop order.
-///
-/// Presentations share the Operating-System Window's one active slot and eight-entry waiting FIFO.
-/// Results and lifecycle closure are delivered exactly once, including queued dismissal, caller
-/// owner removal, Operating-System Window removal, and reentrant result callbacks.
+/// A destructive Alert enters focus on the enabled safe Cancel action. An outside press never
+/// dismisses it.
 #[derive(Clone)]
 pub struct Alert<A> {
     pub(super) id: ModalId,
@@ -188,19 +175,16 @@ impl<A> Alert<A> {
         self
     }
 
-    /// Sets bounded secondary detail.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// Sets the single bounded noninteractive accessory.
     pub fn accessory(mut self, accessory: AlertAccessory) -> Self {
         self.accessory = Some(accessory);
         self
     }
 
-    /// Sets the caller-owned suppression choice.
     pub fn suppression(mut self, suppression: AlertSuppression) -> Self {
         self.suppression = Some(suppression);
         self

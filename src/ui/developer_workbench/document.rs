@@ -1,7 +1,4 @@
-//! The Settings Document section: the whole document as editable JSON.
-//!
-//! The text previews as a Settings Document, or installs as a Zed theme family, only when the
-//! developer applies it. Typing alone changes nothing.
+//! The Settings Document section: the whole document as editable JSON, applied only on request.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Entity, Window, div};

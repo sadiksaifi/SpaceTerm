@@ -1,20 +1,7 @@
 //! The application-owned native backdrop behind one Operating-System Window's content.
 //!
-//! Asking GPUI for a blurred window background was observed to produce no blur on this macOS: the
-//! desktop showed through the window sharp. GPUI's blurred background installs an
-//! `NSVisualEffectView` and then reaches into the material's private layer tree, clearing layer
-//! backgrounds, hiding a layer matched by private class name and removing a filter matched by
-//! description. Which of those mutations defeats the material here has not been established, and
-//! establishing it would not help: a technique that depends on private layer names and filter
-//! descriptions has no contract to hold across an Operating-System release, so each release can
-//! change the result without any change here.
-//!
-//! SpaceTerm therefore asks GPUI only for a transparent window and owns the effect here, using the
-//! material exactly as AppKit publishes it. The view is an ordinary, unmodified
-//! `NSVisualEffectView` inserted as the bottom sibling of GPUI's rendering view inside the window's
-//! content view, which is where AppKit expects a behind-window material to live. Nothing about
-//! GPUI's view hierarchy is reparented and no layer is mutated, so the backdrop keeps whatever
-//! appearance the Operating System defines for the material.
+//! GPUI's blurred background depends on private layer names, so SpaceTerm installs an unmodified
+//! `NSVisualEffectView` as the bottom sibling of GPUI's rendering view instead.
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send};

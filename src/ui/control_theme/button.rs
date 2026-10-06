@@ -12,11 +12,8 @@ use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTypography, TextRole};
 /// The horizontal padding a compact button paints around its label.
 pub(crate) const COMPACT_HORIZONTAL_PADDING: f32 = 4.0;
 
-/// The border every button reserves inside its edge, whether or not the variant paints one.
-///
-/// It is separate from the padding because it scales differently: padding follows the density
-/// scale and this does not, so a surface aligning a button's label to a text column has to remove
-/// each of them in its own scale rather than one combined figure.
+/// The border every button reserves inside its edge, whether or not the variant paints one. It does
+/// not follow the density scale, unlike the padding.
 pub(crate) const CONTROL_BORDER_WIDTH: f32 = HAIRLINE;
 
 #[cfg(test)]
@@ -156,9 +153,6 @@ pub(super) fn prepared(
                 .gap(px(8.0))
                 .corner_radius(RadiusRole::Control.pixels()),
         ),
-        // The ring is its own role. A control's focused border, where it has one, says the control
-        // is ready; the ring says the keyboard is here. Sharing one value made every family that
-        // wanted to retune one of those move the other.
         gpui_color(colors.focus_ring),
     )
 }
@@ -258,7 +252,6 @@ fn bare(colors: &ChromeColors, show_borders: bool) -> ButtonVariantStyle {
     )
 }
 
-/// A fully transparent paint value, so a state paints nothing rather than a themed surface.
 fn transparent() -> Color {
     Color::rgba(0)
 }

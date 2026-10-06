@@ -84,17 +84,9 @@ pub(super) fn init(cx: &mut App) {
 
 /// Final Operating-System Window layer for shared window-modal controls.
 ///
-/// Place it around the complete root content. Tooltip dismissal is included. Supply complete
-/// CommandPalette owners through [`Self::transient`] so the layer owns their placement above
-/// ordinary content. The active modal is painted as the final normal
-/// child rather than a deferred draw, allowing a modal-owned deferred Menu to remain above it. The
-/// scrim blocks application pointer press, release, move, and wheel input without outside
-/// dismissal or click-through. The modal key context blocks underlay keyboard routing while the
-/// leading and trailing sentinels contain the complete current-frame GPUI tab-stop order.
-///
-/// This layer does not yet exclude the underlay from native accessibility traversal. Private
-/// render snapshots and debug selectors support behavior tests; they provide no native
-/// accessibility evidence.
+/// Place it around the complete root content and pass CommandPalette owners through
+/// [`Self::transient`]. The active modal paints as the final normal child rather than a deferred
+/// draw, so a modal-owned deferred Menu stays above it.
 #[derive(IntoElement)]
 pub struct ModalLayer {
     content: AnyElement,

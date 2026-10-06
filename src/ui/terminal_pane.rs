@@ -101,10 +101,8 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
-/// Gap within which two Escape presses leave Operating-System Window fullscreen.
-///
-/// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
-/// because the caller filters those out before recording.
+/// Gap within which two Escape presses leave Operating-System Window fullscreen. A single Escape is
+/// terminal input, so only a deliberate pair exits.
 const DOUBLE_ESCAPE_FULLSCREEN_WINDOW: Duration = Duration::from_millis(500);
 /// How long a Permission Request notice shows an offer before it accepts an answer. Any key can
 /// reach a program in an enhanced keyboard mode, so without the delay a program could raise a
@@ -133,12 +131,9 @@ impl FullscreenEscapeSequence {
     }
 }
 
-/// The physical keys a Terminal Session received a press for but no release yet.
-///
-/// A program reporting key events must only see releases of presses it received. Presses that a
-/// Command, an IME composition, or another surface consumed keep their releases out of the
-/// session. The record outlives Terminal Input Focus changes, so a key held across one still
-/// releases exactly what the program saw pressed.
+/// The physical keys a Terminal Session received a press for but no release yet. A program
+/// reporting key events must only see releases of presses it received, across Terminal Input Focus
+/// changes.
 #[derive(Default)]
 struct DeliveredKeyPresses {
     session_identity: u64,
@@ -204,9 +199,6 @@ impl StatusIntent {
     }
 
     /// The glyph that leads a notice of this intent.
-    ///
-    /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
-    /// Color an error takes the circle a critical Alert uses.
     pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
         match self {
             Self::Information => IconName::Info,
@@ -300,8 +292,6 @@ pub(super) struct OperationToken {
 }
 
 /// A move-only restart token bound to one Pane's Terminal Session epoch and successor generation.
-///
-/// Preparation reserves a fresh channel but does not replace the current Terminal Session.
 pub(crate) struct PreparedRemotePaneRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: PreparedWorkspaceTerminalLaunch,
@@ -1510,11 +1500,8 @@ impl TerminalPane {
         self.validate_remote_generation(generation)
     }
 
-    /// Suspends a Remote Pane for an authoritative Control Connection loss.
-    ///
-    /// The final screen, title, selection, and Find presentation remain owned by the Pane. Terminal
-    /// input is blocked, prior Terminal Session event tasks are retired, and repeated notification
-    /// for one generation is idempotent. Stale generations and Local Panes are rejected unchanged.
+    /// Suspends a Remote Pane for an authoritative Control Connection loss. Repeated notification
+    /// for one generation is idempotent; stale generations and Local Panes are rejected unchanged.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -1560,10 +1547,9 @@ impl TerminalPane {
         true
     }
 
-    /// Binds one prepared channel to this disconnected Pane without mutating its session.
-    ///
-    /// The generation must advance and the token captures the current Terminal Session epoch so
-    /// delayed preparation cannot replace a successor. Dropping the token abandons the launch.
+    /// Binds one prepared channel to this disconnected Pane without mutating its session. The token
+    /// captures the current Terminal Session epoch so delayed preparation cannot replace a
+    /// successor.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -1591,11 +1577,8 @@ impl TerminalPane {
             .validate(self.terminal_session.remote_facts())
     }
 
-    /// Commits a prevalidated successor Terminal Session in the existing Pane entity.
-    ///
-    /// The Pane and layout identities remain unchanged. Prior-session event and accessibility
-    /// tasks are retired, generation caches reset, and the retained presentation remains visible
-    /// until the successor publishes its first snapshot. Later startup failure is Pane-local.
+    /// Commits a prevalidated successor Terminal Session in the existing Pane entity. The retained
+    /// presentation stays visible until the successor publishes its first snapshot.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedRemotePaneRestart,
@@ -2123,9 +2106,8 @@ impl TerminalPane {
         request.is_some_and(|request| self.offer_permission_setup(request.permissions(), cx))
     }
 
-    /// Accepts metadata no older than what this Pane already presents.
-    ///
-    /// Returns whether any presented fact changed.
+    /// Accepts metadata no older than what this Pane already presents. Returns whether any
+    /// presented fact changed.
     fn accept_metadata(
         &mut self,
         snapshot: Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
@@ -2326,9 +2308,8 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        // A bare Escape pair leaves Operating-System Window fullscreen without stealing terminal
-        // input: each press still reaches the session below. Presses an overlay owns (find, paste
-        // confirmation) or an IME composition owns never count, and any other key breaks the pair.
+        // A bare Escape pair leaves fullscreen while each press still reaches the session. Presses
+        // an overlay or IME composition owns never count.
         let bare_escape = event.keystroke.key == "escape"
             && !event.is_held
             && !event.keystroke.modifiers.modified();
@@ -3497,13 +3478,9 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for.
-    ///
-    /// Only a Local Pane offers one, because a Remote Pane's programs run on another computer.
-    /// Any output a Local Pane shows can carry a request, including output a remote shell or a
-    /// file relays, so the offer names no program and starts nothing until the person chooses Set
-    /// Up. A permission already requested or declined adds nothing, so repeated requests read no
-    /// authorization.
+    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for. Only
+    /// a Local Pane offers one. Any output can carry a request, so the offer names no program and
+    /// starts nothing until the person chooses Set Up.
     fn offer_permission_setup(
         &mut self,
         permissions: &[SystemPermission],
@@ -3562,10 +3539,8 @@ impl TerminalPane {
     }
 
     /// Records when the notice began showing its offer at `edge`, and reports whether it accepts
-    /// answers. An offer that gains a permission starts the delay again; one that loses a
-    /// permission keeps it. Moving to the other edge also starts it again, because the program
-    /// moves the cursor that picks the edge and could otherwise slide an answering button under
-    /// the pointer.
+    /// answers. Gaining a permission or moving edge restarts the delay, because the program moves
+    /// the cursor that picks the edge and could slide a button under the pointer.
     fn show_permission_request(
         &mut self,
         edge: Option<NoticeEdge>,
@@ -3903,12 +3878,6 @@ impl TerminalPane {
     }
 }
 
-/// Resolves the shared treatment for one Pane-local floating surface.
-///
-/// Every surface a Pane raises over terminal content covers cells that are already painted, so its
-/// material, edge, corners, and elevation come from the window's one floating catalog rather than
-/// from this renderer. The bounded library fallback keeps fixtures legible before a window installs
-/// its resolved catalog.
 fn floating_shell(role: FloatingRole, cx: &App) -> FloatingShell {
     spaceterm_ui::floating_surface_theme(cx).shell(role)
 }
@@ -4668,9 +4637,6 @@ impl Render for TerminalPane {
                                 .chrome_text(appearance.typography.style(TextRole::Body))
                                 .flex()
                                 .flex_row()
-                                // The surface edge now belongs to the shared role, so the status
-                                // intent reads from a leading rail alongside its glyph rather than
-                                // from a tinted border that looked like ordinary chrome.
                                 .child(
                                     div()
                                         .debug_selector(|| "terminal-status-intent".to_owned())
@@ -4770,10 +4736,8 @@ impl Render for TerminalPane {
     }
 }
 
-/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface.
-///
-/// The caller resolves the shell, because this surface is raised beside the Pane's other notices and
-/// must sit at exactly their elevation.
+/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface. The caller
+/// resolves the shell so it sits at the elevation of the Pane's other notices.
 fn render_paste_confirmation(
     confirmation: PasteConfirmation,
     pane: gpui::WeakEntity<TerminalPane>,
@@ -4887,12 +4851,9 @@ enum NoticeEdge {
     Bottom,
 }
 
-/// Presents a Permission Request on the shared Notice surface.
-///
-/// The notice never takes keyboard focus, so terminal input still reaches the program. Its answers
-/// are clicks and shortcuts, which a program cannot produce by writing to the terminal. They stay
-/// off until the notice is `armed`, so a program cannot redirect a click or keystroke by timing a
-/// request just before it.
+/// Presents a Permission Request on the shared Notice surface. It never takes keyboard focus, and
+/// its answers stay off until `armed`, so a program cannot redirect a click or keystroke by timing
+/// a request.
 fn render_permission_request(
     copies: Vec<&'static super::permission_setup::PermissionCopy>,
     edge: NoticeEdge,
@@ -5030,11 +4991,8 @@ fn ime_candidate_bounds(
 }
 
 /// The identity one Pane caption presents: where its Terminal Session runs, where it is, what it
-/// runs, and how far along it reports being.
-///
-/// This is the one presentation boundary between a Pane's sanitized Terminal Metadata and the
-/// chrome that describes it. The Pane Caption and the Tab item both read these facts, so neither
-/// parses terminal controls or interprets title text on its own.
+/// runs, and how far along it reports being. The Pane Caption and the Tab item both read these
+/// sanitized facts.
 pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
@@ -5045,10 +5003,8 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) progress: super::terminal_status::TerminalProgress,
 }
 
-/// The account and machine one Pane runs on, split so a caption can emphasize each part.
-///
-/// `remote` is the Local or Remote classification itself, never inferred from the spelling of
-/// `host`. A Remote destination that names no account leaves `user` empty.
+/// The account and machine one Pane runs on. `remote` is the Local or Remote classification, never
+/// inferred from the spelling of `host`.
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct PaneOrigin {
     pub(crate) user: SharedString,
@@ -5076,18 +5032,13 @@ impl PaneOrigin {
 }
 
 /// Drops the multicast DNS suffix a host may append to a machine name.
-///
-/// Every other spelling, including an address, is presented exactly as reported.
 fn short_hostname(host: &str) -> &str {
     host.strip_suffix(".local")
         .filter(|short| !short.is_empty())
         .unwrap_or(host)
 }
 
-/// Abbreviates a displayed directory against its own side's home spelling.
-///
-/// The caller supplies the home belonging to the same Local or Remote context as the directory,
-/// so a path is never shortened against the other side's home.
+/// Abbreviates a displayed directory against the home of its own Local or Remote side.
 fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
     let Some(home) = home
         .map(|home| home.trim_end_matches('/'))

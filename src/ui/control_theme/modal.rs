@@ -12,9 +12,6 @@ pub(in crate::ui) fn theme(colors: &ChromeColors) -> ModalTheme {
 }
 
 /// The modal's own meaning: two registers of text and three semantic intents.
-///
-/// The scrim, the surface material, its edge, and its internal rules are resolved once for every
-/// floating surface in the window and are not authored again here.
 fn paint(colors: &ChromeColors) -> ModalPaint {
     ModalPaint::new(
         gpui_color(colors.text),

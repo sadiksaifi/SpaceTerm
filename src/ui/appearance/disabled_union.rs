@@ -198,9 +198,6 @@ fn closest_disabled_candidate<const N: usize>(
 }
 
 /// Derives one achromatic disabled ink from the final active enabled presentation.
-///
-/// The authored ordinary pair contributes only its disabled depth. The active enabled pair owns
-/// polarity, and the prepared disabled fill may move only after the neutral axis is exhausted.
 fn resolve_disabled_frame<const N: usize>(
     authored: &ChromeColors,
     enabled_fill: Color,
@@ -784,10 +781,8 @@ fn disabled_union_endpoint_candidate<const N: usize>(
     (disabled_union_contrast(endpoint, backgrounds) >= minimum).then_some((endpoint, 1.0))
 }
 
-/// Searches every quantized color on the existing black and white adjustment paths.
-///
-/// Minimum contrast across opposing hosts is not monotonic, so endpoint-directed bisection can
-/// jump over a feasible middle interval. The first result is the smallest authored-color movement.
+/// Searches every quantized color on the existing black and white adjustment paths. Minimum
+/// contrast across opposing hosts is not monotonic, so bisection could skip a feasible interval.
 fn resolve_disabled_union_color<const N: usize>(
     proposed: Color,
     backgrounds: [Color; N],
@@ -1396,9 +1391,7 @@ fn share_disabled_segmented_colors(
     inactive.selection_disabled_foreground = inactive_content;
     inactive.selection_disabled_icon = inactive_content;
 
-    // The unselected label and boundary do not depend on whether one selected chip can be
-    // shared across both activity variants. Reconcile them first so a selected-chip split does
-    // not also split otherwise-compatible unselected paints.
+    // Reconcile the unselected paints first so a selected-chip split does not also split them.
     if let Some([label]) = resolve_disabled_union_content([(active.text_disabled, minimum)], tracks)
     {
         active.text_disabled = label;

@@ -126,8 +126,8 @@ pub(crate) enum ControlConnectionError {
 /// Singular owner of one workspace-scoped OpenSSH control master.
 ///
 /// The connection owns the child process group, private runtime directory, registered socket,
-/// live authority, and supervisor. It is intentionally non-clone. Child commands are authorized
-/// only while the exact socket identity and live connection instance and generation remain ready.
+/// live authority, and supervisor. Child commands are authorized only while the exact socket
+/// identity and live connection instance and generation remain ready.
 /// Drop performs exact owned-process cleanup and removes only registered runtime artifacts.
 pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     backend: Arc<B>,
@@ -344,7 +344,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
-    /// Returns the current state without transferring live authority.
     pub(crate) fn state(&self) -> ControlConnectionState {
         match self.authority.as_ref().map(|authority| authority.state()) {
             Some(LiveConnectionState::Ready) => ControlConnectionState::Ready,
@@ -354,7 +353,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
-    /// Borrows the bounded private socket path owned by this connection.
     #[cfg(test)]
     pub(crate) fn control_path(&self) -> &Path {
         &self.control_path

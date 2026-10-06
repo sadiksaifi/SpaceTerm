@@ -673,10 +673,7 @@ impl<T> WorkspaceCollection<T> {
     }
 
     /// Moves a Workspace to `position` in the Workspace order and reports whether the order
-    /// changed.
-    ///
-    /// The Active Workspace and every Workspace name keep their identities; only presentation
-    /// order changes.
+    /// changed. Only presentation order changes.
     pub(crate) fn move_workspace(
         &mut self,
         workspace_id: WorkspaceId,

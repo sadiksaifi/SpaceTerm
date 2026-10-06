@@ -178,7 +178,6 @@ pub struct ContextMenuOpenRequest {
 }
 
 impl ContextMenuOpenRequest {
-    /// Returns the window-relative pointer position requested by the context gesture.
     pub fn position(self) -> Point<Pixels> {
         self.position
     }
@@ -192,12 +191,10 @@ pub struct PickerChange<T> {
 }
 
 impl<T> PickerChange<T> {
-    /// Returns the selected value.
     pub fn value(&self) -> &T {
         &self.value
     }
 
-    /// Returns the input path that selected the value.
     pub fn source(&self) -> MenuActivationSource {
         self.source
     }
@@ -269,25 +266,21 @@ impl MenuPaint {
         }
     }
 
-    /// Installs complete semantic list row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Supplies destructive action row states independently from ordinary navigation rows.
     pub fn destructive_rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.destructive_rows = Some(rows);
         self
     }
 
-    /// Sets row hover independently of keyboard selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
         self
     }
 
-    /// Sets the foreground paired with the row hover background.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
@@ -376,13 +369,11 @@ impl MenuMetrics {
         }
     }
 
-    /// Sets the menu trigger height.
     pub fn trigger_height(mut self, height: Pixels) -> Self {
         self.trigger_height = height;
         self
     }
 
-    /// Sets horizontal row and trigger padding.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
@@ -403,45 +394,38 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets the gap between the leading columns, the label, and the trailing content.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
     }
 
-    /// Sets the corner radius of the trigger that opens the menu.
     pub fn trigger_corner_radius(mut self, radius: Pixels) -> Self {
         self.trigger_corner_radius = radius;
         self
     }
 
-    /// Sets menu label and shortcut font sizes.
     pub fn font_sizes(mut self, label: Pixels, shortcut: Pixels) -> Self {
         self.font_size = label;
         self.shortcut_font_size = shortcut;
         self
     }
 
-    /// Sets the font size for group headings independently from shortcut columns.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_font_size = size;
         self
     }
 
-    /// Sets the horizontal gap between a panel and the submenu it opens.
     pub fn submenu_gap(mut self, gap: Pixels) -> Self {
         self.submenu_gap = gap;
         self
     }
 
-    /// Sets the shared glyph size and visible separator thickness.
     pub fn decoration_metrics(mut self, icon_size: Pixels, separator_thickness: Pixels) -> Self {
         self.icon_size = icon_size;
         self.separator_thickness = separator_thickness;
         self
     }
 
-    /// Sets disclosure glyph size for the interactive trigger independently from row glyphs.
     pub fn trigger_icon_size(mut self, size: Pixels) -> Self {
         self.trigger_icon_size = size.max(px(0.0));
         self
@@ -559,7 +543,6 @@ pub struct MenuTheme {
 }
 
 impl MenuTheme {
-    /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
         Self { paint, sizes }
     }
@@ -601,7 +584,6 @@ fn trigger_edges(paint: MenuPaint, enabled: bool, focused: bool) -> (Rgba, Optio
     )
 }
 
-/// Resolves the installed menu theme against the shared anchored-popup surface.
 fn menu_style(size: MenuSize, cx: &App) -> MenuStyle {
     crate::control_theme_catalog(cx)
         .map_or_else(|| cx.global::<MenuTheme>(), |catalog| &catalog.menu)
@@ -685,7 +667,6 @@ impl<A> MenuEntry<A> {
         Self::item(label.into(), action, EntryMark::None)
     }
 
-    /// Creates a checkbox action entry.
     pub fn checkbox(label: impl Into<SharedString>, checked: bool, action: A) -> Self {
         Self::item(label.into(), action, EntryMark::Checkbox(checked))
     }
@@ -705,7 +686,6 @@ impl<A> MenuEntry<A> {
         }
     }
 
-    /// Creates a separator.
     pub fn separator() -> Self {
         Self {
             kind: MenuEntryKind::Separator,
@@ -830,7 +810,6 @@ impl<A: Clone + 'static> Menu<A> {
         }
     }
 
-    /// Adds a leading trigger icon built with the resolved foreground color.
     pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
@@ -986,7 +965,6 @@ impl<T> PickerOption<T> {
         }
     }
 
-    /// Controls whether navigation and activation may reach this option.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -1000,7 +978,6 @@ impl<T> PickerOption<T> {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -1093,7 +1070,6 @@ impl<T: Clone + PartialEq + 'static> Picker<T> {
         })
     }
 
-    /// Adds a leading trigger icon built with the resolved foreground color.
     pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
@@ -1206,21 +1182,18 @@ impl<A: Clone + 'static> ComboButton<A> {
         }
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
         self.button = self.button.variant(variant);
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.size = size;
         self.button = self.button.size(size);
         self
     }
 
-    /// Selects the outer silhouette the two segments share.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.shape = shape;
         self.button = self.button.shape(shape);
@@ -1233,13 +1206,11 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
-    /// Shows the displayed Shortcut that runs the primary command after its label.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.button = self.button.shortcut(shortcut);
         self
     }
 
-    /// Controls whether the menu segment can open, independently of the primary command.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu.disabled = disabled;
         self
@@ -1252,13 +1223,11 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the primary segment.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.button = self.button.tab_stop(tab_stop);
         self
     }
 
-    /// Selects where the menu opens relative to its segment.
     pub fn placement(mut self, placement: MenuPlacementConfig) -> Self {
         self.menu.placement = placement;
         self
@@ -1309,7 +1278,6 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             style.disabled
         };
         let icon_size = menu_style(self.menu.size, cx).metrics.trigger_icon_size;
-        // The divider sits on the segment's leading edge, marking the seam between the segments.
         let content = div()
             .relative()
             .size_full()
@@ -1398,25 +1366,21 @@ macro_rules! lifecycle_builders {
             self
         }
 
-        /// Selects a standard bounded menu width.
         pub fn size(mut self, size: MenuSize) -> Self {
             self.core.size = size;
             self
         }
 
-        /// Selects root menu placement.
         pub fn placement(mut self, placement: MenuPlacementConfig) -> Self {
             self.core.placement = placement;
             self
         }
 
-        /// Controls whether the control can open.
         pub fn disabled(mut self, disabled: bool) -> Self {
             self.core.disabled = disabled;
             self
         }
 
-        /// Adds a stable selector used by GPUI interaction tests.
         pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
             self.core.debug_selector = Some(selector.into());
             self

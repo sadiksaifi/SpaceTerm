@@ -31,7 +31,6 @@ impl ListRowPaint {
         }
     }
 
-    /// Returns the fill painted over the row's owning surface.
     pub fn background(self) -> Rgba {
         self.background
     }

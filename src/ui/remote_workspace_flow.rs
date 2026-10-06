@@ -92,10 +92,8 @@ impl RemoteWorkspaceConnectContext {
 }
 
 #[derive(Eq, Error, PartialEq)]
-/// Actionable flow failure with authentication material and raw remote output excluded.
-///
-/// Connection detail, when present, is already control-free and bounded to the transient alert
-/// lifetime. Its `Debug` representation remains redacted.
+/// Actionable flow failure with authentication material and raw remote output excluded. Its `Debug`
+/// representation remains redacted.
 pub(crate) enum RemoteWorkspaceFlowBackendError {
     #[error("the SSH host is already in use")]
     HostInUse,
@@ -185,10 +183,8 @@ fn connection_error_content(
     ConnectionErrorContent { message, detail }
 }
 
-/// Opaque Workspace-lifetime authority that keeps one configured SSH alias immutable.
-///
-/// This value is intentionally non-Clone and non-Debug. Dropping it releases exactly its own
-/// registry count without affecting the Control Connection's independent alias lease.
+/// Opaque Workspace-lifetime authority that keeps one configured SSH alias immutable. Dropping it
+/// releases exactly its own registry count.
 pub(crate) struct RemoteWorkspaceAliasPin {
     _owner: Box<dyn Send>,
 }
@@ -205,12 +201,8 @@ impl RemoteWorkspaceAliasPin {
 #[error("the configured SSH alias could not be pinned for Workspace ownership")]
 pub(crate) struct RemoteWorkspaceAliasPinError;
 
-/// The opaque lifetime owner for one Control Connection.
-///
-/// This trait deliberately exposes no command or transport access to UI code. Implementations are
-/// non-clone owners and must make `close` idempotent and non-blocking for the calling GPUI thread.
-/// Retained background ownership remains responsible for bounded exact process, socket,
-/// authentication, cancellation, and Control Connection alias cleanup after `close` returns.
+/// The opaque lifetime owner for one Control Connection. It exposes no command or transport access
+/// to UI code, and `close` must be idempotent and non-blocking for the calling GPUI thread.
 pub(crate) trait ControlConnectionOwner: Send + 'static {
     /// Acquires an independent Workspace-lifetime alias count without consuming this owner.
     fn acquire_workspace_alias_pin(
@@ -230,9 +222,8 @@ pub(crate) trait ControlConnectionOwner: Send + 'static {
     fn close(&mut self);
 }
 
-/// A live Control Connection and its narrow directory-provider capability.
-///
-/// This value is intentionally non-Clone. Dropping it closes the Control Connection exactly once.
+/// A live Control Connection and its narrow directory-provider capability. Dropping it closes the
+/// Control Connection exactly once.
 pub(crate) struct ConnectedControlConnection {
     owner: Option<Box<dyn ControlConnectionOwner>>,
     provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
@@ -388,8 +379,6 @@ impl RemoteWorkspaceFlowCompletion {
     }
 
     /// Acquires the independent alias pin only when Workspace installation is ready to commit.
-    ///
-    /// Failure borrows no ownership from this completion, so activation can return it intact.
     pub(crate) fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {

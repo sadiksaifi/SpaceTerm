@@ -1,9 +1,5 @@
-//! The Developer Workbench's appearance preview.
-//!
-//! A preview is an uncommitted Settings Document that every window renders until the developer
-//! cancels or commits it. It never writes the settings file on its own. The Settings Document
-//! allows one preview at a time, so while this one is open the Settings Window cannot save, and
-//! closing the Developer Workbench cancels it.
+//! The Developer Workbench's uncommitted Settings Document preview. The Settings Document allows
+//! one preview at a time, so the Settings Window cannot save while this one is open.
 
 use crate::appearance::{AppearanceMode, ChromeDensity, ResetTarget, TerminalFontFamily};
 use crate::settings::{CommitOutcome, PreviewToken, Settings, ThemeImport};

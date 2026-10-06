@@ -1,11 +1,6 @@
 //! A bounded, content-safe, single-line GPUI text editor.
 //!
-//! Values are always normalized to one line. The default value limit is 64 KiB and the absolute
-//! value limit is 1 MiB. Clipboard insertion is limited to 1 MiB before the configured value
-//! limit is applied. Undo and redo retain at most 128 snapshots and 1 MiB of text in total. The
-//! application kill ring retains at most 64 KiB. All limits are byte limits and every truncation
-//! performed during construction or kill-ring capture ends at a complete grapheme boundary.
-//! Obscured inputs use a 16 KiB limit, render one bullet per grapheme, and retain no clipboard,
+//! Every byte-limit truncation ends at a grapheme boundary. Obscured inputs retain no clipboard,
 //! kill-ring, undo, or redo content.
 
 use std::{ops::Range, time::Duration};
@@ -258,7 +253,6 @@ impl TextInputPaint {
             disabled_placeholder,
         }
     }
-    /// Supplies the foreground of selected glyphs independently from the selection fill.
     pub fn selection_foreground(mut self, foreground: Rgba) -> Self {
         self.selection_foreground = foreground;
         self
@@ -282,7 +276,6 @@ pub struct TextInputVariants {
 }
 
 impl TextInputVariants {
-    /// Creates the Standard and Bare paint catalog.
     pub fn new(standard: TextInputPaint, bare: TextInputPaint) -> Self {
         Self { standard, bare }
     }
@@ -350,7 +343,6 @@ impl TextInputTheme {
         }
     }
 
-    /// Supplies the shared frame used by fields containing this editor.
     pub fn field_frame(mut self, frame: FieldFrameTheme) -> Self {
         self.frame = frame;
         self
@@ -438,11 +430,9 @@ pub struct TextInputValueChanged {
 }
 
 impl TextInputValueChanged {
-    /// Returns the revision after the change.
     pub fn revision(self) -> u64 {
         self.revision
     }
-    /// Returns the operation that produced the change.
     pub fn source(self) -> TextInputChangeSource {
         self.source
     }
@@ -456,7 +446,6 @@ pub struct TextInputSelection {
 }
 
 impl TextInputSelection {
-    /// Returns the normalized selected byte range.
     pub fn range(&self) -> Range<usize> {
         self.range.clone()
     }
@@ -476,7 +465,6 @@ impl TextInputSelection {
             self.range.start
         }
     }
-    /// Returns whether no text is selected.
     pub fn is_empty(&self) -> bool {
         self.range.is_empty()
     }
@@ -490,11 +478,9 @@ pub struct TextInputComposition {
 }
 
 impl TextInputComposition {
-    /// Returns the marked UTF-8 byte range.
     pub fn marked_range(&self) -> Range<usize> {
         self.marked_range.clone()
     }
-    /// Returns the selection within the current value.
     pub fn selection(&self) -> &TextInputSelection {
         &self.selection
     }
@@ -717,7 +703,6 @@ impl TextInput {
         }
     }
 
-    /// Sets the placeholder shown when the value is empty.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self.geometry = None;
@@ -772,7 +757,6 @@ impl TextInput {
         self.geometry = None;
         self
     }
-    /// Selects one bounded treatment from the installed theme.
     pub fn variant(mut self, variant: TextInputVariant) -> Self {
         self.variant = variant;
         self.geometry = None;
@@ -796,7 +780,6 @@ impl TextInput {
         }
         self
     }
-    /// Controls whether normal keyboard traversal may stop on the enabled input.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
         self.focus_handle = self.focus_handle.clone().tab_stop(self.enabled && tab_stop);
@@ -865,7 +848,6 @@ impl TextInput {
         self
     }
 
-    /// Returns the current normalized value.
     pub fn value(&self) -> &str {
         &self.buffer.text
     }
@@ -910,11 +892,9 @@ impl TextInput {
             && value.len() <= HARD_VALUE_LIMIT
             && !value.chars().any(requires_single_line_normalization)
     }
-    /// Returns the monotonic content revision.
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    /// Returns whether the editor currently owns responder focus.
     pub fn is_focused(&self) -> bool {
         self.focused
     }
@@ -934,7 +914,6 @@ impl TextInput {
             selection: self.buffer.selection.public(),
         })
     }
-    /// Returns the focus handle used by a containing composite for explicit focus transfer.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -971,12 +950,9 @@ impl TextInput {
 
     /// Replaces the complete value after single-line normalization.
     ///
-    /// The operation atomically rejects a normalized value over the configured or hard limit. An
-    /// active composition is superseded and emits `CompositionCancelled` before any programmatic
-    /// change event. Selection collapses at the end and undo and redo are cleared even when the
-    /// normalized text is unchanged. Revision advances only when text changes. A `ValueChanged`
-    /// event with `Programmatic` is emitted only when configured and only after that revision
-    /// advances. The return value reports whether text changed.
+    /// Returns whether text changed. A value over the configured or hard limit is rejected. Undo
+    /// and redo are cleared even when the text is unchanged. A `Programmatic` `ValueChanged` is
+    /// emitted only when configured and the text changed.
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) -> bool {
         let value = Zeroizing::new(value.into());
         let normalized = Zeroizing::new(normalize_single_line(&value));

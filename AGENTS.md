@@ -7,6 +7,7 @@ SpaceTerm is a native desktop terminal multiplexer. Prior SpaceTerm versions imp
 - Terminology: use the definitions in [CONTEXT.md](CONTEXT.md).
 - Architecture and authentication changes: read the relevant [ADRs](docs/adr/).
 - Code, tests, and configuration own executable behavior. ADRs record durable tradeoffs.
+- Write docs only for what code, configuration, or the UI cannot express, with one purpose per file in `docs/`.
 - Keep task plans and validation reports in issues or PRs.
 
 ## Architecture
@@ -20,7 +21,7 @@ SpaceTerm is a native desktop terminal multiplexer. Prior SpaceTerm versions imp
 
 ## Safety
 
-- Keep errors and Local Diagnostics content-free: typed classifications and bounded metadata only. Exclude terminal and clipboard contents, environment values, paths, credentials, and raw native errors.
+- Keep errors and Terminal Diagnostics content-free: typed classifications and bounded metadata only. Exclude terminal and clipboard contents, environment values, paths, credentials, and raw native errors.
 - SpaceTerm sends no automatic telemetry or crash reports.
 - Retain explicit local filesystem authority. Remote values grant no authority for local file actions.
 

@@ -14,9 +14,6 @@ pub(in crate::ui) fn theme(colors: &ChromeColors) -> ProgressTheme {
             // Compact belongs in status rows and pane captions: a hairline-weight bar beside
             // caption text, and a spinner that fits inside a caption's line box.
             ProgressMetrics::new(px(3.0), px(1.5), px(12.0), px(1.5)),
-            // Regular belongs in panels, sheets, and modal content. It stays restrained: the bar
-            // is a thin capsule rather than a filled band, and the ring stays a small indicator
-            // beside body text rather than a graphic the surface is built around.
             ProgressMetrics::new(px(4.0), px(2.0), px(18.0), px(2.0)),
         ),
     )

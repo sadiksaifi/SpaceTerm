@@ -1,5 +1,4 @@
 //! Where the Setup Guide docks on System Settings' content column.
-//!
 //! Every frame here is relative to the top-left corner of one display.
 
 use gpui::{Bounds, Pixels, point, px, size};

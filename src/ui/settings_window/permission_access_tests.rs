@@ -100,7 +100,6 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// The selector the modal renderer gives one action.
 fn modal_action(debug_identity: &str) -> &'static str {
     format!("modal-action-{debug_identity}").leak()
 }

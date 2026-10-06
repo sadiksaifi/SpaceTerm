@@ -1,14 +1,6 @@
 //! Pointer drag and drop shared by the Tab bar, the Workspace sidebar, and Pane Layouts.
-//!
-//! A dragged item stays in its place until release. A copy of it follows the pointer as a
-//! [`DragPreview`], and the strip or Pane Layout marks in the accent color where a release would put
-//! it. Releasing anywhere else, or pressing Escape, moves nothing.
-//!
-//! GPUI owns each drag's lifetime: it ends a drag on any release. A [`DragSession`] ties an owner's
-//! state to the one drag it started, so the owner keeps that state only while GPUI still carries
-//! that drag. Escape cancels that drag from any window, even once its owner is gone. A release the
-//! owner never saw, such as one while it was hidden, cannot strand its state or let it act on a
-//! later drag.
+//! A [`DragSession`] ties owner state to the one GPUI drag it started, so an unseen release cannot
+//! strand it.
 
 use gpui::prelude::*;
 use std::rc::Rc;
@@ -25,9 +17,6 @@ use super::appearance::gpui_color;
 const INSERTION_MARKER_THICKNESS: f32 = 2.0;
 
 /// The drop state of one scrolling strip of items laid out along one axis.
-///
-/// The strip reads its items' painted bounds from the scroll container that lays them out, so
-/// the geometry follows scrolling.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
     lift: Option<Lift<Id>>,
@@ -62,10 +51,8 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         });
     }
 
-    /// Ends a lift whose drag GPUI no longer carries.
-    ///
-    /// Call it on every render, so a drag released anywhere, including while the strip was
-    /// hidden, leaves no marker behind.
+    /// Ends a lift whose drag GPUI no longer carries. Call it on every render, so a drag released
+    /// while the strip was hidden leaves no marker behind.
     pub(crate) fn end_released(&mut self, cx: &App) {
         if self
             .lift
@@ -76,7 +63,6 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         }
     }
 
-    /// Drops the lift without moving anything.
     pub(crate) fn cancel(&mut self) {
         self.lift = None;
     }
@@ -96,10 +82,6 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
 
     /// Follows the pointer with the slot a release would land the dragged item in. Returns whether
     /// the slot changed.
-    ///
-    /// `current` is the dragged item's position among the `len` items the strip's scroll container
-    /// laid out. A pointer outside the strip across its axis, a slot beside the item's own place,
-    /// and a container that laid out a different number of items show no slot.
     pub(crate) fn track(
         &mut self,
         items: &ScrollHandle,
@@ -119,10 +101,8 @@ impl<Id: Copy + Eq> ReorderableStrip<Id> {
         changed
     }
 
-    /// Ends the drag on its release, returning the dragged item and the position it lands at among
-    /// the `len` items the strip now presents, when it lands somewhere new.
-    ///
-    /// A drag GPUI no longer carries, such as one cancelled with Escape, lands nowhere.
+    /// Ends the drag on its release, returning the dragged item and its new position among the
+    /// `len` items when it lands somewhere new.
     pub(crate) fn finish(&mut self, current: usize, len: usize, cx: &App) -> Option<(Id, usize)> {
         let lift = self.lift.take()?;
         if !lift.session.is_active(cx) {
@@ -158,9 +138,6 @@ fn strip_spans(
 
 /// The slot a release at `pointer` lands the item at `dragged` in, or `None` when that slot is
 /// beside the item's own place.
-///
-/// `spans` are the start and end of every item in presentation order. The slot follows every item
-/// whose midpoint the pointer has passed.
 fn insertion_slot(spans: &[(f32, f32)], dragged: usize, pointer: f32) -> Option<usize> {
     if dragged >= spans.len() {
         return None;
@@ -172,9 +149,6 @@ fn insertion_slot(spans: &[(f32, f32)], dragged: usize, pointer: f32) -> Option<
     (slot != dragged && slot != dragged + 1).then_some(slot)
 }
 
-/// The position an item at `current` takes when it lands in `slot`.
-///
-/// The item leaves its own place first, so a slot after it is one position earlier.
 fn landing_position(slot: usize, current: usize) -> usize {
     if slot > current { slot - 1 } else { slot }
 }
@@ -187,11 +161,6 @@ pub(crate) enum MarkerSide {
 }
 
 /// The accent line that marks the slot a dragged strip item would land in.
-///
-/// It sits on the `side` of the item it is mounted in, across a strip laid out along `axis`, and
-/// keeps `inset` from its two ends so it spans the item's shape rather than its hit target. A marker
-/// between two items is centred on their shared edge; one at either end of the strip stays inside
-/// it.
 pub(crate) fn insertion_marker(
     axis: Axis,
     side: MarkerSide,
@@ -230,14 +199,11 @@ pub(crate) fn insertion_marker(
     .into_any_element()
 }
 
-/// The size the scroll container painted its item at `position`, used to lift it at that size.
 pub(crate) fn painted_item_size(items: &ScrollHandle, position: usize) -> Option<Size<Pixels>> {
     items.bounds_for_item(position).map(|bounds| bounds.size)
 }
 
 /// The bounds a scroll container painted its items at, in presentation order.
-///
-/// The container records layout bounds before its scroll offset moves them.
 fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
     let offset = items.offset();
     (0..items.children_count())
@@ -247,15 +213,9 @@ fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
 }
 
 /// The lifted copy of a dragged item that follows the pointer.
-///
-/// A Tab or Workspace row paints its own face, so the copy looks exactly like the item it lifts. A
-/// Pane lifts a card of its Pane Caption. The copy keeps the point the press took it by under the
-/// pointer.
 pub(crate) struct DragPreview {
-    /// How far the pointer moved between the press and the motion that started the drag.
-    ///
-    /// GPUI places the preview from where that motion found the pointer, so the face moves back by
-    /// this much to sit where the press took it.
+    /// How far the pointer moved between the press and the motion that started the drag. GPUI
+    /// places the preview from that motion, so the face moves back by this much.
     lift: Point<Pixels>,
     face: Box<PreviewFace>,
 }
@@ -299,10 +259,8 @@ impl Render for DragPreview {
     }
 }
 
-/// Where the press that a drag starting in `window` began from took the pointer.
-///
-/// GPUI starts a drag on the first motion past a small threshold, which can land well past the
-/// press when motion arrives coalesced.
+/// Where the press that a drag starting in `window` began from took the pointer. GPUI starts a drag
+/// on the first motion past a threshold, which can land well past the press.
 pub(crate) fn grab_point(window: &Window, cx: &App) -> Point<Pixels> {
     let window_id = window.window_handle().window_id();
     cx.try_global::<LastPress>()
@@ -321,11 +279,8 @@ impl gpui::Global for LastPress {}
 /// Calls `on_release` when a button is released anywhere in the window while a drag is active, and
 /// records each press a drag could start from.
 ///
-/// GPUI ends every drag on any release, including one dropped outside every target, but tells only
-/// the target. The owner acts on the release point before GPUI ends the drag, and confirms the drag
-/// is its own with [`DragSession::is_active`]. Mount this whether or not a drag is in progress: GPUI
-/// dispatches a release to the listeners of the last painted frame, and a release can arrive before
-/// the frame that shows the drag.
+/// GPUI ends every drag on any release but tells only the target. Mount this whether or not a drag
+/// is in progress, because GPUI dispatches a release to the last painted frame's listeners.
 pub(crate) fn drag_release_observer(
     on_release: impl Fn(&mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
@@ -367,11 +322,8 @@ impl gpui::Global for CurrentDrag {}
 /// Tells the owner of a drag that Escape cancelled it.
 type CancelDrag = dyn Fn(&mut Window, &mut App);
 
-/// One drag that one owner started.
-///
-/// Every Tab, Workspace, and Pane drag begins a session, so the session that began last names the
-/// drag GPUI carries. While GPUI carries it, Escape in any window cancels it before the key reaches
-/// any focused element, so it never reaches a Terminal Session, even when the owner is gone.
+/// One drag that one owner started. While GPUI carries it, Escape in any window cancels it before
+/// the key reaches any focused element, including a Terminal Session.
 pub(crate) struct DragSession {
     ticket: u64,
 }
@@ -403,7 +355,6 @@ impl DragSession {
         }
     }
 
-    /// Whether GPUI still carries this session's drag.
     pub(crate) fn is_active(&self, cx: &App) -> bool {
         carries(self.ticket, cx)
     }

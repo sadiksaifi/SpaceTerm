@@ -78,9 +78,8 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     );
 }
 
-/// Remove in Get More Themes removes every theme the extension installed at once, because the
-/// sheet cannot stack a confirmation, and offers Get again. A slot that used one of them returns
-/// to its built-in theme.
+/// Remove removes every theme the extension installed at once, because the sheet cannot stack a
+/// confirmation.
 #[gpui::test]
 fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());

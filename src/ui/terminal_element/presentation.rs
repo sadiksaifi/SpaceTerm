@@ -12,9 +12,7 @@ use super::{
 };
 use crate::terminal::ScreenSnapshot;
 
-/// Retains GPUI's grid scene between cursor phases. The affected cursor rectangle is
-/// composited over that scene so backgrounds, selection, symbols, and decorations keep
-/// their normal paint order even for a block cursor over a wide or decorated cell.
+/// Retains GPUI's grid scene between cursor phases and composites the cursor rectangle over it.
 pub(crate) struct TerminalGridPresentation {
     grid: Option<Entity<GridView>>,
     cursor: CursorLayer,

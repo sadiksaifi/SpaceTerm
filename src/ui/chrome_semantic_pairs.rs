@@ -78,9 +78,8 @@ fn prepare_pair(
     let composite = background.source_over(host);
     let prepared_composite = super::chrome_state::contrast_host(composite, primary_floor);
     PreparedTextPair {
-        // Retain the authored material whenever it can carry the requested text floor. An opaque
-        // safe fallback is necessary only when no black-or-white ink can reach that floor on the
-        // material composite.
+        // An opaque fallback is needed only when no black-or-white ink reaches the floor on the
+        // material.
         background: if prepared_composite == composite {
             background
         } else {

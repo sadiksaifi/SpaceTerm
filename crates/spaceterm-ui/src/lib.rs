@@ -191,9 +191,6 @@ impl ControlPreviewState {
 }
 
 /// Bounded application-owned presentation catalog for every reusable control family.
-///
-/// The catalog keeps initialization stable as the library gains cohesive control families and
-/// does not expose an arbitrary style map or call-site paint escape hatch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControlThemeCatalog {
     generation: ControlThemeGeneration,
@@ -262,12 +259,10 @@ impl gpui::Global for InstalledControlThemeCatalogs {}
 pub struct ControlThemeGeneration(u64);
 
 impl ControlThemeGeneration {
-    /// Creates a generation from the application appearance revision.
     pub fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// Returns the numeric appearance generation.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -457,9 +452,8 @@ impl ControlThemeCatalog {
 
     /// Sets controls compiled against the title bar's actual material.
     ///
-    /// The bundle changes only controls inside an explicit [`ControlHost::TitleBar`] scope. If it
-    /// is omitted, that scope uses the root Window presentation so existing applications retain
-    /// their current behavior.
+    /// The bundle applies only inside an explicit [`ControlHost::TitleBar`] scope. Without it, that
+    /// scope uses the root Window presentation.
     pub fn title_bar_controls(mut self, controls: SurfaceControlThemes) -> Self {
         self.title_bar_controls = Some(controls);
         self
@@ -479,13 +473,11 @@ impl ControlThemeCatalog {
         }
     }
 
-    /// Sets the generation shared by every family in this complete catalog.
     pub fn generation(mut self, generation: ControlThemeGeneration) -> Self {
         self.generation = generation;
         self
     }
 
-    /// Sets complete resolved typography shared by every text-bearing control family.
     pub fn typography(mut self, typography: ControlTypography) -> Self {
         self.typography = typography;
         self
@@ -529,15 +521,11 @@ impl ControlThemeCatalog {
     }
 }
 
-/// Installs the application and Settings Window presentation variants and initializes
-/// control-owned state.
+/// Installs the application and Settings Window presentation variants and initializes control-owned
+/// state.
 ///
-/// Heap-owned catalogs keep the complete scoped catalog set out of the caller's stack frame.
-/// Applications install desktop policy and control keybindings explicitly with
-/// [`install_modal_policy`], [`install_portable_modal_keybindings`], [`install_modal_keybindings`],
-/// [`install_menu_keybindings`], [`install_command_palette_keybindings`],
-/// [`install_portable_combo_box_keybindings`], [`install_combo_box_keybindings`], and
-/// [`install_text_input_keybindings`].
+/// Catalogs are boxed to keep them out of the caller's stack frame. The application installs
+/// desktop policy and control keybindings separately.
 pub fn init(
     cx: &mut App,
     active: Box<ControlThemeCatalog>,

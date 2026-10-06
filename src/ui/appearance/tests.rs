@@ -57,11 +57,6 @@ fn light_popup_uses_base_host_and_raised_selection() {
 }
 
 /// Hover is read over the shell the window renders, so that is where it has to hold its step.
-///
-/// The opaque reference the fill is solved from is not a surface anyone sees once the window
-/// transmits, and no authored tone can hold a tenth of a step against it through the material.
-/// Over a desktop the same ink reads plainly, and it grows rather than fades as the Setting
-/// rises, because equal ink buys a wider ratio the darker its backing is.
 #[test]
 fn light_unselected_navigation_hover_remains_visible_through_materials() {
     let desktop = Color::rgb(0x808080);
@@ -148,13 +143,6 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
     }
 }
 
-/// A Settings group rises from its canvas and carries the raised Chrome tone.
-///
-/// The ladder runs one way in both appearances: navigation is the most shaded rung, the page
-/// above it, and the groups on the page above that. Light once ran it backwards, sinking its
-/// groups to keep them off the tone a selected control takes, which cut grey wells into a white
-/// page. The canvas keeps the denser paint, because a bright scheme's navigation rests on the
-/// window root and a canvas that thinned toward it would merge into the column beside it.
 #[test]
 fn light_settings_uses_the_workspace_content_hierarchy() {
     use super::settings::{
@@ -264,19 +252,7 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
     }
 }
 
-/// A chip is lifted, not outlined, and the Pane is the one surface that states a real boundary.
-///
-/// A Tab and a selected row sit on the strip behind them, so their rim only has to catch the
-/// light an edge would: enough to lift the shape, not enough to draw a line around it. The Pane
-/// separates the reading surface from the Chrome, which is a boundary, so it keeps the stronger
-/// hairline.
-///
-/// The rim belongs to the chip. A dark scheme states it on the far side of the fill, away from
-/// the strip, where it reads as the chip's own lit edge and the chip gains a little mass. A
-/// bright fill sits at the top of the range with no room above it, so its rim states the same
-/// edge inward, toward the strip, and then it has to stop early: the fill's own step over the
-/// strip is what the rim is a fraction of, and a rim that outruns it lands on the strip's tone
-/// and draws a line around the chip instead.
+/// The Pane is the one surface that states a real boundary, so it keeps the stronger hairline.
 #[test]
 fn every_chip_lifts_without_drawing_a_border() {
     use crate::appearance::Appearance;

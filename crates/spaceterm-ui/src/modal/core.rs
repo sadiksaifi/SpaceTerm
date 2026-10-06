@@ -2124,7 +2124,6 @@ pub struct ModalPresentationHandle {
 }
 
 impl ModalPresentationHandle {
-    /// Returns the monotonic presentation identity carried by retained operations.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation
     }
@@ -2187,7 +2186,6 @@ impl DialogCompletion {
         Self { presentation }
     }
 
-    /// Returns the exact presentation identity this operation may complete.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation.presentation_id()
     }
@@ -2425,13 +2423,8 @@ impl ProgressCancellationCompletion {
 
 /// Retained authority for bounded updates and terminal completion of one ProgressDialog.
 ///
-/// Each clone retains its observed update generation while all clones share exactly-once terminal
-/// authority. Updates and terminal methods target this exact active or queued generation. Queued
-/// status, detail, progress, cancellation availability, and update generation transfer unchanged
-/// when the presentation is promoted. A clone whose generation was superseded receives a
-/// stale-update error instead of overwriting newer status. Updates mutate one stable surface and
-/// never auto-close at determinate maximum. Terminal methods are mutually exclusive:
-/// the first accepted completion, failure, dismissal, cancellation, deadline, or teardown wins.
+/// Clones share exactly-once terminal authority. A clone whose update generation was superseded
+/// receives a stale-update error. The first accepted terminal outcome wins.
 #[derive(Clone)]
 pub struct ProgressDialogHandle {
     presentation: ModalPresentationHandle,
@@ -2446,7 +2439,6 @@ impl ProgressDialogHandle {
         }
     }
 
-    /// Returns the exact presentation identity this handle may update.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation.presentation_id()
     }

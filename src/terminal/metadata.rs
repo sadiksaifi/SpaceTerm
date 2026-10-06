@@ -204,7 +204,6 @@ impl RemoteTerminalMetadataContext {
         &self.initial_directory
     }
 
-    /// Changes the Starting Directory while retaining the discovered account and machine facts.
     pub(crate) fn set_initial_directory(&mut self, directory: RemoteDirectory) {
         self.initial_directory = directory;
     }

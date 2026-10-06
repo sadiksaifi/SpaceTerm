@@ -623,10 +623,8 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         cx,
     )
 }
-/// Every live Workspace window, resolved at call time from GPUI's own registry.
-///
-/// A Settings window is not a Workspace window: it presents no Workspace, cannot host one, and must
-/// never be counted as one when SpaceTerm decides whether a Workspace still exists.
+/// Every live Workspace window, resolved at call time from GPUI's own registry. A Settings window
+/// is never counted.
 fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<WorkspaceManager>> {
     cx.windows()
         .into_iter()

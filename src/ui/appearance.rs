@@ -120,10 +120,6 @@ pub(crate) struct ChromeAppearance {
     /// Standard field fills and content resolved against their material frame on a floating host.
     pub(crate) floating_field_colors: ChromeColors,
     /// Content-free families whose authored constraints required a safe fallback.
-    ///
-    /// Most families use opaque state fills when no translucent solution exists. An
-    /// unrepresentable host-relative step can instead retain the safe presentation, which
-    /// may remain translucent.
     pub(crate) floating_fallbacks: Vec<FloatingControlFamily>,
     /// Content-free disabled-state failures collected across every prepared host.
     pub(crate) disabled_diagnostics: Vec<DisabledControlDiagnostic>,
@@ -855,11 +851,9 @@ fn relative_luminance(color: Color) -> f64 {
         + 0.0722 * linear_channel(color.b)
 }
 
-/// Reapplies an authored fill's luminance step from the definition root to an immediate host.
-///
-/// The returned color is an opaque semantic target. Transparent fills remain unpainted at the
-/// caller. A target outside the displayable luminance interval is reported instead of clamped,
-/// because clamping would claim to preserve a relationship that the color gamut cannot represent.
+/// Reapplies an authored fill's luminance step from the definition root to an immediate host. A
+/// target outside the displayable luminance interval returns `None` instead of clamping, because
+/// clamping would claim a relationship the gamut cannot represent.
 fn host_relative_fill(authored: Color, root: Color, host: Color) -> Option<Color> {
     let root = root.with_alpha(255);
     let host = host.with_alpha(255);
@@ -2095,10 +2089,7 @@ fn resolve_floating_progress_accent(
 }
 
 /// Resolves controls after their material fills have been expressed as overlays on a known host.
-///
-/// The opaque reference remains the safe fallback. A prepared overlay that already carries every
-/// required content color is retained byte-for-byte; otherwise only the prepared presentation is
-/// made opaque enough to carry that content.
+/// The opaque reference remains the safe fallback.
 fn resolve_material_control_colors(
     reference: &ChromeColors,
     mut paint: ChromeColors,
@@ -2844,8 +2835,7 @@ fn non_floating_control_host_background(
 }
 
 /// Moves one prepared semantic target only when its modeled material composite cannot carry the
-/// requested contrast floor. The compiled colors remain untouched, and rendering consumes the
-/// returned target through the ordinary material path.
+/// requested contrast floor.
 fn feasible_non_floating_material_target(
     materials: SurfaceMaterials,
     role: SurfaceRole,
@@ -2937,10 +2927,6 @@ struct PreparedAppState<const N: usize> {
 }
 
 /// Resolves one app-drawn row or Tab state on the material it will actually paint.
-///
-/// The returned fill remains a semantic material target; renderers still apply the material once.
-/// Candidate search prefers retaining authored RGB and increasing prepared opacity, then makes the
-/// smallest endpoint move that can carry every content floor and any persistent-selection step.
 fn prepare_app_state<const N: usize>(
     materials: SurfaceMaterials,
     semantic_host: Color,
@@ -3011,9 +2997,8 @@ fn prepare_app_state<const N: usize>(
     })
 }
 
-/// Resolves a selected-state rim against the surrounding material host. Explicitly absent optional
-/// edges remain absent; the Increase Contrast policy has already made required selection rims
-/// nontransparent before this seam.
+/// Resolves a selected-state rim against the surrounding material host. Increase Contrast has
+/// already made required selection rims nontransparent before this point.
 fn prepare_app_state_boundary<const N: usize>(
     materials: SurfaceMaterials,
     semantic_host: Color,
@@ -3055,12 +3040,8 @@ fn prepare_app_state_boundary<const N: usize>(
     proposed
 }
 
-/// The separation a chip rim must reach, or `None` to keep the authored one as painted.
-///
-/// A chip rim is a lift, not a boundary: it catches the light a raised edge would so a Tab or a
-/// selected row reads as sitting above the strip behind it, and both built-in appearances author it
-/// well under the Pane rim that does state a boundary. Raising it to the boundary floor would
-/// draw an outline around every chip. Increase Contrast applies the stronger boundary floor.
+/// The separation a chip rim must reach, or `None` to keep the authored one as painted. A chip rim
+/// is a lift, not a boundary; raising it to the boundary floor would outline every chip.
 const fn app_owned_hairline(increase_contrast: bool) -> Option<f64> {
     if !increase_contrast {
         None
@@ -3763,25 +3744,15 @@ impl ChromeAppearance {
         }
     }
 
-    /// Persistent selection paints its difference from its host, like any other resting surface.
-    ///
-    /// A selected chip is read against the surface it sits on, so what it owes the reader is its
-    /// authored step from that host, not a fixed density. Holding the step against the opaque
-    /// host instead pins a bright chip near opacity, and a pinned chip keeps its ink while the
-    /// shell under it goes on fading: a step authored at 1.21 then renders at 2.0 and then 4.0 as
-    /// the Setting rises, until the chip is the loudest thing in a window that was asked for
-    /// glass. Dark always spent less ink than that bound asked for, so this is what a Dark chip
-    /// has painted all along.
+    /// Persistent selection paints its authored step from its host, like any other resting surface.
+    /// Holding the step against the opaque host would pin the chip near opacity as the shell fades.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
         self.materials
             .paint_compact(SurfaceRole::Surface, host, color)
     }
 
-    /// The fill an unselected chip takes under the pointer.
-    ///
-    /// Hover is the same kind of small surface as a selection and takes the same material, so the
-    /// two keep the order their authored tones set: a hovered row can never overtake the selected
-    /// row beside it, whatever the window transmits.
+    /// The fill an unselected chip takes under the pointer. It shares the selection material so a
+    /// hovered row never overtakes the selected row beside it.
     pub(crate) fn hover_surface(&self, host: Color, color: Color) -> Color {
         self.selection_surface(host, color)
     }
@@ -3825,20 +3796,14 @@ impl ChromeAppearance {
         self.materials.edge(host, toward(amount))
     }
 
-    /// Applies the window's material for one surface role to an authored background color.
-    ///
-    /// Only the owner of a painted background calls this, once. Authored translucency is scaled
-    /// rather than replaced, so a theme that authored a translucent surface keeps its intent.
+    /// Applies the window's material for one surface role to an authored background color. Only the
+    /// owner of a painted background calls this, once.
     pub(crate) fn surface(&self, role: SurfaceRole, color: Color) -> Color {
         self.materials.paint(role, self.colors.background, color)
     }
 
-    /// The deterministic in-window backdrop beneath controls on a host.
-    ///
-    /// The native desktop is intentionally outside this contract. The opaque color reference
-    /// backs the same Sheet, Base and Surface paints that the corresponding window roots render.
-    /// Floating callers that need transmission bounds use the shell's two endpoint backgrounds;
-    /// its value here is the opaque semantic reference only.
+    /// The deterministic in-window backdrop beneath controls on a host. The native desktop is
+    /// outside this contract.
     pub(crate) fn control_host_background(&self, host: spaceterm_ui::ControlHost) -> Color {
         if let Some(settings) = self.settings_hosts
             && let Some(background) = settings.background(host)
@@ -3966,13 +3931,7 @@ impl ChromeAppearance {
         wash.source_over(tone)
     }
 
-    /// The backdrop a Pane paints beneath its Terminal.
-    ///
-    /// A Pane is an ordinary resting surface in both appearances: it paints only its difference
-    /// from the window sheet, so it transmits what the Transparency Setting asks of every other
-    /// resting surface and keeps its authored step from the chrome around it. The overlay carries
-    /// the authored luminance relationship without a separate backing.
-    /// Explicit cell backgrounds are separate.
+    /// The backdrop a Pane paints beneath its Terminal. Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         self.surface(SurfaceRole::Surface, terminal_background)
     }

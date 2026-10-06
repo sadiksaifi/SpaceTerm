@@ -1,14 +1,7 @@
 //! A bounded, content-safe, multi-line GPUI text editor for editable source such as JSON.
 //!
-//! The editor shares its buffer, selection, and bounded undo history with [`crate::TextInput`].
-//! It keeps line breaks, converts pasted carriage returns and Unicode line separators to `\n`,
-//! and replaces a tab with the indent unit, so every line it lays out is one shaped line without
-//! control characters. The default value limit is 256 KiB and the absolute limit is 4 MiB.
-//!
-//! The editor inherits its font from the surrounding text style, so a caller chooses the typeface
-//! and size, and it sizes itself to a fixed number of visible rows. Rows beyond them scroll.
-//! Lines do not wrap; a line wider than the viewport scrolls horizontally. Only the rows in view
-//! are shaped. Read-only content stays focusable, selectable, and copyable.
+//! It shares its buffer, selection, and undo history with [`crate::TextInput`], converts line
+//! separators to `\n` and tabs to the indent unit, and shapes only the rows in view.
 
 use std::{collections::HashMap, ops::Range, time::Duration};
 
@@ -331,7 +324,6 @@ impl TextArea {
         }
     }
 
-    /// Sets the placeholder shown when the value is empty.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
@@ -370,19 +362,15 @@ impl TextArea {
         self
     }
 
-    /// Returns the current value.
     pub fn value(&self) -> &str {
         &self.buffer.text
     }
-    /// Returns the monotonic content revision.
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    /// Returns whether the editor currently owns responder focus.
     pub fn is_focused(&self) -> bool {
         self.focused
     }
-    /// Returns the focus handle used by a containing composite for explicit focus transfer.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -1930,7 +1918,6 @@ fn line_ranges(text: &str) -> Vec<Range<usize>> {
     lines
 }
 
-/// The spaces a line starts with.
 fn leading_indentation(line: &str) -> &str {
     &line[..line.len() - line.trim_start_matches(' ').len()]
 }

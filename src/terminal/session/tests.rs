@@ -3104,7 +3104,7 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
     );
 
     // icat fits the image to the PTY pixel width, then floors pixel_width/columns
-    // to infer cell width. A fractional extent previously produced 59 columns.
+    // to infer cell width.
     let image_columns = size.pixel_width.div_ceil(cell_width);
     assert_eq!(image_columns, 57);
     let mut stream = format!(

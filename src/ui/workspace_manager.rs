@@ -2998,9 +2998,6 @@ impl WorkspaceManager {
 
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
-    ///
-    /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
-    /// chip would be duplicate chrome; with it closed nothing on screen does.
     fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
         let remote_connection_phase = workspace
@@ -3150,9 +3147,8 @@ impl WorkspaceManager {
             "No matching Workspaces",
         ))
         .menu_with_filter_header()
-        // The chooser takes the top chrome's icon size rather than the selector's own, so the
-        // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
-        // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
+        // The chooser takes the top chrome's icon size so its glyph keeps one size across sidebar
+        // states.
         .icon_trigger(move |_, _| {
             // The same selector the chip's glyph carries: they are the one chooser icon in its two
             // states, so a test can hold them to one size.
@@ -3282,11 +3278,8 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    /// The title-bar surface behind the top-left chrome.
-    ///
-    /// It paints beneath the Tab manager rather than with the chrome's controls. The first Tab's
-    /// leading inset reaches under the chrome, so an opaque surface painted above the Tab strip
-    /// would hide the mark that separates the strip's start from the sidebar.
+    /// The title-bar surface behind the top-left chrome. It paints beneath the Tab manager so it
+    /// cannot hide the mark at the Tab strip's start.
     fn render_top_left_chrome_surface(
         layout: WorkspaceChromeLayout,
         window: &Window,
@@ -3442,9 +3435,8 @@ impl WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    /// Keeps ordinary content and complete transient owners on the same action routes while
-    /// leaving the active modal outside those routes. Picker-owned capture handlers still decide
-    /// which hierarchy actions may reach the Workspace.
+    /// Keeps ordinary content and complete transient owners on the same action routes while leaving
+    /// the active modal outside those routes.
     fn workspace_action_scope(cx: &Context<Self>) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)

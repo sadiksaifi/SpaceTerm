@@ -91,16 +91,7 @@ pub(super) const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 /// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
-///
-/// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
-/// paint moves inward. The insets are what the eye actually measures:
-///
-/// - vertically the chip faces the window's top edge and, below the strip, the Pane's own surface,
-///   so it carries a whole frame space on each side of the band beneath the window's edge;
-/// - horizontally it faces another chip, so each side carries a share and the visible gap between
-///   two Tabs is one frame space again.
-///
-/// Tab, selected sidebar row, and Pane radii derive from the same frame geometry.
+/// A Tab keeps the full title-bar height as its hit target; only the paint moves inward.
 fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
     let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     ChipShape {
@@ -115,26 +106,13 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
 const TAB_ORIGIN_GAP: f32 = 6.0;
 /// The gap between the status glyph and close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
-/// How much of a Tab's identity the activity may claim when a place beside it needs a share.
-///
-/// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
-/// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
+/// The share of a Tab's identity the activity may claim, so a wordy title never pushes the
+/// directory leaf out of the Tab.
 const TAB_ACTIVITY_MAXIMUM_SHARE: f32 = 0.6;
-/// The Compact-density length of the quiet mark at a Tab-strip boundary that no chip touches.
-///
-/// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
-/// ends: between two inactive Tabs, after an inactive last Tab, and before an inactive first Tab
-/// beside the sidebar's edge. The Active Tab's chip and the collapsed Workspace Switcher's chip
-/// already have an edge, so no mark touches either of them. Like the chip insets,
-/// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
-/// keeps its proportion to a Tab that grows with density.
+/// The Compact-density length of the hairline at a Tab-strip boundary that no chip touches.
 const TAB_SEPARATOR_LENGTH: f32 = 18.0;
-/// The mark's thickness: one logical point at every density, the same hairline as the chip rim.
-///
-/// Density lengthens the mark but never thickens it. A whole point covers at least one whole device
-/// pixel at every supported display scale, so the mark stays thin on a 1x display without ever
-/// dropping below a pixel on a fractional one, and a width derived from the scale would leave
-/// layout rounding to decide which side of an edge it lands on.
+/// One logical point at every density. It covers at least one device pixel at every supported
+/// scale, where a scale-derived width would leave layout rounding to pick a side of the edge.
 const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 
 /// The selected Tab material shared by the collapsed Workspace Switcher.
@@ -221,15 +199,7 @@ impl TabChromePresentation {
     }
 
     /// The material one Tab rests on, as an inset chip within the title-bar surface.
-    ///
-    /// The Active Tab uses an inset selection fill tuned to the title bar, with a stronger fill
-    /// under the pointer. Built-in appearances omit decorative outlines; custom Tab edges remain
-    /// supported.
-    ///
-    /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
-    /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
-    /// title bar itself, which leaves an inactive Tab as text on the bar and the Active Tab as the
-    /// one shape on it.
+    /// An inactive Tab paints its own fill so a scheme's distinct inactive Tab color still shows.
     fn tab_chip(
         &self,
         active: bool,
@@ -690,10 +660,7 @@ impl TabManager {
     }
 
     /// Atomically disconnects every Tab and Pane for the authoritative connection generation.
-    ///
-    /// The complete hierarchy is prevalidated before mutation. Tab IDs, Pane layouts, active and
-    /// focused identities, zoom, and final presentations remain intact while input and new Remote
-    /// child launches are blocked.
+    /// The whole hierarchy is prevalidated before mutation.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -717,10 +684,7 @@ impl TabManager {
     }
 
     /// Revalidates and reserves one fresh Terminal Session Channel for every preserved Pane.
-    ///
-    /// Reservation is asynchronous and completes before hierarchy mutation. Each channel requires
-    /// its own current physical-identity grant. Cancellation, stale generation, directory change,
-    /// or any reservation failure drops all prepared tokens and leaves the hierarchy disconnected.
+    /// Any failure drops all prepared tokens and leaves the hierarchy disconnected.
     pub(crate) fn prepare_remote_restart(
         &mut self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -811,9 +775,7 @@ impl TabManager {
     }
 
     /// Commits a fully prepared Remote restart across the existing Tab hierarchy.
-    ///
-    /// The method revalidates all Tab and Pane identities before the first commit, then replaces
-    /// Terminal Sessions in place. Post-commit session startup failures remain local to each Pane.
+    /// Session startup failures after the commit stay local to each Pane.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedTabManagerRemoteRestart,
@@ -907,8 +869,6 @@ impl TabManager {
     }
 
     /// Places the Operating-System Window's own control at the trailing end of the Tab bar.
-    ///
-    /// The Workspace manager owns one per window and hands it to whichever Tab manager is active.
     pub(crate) fn set_window_close_handler(&mut self, handler: spaceterm_ui::WindowCloseHandler) {
         self.window_close_handler = Some(handler);
     }
@@ -1044,10 +1004,7 @@ impl TabManager {
     }
 
     /// Lifts a Tab to move it in the Tab bar. A press that becomes a drag never selects its Tab.
-    ///
-    /// The Tab keeps its place until release, and an exact copy of it follows the pointer. The
-    /// motion that starts the drag already marks a slot, so a quick drag released on its first move
-    /// still lands.
+    /// The starting motion already marks a slot, so a drag released on its first move still lands.
     fn begin_tab_drag(
         &mut self,
         tab_id: TabId,
@@ -1502,11 +1459,8 @@ impl TabManager {
         .into_any_element()
     }
 
-    /// One Tab in the Tab bar, or the lifted copy of it that follows the pointer during a drag.
-    ///
-    /// Both paint the same face, so a lifted Tab looks exactly like the Tab it lifts. The copy is
-    /// always under the pointer, so it keeps the paint a Tab has there, and it claims no pointer
-    /// input because it lies over every drop target.
+    /// One Tab in the Tab bar, or the lifted copy that follows the pointer during a drag.
+    /// The copy claims no pointer input because it lies over every drop target.
     #[expect(
         clippy::too_many_arguments,
         reason = "one Tab render step needs its identity, role, hover, presentation, owner, appearance, and host geometry"
@@ -1723,10 +1677,8 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
-        // A chip is inset inside its item, which would add to the gap the Workspace identity before
-        // the strip already leaves. The strip pulls that inset back, so the visible distance from
-        // the identity to the first Tab is one frame space and the first Tab's paint lines up with
-        // the Pane beneath it.
+        // The strip pulls back the chip inset so the first Tab sits one frame space from the
+        // identity.
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
                 .chip_strip_leading_offset();
@@ -1759,9 +1711,6 @@ impl TabManager {
         let mut previous_inactive_tab = None;
         for (index, ((tab_id, view), (fade, hover))) in self.tabs.iter().zip(hovers).enumerate() {
             let active = tab_id == active_tab_id;
-            // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
-            // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
-            // the bare Create Tab glyph.
             let leading_boundary = if index == 0 {
                 (self.sidebar_visible && !active).then_some(TabBoundary::StripStart(tab_id))
             } else {
@@ -1882,9 +1831,6 @@ impl TabManager {
             )
             .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
-                // The Tabs give up room to the accessory rather than scrolling beneath it, and the
-                // space between them stays draggable. The accessory owns its own edge spacing, so
-                // an empty accessory reserves nothing.
                 content.child(
                     div()
                         .debug_selector(|| "tab-bar-trailing-accessory".to_owned())
@@ -2042,12 +1988,8 @@ impl Render for TabManager {
                     .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
-                    // The content stage is base surface, and every gap it paints is measured to the
-                    // next painted surface rather than counted in layout properties. It has no top
-                    // edge: the chrome above already carries that space in its own height. Beside a
-                    // sidebar it has no leading edge either, because the sidebar chip's own trailing
-                    // margin is already that gap and two insets of one continuous surface would read
-                    // as a gap of twice the size.
+                    // No top edge: the chrome above carries that space. No leading edge beside a
+                    // sidebar: the sidebar chip's trailing margin is already that gap.
                     .border_color(gpui_color(
                         appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface),
                     ))
@@ -2097,16 +2039,8 @@ impl TabBoundary {
 }
 
 /// The quiet mark at one boundary of the Tab strip whose Tabs are all inactive.
-///
-/// The Tab after the boundary carries the mark as paint just inside its own leading edge; at the
-/// strip's end the last Tab carries it just inside its trailing edge. The row keeps one scroll
-/// child per Tab and every Tab keeps its spacing, hit target, and hover region. Staying inside the
-/// Tab's bounds and on whole points leaves layout rounding nothing to move, and the chip inset
-/// keeps hover paint clear of it.
-///
-/// The mark paints its own `tab_separator` role. `border` describes full-length structure and is
-/// too close to the bar to show on a mark this short, and an outlined control's ring is a separate
-/// decision a scheme must be able to retune without moving the Tab strip.
+/// It paints inside the Tab on whole points so layout rounding cannot move it. It uses its own
+/// `tab_separator` role because `border` is too close to the bar to show on a mark this short.
 fn render_tab_separator(
     boundary: TabBoundary,
     presentation: &TabChromePresentation,
@@ -2137,10 +2071,7 @@ fn render_tab_separator(
         .into_any_element()
 }
 
-/// One Tab's identity: `<status glyph> <activity> · <place>`.
-///
-/// The status glyph is the segment a Tab never gives up. Only the words after it narrow: the
-/// activity first, then the place.
+/// One Tab's identity: `<status glyph> <activity> · <place>`. The status glyph never narrows.
 fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
@@ -2513,11 +2444,6 @@ mod tests {
         assert_eq!(inactive.hover_rim, None);
     }
 
-    /// The Active Tab carries selected-row content on a material tuned for the title bar.
-    ///
-    /// The Workspace sidebar and Settings navigation need a fill that works on shell and raised
-    /// surfaces. The Active Tab has one title-bar host, so it keeps the shared text hierarchy while
-    /// using its own borderless fill and hover response.
     #[test]
     fn built_in_active_tab_should_use_its_authored_chip_material_and_edge() {
         use crate::appearance::{Appearance, builtin_chrome_base};
@@ -2573,10 +2499,6 @@ mod tests {
         }
     }
 
-    /// A separator is a short hairline, so it needs more contrast than a full-length divider to be
-    /// seen at all, yet it must stay a step quieter than the titles it sits between. The mark rests
-    /// on the title bar in a focused window and on the inactive title bar in an unfocused one, so
-    /// both surfaces are held to the same band.
     #[test]
     fn built_in_tab_separator_should_be_visible_but_quiet_on_both_title_bar_surfaces() {
         use crate::appearance::{Appearance, builtin_chrome_base};
@@ -2613,9 +2535,6 @@ mod tests {
         }
     }
 
-    /// The separator keeps one logical point at every supported display scale, which never
-    /// rasterises below one whole device pixel: a single crisp pixel at 1x and more on denser
-    /// displays, so the mark stays thin without disappearing.
     #[test]
     fn tab_separator_width_should_cover_at_least_one_device_pixel_at_every_display_scale() {
         for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
@@ -3380,12 +3299,6 @@ mod tests {
         assert_eq!(records.commands().len(), commands_before);
     }
 
-    /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
-    ///
-    /// The chip is what carries that reading, and it only works while it keeps an inset on every side:
-    /// against its own item, against the chip beside it, and against the bar's lower edge, which
-    /// meets the base surface without a seam. The item itself keeps the full height of the bar,
-    /// because the inset is paint and must never shrink what a pointer can hit.
     #[gpui::test]
     fn every_tab_should_float_as_an_inset_chip_without_a_bar_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
@@ -3482,21 +3395,8 @@ mod tests {
         Box::leak(selector.into_boxed_str())
     }
 
-    /// Opens a fresh four-Tab row for each density, sidebar visibility, and selected position, and
-    /// checks every boundary of the strip.
-    ///
-    /// Each position gets its own window because rendered debug bounds outlive the frame that drew
-    /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
-    ///
-    /// A boundary between two Tabs is marked only while both Tabs are inactive. The strip's start
-    /// is marked only while the sidebar is visible and the first Tab is inactive, because the
-    /// collapsed Workspace Switcher is a chip. The strip's end is marked while the last Tab is
-    /// inactive. The mark is a hairline one logical point wide at every density, whose length
-    /// scales with density from its 18-point Compact baseline to 22.5 points at Comfortable. It is
-    /// laid out on whole device pixels, painted entirely inside a Tab against the boundary's edge
-    /// and clear of the chips beside it, so neither layout rounding, an ancestor's clip, nor a
-    /// neighbour's paint can take it away. It carries no hit target of its own. Every edge is found
-    /// from the rendered items rather than assumed to run left to right.
+    /// Opens a fresh four-Tab row for each density, sidebar visibility, and selected position. Each
+    /// position gets its own window because rendered debug bounds outlive the frame that drew them.
     fn assert_separators_mark_only_inactive_neighbours(
         cx: &mut TestAppContext,
         direction: spaceterm_ui::TextDirection,

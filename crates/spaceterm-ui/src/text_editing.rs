@@ -1,8 +1,6 @@
 //! The editing core shared by SpaceTerm's text controls.
 //!
-//! A buffer owns its text, a grapheme-normalized selection, and bounded undo and redo history. The
-//! helpers here convert between byte, grapheme, word, and UTF-16 positions. Nothing in this module
-//! knows how text is laid out, so single-line and multi-line editors share one editing model.
+//! It knows nothing about layout, so single-line and multi-line editors share one editing model.
 
 use std::ops::Range;
 

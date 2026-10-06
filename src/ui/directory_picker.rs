@@ -368,9 +368,6 @@ pub(super) fn descend_query(
 }
 
 /// Returns the path that lists the directory enclosing the one `parsed` lists.
-///
-/// The home spells its enclosing directory from the physical home, so `~/` leads to the absolute
-/// directory that contains it.
 fn enclosing_directory_query(parsed: &ParsedPickerPath, home: &PickerPath) -> Option<String> {
     let listed = parsed
         .enumeration_directory()
@@ -542,7 +539,6 @@ impl DirectoryPicker {
         }
     }
 
-    /// Offers System Directory Selection, labeled `label`, beside the confirm action.
     pub(super) fn with_system_selection(mut self, label: SharedString) -> Self {
         self.system_selection = Some(label);
         self
@@ -1161,9 +1157,6 @@ impl DirectoryPicker {
     }
 
     /// Returns the listed rows: the enclosing directory, then the matching children.
-    ///
-    /// The enclosing row accompanies a readable listing, so an unusable or missing path presents
-    /// its notice instead.
     fn palette_items(&self) -> Vec<CommandPaletteItem<DirectoryPickerItemId>> {
         let Some(directory) = self.rows_directory.as_ref() else {
             return Vec::new();
@@ -1331,10 +1324,8 @@ impl PickerPathError {
     }
 }
 
-/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker.
-///
-/// The Command Palette owns focus, pointer, and dismissal isolation, but the application's
-/// hierarchy actions are registered above it and would otherwise still fire.
+/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker. The
+/// application's hierarchy actions are registered above the Command Palette.
 fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }

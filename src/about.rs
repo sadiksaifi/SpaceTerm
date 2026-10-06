@@ -1,7 +1,5 @@
-//! What every About surface says about the running build.
-//!
-//! macOS presents these facts in AppKit's standard About panel, and a host without one presents
-//! them in SpaceTerm's own About window. Both read them here, so the two cannot drift apart.
+//! What every About surface says about the running build, shared by AppKit's About panel and
+//! SpaceTerm's own About window.
 
 use crate::application_identity::ApplicationIdentity;
 

@@ -1,11 +1,5 @@
-//! The Privacy section's Screen Recording and Device Control rows: SpaceTerm's own grants, which
-//! programs running in its Terminal Sessions inherit, and how to set them up and recover them.
-//!
-//! Each row offers one action for its state. Set Up starts a Permission Setup, which also clears an
-//! entry that grants nothing, so a missing grant needs no other recovery. An allowed grant offers
-//! Troubleshoot, because a program can still report missing access. Its alert resets one
-//! permission of the running application only after the person chooses Reset, then starts a
-//! Permission Setup again. Nothing here captures the screen or sends input to test access.
+//! The Privacy section's Screen Recording and Device Control rows.
+//! Nothing here captures the screen or sends input to test access.
 
 use std::rc::Rc;
 
@@ -193,8 +187,6 @@ impl PermissionAccessRow {
     }
 
     /// Reads the current authorization, which can change in System Settings at any time.
-    ///
-    /// Opening System Settings never changes the status by itself; only a later read does.
     pub(super) fn refresh(&mut self) {
         self.apply(self.read());
     }
@@ -356,10 +348,8 @@ fn open_failed(application: &str, pane: &str) -> String {
     )
 }
 
-/// Keeps the rows current with authorization changes the system reports while the window is open.
-///
-/// The system can answer a read with a value cached before a change until it reports that change,
-/// which can arrive after the window became active again.
+/// Keeps the rows current with authorization changes the system reports while the window is open. A
+/// read can return a cached value until the system reports the change.
 pub(super) struct PermissionAccessChanges {
     _subscription: Box<dyn PermissionAccessSubscription>,
     _refresh: Task<()>,
@@ -600,8 +590,7 @@ impl SettingsWindow {
     }
 
     /// Runs a chosen reset, then allows the running application again. The native completion may
-    /// run on any thread, so it only sends the closed result through a channel and the window
-    /// applies it on the foreground executor.
+    /// run on any thread, so it sends the result through a channel to the foreground executor.
     pub(super) fn reset_permission(
         &mut self,
         permission: SystemPermission,

@@ -1,68 +1,8 @@
 //! Window-modal desktop controls backed by one Operating-System Window-owned mechanism.
 //!
-//! [`Alert`], [`Dialog`], and [`ProgressDialog`] validate caller-owned typed configuration and
-//! compile it into one private presentation model. Each Operating-System Window may show one modal
-//! at a time. Up to eight additional requests wait in a bounded FIFO queue, and monotonic
-//! [`ModalPresentationId`] values prevent retained completion and update handles from affecting a
-//! successor. Each semantic facade can intentionally replace the visible presentation in one
-//! owner transition. Replacement settles the predecessor before opening the successor, preserves
-//! the existing FIFO behind it, and never exposes an interactive underlay gap. Queued
-//! presentations inherit continuous Menu, Command Palette, Tooltip, keyboard, pointer, and
-//! Terminal Input Focus blocking from the active modal.
-//!
-//! The shared renderer owns the viewport scrim, compact surface, adaptive action area, scrollable
-//! body, focus scope, and key context. Focus enters according to [`ModalDesktopPolicy`], focused
-//! controls are revealed inside the independently scrolling body and footer, and
-//! [`DialogFocusTarget`] lets arbitrary caller-owned body controls join that reveal mechanism
-//! without exposing scroll internals. The complete current-frame GPUI tab-stop order remains
-//! contained in both directions, disabled or removed
-//! targets are repaired on the next frame, and
-//! restoration is attempted only for a live predecessor or explicit successor that has not been
-//! superseded by newer focus ownership. Focused children handle Return and Escape first. A focused
-//! action consumes Return before any different explicit default, while an editor may decline Return
-//! so that explicit default runs. The first Escape cancels input-method composition before a later
-//! Escape reaches the modal Cancel path.
-//!
-//! Caller action order is logical input order, not result identity or physical placement.
-//! [`ModalActionRole`], [`ModalActionIntent`], [`ModalActionEmphasis`], enabled state, explicit
-//! default state, typed identity, and debug identity remain independent. The installed desktop
-//! policy selects locale direction, physical action placement, focus entry, layout axis, and
-//! deadline limits. Every Operating-System Window modal root consumes that installed direction;
-//! individual modal call sites do not select it. The application explicitly installs portable
-//! modal bindings and separately selects platform bindings through
-//! [`ModalKeybindingProfile`]. It also owns and explicitly installs the immutable policy and
-//! aggregate [`ModalTheme`].
-//!
-//! Dialog action callbacks run after the private reducer releases its GPUI entity update. A
-//! [`DialogCloseDecision::Pending`] result disables duplicate primary completion and gives the
-//! caller an opaque [`DialogPendingCompletion`] tied to that presentation and close attempt. The
-//! independently retained [`DialogCompletion`] completes an active or queued Dialog with a typed
-//! programmatic outcome and optional guarded successor focus, without synthesizing an action or
-//! borrowing pending-action authority. One nested safe Cancel attempt may coexist without
-//! replacing the primary authority. Denial preserves
-//! any still-live counterpart, and the first allowed terminal decision wins. All terminal callbacks
-//! and public close lifecycle transitions are delivered at most once, including caller
-//! owner removal, Operating-System Window removal, replacement, queued dismissal, and reentrant
-//! callbacks. Reducer state transitions and control disarming remain synchronous, while an
-//! owner-owned effect pump defers callbacks until the GPUI update that invoked the public operation
-//! has unwound. Reentrant effects and queue advancement retain their deterministic order.
-//!
-//! Progress updates are caller-driven and generation-checked. Determinate progress reaching `1.0`
-//! does not close a [`ProgressDialog`]; the owner must complete, fail, or dismiss it. Immutable
-//! typed cancellation capability is retained separately from mutable availability, and active or
-//! queued programmatic-only presentations reject availability updates. Cancellation may allow,
-//! deny, or become pending, and delayed completion retains its original activation source.
-//! Programmatic-only mode requires a nonzero deadline no longer than the installed desktop
-//! policy's private bound, and expiry produces a typed terminal outcome.
-//!
-//! # Accessibility status
-//!
-//! These controls do not yet publish native Alert, Dialog, or progress nodes, associated action
-//! state, progress values, live announcements, or modal underlay exclusion. Private render
-//! snapshots and stable debug selectors support behavior tests, but provide no native
-//! accessibility evidence. This module makes no VoiceOver, Narrator, or Orca conformance claim.
-//! Accessibility-sensitive production workflows remain on native system prompts. SpaceTerm's
-//! existing `Window::prompt` call sites remain native.
+//! [`Alert`], [`Dialog`], and [`ProgressDialog`] compile typed configuration into one private
+//! presentation model. Each Operating-System Window shows one modal at a time and queues the rest.
+//! These controls publish no native accessibility nodes.
 //!
 //! # Example
 //!
@@ -234,7 +174,6 @@ impl ModalId {
         Self(value.into())
     }
 
-    /// Returns the identity text used for validation, stable element identity, and diagnostics.
     pub fn as_str(&self) -> &str {
         self.0.as_ref()
     }
@@ -249,7 +188,6 @@ impl ModalPresentationId {
         Self(generation)
     }
 
-    /// Returns a content-free diagnostic generation.
     pub const fn value(self) -> u64 {
         self.0
     }
@@ -319,7 +257,6 @@ impl<A> ModalAction<A> {
         }
     }
 
-    /// Marks whether this action can currently be activated.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -343,22 +280,18 @@ impl<A> ModalAction<A> {
         self
     }
 
-    /// Returns the caller-owned typed identity.
     pub fn id(&self) -> &A {
         &self.id
     }
 
-    /// Returns the localized visible label.
     pub fn label(&self) -> &str {
         self.label.as_ref()
     }
 
-    /// Returns the semantic action role.
     pub const fn role(&self) -> ModalActionRole {
         self.role
     }
 
-    /// Returns the consequence of activating the action.
     pub const fn intent(&self) -> ModalActionIntent {
         self.intent
     }
@@ -368,7 +301,6 @@ impl<A> ModalAction<A> {
         self.emphasis
     }
 
-    /// Returns whether this action can currently be activated.
     pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -378,7 +310,6 @@ impl<A> ModalAction<A> {
         self.is_default
     }
 
-    /// Returns the stable content-free debug and test identity.
     pub fn debug_identity(&self) -> &str {
         self.debug_identity.as_ref()
     }
@@ -592,12 +523,10 @@ impl ModalStaleGenerationError {
         Self { attempted, current }
     }
 
-    /// Returns the rejected presentation identity.
     pub const fn attempted(self) -> ModalPresentationId {
         self.attempted
     }
 
-    /// Returns the current presentation identity when one remains active.
     pub const fn current(self) -> Option<ModalPresentationId> {
         self.current
     }
@@ -693,9 +622,7 @@ impl Error for ModalDismissalError {}
 
 /// Returns whether this Operating-System Window currently owns a visible modal presentation.
 ///
-/// This narrow read-only integration is intended for Terminal Input Focus and other underlay
-/// policy. It exposes no queue, coordinator, focus-chain, overlay, or transient machinery. Queued
-/// requests alone return `false`; promotion keeps the fact continuously true between presentations.
+/// Queued requests alone return `false`; promotion keeps the result true between presentations.
 pub fn window_modal_is_open(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::window_modal_is_open(window, cx)
 }

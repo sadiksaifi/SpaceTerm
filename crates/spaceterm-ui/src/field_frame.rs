@@ -21,7 +21,6 @@ impl FieldState {
         self
     }
 
-    /// Disables the complete frame, including hover and focus decoration.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -97,17 +96,11 @@ impl FieldFrameTheme {
     }
 }
 
-/// Creates the shared field frame while leaving its remaining geometry and children with its
-/// caller.
+/// Creates the shared field frame; the caller supplies the remaining geometry and children.
 ///
-/// The frame owns its corner radius so the focus ring stays concentric with it; callers do not
-/// round the returned element again.
-///
-/// Attach the handle the editor itself takes focus with, because that is the handle the frame
-/// decorates. A frame given an enclosing handle instead would report focus for everything inside
-/// that scope: a dialog that focuses its own root would light every field it contains as though the
-/// reader were typing in all of them. The editor continues to own editing, enabled state, content,
-/// and input-method composition. Callers must keep its enabled state synchronized with `state`.
+/// The frame owns its corner radius so the focus ring stays concentric; do not round it again.
+/// Attach the editor's own focus handle: an enclosing handle would light every field in that scope
+/// whenever the scope holds focus. Keep the editor's enabled state synchronized with `state`.
 pub fn field_frame(
     id: impl Into<ElementId>,
     focus: &FocusHandle,

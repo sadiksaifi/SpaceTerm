@@ -84,7 +84,7 @@ _Avoid_: Hotkey, key equivalent
 
 ## Updates
 
-**Update Deadline**: The release age after which an obtainable update is required at a fresh launch.
+**Overdue Update**: An available update released at least two days ago. A fresh launch that finds one requires it before opening.
 
 **Update Reminder**: A deferrable notice about an outstanding update.
 
@@ -114,19 +114,21 @@ _Avoid_: Hotkey, key equivalent
 
 **System Directory Selection**: The system chooser offered for selecting a local Pinned Directory.
 
-## Workspace sources and remote identity
+## Workspace location and remote identity
 
-**Workspace Source**: The choice identifying whether a Workspace runs locally or remotely.
+**Workspace Location**: Where a Workspace runs: Local or Remote. Pinning is independent of it.
 
 **SSH Destination**: The validated OpenSSH destination token selected for a Remote Workspace. Distinct aliases retain distinct identities.
 
 **Remote Directory**: An absolute or home-relative directory value on a remote machine, carrying no local filesystem authority.
 
-**Physical Directory Identity**: The resolved absolute identity of a Remote Directory used to validate an explicit pin.
+**Remote Directory Identity**: The physical absolute directory that the remote `pwd -P` validation returns for a Remote Directory, used to validate an explicit pin.
 
 **Control Connection**: The Workspace-owned OpenSSH transport shared by its Remote Panes.
+_Avoid_: Remote Workspace Session, SSH session
 
 **Terminal Session Channel**: The single-use remote shell channel consumed by one Remote Pane through its Control Connection.
+_Avoid_: remote channel, Pane channel
 
 **Authentication Prompt**: An OpenSSH confirmation or obscured response request presented by SpaceTerm.
 
@@ -137,7 +139,7 @@ _Avoid_: session, terminal
 
 **Terminal Emulator**: The state machine interpreting terminal output and owning screen state.
 
-**Terminal Metadata**: Sanitized facts associated with terminal screen state, including title, Current Directory, command, progress, and Semantic Zones.
+**Terminal Metadata**: Sanitized facts associated with terminal screen state, including title, Current Directory, command, progress, and prompt zone.
 
 ## Terminal interaction and safety
 
@@ -147,7 +149,7 @@ _Avoid_: session, terminal
 
 **Scroll Commands**: The Commands moving the Focused Pane's view through Scrollback.
 
-**Terminal Hyperlink**: A validated target attached to terminal cells for activation.
+**Hyperlink Target**: A validated target attached to terminal cells for activation.
 
 **File Preview**: A host preview of a local file.
 
@@ -157,9 +159,9 @@ _Avoid_: session, terminal
 
 **Paste Confirmation**: Time-bounded authorization for one unsafe Paste Payload under Terminal Input Focus.
 
-**OSC 52 Filtering**: Recognition of terminal clipboard escape sequences before Terminal Emulation, producing ordered plain-text requests.
+**OSC 52 Filter**: The Terminal Session stage recognizing terminal clipboard escape sequences before the Terminal Emulator, producing ordered plain-text requests.
 
-**Terminal Clipboard Access**: Terminal Session-scoped permission to consult the system text clipboard under Terminal Input Focus.
+**Clipboard Authority**: A Terminal Session's grant to complete OSC 52 clipboard requests, valid only during the Terminal Input Focus period that issued them and limited by the clipboard Settings.
 
 **System Permission**: A Screen Recording or Accessibility grant inherited by programs in a Terminal Session and granted through System Settings.
 
@@ -173,7 +175,7 @@ _Avoid_: session, terminal
 
 **Terminal Failure**: A typed terminal fault with an explicit recovery class.
 
-**Local Diagnostics**: Bounded content-free failure and unhandled-key metadata exported by explicit user action.
+**Terminal Diagnostics**: Bounded content-free failure and unhandled-key metadata exported by the Export Terminal Diagnostics command.
 
 **Close Confirmation**: Authorization for an exact user-requested close that may discard running work.
 
@@ -187,7 +189,7 @@ _Avoid_: session, terminal
 
 **Zed Extension**: A package in Zed's extension registry that can contribute Zed Theme family documents.
 
-**Resolved Theme**: Complete validated presentation colors after Terminal overrides and built-in completion.
+**Resolved Appearance**: The validated Application Chrome and terminal presentation, including colors, typography, and window composition, resolved from Settings and the system appearance.
 
 **Theme Origin**: Source identity and attribution, distinct from the installed identifier and display name.
 

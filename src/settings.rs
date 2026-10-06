@@ -469,11 +469,7 @@ impl Settings {
     }
 
     /// Adopts the file another program changed, returning whether SpaceTerm read a new document.
-    ///
-    /// A file SpaceTerm last read or wrote is left alone. Any other file is adopted as an explicit
-    /// reload adopts it, so a malformed or unsafe file keeps the committed state and pauses writes
-    /// until a valid file arrives. A live preview or write owns the transaction, so the caller
-    /// retries once it ends.
+    /// A live preview or write owns the transaction, so the caller retries once it ends.
     pub(crate) fn follow_file(&self) -> Result<bool, SettingsError> {
         let mut state = self.0.lock();
         if !matches!(state.transaction, Transaction::Idle) {
@@ -500,10 +496,8 @@ impl Settings {
         self.adopt(&mut state, read).map(|()| true)
     }
 
-    /// Returns the write that creates the settings file when none holds the document yet.
-    ///
-    /// Another program can open only a file that exists. An existing file, including one SpaceTerm
-    /// cannot read, is left as it is.
+    /// Returns the write that creates the settings file when none exists. An existing unreadable
+    /// file is left as it is.
     pub(crate) fn ensure_file(&self) -> Result<Option<CommitJob>, SettingsError> {
         let mut state = self.0.lock();
         if !matches!(state.transaction, Transaction::Idle) {

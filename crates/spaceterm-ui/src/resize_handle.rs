@@ -69,7 +69,6 @@ pub enum ResizeHandleTarget {
 pub struct ResizeInteractionId(u64);
 
 impl ResizeInteractionId {
-    /// Returns the monotonic numeric identity.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -192,19 +191,16 @@ impl ResizeHandleMetrics {
         .normalized()
     }
 
-    /// Sets the visible emphasis used while hovered.
     pub fn hover_thickness(mut self, thickness: Pixels) -> Self {
         self.hover_thickness = thickness;
         self.normalized()
     }
 
-    /// Sets the visible emphasis used during an active pointer interaction.
     pub fn active_thickness(mut self, thickness: Pixels) -> Self {
         self.active_thickness = thickness;
         self.normalized()
     }
 
-    /// Sets the visible emphasis used while the handle has keyboard focus.
     pub fn focus_thickness(mut self, thickness: Pixels) -> Self {
         self.focus_thickness = thickness;
         self.normalized()
@@ -215,7 +211,6 @@ impl ResizeHandleMetrics {
         self.visible_thickness
     }
 
-    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.hitbox_thickness
     }
@@ -263,7 +258,6 @@ pub struct ResizeHandleTheme {
 }
 
 impl ResizeHandleTheme {
-    /// Creates a complete theme from application-owned paint and bounded metrics.
     pub fn new(paint: ResizeHandlePaint, metrics: ResizeHandleMetrics) -> Self {
         Self { paint, metrics }
     }
@@ -273,12 +267,10 @@ impl ResizeHandleTheme {
         self.metrics.visible_thickness
     }
 
-    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.metrics.hitbox_thickness
     }
 
-    /// Returns the pointer-target thickness for the selected shape.
     pub fn pointer_target_thickness(self, target: ResizeHandleTarget) -> Pixels {
         self.metrics.pointer_target_thickness(target)
     }
@@ -305,14 +297,8 @@ type ResizeHandler = Rc<dyn Fn(&ResizeHandleEvent, &mut Window, &mut App) -> Opt
 
 /// A platform-neutral GPUI divider that owns resize input and presentation mechanics.
 ///
-/// The control owns its enlarged hitbox, pointer capture, cumulative displacement, keyboard
-/// interaction, cancellation, focus, and themed visual states. It never owns Pane Layout ratios,
-/// panel dimensions, minimum sizes, collapse behavior, or other application policy. Each
-/// [`ResizeHandleEvent::ResizeRequested`] is advisory: callers apply policy and feed their
-/// authoritative value back on the next render. Caller clamping never rebases an active drag.
-///
-/// A logical accessibility name is mandatory. The control retains its axis, value, and range for
-/// callers. It does not yet publish a separator node to the native accessibility tree.
+/// Each [`ResizeHandleEvent::ResizeRequested`] is advisory: callers apply their own policy and feed
+/// the authoritative value back on the next render.
 #[derive(IntoElement)]
 pub struct ResizeHandle {
     #[cfg(feature = "control-preview")]
@@ -380,13 +366,11 @@ impl ResizeHandle {
         self
     }
 
-    /// Controls whether keyboard traversal may stop on this handle.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
         self
     }
 
-    /// Enables the optional primary-pointer double-click reset request.
     pub fn reset_on_double_click(mut self, enabled: bool) -> Self {
         self.reset_on_double_click = enabled;
         self

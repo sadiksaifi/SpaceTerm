@@ -219,12 +219,10 @@ impl AppDirectories {
         })
     }
 
-    /// Returns the Settings document beneath the Operating-System Config root.
     pub fn settings_file(&self) -> PathBuf {
         self.config.join(SETTINGS_DOCUMENT_NAME)
     }
 
-    /// Returns the Settings Recovery backup beside the Settings document.
     pub fn settings_backup_file(&self) -> PathBuf {
         self.config.join(SETTINGS_BACKUP_NAME)
     }
@@ -336,7 +334,6 @@ impl DesktopResourceDirectories {
             .collect()
     }
 
-    /// The desktop-wide KDE settings file.
     pub fn kde_globals_file(&self) -> Option<PathBuf> {
         self.config_home
             .as_ref()

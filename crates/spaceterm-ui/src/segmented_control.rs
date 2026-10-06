@@ -1,13 +1,7 @@
 //! A controlled inline single-selection control over a small set of bounded options.
 //!
-//! Selection follows keyboard navigation, which is the conventional desktop behavior for a joined
-//! segmented control and for a row of selectable option cards: the whole control is one Tab stop,
-//! and the arrow keys move the selection directly rather than moving a separate focus cursor that a
-//! later key press confirms. Callers own the selected value and receive a change request; the
-//! control never retains a value of its own.
-//!
-//! Each option retains its label as its logical accessibility name. The control does not yet publish
-//! radio-group nodes or selected state to the native accessibility tree.
+//! Selection follows keyboard navigation, as in desktop segmented controls: the control is one Tab
+//! stop, and the arrow keys move the selection directly.
 
 use std::rc::Rc;
 
@@ -60,12 +54,10 @@ impl<T> SegmentedChange<T> {
         self.previous.as_ref()
     }
 
-    /// Returns the value the user requested.
     pub fn requested(&self) -> &T {
         &self.requested
     }
 
-    /// Returns the input path that requested the change.
     pub fn source(&self) -> SegmentedActivationSource {
         self.source
     }
@@ -109,13 +101,11 @@ impl<T> SegmentedOption<T> {
         self
     }
 
-    /// Controls whether navigation and activation may reach this option.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -149,12 +139,10 @@ impl SegmentedPaint {
         }
     }
 
-    /// Returns the option fill.
     pub const fn background(self) -> Rgba {
         self.background
     }
 
-    /// Returns the visible label color.
     pub const fn label(self) -> Rgba {
         self.label
     }
@@ -258,7 +246,6 @@ impl SegmentedMetrics {
         }
     }
 
-    /// Sets the inline padding inside one option.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
@@ -274,25 +261,21 @@ impl SegmentedMetrics {
         self
     }
 
-    /// Sets option corner rounding.
     pub fn radius(mut self, radius: Pixels) -> Self {
         self.radius = radius;
         self
     }
 
-    /// Sets the stable option border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
         self
     }
 
-    /// Sets the space between a card preview and its label.
     pub fn preview_gap(mut self, gap: Pixels) -> Self {
         self.preview_gap = gap;
         self
     }
 
-    /// Sets visible-label typography.
     pub fn typography(mut self, font_size: Pixels, line_height: f32) -> Self {
         self.font_size = font_size;
         self.line_height = line_height.clamp(1.0, 2.0);
@@ -331,7 +314,6 @@ pub struct SegmentedSizes {
 }
 
 impl SegmentedSizes {
-    /// Creates a complete size catalog.
     pub const fn new(regular: SegmentedMetrics, card: SegmentedMetrics) -> Self {
         Self { regular, card }
     }
@@ -423,7 +405,6 @@ impl SegmentedControlTheme {
         paints.resolve(selected)
     }
 
-    /// Sets the semantic shadow lifting the selected segment out of its track.
     pub const fn selected_shadow(mut self, shadow: ControlShadow) -> Self {
         self.selected_shadow = shadow;
         self
@@ -542,19 +523,16 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         })
     }
 
-    /// Selects a standard presentation.
     pub fn size(mut self, size: SegmentedSize) -> Self {
         self.size = size;
         self
     }
 
-    /// Controls whether the control can request a selection change.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the control.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
         self
@@ -575,13 +553,11 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content to the whole control.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.tooltip = Some(tooltip);
         self

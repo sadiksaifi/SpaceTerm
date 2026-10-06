@@ -43,7 +43,6 @@ pub struct FuzzyMatch {
 }
 
 impl FuzzyMatch {
-    /// Returns the candidate's index in the source slice.
     pub const fn item_index(&self) -> usize {
         self.item_index
     }

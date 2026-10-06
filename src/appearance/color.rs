@@ -7,9 +7,7 @@ pub(crate) struct Color {
 }
 
 impl Color {
-    /// The dark contrast endpoint.
     pub(crate) const BLACK: Self = Self::rgb(0x000000);
-    /// The light contrast endpoint.
     pub(crate) const WHITE: Self = Self::rgb(0xffffff);
 
     pub(crate) const fn rgb(hex: u32) -> Self {
@@ -129,10 +127,7 @@ impl Color {
     }
 
     /// Express this opaque semantic target as the smallest straight-alpha overlay over `base`.
-    ///
-    /// The result preserves the target's direction away from its semantic host without retaining
-    /// the opaque ink used to author that target. Callers must composite authored alpha into the
-    /// target before invoking this operation.
+    /// Callers must composite authored alpha into the target first.
     pub(crate) fn relative_overlay(self, base: Self) -> Self {
         let base_channels = [base.r, base.g, base.b].map(f64::from);
         let target_channels = [self.r, self.g, self.b].map(f64::from);
@@ -332,12 +327,7 @@ impl Color {
             .map(|(color, _)| color)
     }
 
-    /// Finds the nearest readable luminance on one fixed polarity side.
-    ///
-    /// Hue and chroma remain exact until the sRGB gamut boundary forces chroma inward. Unlike
-    /// [`Self::readable_preserving_chroma`], this never searches the opposite luminance endpoint
-    /// and never changes opacity, so callers can reserve polarity flips and alpha changes for
-    /// their own later fallback stages.
+    /// Like [`Self::readable_preserving_chroma`], but never flips polarity or changes opacity.
     pub(crate) fn readable_preserving_chroma_toward(
         self,
         backgrounds: &[Self],

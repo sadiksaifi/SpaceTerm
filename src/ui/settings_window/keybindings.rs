@@ -1,9 +1,5 @@
 //! The Keybindings section: the Shortcut each Command resolves to, and a recorder to change it.
-//!
-//! [`crate::keybindings`] owns Keymap policy. These rows present the draft's resolved Keymap,
-//! refuse a Reserved Shortcut in the recorder with its reason, and edit the retained overrides
-//! through the Settings draft, which the keymap runtime applies to every window as it changes.
-//! A search above the rows narrows them by Command name or by a Shortcut pressed into it.
+//! [`crate::keybindings`] owns Keymap policy.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

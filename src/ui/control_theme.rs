@@ -41,9 +41,7 @@ pub(super) fn catalog(
     appearance: &super::appearance::ChromeAppearance,
     motion: spaceterm_ui::ControlMotion,
 ) -> ControlThemeCatalog {
-    // Controls paint the window's material. Floating controls use the same semantic colors as
-    // their host, with fills compiled into overlays so the shell remains visible beneath them.
-    // Overlay rows also receive the opaque presentation as their contrast reference.
+    // Floating controls compile fills into overlays so the shell remains visible beneath them.
     let reference = &appearance.colors;
     let colors = &appearance.control_colors;
     let segmented = &appearance.segmented_control_colors;
@@ -444,9 +442,8 @@ fn row_backgrounds(
         if fill.a == 0 {
             return background;
         }
-        // The catalog folds tone and wash into one material. Rendering blends them separately,
-        // so adding a row fill can move the endpoint one level beyond that folded estimate.
-        // Idle rows keep the shell's already-resolved content and do not add this extra layer.
+        // The catalog folds tone and wash into one material but rendering blends them separately,
+        // so a row fill can move the endpoint one level beyond that estimate.
         let channel = |value: u8| {
             if underlay.r == 0 {
                 value.saturating_sub(1)
@@ -534,12 +531,9 @@ fn shared_neutral(
     (contrast >= minimum).then_some(foreground)
 }
 
-/// Compresses one row-state overlay into the readable interval connected to transparent.
-///
-/// Fully opaque ink can become readable again after crossing an inaccessible middle interval;
-/// stopping at the first failure keeps the result on the material side of that interval. The
-/// compression curve preserves ordering among states that share the same ink and host instead of
-/// flattening each of them onto one alpha ceiling.
+/// Compresses one row-state overlay into the readable interval connected to transparent. Opaque ink
+/// can become readable again past an inaccessible middle interval, so the search stops at the first
+/// failure.
 fn readable_material_row_fill(
     fill: crate::appearance::Color,
     surface: crate::appearance::Color,
@@ -716,9 +710,8 @@ pub(super) fn overlay_list_rows_with_policy(
     )
 }
 
-/// What a row paints over the surface it rests on. Without a material it paints its authored
-/// composite. With a material it paints the smallest host-relative overlay that reaches the same
-/// state, and an idle row paints nothing, so the surface is never composited twice.
+/// What a row paints over the surface it rests on. With a material, an idle row paints nothing so
+/// the surface is never composited twice.
 pub(super) fn row_fill(
     (reference, reference_surface): (crate::appearance::Color, crate::appearance::Color),
     (paint, paint_surface): (crate::appearance::Color, crate::appearance::Color),

@@ -464,9 +464,6 @@ pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
 }
 
 /// The font availability captured at startup or at the last explicit font reload.
-///
-/// Settings presents only families the resolver can actually use, so an unavailable choice cannot
-/// be made from the interface in the first place.
 pub(crate) fn available_fonts(cx: &App) -> AvailableFonts {
     cx.try_global::<AppearanceRuntime>()
         .map(|runtime| runtime.fonts.clone())
@@ -491,21 +488,14 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
 }
 
 /// Which client titlebar height anchors one window's native traffic lights.
-///
-/// Workspace chrome absorbs the frame's top space while Settings chrome does not, so each
-/// window keeps its own anchor against the same host geometry facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrafficLightChrome {
     Workspace,
     SidebarWindow,
 }
 
-/// Owns one Operating-System Window's native traffic-light position across density changes.
-///
-/// The native position is fixed at window open while Comfortable density grows the titlebar,
-/// so stored buttons would otherwise ride high above centered Tabs and headings. Re-applying
-/// the geometry-anchored position keeps their center aligned with the taller chrome. Repeat
-/// applies with an unchanged position cost no native work.
+/// Owns one Operating-System Window's native traffic-light position across density changes. The
+/// native position is fixed at window open, so Comfortable density would otherwise leave it high.
 pub(crate) struct WindowTrafficLightOwner {
     role: TrafficLightChrome,
     applied: Option<gpui::Point<gpui::Pixels>>,
@@ -585,14 +575,8 @@ impl WindowAppearanceOwner {
     }
 }
 
-/// What must sit behind this window's content.
-///
-/// The Chrome tone travels with the request because the material behind the window is what the
-/// reader sees the desktop through, and Chrome only shows the desktop through a material its own
-/// paint does not match. The tone is read from the compiled window root rather than from the
-/// Light or Dark slot, so a definition filed under Light that paints a near-black root asks for
-/// the material its own paint can show. Deciding that here keeps the choice one piece of product
-/// policy rather than an assumption inside the platform Adapter.
+/// What must sit behind this window's content. The Chrome tone is read from the compiled window
+/// root rather than the Light or Dark slot, so the material matches the paint.
 fn requested_backdrop(
     effective: crate::appearance::WindowBackgroundAppearance,
     tone: crate::appearance::ChromeTone,
@@ -609,12 +593,9 @@ pub(crate) fn window_background(cx: &App) -> gpui::WindowBackgroundAppearance {
     native_background(current(cx).chrome.composition.effective)
 }
 
-/// A blurred window asks the framework for a transparent one.
-///
-/// SpaceTerm owns the blurred backdrop itself through `AppearancePlatform`, because GPUI's own
-/// blurred background rewrites the native material's private layers and leaves the desktop
-/// showing through unblurred. Asking for transparency is exactly the part of the framework's
-/// behavior SpaceTerm still wants: a non-opaque window whose renderer composites straight alpha.
+/// A blurred window asks the framework for a transparent one. SpaceTerm owns the blurred backdrop
+/// through `AppearancePlatform` because GPUI's blurred background rewrites the native material's
+/// private layers and leaves the desktop unblurred.
 fn native_background(
     appearance: crate::appearance::WindowBackgroundAppearance,
 ) -> gpui::WindowBackgroundAppearance {

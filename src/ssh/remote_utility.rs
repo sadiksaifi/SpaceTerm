@@ -364,7 +364,6 @@ pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
-    /// Creates a client bound to one prepared command and Control Connection cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,

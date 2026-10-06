@@ -1,18 +1,7 @@
 //! One presentation system for every surface that floats over window content.
 //!
-//! A floating surface sits over content that is already painted. Its shared shell filters spatial
-//! detail when requested, constrains the backdrop's straight color, admits the native window
-//! backing when available, and adds a small host-relative elevation wash. Every floating family
-//! selects a semantic [`FloatingRole`] and receives the complete treatment for it: backdrop tone,
-//! coverage limit, wash, filter, outer edge, internal divider, corner geometry, content inset,
-//! elevation, clipping, and window layer. No call site chooses its own alpha, blur, radius, border,
-//! separator, or shadow.
-//!
-//! Controls nested inside a floating surface resolve against that surface rather than against the
-//! window root. [`FloatingShell::mount`] enters a host scope for the complete lifetime of the
-//! surface's descendants, covering layout, prepaint, and paint, so retained entities and custom
-//! elements resolve their own presentation correctly rather than depending on a render-time swap.
-//! Content that defers carries its own surface, which re-enters the scope inside the deferred draw.
+//! Each floating family selects a [`FloatingRole`] and receives the complete treatment for it; no
+//! call site chooses its own alpha, blur, radius, border, separator, or shadow.
 
 use std::cell::Cell;
 
@@ -71,7 +60,6 @@ impl FloatingRole {
         }
     }
 
-    /// Whether this role paints the window's raised material or its quiet readout material.
     const fn quiet_material(self) -> bool {
         matches!(self, Self::Readout)
     }
@@ -189,7 +177,6 @@ pub struct FloatingSurfacePaints {
 }
 
 impl FloatingSurfacePaints {
-    /// Creates the complete bounded material catalog.
     pub fn new(raised: FloatingSurfacePaint, readout: FloatingSurfacePaint) -> Self {
         Self { raised, readout }
     }
@@ -251,7 +238,6 @@ impl FloatingSurfaceTheme {
         self
     }
 
-    /// The scrim painted beneath a window-modal surface.
     pub fn scrim(&self) -> Rgba {
         self.scrim
     }
@@ -314,7 +300,6 @@ pub fn floating_surface_theme(cx: &App) -> FloatingSurfaceTheme {
         .unwrap_or_default()
 }
 
-/// Returns the complete resolved presentation of one role.
 pub(crate) fn shell(role: FloatingRole, cx: &App) -> FloatingShell {
     floating_surface_theme(cx).shell(role)
 }
@@ -332,12 +317,10 @@ pub struct FloatingShell {
 }
 
 impl FloatingShell {
-    /// The semantic role this shell resolves.
     pub fn role(&self) -> FloatingRole {
         self.role
     }
 
-    /// The surface's outer corner radius.
     pub fn corner_radius(&self) -> Pixels {
         self.corner_radius
     }
@@ -352,7 +335,6 @@ impl FloatingShell {
         self.backdrop_alpha_limit
     }
 
-    /// The concentric radius of a row or control inset directly inside this surface.
     pub fn nested_radius(&self) -> Pixels {
         (self.corner_radius - self.content_inset).max(px(4.0))
     }
@@ -385,7 +367,6 @@ impl FloatingShell {
         self.paint.divider
     }
 
-    /// The window layer this surface reaches.
     pub fn layer(&self, hosts_nested_surface: bool) -> FloatingLayer {
         self.role.layer(hosts_nested_surface)
     }

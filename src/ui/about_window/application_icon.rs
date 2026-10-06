@@ -1,9 +1,5 @@
 //! Draws an identity's application icon from its Icon Composer document.
-//!
-//! Hosts with a compiled bundle icon show that icon. Elsewhere SpaceTerm composes the same document
-//! as one full-color SVG: the document's fill on the icon body, each layer's artwork in its
-//! light-appearance fill, and the layer shadow and translucency the document asks for. The glass
-//! material itself is approximated as a flat, partly translucent fill under a soft rim highlight.
+//! Without a compiled bundle icon, the glass material is approximated as a flat translucent fill.
 
 use std::fmt::Write as _;
 

@@ -49,12 +49,9 @@ pub enum DialogInitialFocus<A> {
 
 /// A layout-transparent focus-reveal adapter for an arbitrary Dialog body control.
 ///
-/// [`crate::Button`] and [`crate::TextInput`] register themselves automatically and do not need
-/// this adapter. A custom control built with GPUI's plain `track_focus` must wrap its outer element
-/// in `DialogFocusTarget` and provide the same [`FocusHandle`] used by
-/// [`DialogInitialFocus::Body`] or the `first_invalid` field of [`DialogCloseDecision::Deny`]. The
-/// wrapped content retains its layout, focus tracking, keyboard handling, pointer behavior, and
-/// paint.
+/// [`crate::Button`] and [`crate::TextInput`] register themselves. A custom control that uses
+/// `track_focus` wraps its outer element in this adapter with the same [`FocusHandle`] it passes to
+/// [`DialogInitialFocus::Body`] or [`DialogCloseDecision::Deny`].
 pub struct DialogFocusTarget {
     content: AnyElement,
     focus: FocusHandle,
@@ -153,12 +150,10 @@ impl<A> DialogActionRequest<A> {
         }
     }
 
-    /// Returns the caller-owned typed action identity.
     pub fn action_id(&self) -> &A {
         &self.action_id
     }
 
-    /// Returns the content-free activation path.
     pub const fn source(&self) -> ModalActivationSource {
         self.source
     }
@@ -171,11 +166,8 @@ impl<A> DialogActionRequest<A> {
 
 /// Caller decision for one close attempt.
 ///
-/// The request callback runs after the private reducer update is released. [`Self::Pending`]
-/// transitions the matching presentation and attempt into duplicate-safe pending state. One safe
-/// nested Cancel attempt may coexist with an original pending attempt. The callback's
-/// [`DialogPendingCompletion`] later allows or denies its exact attempt; denial preserves any
-/// still-live counterpart, while the first allowed terminal decision closes exactly once.
+/// [`Self::Pending`] blocks duplicate activation until the callback's [`DialogPendingCompletion`]
+/// allows or denies the exact attempt. One nested Cancel attempt may coexist with it.
 pub enum DialogCloseDecision {
     /// Close with the requested typed action.
     Allow,
@@ -210,24 +202,9 @@ pub enum DialogOutcome<A> {
 
 /// A compact window-modal task surface for forms, options, and short scoped workflows.
 ///
-/// The shared renderer owns the fixed header and footer, vertically scrollable body viewport,
-/// adaptive action area, focus scope, and complete underlay modality. [`Self::body`] attaches one
-/// caller-owned reusable GPUI entity without exposing those mechanisms. [`crate::Button`] and
-/// [`crate::TextInput`] automatically participate in focus reveal; arbitrary body controls use
-/// [`DialogFocusTarget`]. Tab and Shift-Tab remain contained and are repaired when a target
-/// disables or disappears. Focused action buttons consume Return before the Dialog default, while
-/// focused body controls may decline Return to that default. Focused children also receive Escape
-/// before the Dialog, including input-method composition cancellation.
+/// [`Self::body`] attaches one caller-owned GPUI entity. Custom focusable body controls join focus
+/// reveal through [`DialogFocusTarget`].
 ///
-/// Actions retain caller-owned typed identity and logical order while installed desktop policy
-/// owns physical ordering. Denied close attempts preserve caller-owned field values and may focus
-/// the first invalid field. Pending attempts block duplicate activation while allowing the safe
-/// Cancel path where configured. Close and result callbacks are exactly once and run after the
-/// private owner update is released. While a primary action is pending, at most one nested Cancel
-/// attempt may be requested; duplicate Cancel activation is disabled without replacing either
-/// completion authority.
-///
-/// # Example
 ///
 /// ```
 /// use spaceterm_ui::{
@@ -292,13 +269,11 @@ impl<A> Dialog<A> {
         self
     }
 
-    /// Sets concise descriptive text related to the logical title.
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
         self
     }
 
-    /// Selects one bounded width from the installed modal metrics.
     pub fn size(mut self, size: DialogSize) -> Self {
         self.size = size;
         self

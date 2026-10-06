@@ -1,8 +1,4 @@
-//! The Modals section: each modal family over controls it must obscure.
-//!
-//! The obscured input, combo box, and menu stay in the section while a modal is open. None of
-//! them may receive interaction through the scrim, and closing the modal returns focus to the
-//! control that held it.
+//! The Modals section: each modal family over controls the scrim must keep from interaction.
 
 use std::time::Duration;
 

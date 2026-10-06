@@ -21,10 +21,8 @@ pub(super) struct RowFade {
     level: f32,
 }
 
-/// The chip carrying a Workspace row's hover and persistent selection.
-///
-/// The geometry and the paints are read together so the fill and the hover state cannot drift
-/// apart. An emphasized selection marks a sidebar with keyboard focus.
+/// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
+/// marks a sidebar with keyboard focus.
 fn row_chip(
     selected: bool,
     emphasized: bool,
@@ -75,9 +73,6 @@ fn row_chip(
 }
 
 /// The leading and trailing row padding that keeps a row's content balanced inside its chip.
-///
-/// Each side's padding is the chip's margin on that side plus the air the content keeps inside the
-/// chip.
 fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> (Pixels, Pixels) {
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     let air = appearance.spacing(SIDEBAR_ROW_CHIP_PADDING);
@@ -201,11 +196,8 @@ impl WorkspaceSidebar {
 }
 
 impl WorkspaceSidebar {
-    /// One Workspace row, or the lifted copy of it that follows the pointer during a drag.
-    ///
-    /// Both paint the same face, so a lifted row looks exactly like the row it lifts. The copy is
-    /// always under the pointer, so it keeps the paint a row has there, and it claims no pointer
-    /// input because it lies over every drop target.
+    /// One Workspace row, or the lifted copy that follows the pointer during a drag. The copy
+    /// claims no pointer input because it lies over every drop target.
     #[expect(
         clippy::too_many_arguments,
         reason = "one row render step needs its model, role, hover, owner, presentation, and host geometry"
@@ -238,12 +230,9 @@ impl WorkspaceSidebar {
         let mut row_colors = appearance
             .host_colors(spaceterm_ui::ControlHost::Panel)
             .clone();
-        // Hover and selection are carried by an inset chip rather than by the row's own fill, so
-        // the strip keeps the sidebar surface and the current Workspace reads as a resting shape
-        // with air around it. The chip's paints are read before the selected colors are promoted
-        // below, because that promotion is what the row's text and icons consume.
-        // A sidebar the keyboard focused emphasizes its selection in the accent color, like an
-        // AppKit source list, and draws no focus ring.
+        // The chip's paints are read before the selected colors are promoted below, because that
+        // promotion is what the row's text and icons consume. A keyboard-focused sidebar emphasizes
+        // its selection in the accent color, like an AppKit source list, and draws no focus ring.
         let emphasized = appearance.active && self.has_visible_focus(window);
         let selection_colors = if emphasized {
             crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
@@ -683,9 +672,8 @@ impl WorkspaceSidebar {
                 let _ = menu_sidebar.update(cx, |sidebar, cx| {
                     sidebar.dismiss_editing(window, cx);
                 });
-                // A chooser opens after this menu closes so it captures Terminal Input
-                // Focus (not the menu) to restore on cancel, matching the switcher's
-                // creation rows.
+                // A chooser opens after this menu closes so it captures Terminal Input Focus, not
+                // the menu, to restore on cancel.
                 cx.defer(move |cx| {
                     let _ = sidebar.update(cx, |_, cx| {
                         cx.emit(SidebarEvent::Create(creation));
@@ -738,9 +726,6 @@ impl WorkspaceSidebar {
                     .items_center()
                     .justify_between()
                     .px(appearance.spacing(SIDEBAR_FOOTER_HORIZONTAL_PADDING))
-                    // Settings stands alone at the leading end: it is application scoped, while
-                    // the menu opposite it adds a Workspace to this window. Keeping the odd one
-                    // out apart says which is which without a label.
                     .child(
                         IconButton::new("open-settings-button", "Settings", move |foreground| {
                             div()
@@ -823,9 +808,7 @@ impl WorkspaceSidebar {
         }
     }
 }
-/// The footer creation menu's rows mirror the Workspace switcher's creation rows: the same
-/// labels, leading icons, and trailing shortcuts, presented as a button-triggered menu.
-/// Labels and icons come from the shared creation descriptors so the two surfaces cannot drift.
+/// The footer creation menu's rows, built from the shared creation descriptors.
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
     remote_disabled: bool,

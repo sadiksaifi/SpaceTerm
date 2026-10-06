@@ -1,10 +1,5 @@
-//! The Privacy section's microphone access row: the current authorization and its one honest action.
-//!
-//! Voice tools running in a Terminal Session inherit SpaceTerm's microphone authorization, so this
-//! row is where a person learns why such a tool cannot hear them and how to fix it. The row never
-//! offers an action the system would refuse: it requests authorization only while the system has
-//! not decided, sends a denied decision to the system's privacy settings, and explains a restriction
-//! without pretending it can prompt.
+//! The Privacy section's microphone access row: the current authorization and the one action the
+//! system will accept.
 
 use std::rc::Rc;
 
@@ -79,10 +74,8 @@ impl MicrophoneAccessRow {
         row
     }
 
-    /// Reads the current authorization, which can change in the system's settings at any time.
-    ///
-    /// A pending request keeps its status until the system answers it, so a window activation
-    /// caused by the prompt itself cannot race the decision.
+    /// Reads the current authorization. A pending request keeps its status until the system
+    /// answers, so a window activation the prompt causes cannot race the decision.
     pub(super) fn refresh(&mut self) {
         if self.status != MicrophoneAccessStatus::Requesting {
             self.apply(self.read());
@@ -198,10 +191,8 @@ impl MicrophoneAccessRow {
 }
 
 impl SettingsWindow {
-    /// Asks the system for microphone access, once, from the Not Determined state.
-    ///
-    /// The native completion may run on any queue. It only sends the closed decision through a
-    /// channel, and the window applies it on the foreground executor before repainting.
+    /// Asks the system for microphone access, once, from the Not Determined state. The native
+    /// completion may run on any queue, so it sends the decision through a channel.
     pub(super) fn request_microphone_access(&mut self, cx: &mut Context<Self>) {
         let row = &mut self.microphone_access;
         if row.status

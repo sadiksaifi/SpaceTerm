@@ -1,8 +1,6 @@
 //! The Settings Document file as other programs see it.
 //!
-//! A person edits settings.json in the program the Operating System assigns to JSON files.
-//! SpaceTerm shows where the file lives, opens it in that program, and learns when the file may
-//! have changed. Reading and writing the file stay with the settings storage.
+//! Reading and writing the file stay with the settings storage.
 
 use std::{
     any::Any,
@@ -133,7 +131,6 @@ pub(crate) mod testing {
             file
         }
 
-        /// Reports a change as the Operating System would.
         pub(crate) fn announce_change(&self) {
             let changed = self.changed.borrow().clone();
             changed.expect("the file is watched")();

@@ -45,10 +45,8 @@ impl CompositionCapabilities {
     }
 
     /// The missing desktop capability that keeps Transparency and Blur from changing the window.
-    ///
-    /// Without desktop transparency nothing shows through the window. Without desktop blur the
-    /// window keeps its opaque backing too, because unsoftened desktop content reads poorly
-    /// behind these materials and an application cannot blur the desktop behind its own window.
+    /// Without desktop blur the window stays opaque because an application cannot blur the
+    /// desktop behind its own window.
     pub(crate) const fn unavailable_window_effect(self) -> Option<UnavailableWindowEffect> {
         if !self.native_window_transparency {
             Some(UnavailableWindowEffect::Transparency)
@@ -59,11 +57,8 @@ impl CompositionCapabilities {
         }
     }
 
-    /// The Transparency and Blur that take effect on this desktop.
-    ///
-    /// Where a window effect is unavailable, neither choice can change the window, so both take
-    /// their defaults everywhere, floating surfaces included. The retained choices are untouched
-    /// and return on a desktop that presents them.
+    /// The Transparency and Blur that take effect on this desktop. Both take their defaults while
+    /// a window effect is unavailable; the retained choices are untouched.
     pub(crate) fn window_background(
         self,
         preferences: &super::preferences::WindowPreferences,
@@ -141,7 +136,6 @@ pub(crate) enum ChromeTone {
 }
 
 impl ChromeTone {
-    /// Reads the tone of one surface's authored color.
     pub(crate) fn of(base: super::Color) -> Self {
         if [base.r, base.g, base.b]
             .iter()
@@ -173,11 +167,8 @@ impl SurfaceMaterials {
     /// Every surface keeps its authored color; the window has a known opaque backing.
     pub(crate) const OPAQUE: Self = Self { glass: 0, sheet: 0 };
 
-    /// Returns the same material policy with only a share of its requested transmission.
-    ///
-    /// A nested application surface can retain more of its semantic color than the window sheet
-    /// without inventing another transparency preference. Accessibility-forced opaque materials
-    /// remain opaque because their requested transmission is already zero.
+    /// Returns this policy with only `share` of its requested transmission, so a nested surface
+    /// keeps more of its color than the window sheet without another preference.
     pub(crate) fn with_transmission_share(self, share: f32) -> Self {
         let share = if share.is_finite() {
             share.clamp(0.0, 1.0)
@@ -190,45 +181,23 @@ impl SurfaceMaterials {
         }
     }
 
-    /// What a resting surface still paints at the maximum setting, and what a floating one does.
-    ///
-    /// The sheet is the window's transmission: one continuous tint over everything, so the
-    /// maximum setting hands the desktop all of it and keeps none. A resting surface paints only
-    /// its difference from that sheet, and that difference is the whole of what tells a Pane from
-    /// the shell, a card from the page, or a selected chip from the row beside it. Giving it up
-    /// buys a few percent more desktop and costs the window its hierarchy, so a resting surface
-    /// keeps enough of its color to lift several levels off a pale desktop instead.
-    ///
+    /// What a resting surface still paints at the maximum setting. A resting surface's
+    /// difference from the sheet carries the window's hierarchy, so it is never given up.
     const RESTING_RESIDUAL: f32 = 0.42;
-    /// How strongly a floating material constrains backdrop color at maximum transparency.
-    ///
-    /// The treatment preserves backdrop alpha, so this strength does not cover the native window
-    /// material. The same curve applies with blur on and off.
+    /// How strongly a floating material constrains backdrop color at maximum transparency, with
+    /// blur on or off.
     const FLOATING_RESIDUAL: f32 = 0.70;
     /// The most coverage a floating shell adds after the window's glass has engaged.
     const FLOATING_WASH_CEILING: u8 = 20;
     /// How much already-painted in-window content a floating shell may retain at maximum
     /// transparency. The remainder exposes the effective native window backdrop.
     const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
-    /// How much more ink a dark ladder spends at the maximum setting than over its own base.
-    ///
-    /// A dark rung is solved as light ink over the scheme's near-black base, but the backdrop the
-    /// window admits is lighter than that base, so the same overlay covers less distance and the
-    /// rungs close up as the setting rises. The overlay grows with the setting instead, staying
-    /// within a few percent of the ceiling so every rung still transmits nearly all its backing.
+    /// How much more ink a dark ladder spends at the maximum setting than over its own base,
+    /// because the admitted backdrop is lighter than the near-black base the rungs are solved over.
     const DARK_BACKING_GAIN: f64 = 0.5;
     /// How many times over bright Chrome's window tint gives up what the Setting leaves it.
-    ///
-    /// The Setting admits the same share of the native material whatever is painted over it.
-    /// Under dark Chrome that share arrives as light against near-black and reads as glass. Bright
-    /// Chrome paints near-white, so the admitted backdrop is close to what it covers and the
-    /// window reads as paper instead. A bright sheet therefore gives up its tint twice over: what
-    /// the Setting leaves standing is taken again. Both ends keep their meaning, since nothing
-    /// taken twice is still nothing and everything taken twice is still everything, and the rate
-    /// at the bottom of the range only doubles, so the Stepper stays continuous.
-    ///
-    /// Only the sheet reads this. Resting surfaces keep the overlays their appearance authored,
-    /// so a Pane, a chip and a row hold their spacing while the shell behind them clears.
+    /// Backdrop admitted under near-white paint reads as paper, so a bright sheet clears twice.
+    /// Only the sheet reads this.
     const BRIGHT_SHEET_PASSES: i32 = 2;
 
     /// The setting by which the window's glass behaves as glass: resting surfaces spend no more
@@ -236,22 +205,12 @@ impl SurfaceMaterials {
     /// leaving 0 moves the surfaces continuously instead of stepping.
     const GLASS_ENGAGED_AT: f32 = 0.12;
 
-    /// The most a near-neutral resting surface may add over the window's sheet.
-    ///
-    /// Bright Chrome needs an almost opaque white to reproduce its surfaces over its own base,
-    /// and dark Chrome needs only a sliver of light ink, so the two spend different amounts of
-    /// paint for the same authored step. Both stay translucent.
+    /// The most a near-neutral resting surface may add over the window's sheet. Bright Chrome
+    /// needs near-opaque white per step; dark Chrome needs a sliver of light ink.
     const LADDER_CEILING_BRIGHT: f64 = 0.45;
     const LADDER_CEILING_DARK: f64 = 0.12;
-    /// The most a chip or a row may add over the window's sheet.
-    ///
-    /// The ceiling above keeps a surface from painting the backdrop out, which is a question of
-    /// area: a Pane or a sidebar covers the desktop, so what it spends is what the reader loses.
-    /// A selected chip and a hovered row cover a few hundred square points between them, so the
-    /// ink they spend costs the reader nothing they would have seen, and they may reproduce more
-    /// of their step. They need it, too. A chip is small, and a small shape needs more contrast
-    /// than a large one to read as the same step. A dark scheme's rungs already fit under their
-    /// own ceiling, so this raises nothing there.
+    /// The most a chip or a row may add over the window's sheet. Small shapes hide little
+    /// backdrop and need more contrast to read as the same step.
     const LADDER_CEILING_COMPACT: f64 = 0.65;
     /// The channel spread within which a color reads as a neutral rather than as a stated hue,
     /// and the spread by which it reads entirely as a hue.
@@ -299,14 +258,8 @@ impl SurfaceMaterials {
         }
     }
 
-    /// The share of an authored color one role still holds at this setting.
-    ///
-    /// The sheet fades linearly. Resting roles approach their residual through a quadratic curve,
-    /// retaining more color at high transparency with a smaller change near the default.
-    /// Residuals below a half keep that curve strictly decreasing across the whole range.
-    ///
-    /// Floating surfaces use a linear curve because their larger residual would make the
-    /// quadratic curve non-monotonic.
+    /// The share of an authored color one role still holds at this setting. Resting roles use a
+    /// quadratic curve, which is monotonic only for residuals below one half; others fade linearly.
     fn presence(self, role: SurfaceRole) -> f32 {
         if matches!(role, SurfaceRole::Sheet) {
             return 1.0 - f32::from(self.sheet) / 255.0;
@@ -324,13 +277,8 @@ impl SurfaceMaterials {
         (255.0 * self.presence(role).powf(Self::transmission(role).1)).round() as u8
     }
 
-    /// Fits one appearance's reconstruction alphas into the overlay a resting surface may spend.
-    ///
-    /// An alpha small enough to fit passes through untouched, so a surface authored close to the
-    /// base keeps exactly the weight it asked for. The crowded top of the range is compressed
-    /// into whatever is left below the ceiling, so surfaces that each need almost all the ink
-    /// still land on distinct overlays instead of collapsing onto the ceiling together. The map
-    /// is continuous, never increases an alpha, and preserves order.
+    /// Fits reconstruction alphas under `ceiling`, compressing the crowded top of the range so
+    /// rungs stay distinct. The map is continuous, never increases an alpha, and preserves order.
     fn compress(alpha: f64, ceiling: f64) -> f64 {
         let knee = ceiling * (1.0 - ceiling);
         if alpha <= knee {
@@ -341,13 +289,7 @@ impl SurfaceMaterials {
     }
 
     /// How far a base and a surface read as two rungs of one neutral elevation ladder rather than
-    /// as two stated colors.
-    ///
-    /// Only a ladder is compressed: its rungs share one ink, so spending less of it keeps their
-    /// order and their spacing. A saturated fill and a surface authored far from the base are
-    /// each saying something the backdrop cannot say for them, and keep the alpha they need.
-    /// Both judgements fade across a range rather than switching at a threshold, so retuning a
-    /// palette moves the result gradually instead of stepping.
+    /// as two stated colors. Fades across a range so retuning a palette never steps the result.
     fn ladder_membership(base: [f64; 3], target: [f64; 3]) -> f64 {
         let spread = |channels: [f64; 3]| {
             channels.into_iter().fold(f64::NEG_INFINITY, f64::max)
@@ -421,11 +363,8 @@ impl SurfaceMaterials {
                 .round()
                 .clamp(0.0, 255.0) as u8
         });
-        // A bright scheme's surfaces each need almost opaque white to reproduce their reference
-        // color, so reproducing them exactly would paint the backdrop out and, once clamped to
-        // one ceiling, would paint every one of them the same. Compressing the ladder instead
-        // keeps the Pane, the selected chip and the hovered row apart at every setting. Saturated
-        // action and status fills retain their color strength for readable foregrounds.
+        // Compress the bright ladder instead of clamping it so its rungs stay distinct.
+        // Saturated fills keep their strength for readable foregrounds.
         let bright = Self::is_bright(base);
         let ceiling = match (bright, compact) {
             (true, true) => Self::LADDER_CEILING_COMPACT,
@@ -437,11 +376,8 @@ impl SurfaceMaterials {
         let mut opacity = alpha + (Self::compress(alpha, ceiling) - alpha) * ladder;
         let mut retention = self.alpha(role);
         if !bright {
-            // A dark rung's overlay is already a sliver of ink under the ceiling, so fading it
-            // with the sheet buys no visible backdrop and costs the window its hierarchy. The
-            // ladder keeps its overlay, grown to cover the lighter backdrop it now rests on;
-            // saturated fills keep fading as before. Scaling every rung alike keeps their order
-            // and their spacing.
+            // Fading a dark rung buys no visible backdrop, so the ladder keeps its overlay,
+            // grown for the lighter backdrop it rests on.
             opacity *= 1.0 + Self::DARK_BACKING_GAIN * f64::from(self.admitted()) * ladder;
             retention =
                 (f64::from(retention) + (255.0 - f64::from(retention)) * ladder).round() as u8;
@@ -452,11 +388,6 @@ impl SurfaceMaterials {
     }
 
     /// Resolves a decorative edge as a host-relative overlay when glass is active.
-    ///
-    /// Opaque and accessibility-limited presentations retain the authored edge exactly. An
-    /// explicit transparent edge also stays absent. Otherwise authored alpha is first composed
-    /// into the semantic target, then reconstructed as the smallest overlay that preserves the
-    /// edge's direction away from its immediate host.
     pub(crate) fn edge(self, host: super::Color, edge: super::Color) -> super::Color {
         if self.is_opaque() || edge.a == 0 {
             return edge;
@@ -509,11 +440,8 @@ impl SurfaceMaterials {
         self.glass == 0
     }
 
-    /// Maximum alpha that already-painted content may retain beneath a floating shell.
-    ///
-    /// This follows the effective window material, not the independently resolved floating
-    /// material. An opaque or unsupported native window has no backing to reveal and therefore
-    /// keeps the existing framebuffer intact.
+    /// Maximum alpha that already-painted content may retain beneath a floating shell. Follows
+    /// the effective window material, not the floating material.
     pub(crate) fn floating_backdrop_alpha_limit(self) -> f32 {
         1.0 - (1.0 - Self::FLOATING_BACKDROP_RETENTION) * self.admitted()
     }
@@ -521,7 +449,6 @@ impl SurfaceMaterials {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedWindowComposition {
-    /// Platform capabilities captured with this resolved presentation.
     pub(crate) capabilities: CompositionCapabilities,
     pub(crate) requested: WindowBackgroundAppearance,
     /// Effective native Operating-System Window backdrop.
@@ -764,9 +691,7 @@ mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
 
-    /// A desktop without transparency or blur keeps the window opaque, so neither choice changes
-    /// it. Both then take their defaults everywhere, floating surfaces included, so what Settings
-    /// shows is what renders; a desktop with both presents the retained choices again.
+    /// Without desktop transparency or blur, both choices take their defaults everywhere.
     #[test]
     fn unavailable_window_effects_resolve_every_material_from_the_defaults() {
         use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
@@ -1123,9 +1048,7 @@ mod tests {
         assert_eq!(material.paint(SurfaceRole::Base, base, base).a, 0);
     }
 
-    /// The rungs of one appearance's elevation ladder each need a different overlay, and a single
-    /// ceiling used to hand the crowded bright ones the same paint: a Pane, a selected chip and a
-    /// hovered row all became one flat wash. Compression must keep them apart at every setting.
+    /// Compression keeps every rung of an elevation ladder on a distinct overlay at every setting.
     #[test]
     fn resting_surfaces_stay_distinct_where_one_ceiling_would_collapse_them() {
         let ladders = [
@@ -1144,8 +1067,7 @@ mod tests {
                         .a
                 })
             };
-            // Below the setting where the glass engages, a surface is still allowed to reproduce
-            // the color it was authored as: the window it sits in is nearly opaque anyway.
+            // Below glass engagement, a surface reproduces its authored color.
             for transparency in [0.01, 0.05] {
                 let rungs = alphas(transparency);
                 assert!(
@@ -1169,8 +1091,7 @@ mod tests {
                 );
             }
         }
-        // The bright ladder is genuinely compressed where it used to collapse: reproducing a
-        // white Pane exactly would spend the whole of the sheet's remaining transmission.
+        // Reproducing a white Pane exactly would spend the sheet's remaining transmission.
         let bright = SurfaceMaterials::derive(0.35, ChromeTone::Dark);
         let exact = u16::from(bright.alpha(SurfaceRole::Surface));
         let painted = u16::from(
@@ -1181,8 +1102,6 @@ mod tests {
         assert!(painted * 2 < exact, "{painted} of {exact}");
     }
 
-    /// The Stepper is one continuous control, so transmission may not step, reverse, or land on
-    /// nothing: at the maximum setting a window is all the glass it can be and still a window.
     #[test]
     fn transmission_falls_smoothly_to_a_usable_maximum() {
         let base = Color::rgb(0xdcdee3);
@@ -1231,9 +1150,7 @@ mod tests {
             maximum.alpha(SurfaceRole::Floating) >= 96,
             "a menu must still constrain the color of content it is drawn over"
         );
-        // Nonzero is not the same as visible. A pale desktop is the hardest backing for a bright
-        // scheme to lift off, because white ink has the least room to work in, so that is where
-        // the surviving difference is measured.
+        // A pale desktop is the hardest backing for a bright scheme to lift off.
         let pale = Color::rgb(0xe0e0e0);
         for (rung, lift) in [(0xffffff_u32, 5_u8), (0xf6f8fb, 4), (0xe3e5e9, 2)] {
             let surface = maximum
@@ -1246,9 +1163,8 @@ mod tests {
         }
     }
 
-    /// Compression belongs to a neutral ladder. A saturated fill and a surface authored far from
-    /// the base are each stating a color the backdrop cannot state for them, and both reach their
-    /// authored value gradually rather than at a threshold.
+    /// Only a neutral ladder is compressed; saturated and distant fills reach their authored
+    /// value gradually.
     #[test]
     fn stated_colors_keep_the_alpha_they_need() {
         let base = Color::rgb(0xdcdee3);

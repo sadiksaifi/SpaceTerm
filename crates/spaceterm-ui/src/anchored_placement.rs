@@ -40,12 +40,6 @@ pub enum AnchoredTextDirection {
 }
 
 /// Placement preferences shared by anchored transient controls.
-///
-/// Surfaces keep the preferred side when they fit, then try the opposite side.
-/// If neither side fits, they shrink to the side with more room. Alignment can
-/// flip or shift along the other axis to keep the surface inside the viewport.
-/// When the target leaves no space on either preferred-axis side, placement
-/// falls back to the perpendicular axis if it has any room.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchoredPlacementConfig {
     pub(crate) placement: AnchoredPlacement,
@@ -73,13 +67,11 @@ impl AnchoredPlacementConfig {
         self
     }
 
-    /// Sets the gap between the target and surface.
     pub fn offset(mut self, offset: Pixels) -> Self {
         self.offset = offset.max(px(0.0));
         self
     }
 
-    /// Sets the minimum distance from the viewport edge.
     pub fn viewport_margin(mut self, margin: Pixels) -> Self {
         self.viewport_margin = margin.max(px(0.0));
         self

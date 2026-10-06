@@ -1,8 +1,5 @@
 //! The Terminal section: display fixtures the Workspace windows render in place of host facts.
-//!
-//! Each fixture replaces only what a Pane shows, never what it does. The Pane Caption fixture
-//! keeps captures independent of the host account and directory, and the link preview fixture
-//! shows the hover preview without a terminal hyperlink target.
+//! Each fixture replaces only what a Pane shows, never what it does.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Global, Window};

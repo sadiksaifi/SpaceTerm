@@ -5,12 +5,10 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 
-/// Atomically exchange two entries in one directory.
 pub(super) fn exchange_at(directory: &File, first: &CStr, second: &CStr) -> io::Result<()> {
     rename_at(directory, first, second, libc::RENAME_SWAP)
 }
 
-/// Atomically rename an entry within one directory, failing if the target exists.
 pub(super) fn rename_noreplace_at(directory: &File, from: &CStr, to: &CStr) -> io::Result<()> {
     rename_at(directory, from, to, libc::RENAME_EXCL)
 }
