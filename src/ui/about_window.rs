@@ -334,7 +334,10 @@ impl AboutWindow {
             Edges::default(),
             window,
         );
+        // The surface holds the window's focus, so it publishes a node for focus to rest on.
         let root = div()
+            .id("about-window-surface")
+            .role(gpui::accesskit::Role::Group)
             .debug_selector(|| "about-window-surface".to_owned())
             .key_context(ABOUT_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
