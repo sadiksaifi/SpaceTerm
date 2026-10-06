@@ -601,8 +601,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let Some(metrics) = self.metrics else {
             return;
         };
-        let Some(offset) = metrics.offset_for_progress(value / metrics.maximum_offset.as_f64())
-        else {
+        let maximum = metrics.maximum_offset.as_f64();
+        let Some(offset) = metrics.offset_for_progress(value.clamp(0.0, maximum) / maximum) else {
             return;
         };
         cx.emit(OverlayScrollbarEvent::InteractionStarted);
@@ -1283,5 +1283,44 @@ mod accessibility_tests {
         assert!(A11yTree::read(cx).with_role("ScrollBar").is_empty());
         perform(cx, node, Action::Increment);
         assert!(events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn pixel_scrollbars_clamp_large_finite_accessibility_values(cx: &mut TestAppContext) {
+        cx.set_global(ScrollbarTheme::new(
+            gpui::rgba(1),
+            gpui::rgba(2),
+            gpui::rgba(3),
+        ));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let (scrollbar, cx) = cx.add_window_view(|_, _| {
+            OverlayScrollbar::<f32>::new("test-scrollbar")
+                .accessibility_name("Scroll Settings")
+                .persistent()
+        });
+        scrollbar.update(cx, |_, cx| {
+            cx.subscribe(&scrollbar, move |_, _, event, _| {
+                recorded.borrow_mut().push(*event)
+            })
+            .detach();
+        });
+        scrollbar.update(cx, |scrollbar, cx| {
+            scrollbar.sync(ScrollMetrics::for_pixels(0.0, 200.0, 0.125, 0.0), cx);
+        });
+        let tree = A11yTree::read(cx);
+        perform_with(
+            cx,
+            tree.node("Scroll Settings"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(f64::MAX)),
+        );
+        assert_eq!(
+            *events.borrow(),
+            [
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(0.125)
+            ]
+        );
     }
 }
