@@ -3392,6 +3392,7 @@ fn render_row(
     let label_selector = format!("{row_selector}-label");
     let mark_selector = format!("{row_selector}-mark");
     let icon_selector = format!("{row_selector}-icon");
+    let shortcut_selector = format!("{row_selector}-shortcut");
     let mut row = div()
         .id(index)
         .debug_selector(move || row_selector)
@@ -3454,6 +3455,7 @@ fn render_row(
         .when_some(shortcut, |row, shortcut| {
             row.child(
                 div()
+                    .debug_selector(move || shortcut_selector)
                     .text_size(style.metrics.shortcut_font_size)
                     .line_height(style.metrics.shortcut_line_height)
                     .font(menu_shortcut_font(typography).clone())

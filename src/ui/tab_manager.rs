@@ -1870,6 +1870,7 @@ impl TabManager {
                     accessibility_name,
                     face,
                     tab_menu_entries(
+                        active,
                         index == 0,
                         index == last_index,
                         child_launch_available,
@@ -2313,8 +2314,10 @@ fn render_tab_identity(
         .into_any_element()
 }
 
-/// Every Tab command carries a symbol, so all labels share the icon column.
+/// Every Tab command carries a symbol, so all labels share the icon column. A Shortcut acts on
+/// the Active Tab, so only the Active Tab's menu advertises one.
 fn tab_menu_entries(
+    active: bool,
     first: bool,
     last: bool,
     child_launch_available: bool,
@@ -2323,6 +2326,7 @@ fn tab_menu_entries(
     let with_shortcut =
         |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
             .shortcut(action)
+            .filter(|_| active)
         {
             Some(shortcut) => entry.shortcut(shortcut),
             None => entry,
@@ -3531,6 +3535,35 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A Shortcut acts on the Active Tab, so only the Active Tab's menu may advertise one.
+    #[gpui::test]
+    fn tab_menu_should_show_shortcuts_only_for_the_active_tab(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let rows = [
+            "tab-menu-row-new-tab-shortcut",
+            "tab-menu-row-split-right-shortcut",
+            "tab-menu-row-split-down-shortcut",
+            "tab-menu-row-move-left-shortcut",
+            "tab-menu-row-move-right-shortcut",
+            "tab-menu-row-close-shortcut",
+        ];
+
+        right_click("tab-item-2-active", cx);
+        assert!(cx.debug_bounds("tab-menu-row-close-shortcut").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        right_click("tab-item-1-inactive", cx);
+        assert!(cx.debug_bounds("menu-panel-0").is_some());
+        for row in rows {
+            assert!(
+                cx.debug_bounds(row).is_none(),
+                "{row} must not advertise a Shortcut"
+            );
+        }
     }
 
     #[gpui::test]
