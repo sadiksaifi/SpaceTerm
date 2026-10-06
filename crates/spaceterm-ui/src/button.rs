@@ -9,8 +9,8 @@ use gpui::{
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     Pixels, RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, actions,
-    canvas, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, accesskit,
+    actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -44,6 +44,8 @@ pub enum ButtonActivationSource {
     Space,
     /// An unmodified Return or Enter key press while the button had keyboard focus.
     Return,
+    /// An assistive technology press, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// Information supplied to a button activation callback.
@@ -1575,10 +1577,27 @@ impl ButtonCore {
         let ring_id = crate::focus_ring::ring_id(&self.id);
         let corner_radii = self.joined_edge.corner_radii(style.corner_radius);
         let visual_inset = self.visual_inset;
+        let accessibility_name = self.accessibility_name.clone();
+        let on_accessibility_activate = self.on_activate.clone().filter(|_| enabled);
         let button = div()
             .id(self.id)
+            .role(accesskit::Role::Button)
+            .aria_label(self.accessibility_name.clone())
+            .aria_disabled(!enabled)
+            .when_some(on_accessibility_activate, |button, handler| {
+                button.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    handler(
+                        &ButtonActivation {
+                            source: ButtonActivationSource::Accessibility,
+                            role,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
             .debug_selector(move || {
-                debug_selector.unwrap_or_else(|| self.accessibility_name.to_string())
+                debug_selector.unwrap_or_else(|| accessibility_name.to_string())
             })
             .relative()
             .flex()
@@ -2188,6 +2207,55 @@ mod tests {
                 "disabled {button} refuses hover"
             );
         }
+    }
+
+    #[gpui::test]
+    fn buttons_publish_native_roles_names_states_and_press(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::Action;
+
+        struct AccessibleButtonsRoot(Rc<RefCell<Vec<ButtonActivationSource>>>);
+        impl Render for AccessibleButtonsRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let activations = self.0.clone();
+                div()
+                    .flex()
+                    .child(
+                        Button::new("save", "Save").on_activate(move |activation, _, _| {
+                            activations.borrow_mut().push(activation.source());
+                        }),
+                    )
+                    .child(
+                        IconButton::new("close", "Close Tab", |_| div().into_any_element())
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Button::new("delete", "Delete")
+                            .disabled(true)
+                            .on_activate(|_, _, _| {}),
+                    )
+            }
+        }
+
+        cx.set_global(test_theme());
+        let activations = Rc::new(RefCell::new(Vec::new()));
+        let root_activations = activations.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| AccessibleButtonsRoot(root_activations));
+        let tree = A11yTree::read(cx);
+        for name in ["Save", "Close Tab", "Delete"] {
+            assert_eq!(tree.node(name)["aria"]["role"], "Button", "{name}");
+        }
+        assert!(supports(tree.node("Save"), Action::Click));
+        assert!(supports(tree.node("Close Tab"), Action::Click));
+        assert_eq!(tree.node("Delete")["aria"]["disabled"], true);
+        assert!(!supports(tree.node("Delete"), Action::Click));
+        assert!(tree.node("Save")["aria"]["disabled"].is_null());
+
+        perform(cx, tree.node("Save"), Action::Click);
+        assert_eq!(
+            *activations.borrow(),
+            [ButtonActivationSource::Accessibility]
+        );
     }
 
     #[gpui::test]

@@ -1527,6 +1527,9 @@ fn render_action(
                 crate::ButtonActivationSource::Pointer => ModalActivationSource::Pointer,
                 crate::ButtonActivationSource::Space => ModalActivationSource::Space,
                 crate::ButtonActivationSource::Return => ModalActivationSource::Return,
+                crate::ButtonActivationSource::Accessibility => {
+                    ModalActivationSource::Accessibility
+                }
             };
             request_action_from_renderer(&source_owner, presentation, index, source, cx);
         });

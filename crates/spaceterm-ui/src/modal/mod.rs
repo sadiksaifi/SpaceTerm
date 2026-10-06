@@ -329,6 +329,8 @@ pub enum ModalActivationSource {
     Escape,
     /// Command-Period reached the modal after the focused child declined it.
     CommandPeriod,
+    /// Assistive technology pressed the action's button.
+    Accessibility,
     /// The owner explicitly requested the semantic action.
     Programmatic,
 }

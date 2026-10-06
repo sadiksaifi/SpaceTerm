@@ -5735,6 +5735,7 @@ dependencies = [
  "fuzzy-matcher",
  "gpui",
  "lucide-icons",
+ "serde_json",
  "unicode-casefold",
  "unicode-segmentation",
  "zeroize",
