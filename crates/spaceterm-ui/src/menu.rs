@@ -3229,6 +3229,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
     let collection_focused = state.read(cx).focus_handle.contains_focused(window, cx);
+    let deepest = panels.len() - 1;
     for (depth, bounds, entries, highlighted, scroll) in panels {
         overlay = overlay.child(render_panel(
             state.downgrade(),
@@ -3244,6 +3245,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             &typography,
             icon_offset,
             collection_focused,
+            depth == deepest,
         ));
     }
 
@@ -3343,6 +3345,7 @@ fn render_panel(
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
     collection_focused: bool,
+    deepest: bool,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
@@ -3432,6 +3435,7 @@ fn render_panel(
                     typography,
                     icon_offset,
                     collection_focused,
+                    deepest,
                 ));
             }
             InternalEntryKind::Submenu {
@@ -3463,6 +3467,7 @@ fn render_panel(
                     typography,
                     icon_offset,
                     collection_focused,
+                    deepest,
                 ));
             }
         }
@@ -3494,6 +3499,7 @@ fn render_row(
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
     collection_focused: bool,
+    deepest: bool,
 ) -> AnyElement {
     let rows = if destructive {
         style.paint.destructive_rows
@@ -3539,8 +3545,9 @@ fn render_row(
         .when_some(shortcut.clone(), |row, shortcut| {
             row.aria_keyshortcuts(shortcut)
         })
-        // The overlay holds keyboard focus while arrows move the highlight between rows.
-        .when(highlighted && collection_focused, |row| {
+        // The overlay holds keyboard focus while arrows move the highlight between rows of the
+        // deepest open panel. Parent panels keep their highlight only to show the open path.
+        .when(highlighted && collection_focused && deepest, |row| {
             row.aria_active_descendant()
         })
         .when(!disabled, |row| {
@@ -4703,6 +4710,27 @@ mod tests {
         assert_eq!(tree.node("Block")["aria"]["role"], "MenuItemRadio");
         assert_eq!(tree.node("Block")["aria"]["toggled"], "False");
         assert_eq!(tree.node("Bar")["aria"]["toggled"], "True");
+    }
+
+    #[gpui::test]
+    fn submenus_report_only_their_highlighted_row_as_focused(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        let (_, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::action("New Tab", "new-tab"),
+                MenuEntry::submenu("Move To", vec![MenuEntry::action("Window", "window")]),
+            ],
+        );
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "New Tab");
+
+        perform(cx, tree.node("Move To"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Menu").len(), 2);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Window");
     }
 
     #[gpui::test]
