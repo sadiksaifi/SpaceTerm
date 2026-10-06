@@ -4,8 +4,8 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, RenderOnce, Rgba, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, canvas, div, img,
-    prelude::FluentBuilder as _, px, relative, size,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, accesskit, actions, canvas,
+    div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -155,7 +155,8 @@ impl RenderOnce for ModalLayer {
                 root.chrome_frame.clone(),
             )
         });
-        if !super::window_modal_is_open(window, cx) {
+        let modal_open = super::window_modal_is_open(window, cx);
+        if !modal_open {
             chrome_frame.pointer.set(None);
         }
         register_root_scope(&owner, &root_focus, cx);
@@ -169,8 +170,19 @@ impl RenderOnce for ModalLayer {
                     .relative()
                     .size_full()
                     .track_focus(&root_focus)
-                    .child(self.content)
-                    .children(self.transients)
+                    .child(
+                        // Assistive technology reaches only the active modal, so the content
+                        // beneath it leaves the tree while the modal is presented.
+                        div()
+                            .id("spaceterm-modal-underlay")
+                            .relative()
+                            .size_full()
+                            .when(modal_open, |underlay| {
+                                underlay.role(accesskit::Role::Group).aria_hidden(true)
+                            })
+                            .child(self.content)
+                            .children(self.transients),
+                    )
                     .child(ModalOwnerView { owner }),
             )
             .into_any_element(),
@@ -395,8 +407,22 @@ fn render_overlay(
     let platform_cancel_owner = owner;
     let press_scope = scope.clone();
 
+    let description = match &snapshot.semantics {
+        PreparedModalSemantics::Alert { message, .. } => Some(message.clone()),
+        PreparedModalSemantics::Dialog { description, .. } => description.clone(),
+        PreparedModalSemantics::Progress { status, .. } => Some(status.clone()),
+    };
     let surface = div()
         .id(("modal-surface", presentation.value()))
+        .role(match snapshot.kind {
+            ModalKind::Alert => accesskit::Role::AlertDialog,
+            ModalKind::Dialog | ModalKind::Progress => accesskit::Role::Dialog,
+        })
+        .aria_label(snapshot.accessibility_title.clone())
+        .when_some(description, |surface, description| {
+            surface.aria_description(description)
+        })
+        .aria_modal(true)
         .debug_selector(move || format!("modal-surface-{}", presentation.value()))
         .absolute()
         .left(geometry.origin_x)

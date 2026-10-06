@@ -8244,3 +8244,30 @@ fn modal_default_and_cancel_resolution_uses_semantics_not_position() {
     actions[1].enabled = false;
     assert_eq!(enabled_action(Some(1), &actions), None);
 }
+
+#[gpui::test]
+fn modals_publish_a_modal_dialog_and_hide_the_underlay(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform};
+    use gpui::accesskit::Action;
+
+    let (root, _underlay, outcome, cx) = alert_window(cx);
+    let tree = A11yTree::read(cx);
+    let alert = tree.node("Render alert");
+    assert_eq!(alert["aria"]["role"], "AlertDialog");
+    assert_eq!(alert["aria"]["modal"], true);
+    assert_eq!(
+        alert["aria"]["description"],
+        "Choose whether to save the current changes."
+    );
+    assert!(tree.exposed(alert));
+    assert!(tree.exposed(tree.node("Save")));
+    assert!(!tree.exposed(tree.node("Underlay")));
+
+    perform(cx, tree.node("Cancel"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Render alert").is_none());
+    assert!(tree.exposed(tree.node("Underlay")));
+    assert!(outcome.borrow().is_some());
+    let invoker = root.read_with(cx, |root, _| root.invoker.clone());
+    assert!(cx.update(|window, _| invoker.is_focused(window)));
+}

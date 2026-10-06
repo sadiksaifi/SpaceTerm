@@ -56,6 +56,21 @@ impl A11yTree {
             .collect()
     }
 
+    /// Reports whether assistive technology reaches a node, which no hidden node may contain.
+    pub(crate) fn exposed(&self, node: &Value) -> bool {
+        let mut pending = self
+            .nodes()
+            .filter(|candidate| candidate["aria"]["hidden"] == true)
+            .collect::<Vec<_>>();
+        while let Some(hidden) = pending.pop() {
+            if hidden["accesskit_id"] == node["accesskit_id"] {
+                return false;
+            }
+            pending.extend(self.children(hidden));
+        }
+        true
+    }
+
     fn nodes(&self) -> impl Iterator<Item = &Value> {
         self.0["nodes"]
             .as_object()

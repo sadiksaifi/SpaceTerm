@@ -155,6 +155,7 @@ impl CompletionFlag {
 
 pub(super) struct PreparedModalRequest {
     id: ModalId,
+    accessibility_title: Option<SharedString>,
     kind: ModalKind,
     actions: Vec<ErasedAction>,
     semantics: PreparedModalSemantics,
@@ -184,6 +185,7 @@ impl PreparedModalRequest {
     ) -> Self {
         Self {
             id,
+            accessibility_title: None,
             kind,
             actions,
             semantics,
@@ -200,6 +202,12 @@ impl PreparedModalRequest {
             completion: CompletionFlag::new(),
             _caller_release: None,
         }
+    }
+
+    /// Names the presentation for assistive technology instead of its visible title.
+    pub(super) fn with_accessibility_title(mut self, title: SharedString) -> Self {
+        self.accessibility_title = Some(title);
+        self
     }
 
     pub(super) fn with_lifecycle(mut self, lifecycle: Option<LifecycleHandler>) -> Self {
@@ -561,6 +569,7 @@ pub(super) struct ModalRenderAction {
 #[derive(Clone)]
 pub(super) struct ModalRenderSnapshot {
     pub(super) id: ModalId,
+    pub(super) accessibility_title: SharedString,
     pub(super) presentation: ModalPresentationId,
     pub(super) kind: ModalKind,
     pub(super) semantics: PreparedModalSemantics,
@@ -1260,8 +1269,18 @@ impl ModalWindowOwner {
                 (None, active.progress_cancellation_action_index())
             }
         };
+        let accessibility_title = active
+            .request
+            .accessibility_title
+            .clone()
+            .unwrap_or_else(|| match &active.request.semantics {
+                PreparedModalSemantics::Alert { visible_title, .. }
+                | PreparedModalSemantics::Dialog { visible_title, .. }
+                | PreparedModalSemantics::Progress { visible_title, .. } => visible_title.clone(),
+            });
         Some(ModalRenderSnapshot {
             id: active.request.id.clone(),
+            accessibility_title,
             presentation: active.id,
             kind: active.request.kind,
             semantics: active.request.semantics.clone(),

@@ -369,6 +369,7 @@ impl<A> ProgressDialog<A> {
         )
         .with_progress_cancel(Rc::new(on_cancel))
         .with_programmatic_deadline(deadline)
+        .with_accessibility_title(self.accessibility_title)
         .with_lifecycle(Some(Rc::new(on_lifecycle)));
         operation
             .apply(request, window, cx)

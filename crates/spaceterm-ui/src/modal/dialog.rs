@@ -469,6 +469,7 @@ impl<A> Dialog<A> {
         )
         .with_body(body)
         .with_dialog_size(self.size)
+        .with_accessibility_title(self.accessibility_title)
         .with_dialog_action(Rc::new(
             move |action_index, source, presentation, completion, cx| {
                 let Some(action_id) = action_ids.get(action_index).cloned() else {
