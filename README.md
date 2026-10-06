@@ -8,7 +8,6 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
 - **Remote terminals** through your existing OpenSSH configuration
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
-- **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
 
 ## Install macOS/Linux
 
