@@ -55,21 +55,7 @@ pub(super) fn harmonize(colors: &mut TerminalColors, appearance: Appearance) {
         return;
     }
     colors.background = background;
-    let restore = |color: &mut Color| {
-        let required = color.contrast_ratio(authored).min(TEXT_CONTRAST);
-        if color.contrast_ratio(background) >= required {
-            return;
-        }
-        // Keep the side of the background the author chose. When that side has no room left,
-        // readability wins and the color crosses to the nearer readable side.
-        let lighter = color.oklab_lightness() > authored.oklab_lightness();
-        if let Some(readable) = color
-            .readable_preserving_chroma_toward(&[background], required, lighter)
-            .or_else(|| color.readable_preserving_chroma(&[background], required))
-        {
-            *color = readable;
-        }
-    };
+    let authored_cursor = colors.cursor;
     for color in [
         &mut colors.foreground,
         &mut colors.bright_foreground,
@@ -81,11 +67,52 @@ pub(super) fn harmonize(colors: &mut TerminalColors, appearance: Appearance) {
     .chain(&mut colors.normal)
     .chain(&mut colors.bright)
     .chain(&mut colors.dim)
-    .chain(colors.cursor_text.as_mut())
-    .chain(colors.selection_foreground.as_mut())
-    .chain(colors.find_match_foreground.as_mut())
-    .chain(colors.find_active_match_foreground.as_mut())
     {
-        restore(color);
+        restore(color, authored, background);
+    }
+    // Cursor and highlight text is drawn on the cursor block or the highlight, not directly on
+    // the background, so it keeps its contrast with that surface.
+    if let Some(text) = colors.cursor_text.as_mut() {
+        restore(text, authored_cursor, colors.cursor);
+    }
+    for (text, highlight) in [
+        (
+            colors.selection_foreground.as_mut(),
+            colors.selection_background,
+        ),
+        (
+            colors.find_match_foreground.as_mut(),
+            colors.find_match_background,
+        ),
+        (
+            colors.find_active_match_foreground.as_mut(),
+            colors.find_active_match_background,
+        ),
+    ] {
+        if let Some(text) = text {
+            restore(
+                text,
+                highlight.source_over(authored),
+                highlight.source_over(background),
+            );
+        }
+    }
+}
+
+/// Restores a text color's contrast with the surface it is drawn on after that surface moved
+/// from `authored` to `under`, up to [`TEXT_CONTRAST`].
+fn restore(color: &mut Color, authored: Color, under: Color) {
+    let required = color.contrast_ratio(authored).min(TEXT_CONTRAST);
+    if color.contrast_ratio(under) >= required {
+        return;
+    }
+    // Keep the side of the surface the author chose. When that side has no room left,
+    // readability wins and the color crosses to the nearer readable side.
+    let lighter = color.oklab_lightness() > authored.oklab_lightness();
+    if let Some(readable) = color
+        .readable_preserving_chroma_toward(&[under], required, lighter)
+        .or_else(|| color.readable_preserving_chroma(&[under], required))
+    {
+        *color = readable;
     }
 }

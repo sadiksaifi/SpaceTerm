@@ -234,3 +234,57 @@ fn gallery_previews_show_the_palette_the_pane_presents() {
         resolve(&catalog, &preferences_for(&theme)).terminal.colors
     );
 }
+
+#[test]
+fn cursor_and_highlight_text_keep_contrast_with_what_they_are_drawn_on() {
+    let mut theme = installed(
+        "dark",
+        json!({ "terminal.background": "#666666", "terminal.foreground": "#ffffff" }),
+    );
+    theme.colors.cursor = Some(Color::rgb(0x757575));
+    theme.colors.cursor_text = OptionalColorOverride::Color(Color::rgb(0x000000));
+    theme.colors.selection_background = Some(Color::rgba(0xffffff40));
+    theme.colors.selection_foreground = OptionalColorOverride::Color(Color::rgb(0x000000));
+    theme.colors.find_match_background = Some(Color::rgba(0xffff0066));
+    theme.colors.find_match_foreground = OptionalColorOverride::Color(Color::rgb(0x000000));
+    let mut authored = builtin_terminal_base(Appearance::Dark);
+    authored.apply(&theme.colors);
+    let colors = resolve_theme(&theme).terminal.colors.clone();
+    assert_ne!(colors.background, authored.background);
+
+    let cases = [
+        (
+            "cursor_text",
+            authored.cursor_text.unwrap(),
+            authored.cursor,
+            colors.cursor_text.unwrap(),
+            colors.cursor,
+        ),
+        (
+            "selection_foreground",
+            authored.selection_foreground.unwrap(),
+            authored
+                .selection_background
+                .source_over(authored.background),
+            colors.selection_foreground.unwrap(),
+            colors.selection_background.source_over(colors.background),
+        ),
+        (
+            "find_match_foreground",
+            authored.find_match_foreground.unwrap(),
+            authored
+                .find_match_background
+                .source_over(authored.background),
+            colors.find_match_foreground.unwrap(),
+            colors.find_match_background.source_over(colors.background),
+        ),
+    ];
+    for (role, before, before_under, after, after_under) in cases {
+        let required = before.contrast_ratio(before_under).min(4.5);
+        let achieved = after.contrast_ratio(after_under);
+        assert!(
+            achieved >= required - 0.01,
+            "{role} {before:?} keeps contrast {required} with what it is drawn on: now {after:?} on {after_under:?} at {achieved}",
+        );
+    }
+}
