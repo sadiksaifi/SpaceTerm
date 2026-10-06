@@ -2023,7 +2023,7 @@ impl SettingsWindow {
                             "Accessibility settings currently keep the window and floating surfaces opaque. Your opacity choice is kept."
                         }
                         (None, _) if opacity => {
-                            "Control how much of the desktop behind the window and content behind floating surfaces remains visible. 0 is transparent; 1 is opaque."
+                            "Adjust opacity for windows and floating surfaces. 0 is transparent; 1 is opaque."
                         }
                         (None, _) if fully_opaque => {
                             "Blur affects the desktop behind the window and content behind floating surfaces. Decrease Opacity below 1 to see it."
