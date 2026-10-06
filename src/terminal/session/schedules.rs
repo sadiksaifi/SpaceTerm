@@ -120,12 +120,19 @@ impl ScheduleInput {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PasteConfirmationOwner {
+    Terminal,
+    Dialog,
+}
+
 pub(super) struct WorkerSchedules {
     input: ScheduleInput,
     accessibility_continuation: AccessibilityContinuationSchedule,
     accessibility_presentation: AccessibilityPresentationSchedule,
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
+    paste_confirmation_owner: Option<(PasteConfirmationId, PasteConfirmationOwner)>,
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
     metadata_presentation_pending: bool,
@@ -321,7 +328,9 @@ impl WorkerSchedules {
         payload: PreparedPaste,
         now: Instant,
     ) -> Option<crate::terminal::paste::PasteConfirmation> {
-        self.paste_confirmations.create(payload, now)
+        let confirmation = self.paste_confirmations.create(payload, now)?;
+        self.paste_confirmation_owner = Some((confirmation.id, PasteConfirmationOwner::Terminal));
+        Some(confirmation)
     }
 
     pub(super) fn resolve_paste_confirmation(
@@ -329,10 +338,28 @@ impl WorkerSchedules {
         id: PasteConfirmationId,
         now: Instant,
     ) -> Option<PreparedPaste> {
+        self.paste_confirmation_owner = None;
         self.paste_confirmations.take(id, now)
     }
 
+    pub(super) fn focus_paste_confirmation(&mut self, id: PasteConfirmationId) -> bool {
+        if self
+            .paste_confirmation_owner
+            .is_some_and(|(pending, _)| pending == id)
+        {
+            self.paste_confirmation_owner = Some((id, PasteConfirmationOwner::Dialog));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn paste_confirmation_has_focus(&self, id: PasteConfirmationId) -> bool {
+        self.paste_confirmation_owner == Some((id, PasteConfirmationOwner::Dialog))
+    }
+
     pub(super) fn cancel_paste_confirmation(&mut self) {
+        self.paste_confirmation_owner = None;
         self.paste_confirmations.cancel();
     }
 
@@ -343,6 +370,7 @@ impl WorkerSchedules {
             accessibility_presentation: AccessibilityPresentationSchedule::new(now),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
+            paste_confirmation_owner: None,
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
             metadata_presentation_pending: false,
@@ -373,6 +401,7 @@ impl WorkerSchedules {
             return Some(Command::SelectionAutoscrollTick);
         }
         if self.paste_confirmations.expire(now) {
+            self.paste_confirmation_owner = None;
             return Some(Command::PasteConfirmationExpired);
         }
         if self.presentation.take_due(now) {

@@ -608,6 +608,10 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
     let editor = cx.debug_bounds("command-palette-editor").unwrap();
     let row = cx.debug_bounds("font-change-row-5").unwrap();
     let thumb = cx.debug_bounds("command-palette-scrollbar-thumb").unwrap();
+    assert_eq!(
+        crate::a11y_testing::A11yTree::read(cx).node("Results")["aria"]["role"],
+        "ScrollBar"
+    );
     let track_height = panel.size.height
         - editor.size.height
         - replacement.metrics.panel_padding * 2.0
@@ -3137,30 +3141,7 @@ fn modal_palette_window(
     Entity<CommandPalette<u8>>,
     &'_ mut VisualTestContext,
 ) {
-    cx.set_global(test_theme());
-    install_control_themes(cx);
-    cx.update(crate::text_input::init);
-    cx.update(crate::menu::init);
-    cx.update(super::init);
-    cx.update(|cx| install_command_palette_keybindings(cx, CommandPaletteKeybindingProfile::MacOs));
-    cx.update(crate::tooltip::init);
-    cx.update(crate::modal::init);
-    cx.update(|cx| {
-        crate::install_modal_policy(cx, crate::ModalDesktopPolicy::mac_os());
-        crate::install_modal_theme(
-            cx,
-            crate::ModalTheme::new(
-                crate::ModalPaint::new(
-                    rgba(0xffffffff),
-                    rgba(0xb0b0b8ff),
-                    rgba(0x5599ffff),
-                    rgba(0xffbb55ff),
-                    rgba(0xff6677ff),
-                ),
-                crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
-            ),
-        );
-    });
+    install_modal_palette_catalogs(cx);
     let (root, cx) = cx.add_window_view(|window, cx| ModalPaletteRoot {
         palette: cx.new(|cx| CommandPalette::new("Search commands", items(), window, cx)),
         replacement_palette: None,
@@ -3187,6 +3168,33 @@ fn modal_palette_window(
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     (root, palette, cx)
+}
+
+fn install_modal_palette_catalogs(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    install_control_themes(cx);
+    cx.update(crate::text_input::init);
+    cx.update(crate::menu::init);
+    cx.update(super::init);
+    cx.update(|cx| install_command_palette_keybindings(cx, CommandPaletteKeybindingProfile::MacOs));
+    cx.update(crate::tooltip::init);
+    cx.update(crate::modal::init);
+    cx.update(|cx| {
+        crate::install_modal_policy(cx, crate::ModalDesktopPolicy::mac_os());
+        crate::install_modal_theme(
+            cx,
+            crate::ModalTheme::new(
+                crate::ModalPaint::new(
+                    rgba(0xffffffff),
+                    rgba(0xb0b0b8ff),
+                    rgba(0x5599ffff),
+                    rgba(0xffbb55ff),
+                    rgba(0xff6677ff),
+                ),
+                crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
+            ),
+        );
+    });
 }
 
 #[gpui::test]
@@ -3976,4 +3984,104 @@ fn deactivation_should_dismiss_without_restoring_prior_focus(cx: &mut TestAppCon
     cx.run_until_parked();
 
     assert!(cx.update(|window, _| prior.is_focused(window)));
+}
+
+#[gpui::test]
+fn command_palettes_publish_a_modal_dialog_with_a_list_of_options(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (root, palette, events, _underlay, cx) = palette_window(cx);
+    assert!(A11yTree::read(cx).with_role("Dialog").is_empty());
+
+    open_palette(&root, &palette, cx);
+    let tree = A11yTree::read(cx);
+    let dialog = tree.node("Search commands");
+    assert_eq!(dialog["aria"]["role"], "Dialog");
+    assert_eq!(dialog["aria"]["modal"], true);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+    let lists = tree.with_role("ListBox");
+    assert_eq!(lists.len(), 1);
+    let options = tree
+        .children(lists[0])
+        .into_iter()
+        .map(|option| {
+            (
+                option["aria"]["role"].as_str().unwrap(),
+                option["aria"]["label"].as_str().unwrap(),
+                option["aria"]["disabled"] == true,
+                option["aria"]["selected"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        options,
+        [
+            ("ListBoxOption", "Open Workspace", false, true),
+            ("ListBoxOption", "Disabled Command", true, false),
+            ("ListBoxOption", "Close Window", false, false),
+        ]
+    );
+    assert!(!supports(tree.node("Disabled Command"), Action::Click));
+
+    perform(cx, tree.node("Close Window"), Action::Click);
+    assert!(A11yTree::read(cx).with_role("Dialog").is_empty());
+    assert!(events.borrow().iter().any(|event| matches!(
+        event,
+        CommandPaletteEvent::Activated(activation)
+            if *activation.item_id() == 3
+                && activation.source() == CommandPaletteActivationSource::Accessibility
+    )));
+}
+
+#[gpui::test]
+fn open_palettes_hide_the_modal_layer_underlay(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    struct TransientPaletteRoot {
+        palette: Entity<CommandPalette<u8>>,
+        invoker: FocusHandle,
+    }
+    impl Render for TransientPaletteRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::ModalLayer::new(
+                div().size_full().child(
+                    div()
+                        .id("palette-invoker")
+                        .role(accesskit::Role::Button)
+                        .aria_label("Invoker")
+                        .track_focus(&self.invoker),
+                ),
+            )
+            .transient(div().absolute().inset_0().child(self.palette.clone()))
+        }
+    }
+
+    install_modal_palette_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|window, cx| TransientPaletteRoot {
+        palette: cx.new(|cx| CommandPalette::new("Search commands", items(), window, cx)),
+        invoker: cx.focus_handle().tab_stop(true),
+    });
+    let (palette, invoker) =
+        root.read_with(cx, |root, _| (root.palette.clone(), root.invoker.clone()));
+    cx.update(|window, cx| {
+        window.activate_window();
+        invoker.focus(window, cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert!(tree.exposed(tree.node("Invoker")));
+
+    cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| palette.open(window, cx));
+    });
+    let tree = A11yTree::read(cx);
+    assert!(tree.exposed(tree.node("Search commands")));
+    assert!(!tree.exposed(tree.node("Invoker")));
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+
+    cx.simulate_keystrokes("escape");
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Search commands").is_none());
+    assert!(tree.exposed(tree.node("Invoker")));
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Invoker");
 }

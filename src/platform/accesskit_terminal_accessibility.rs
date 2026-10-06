@@ -56,7 +56,7 @@ impl TerminalAccessibilityAdapterFactory for AccessKitTerminalAccessibilityAdapt
 struct AccessKitTerminalAccessibility(Rc<RefCell<PaneTree>>);
 
 impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
-    fn set_hierarchy(&mut self, presented: bool, _: usize) {
+    fn set_hierarchy(&mut self, presented: bool) {
         let mut tree = self.0.borrow_mut();
         tree.presented = presented;
         tree.visible &= presented;
@@ -1596,7 +1596,7 @@ mod tests {
         assert!(receiver.drain().is_empty());
         tree.model = model;
         let mut adapter = AccessKitTerminalAccessibility(Rc::new(RefCell::new(tree)));
-        adapter.set_hierarchy(false, 0);
+        adapter.set_hierarchy(false);
         adapter.0.borrow().select(Some(&selection));
         assert!(receiver.drain().is_empty());
         assert!(adapter.0.borrow().selection_sender.is_none());
@@ -1856,6 +1856,7 @@ mod tests {
                 notifications,
                 selection_sender: Some(sender.clone()),
                 demand_sender: None,
+                focus_sender: None,
             })
         };
         cx.update(|window, _| {
@@ -1867,7 +1868,7 @@ mod tests {
             ));
             assert!(publish(&mut adapter, bounds, window).is_empty());
             assert!(adapter.0.borrow().selection_sender.is_some());
-            adapter.set_hierarchy(false, usize::MAX);
+            adapter.set_hierarchy(false);
             assert_eq!(publish(&mut adapter, bounds, window), notifications);
             assert!(adapter.0.borrow().selection_sender.is_none());
         });

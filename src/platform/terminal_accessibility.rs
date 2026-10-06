@@ -8,11 +8,11 @@ use gpui::{Bounds, Div, Pixels, Stateful, Window};
 /// Owns one Pane's native accessibility resources. Dropping it retires those resources.
 pub(crate) trait TerminalAccessibilityAdapter {
     /// Updates layout membership synchronously. Hidden elements must reject Selection requests.
-    fn set_hierarchy(&mut self, presented: bool, order: usize);
+    fn set_hierarchy(&mut self, presented: bool);
     /// Publishes current facts and returns notifications that could not yet be delivered.
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications;
     /// Describes this Pane inside the Window's portable accessibility tree.
-    /// Adapters publishing native accessibility outside that tree keep the element unchanged.
+    /// Adapters whose native elements GPUI does not build attach them to this element's node.
     fn decorate(&self, pane: Stateful<Div>) -> Stateful<Div> {
         pane
     }
@@ -48,6 +48,44 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) notifications: AccessibilityNotifications,
     pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
     pub(crate) demand_sender: Option<AccessibilityDemandSender>,
+    #[cfg_attr(
+        not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+        allow(
+            dead_code,
+            reason = "only the native macOS Adapter requests Pane focus"
+        )
+    )]
+    pub(crate) focus_sender: Option<AccessibilityFocusSender>,
+}
+
+/// Asks one Pane to take focus on behalf of an accessibility client. Requests carry no content
+/// and coalesce until the Pane handles them.
+#[cfg_attr(
+    not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+    allow(
+        dead_code,
+        reason = "only the native macOS Adapter requests Pane focus"
+    )
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct AccessibilityFocusSender(async_channel::Sender<()>);
+
+impl AccessibilityFocusSender {
+    pub(crate) fn channel() -> (Self, async_channel::Receiver<()>) {
+        let (sender, receiver) = async_channel::bounded(1);
+        (Self(sender), receiver)
+    }
+
+    #[cfg_attr(
+        not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+        allow(
+            dead_code,
+            reason = "only the native macOS Adapter requests Pane focus"
+        )
+    )]
+    pub(crate) fn request(&self) {
+        let _ = self.0.try_send(());
+    }
 }
 
 #[cfg(test)]
@@ -69,7 +107,7 @@ pub(crate) mod testing {
         pub(crate) bounds: Option<Bounds<Pixels>>,
         pub(crate) cell_width: Pixels,
         pub(crate) line_height: Pixels,
-        pub(crate) hierarchy: Vec<(bool, usize)>,
+        pub(crate) hierarchy: Vec<bool>,
         pub(crate) presented: bool,
         pub(crate) visible: bool,
         pub(crate) focused: bool,
@@ -112,9 +150,9 @@ pub(crate) mod testing {
     struct RecordingAccessibilityAdapter(Rc<RefCell<AccessibilityRecord>>);
 
     impl TerminalAccessibilityAdapter for RecordingAccessibilityAdapter {
-        fn set_hierarchy(&mut self, presented: bool, order: usize) {
+        fn set_hierarchy(&mut self, presented: bool) {
             let mut record = self.0.borrow_mut();
-            record.hierarchy.push((presented, order));
+            record.hierarchy.push(presented);
             record.presented = presented;
             record.visible &= presented;
             record.focused &= presented;

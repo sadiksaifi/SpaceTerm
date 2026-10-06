@@ -776,6 +776,46 @@ fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn auto_theme_slots_publish_a_radio_group_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_appearance_mode(AppearanceMode::Auto, cx)
+        })
+    });
+    let tree = A11yTree::read(cx);
+    let group = tree.node("Current theme");
+    assert_eq!(group["aria"]["role"], "RadioGroup");
+    let slots = tree.children(group);
+    let labels = slots
+        .iter()
+        .map(|slot| slot["aria"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["Light", "Dark"]);
+    for slot in &slots {
+        assert_eq!(slot["aria"]["role"], "RadioButton");
+        assert!(!slot["aria"]["description"].as_str().unwrap().is_empty());
+    }
+    // The system appearance is Dark, so the gallery starts on the Dark slot.
+    assert_eq!(slots[0]["aria"]["toggled"], "False");
+    assert_eq!(slots[1]["aria"]["toggled"], "True");
+
+    perform(cx, slots[0], Action::Click);
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+        Appearance::Light
+    );
+    let tree = A11yTree::read(cx);
+    let slots = tree.children(tree.node("Current theme"));
+    assert_eq!(slots[0]["aria"]["toggled"], "True");
+    assert_eq!(slots[1]["aria"]["toggled"], "False");
+}
+
+#[gpui::test]
 fn changing_one_theme_slot_preserves_the_mode_and_other_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     for mode in [
@@ -863,6 +903,62 @@ fn use_applies_a_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
         expected.terminal.themes.set(slot, chosen);
         assert_eq!(document_of(&window, cx).appearance, expected);
     }
+}
+
+#[gpui::test]
+fn installed_themes_publish_a_list_of_named_themes_with_their_actions(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let family = br##"{"themes":[{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(family).unwrap(),
+        ..Default::default()
+    };
+    let imported = document.terminal_themes[0].id.clone();
+    let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Themes, cx);
+    let tree = A11yTree::read(cx);
+    // The group heading and the list it titles share a name.
+    let list = tree
+        .with_role("List")
+        .into_iter()
+        .find(|list| list["aria"]["label"] == "Dark themes")
+        .expect("the installed themes publish a list");
+    let items = tree.children(list);
+    assert!(items.iter().all(|item| item["aria"]["role"] == "ListItem"));
+    let item = |name: &str| {
+        *items
+            .iter()
+            .find(|item| item["aria"]["label"] == name)
+            .unwrap_or_else(|| panic!("no theme item is named {name:?}"))
+    };
+    let in_use = tree.children(item("SpaceTerm Dark"));
+    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In Use"));
+    let sample = item("Sample Dark");
+    assert!(!sample["aria"]["description"].as_str().unwrap().is_empty());
+    let actions = tree
+        .children(sample)
+        .into_iter()
+        .filter(|node| node["aria"]["role"] == "Button")
+        .map(|node| node["aria"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["Use", "Remove Sample Dark"]);
+
+    let use_sample = tree
+        .children(sample)
+        .into_iter()
+        .find(|node| node["aria"]["label"] == "Use")
+        .unwrap();
+    perform(cx, use_sample, Action::Click);
+    assert_eq!(
+        document_of(&window, cx)
+            .appearance
+            .terminal
+            .themes
+            .get(Appearance::Dark),
+        &imported
+    );
 }
 
 /// The same slot selection, Use, and removal operations remain reachable without a pointer.
@@ -1781,6 +1877,39 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
         assert_eq!(harness.storage.document().unwrap(), document);
         assert_eq!(harness.storage.writes(), 0);
     }
+}
+
+#[gpui::test]
+fn steppers_publish_an_adjustable_value_that_stops_at_its_range(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    let mut document = SettingsDocument::default();
+    document.appearance.terminal.typography.base_size = 31.0;
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Font, cx);
+    let tree = A11yTree::read(cx);
+    let size = tree.node("terminal font size");
+    assert_eq!(size["aria"]["role"], "SpinButton");
+    assert_eq!(size["aria"]["value"], "31 pt");
+    assert!(supports(size, Action::Decrement));
+
+    perform(cx, size, Action::Increment);
+    let base_size = |cx: &mut VisualTestContext| {
+        document_of(&window, cx)
+            .appearance
+            .terminal
+            .typography
+            .base_size
+    };
+    assert_eq!(base_size(cx), 32.0);
+    let tree = A11yTree::read(cx);
+    let size = tree.node("terminal font size");
+    assert_eq!(size["aria"]["value"], "32 pt");
+    assert!(!supports(size, Action::Increment));
+
+    perform(cx, size, Action::Decrement);
+    assert_eq!(base_size(cx), 31.0);
 }
 
 #[gpui::test]
@@ -3297,6 +3426,20 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
     );
 }
 
+#[gpui::test]
+fn settings_content_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    cx.simulate_resize(gpui::size(
+        px(super::WINDOW_WIDTH),
+        px(super::WINDOW_HEIGHT),
+    ));
+    select_section(SettingsSectionId::Keybindings, cx);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Settings content")["aria"]["role"], "ScrollBar");
+}
+
 /// A described row beside a tall control keeps its label and guidance inside the row at the
 /// window's minimum width, rather than rising out of the group that clips it.
 #[gpui::test]
@@ -4341,4 +4484,168 @@ fn about_follows_the_sections_in_keyboard_order_and_activates_from_the_keyboard(
     cx.simulate_keystrokes("shift-tab");
     cx.run_until_parked();
     assert!(list_focused(cx));
+}
+
+#[gpui::test]
+fn settings_sections_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _harness, cx) = open_settings(cx);
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Sections");
+    assert_eq!(list["aria"]["role"], "ListBox");
+    let font = tree.node("Font");
+    assert_eq!(font["aria"]["role"], "ListBoxOption");
+    assert_eq!(font["aria"]["selected"], false);
+
+    perform(cx, font, Action::Click);
+    assert_eq!(
+        window.read_with(cx, |window, _| window.active_section),
+        SettingsSectionId::Font
+    );
+    assert_eq!(A11yTree::read(cx).node("Font")["aria"]["selected"], true);
+}
+
+#[gpui::test]
+fn about_publishes_one_button_that_requests_the_about_window(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (_window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+    let tree = A11yTree::read(cx);
+    let about = tree
+        .with_role("Button")
+        .into_iter()
+        .filter(|button| button["aria"]["label"] == "About SpaceTerm")
+        .collect::<Vec<_>>();
+    assert_eq!(about.len(), 1);
+
+    perform(cx, about[0], Action::Click);
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+}
+
+#[gpui::test]
+fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Font, cx);
+    let tree = A11yTree::read(cx);
+    let headings = tree
+        .with_role("Heading")
+        .into_iter()
+        .map(|heading| {
+            (
+                heading["aria"]["label"].as_str().unwrap(),
+                heading["aria"]["level"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for heading in [
+        ("Font", 1),
+        ("Typeface", 2),
+        ("Weight", 2),
+        ("Rendering", 2),
+    ] {
+        assert!(headings.contains(&heading), "{heading:?} in {headings:?}");
+    }
+
+    select_section(SettingsSectionId::Themes, cx);
+    let tree = A11yTree::read(cx);
+    let reading = tree
+        .in_order()
+        .into_iter()
+        .map(|node| {
+            let text = node["aria"]["label"]
+                .as_str()
+                .or_else(|| node["aria"]["value"].as_str())
+                .unwrap_or_default();
+            format!("{} {text}", node["aria"]["role"].as_str().unwrap())
+        })
+        .collect::<Vec<_>>();
+    let position = |entry: &str| {
+        reading
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry:?} is not in {reading:?}"))
+    };
+    assert!(position("Heading Themes") < position("Label Appearance"));
+    // Guidance stacks under its row title, beside the control it explains.
+    let guidance = position("Label Auto matches the system light or dark setting.");
+    assert!(position("Label Appearance") < guidance);
+    assert!(guidance < position("RadioGroup Appearance"));
+}
+
+#[gpui::test]
+fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_appearance_mode(AppearanceMode::Light, cx)
+        })
+    });
+    let tree = A11yTree::read(cx);
+    let current = tree.node("Current theme");
+    assert_eq!(current["aria"]["role"], "Group");
+    let text = tree
+        .children(current)
+        .into_iter()
+        .filter_map(|node| node["aria"]["value"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(text, ["SpaceTerm Light", "Built into SpaceTerm"]);
+
+    set_query(&window, "zzzz", cx);
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.with_role("Label")
+            .iter()
+            .any(|label| label["aria"]["value"] == "No settings match “zzzz”.")
+    );
+}
+
+#[gpui::test]
+fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, harness, cx) = open_settings(cx);
+    let labels = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("Label")
+            .into_iter()
+            .filter_map(|label| label["aria"]["value"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    assert!(labels(cx).contains(&"All changes saved".to_owned()));
+
+    harness.storage.fail_writes(Some(StorageError::Unavailable));
+    click("settings-density-comfortable", cx);
+    settle(cx);
+    let text = labels(cx);
+    for expected in [
+        "Could not save your changes",
+        "The change is still applied. Retry to write it to your settings file.",
+    ] {
+        assert!(
+            text.contains(&expected.to_owned()),
+            "{expected:?} in {text:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn settings_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    let tree = A11yTree::read(cx);
+    let focused = tree
+        .focused()
+        .expect("the focused surface publishes a node");
+    assert_eq!(focused["aria"]["role"], "Group");
 }

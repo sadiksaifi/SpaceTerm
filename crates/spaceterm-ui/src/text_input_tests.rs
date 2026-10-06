@@ -1737,3 +1737,314 @@ fn selecting_ligatures_and_joined_script_preserves_the_exact_shaped_geometry(
     cx.run_until_parked();
     assert_eq!(input.read_with(cx, |input, _| input.shape_count), shapes);
 }
+
+#[gpui::test]
+fn text_inputs_publish_their_name_value_placeholder_and_focus(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (input, cx) = input(cx, "");
+    input.update(cx, |input, cx| input.set_placeholder("Host name", cx));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["role"], "TextInput");
+    assert_eq!(field["aria"]["placeholder"], "Host name");
+    assert_eq!(field["aria"]["value"], "");
+    assert_eq!(tree.focused(), Some(field));
+
+    cx.simulate_input("example.com");
+    input.update(cx, |input, cx| input.set_editable(false, cx));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["value"], "example.com");
+    assert_eq!(field["aria"]["read_only"], true);
+
+    input.update(cx, |input, cx| input.set_enabled(false, cx));
+    assert_eq!(
+        A11yTree::read(cx).node("Test input")["aria"]["disabled"],
+        true
+    );
+}
+
+#[gpui::test]
+fn obscured_inputs_publish_a_secure_field_without_their_value(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (_, cx) = obscured_input(cx, "hunter2");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Secret");
+    assert_eq!(field["aria"]["role"], "PasswordInput");
+    assert!(field["aria"]["value"].is_null());
+    let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+    assert!(!published.contains("hunter2"));
+}
+
+#[gpui::test]
+fn text_inputs_publish_their_caret_and_accept_selection_requests(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (input, cx) = input(cx, "hello world");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    let runs = tree.children(field);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["aria"]["role"], "TextRun");
+    assert_eq!(runs[0]["aria"]["value"], "hello world");
+    let caret = serde_json::json!({ "node": field["children"][0], "character_index": 11 });
+    assert_eq!(field["aria"]["text_selection"]["anchor"], caret);
+    assert_eq!(field["aria"]["text_selection"]["focus"], caret);
+
+    let run = node_id(runs[0]);
+    perform_with(
+        cx,
+        field,
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 6,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 0,
+            },
+        })),
+    );
+    let selection = input.read_with(cx, |input, _| input.selection());
+    assert_eq!(selection.range(), 0..6);
+    assert_eq!(selection.anchor(), 6);
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.node("Test input")["aria"]["text_selection"]["focus"]["character_index"],
+        0
+    );
+}
+
+#[gpui::test]
+fn obscured_inputs_publish_no_text_runs(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (_, cx) = obscured_input(cx, "hunter2");
+    let tree = A11yTree::read(cx);
+    assert!(tree.children(tree.node("Secret")).is_empty());
+}
+
+#[gpui::test]
+fn accessibility_value_writes_replace_text_inputs_as_one_user_edit(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (input, _, events, cx) = input_with_events(cx, "old", false);
+    cx.simulate_input("!");
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test input"),
+        Action::SetValue,
+        Some(ActionData::Value("new\r\nvalue".into())),
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "new value"
+    );
+    assert_eq!(input.read_with(cx, |input, _| input.selection().caret()), 9);
+    assert_eq!(events.borrow().len(), 2);
+    let TextInputEvent::ValueChanged(change) = events.borrow()[1] else {
+        panic!("a value change event");
+    };
+    assert_eq!(change.revision(), 2);
+    assert_eq!(change.source(), TextInputChangeSource::Accessibility);
+    assert_eq!(
+        A11yTree::read(cx).node("Test input")["aria"]["value"],
+        "new value"
+    );
+
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "old!"
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.selection().range()),
+        0..4
+    );
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "old"
+    );
+}
+
+#[gpui::test]
+fn accessibility_value_writes_respect_text_input_editability_and_limits(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with, supports};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (input, cx) = input(cx, "old");
+    input.update(cx, |input, _| input.input_length_limit = 4);
+    for data in [
+        None,
+        Some(ActionData::Value("too long".into())),
+        Some(ActionData::Value(
+            "x".repeat(CLIPBOARD_INSERTION_LIMIT + 1).into(),
+        )),
+    ] {
+        let tree = A11yTree::read(cx);
+        perform_with(cx, tree.node("Test input"), Action::SetValue, data);
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.selection().range(),
+                input.revision()
+            )),
+            ("old".into(), 3..3, 0)
+        );
+    }
+    input.update(cx, |input, cx| input.set_editable(false, cx));
+    let tree = A11yTree::read(cx);
+    assert!(!supports(tree.node("Test input"), Action::SetValue));
+    perform_with(
+        cx,
+        tree.node("Test input"),
+        Action::SetValue,
+        Some(ActionData::Value("new".into())),
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "old"
+    );
+
+    input.update(cx, |input, cx| {
+        input.set_editable(true, cx);
+        input.set_enabled(false, cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert!(!supports(tree.node("Test input"), Action::SetValue));
+    perform_with(
+        cx,
+        tree.node("Test input"),
+        Action::SetValue,
+        Some(ActionData::Value("new".into())),
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "old"
+    );
+}
+
+#[gpui::test]
+fn accessibility_value_writes_edit_obscured_inputs_without_publishing_secrets(
+    cx: &mut TestAppContext,
+) {
+    use crate::a11y_testing::{A11yTree, perform_with};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (input, cx) = obscured_input(cx, "old secret");
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Secret"),
+        Action::SetValue,
+        Some(ActionData::Value("new secret".into())),
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "new secret"
+    );
+    let tree = A11yTree::read(cx);
+    assert!(tree.node("Secret")["aria"]["value"].is_null());
+    assert!(tree.children(tree.node("Secret")).is_empty());
+    let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+    assert!(!published.contains("old secret"));
+    assert!(!published.contains("new secret"));
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "new secret"
+    );
+}
+
+#[gpui::test]
+fn text_inputs_reuse_accessibility_publication_until_the_value_changes(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use crate::accessible_text::testing::run_storage;
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (input, cx) = input(cx, "hello world");
+    assert!(
+        input
+            .read_with(cx, |input, _| run_storage(&input.accessible_text))
+            .is_none()
+    );
+    let tree = A11yTree::read(cx);
+    let run = node_id(tree.children(tree.node("Test input"))[0]);
+    let storage = input.read_with(cx, |input, _| run_storage(&input.accessible_text));
+    for _ in 0..3 {
+        cx.executor().advance_clock(CARET_BLINK_INTERVAL);
+        let tree = A11yTree::read(cx);
+        let field = tree.node("Test input");
+        assert_eq!(field["aria"]["value"], "hello world");
+        assert_eq!(node_id(tree.children(field)[0]), run);
+        assert_eq!(
+            input.read_with(cx, |input, _| run_storage(&input.accessible_text)),
+            storage
+        );
+    }
+
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test input"),
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 11,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 6,
+            },
+        })),
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test input")["aria"]["text_selection"]["focus"]["character_index"],
+        6
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| run_storage(&input.accessible_text)),
+        storage
+    );
+
+    cx.simulate_input("there");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["value"], "hello there");
+    assert_eq!(tree.children(field)[0]["aria"]["value"], "hello there");
+    input.update(cx, |input, cx| {
+        input.clear(cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Test input")["aria"]["value"], "");
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        ""
+    );
+
+    cx.deactivate_accessibility();
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        ""
+    );
+    cx.deactivate_accessibility();
+    input.update(cx, |input, cx| {
+        input.set_value("after reconnect", cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Test input")["aria"]["value"], "after reconnect");
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        "after reconnect"
+    );
+}

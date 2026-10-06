@@ -1,17 +1,19 @@
 #[cfg(any(not(test), feature = "native-tests"))]
 use std::ops::Range;
 
-#[cfg(not(test))]
+#[cfg(any(not(test), feature = "native-tests"))]
 use super::terminal_accessibility::TerminalAccessibilityUpdate;
 use super::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
 };
-#[cfg(not(test))]
+#[cfg(any(not(test), feature = "native-tests"))]
 use crate::terminal::AccessibilityNotifications;
 use gpui::{Pixels, Window};
 
+#[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
+use super::terminal_accessibility::AccessibilityFocusSender;
 use crate::terminal::TerminalAccessibilityModel;
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
 use crate::terminal::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(any(not(test), feature = "native-tests"))]
 use crate::terminal::{AccessibilityGeometry, AccessibilityNotification};
@@ -82,18 +84,17 @@ struct AccessibilityElementState {
         )
     )]
     visible: bool,
-    #[cfg(all(target_os = "macos", not(test)))]
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
     presented: bool,
-    #[cfg(all(target_os = "macos", not(test)))]
-    registered: bool,
-    #[cfg(all(target_os = "macos", not(test)))]
-    order: usize,
-    #[cfg(all(target_os = "macos", not(test)))]
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
     selection_sender: Option<AccessibilitySelectionSender>,
-    #[cfg(all(target_os = "macos", not(test)))]
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
     demand_sender: Option<AccessibilityDemandSender>,
-    #[cfg(all(target_os = "macos", not(test)))]
-    parent: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
+    focus_sender: Option<AccessibilityFocusSender>,
+    /// The GPUI view whose coordinates place this element on screen.
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
+    view: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,15 +170,19 @@ impl AccessibilityElementState {
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
 mod native {
-    use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
+    use std::cell::Cell;
     use std::ops::Range;
+    use std::ptr::NonNull;
+    use std::rc::Rc;
 
-    use gpui::{Bounds, Pixels, Window};
-    use objc2::rc::{Retained, Weak};
-    use objc2::runtime::AnyObject;
+    use gpui::{
+        Bounds, Div, NativeAccessibilityElement, Pixels, Stateful, StatefulInteractiveElement,
+        Window, accesskit::Role,
+    };
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Sel};
     use objc2::{
         AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
     };
@@ -187,8 +192,8 @@ mod native {
         NSAccessibilityPostNotification, NSAccessibilityVisibleNameKey, NSView,
     };
     use objc2_foundation::{
-        NSArray, NSAttributedString, NSDictionary, NSInteger, NSNumber, NSObjectProtocol, NSPoint,
-        NSRange, NSRect, NSSize, NSString,
+        NSAttributedString, NSDictionary, NSInteger, NSNumber, NSObjectProtocol, NSPoint, NSRange,
+        NSRect, NSSize, NSString,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -199,18 +204,7 @@ mod native {
         resolve_font_metadata,
     };
 
-    const LAYOUT_CHANGED: &str = "AXLayoutChanged";
-
-    thread_local! {
-        static CHILDREN: RefCell<HashMap<usize, Vec<Child>>> = RefCell::new(HashMap::new());
-    }
-
-    #[derive(Clone)]
-    struct Child {
-        element: Weak<PaneAccessibilityElement>,
-        identity: usize,
-        order: usize,
-    }
+    const ELEMENT_DESTROYED: &str = "AXUIElementDestroyed";
 
     struct AccessibilityIvars {
         state: Cell<*mut AccessibilityElementState>,
@@ -253,16 +247,50 @@ mod native {
                     .map_or_else(empty_rect, |state| ns_rect(state.frame))
             }
 
-            #[unsafe(method_id(accessibilityParent))]
-            fn accessibility_parent(&self) -> Option<Retained<NSView>> {
-                state(self)
-                    .filter(|state| state.visible && state.registered)
-                    .and_then(|state| state.parent.clone())
-            }
-
             #[unsafe(method(isAccessibilityFocused))]
             fn is_accessibility_focused(&self) -> bool {
                 state(self).is_some_and(|state| state.focused)
+            }
+
+            /// Asks the Pane for focus, which moves Terminal Input Focus as a pointer press does.
+            #[unsafe(method(setAccessibilityFocused:))]
+            fn set_accessibility_focused(&self, focused: bool) {
+                if focused
+                    && let Some(sender) = state(self)
+                        .filter(|state| state.visible)
+                        .and_then(|state| state.focus_sender.as_ref())
+                {
+                    sender.request();
+                }
+            }
+
+            #[unsafe(method(isAccessibilityEnabled))]
+            fn is_accessibility_enabled(&self) -> bool {
+                state(self).is_some_and(|state| state.presented)
+            }
+
+            #[unsafe(method_id(accessibilityWindow))]
+            fn accessibility_window(&self) -> Option<Retained<AnyObject>> {
+                // SAFETY: Both selectors are part of NSAccessibility and the receivers are live.
+                containing_element(self, |parent| unsafe { msg_send![parent, accessibilityWindow] })
+            }
+
+            #[unsafe(method_id(accessibilityTopLevelUIElement))]
+            fn accessibility_top_level_ui_element(&self) -> Option<Retained<AnyObject>> {
+                // SAFETY: Both selectors are part of NSAccessibility and the receivers are live.
+                containing_element(self, |parent| unsafe {
+                    msg_send![parent, accessibilityTopLevelUIElement]
+                })
+            }
+
+            #[unsafe(method(isAccessibilitySelectorAllowed:))]
+            fn is_accessibility_selector_allowed(&self, selector: Sel) -> bool {
+                if selector == sel!(setAccessibilityFocused:) {
+                    state(self).is_some_and(|state| state.visible && state.focus_sender.is_some())
+                } else {
+                    // SAFETY: NSAccessibilityElement implements this NSAccessibility method.
+                    unsafe { msg_send![super(self), isAccessibilitySelectorAllowed: selector] }
+                }
             }
 
             #[unsafe(method(accessibilityNumberOfCharacters))]
@@ -286,7 +314,7 @@ mod native {
             #[unsafe(method(setAccessibilitySelectedTextRange:))]
             fn set_accessibility_selected_text_range(&self, range: NSRange) {
                 let Some((sender, request)) = semantic_state(self)
-                    .filter(|state| state.visible && state.registered)
+                    .filter(|state| state.visible)
                     .and_then(|state| {
                         Some((
                             state.selection_sender.clone()?,
@@ -384,9 +412,13 @@ mod native {
         }
     }
 
+    /// Publishes one Pane as a native text area, attached to the Pane's node in GPUI's
+    /// accessibility tree while the Pane is presented with bounds.
     pub(crate) struct MacosAccessibilityElement {
-        element: Retained<PaneAccessibilityElement>,
+        element: Rc<Retained<PaneAccessibilityElement>>,
         state: Box<AccessibilityElementState>,
+        #[cfg(all(test, feature = "native-tests"))]
+        assumed_on_screen: bool,
     }
 
     impl MacosAccessibilityElement {
@@ -396,7 +428,7 @@ mod native {
             font: &crate::appearance::ResolvedFontDescriptor,
             font_size: Pixels,
         ) -> Self {
-            let parent = native_view(window);
+            let view = native_view(window);
             let mut state = Box::new(AccessibilityElementState {
                 model,
                 font: resolve_font_metadata(font, f32::from(font_size)),
@@ -407,41 +439,70 @@ mod native {
                 focused: false,
                 visible: false,
                 presented: false,
-                registered: false,
-                order: 0,
                 selection_sender: None,
                 demand_sender: None,
-                parent,
+                focus_sender: None,
+                view,
             });
             let pointer = state.as_mut() as *mut AccessibilityElementState;
             let mtm = MainThreadMarker::new()
                 .expect("GPUI must create native accessibility on the main thread");
-            let element = PaneAccessibilityElement::new(mtm, pointer);
-            Self { element, state }
+            let element = Rc::new(PaneAccessibilityElement::new(mtm, pointer));
+            Self {
+                element,
+                state,
+                #[cfg(all(test, feature = "native-tests"))]
+                assumed_on_screen: false,
+            }
         }
 
-        pub(crate) fn set_hierarchy(&mut self, presented: bool, order: usize) {
-            if self.state.presented == presented && self.state.order == order {
-                return;
-            }
+        /// Hierarchy order follows the Pane's position in GPUI's tree, so only presentation
+        /// matters here.
+        pub(crate) fn set_hierarchy(&mut self, presented: bool) {
             self.state.presented = presented;
-            self.state.order = order;
             if !presented {
                 self.state.selection_sender = None;
                 self.state.demand_sender = None;
+                self.state.focus_sender = None;
             }
             self.state.visible &= presented;
             self.state.focused &= presented;
-            if self.state.registered && !presented {
-                self.state.registered = false;
-                if let Some(parent) = &self.state.parent {
-                    unregister_child(parent, &self.element);
-                }
-            } else if self.state.registered
-                && let Some(parent) = &self.state.parent
-            {
-                register_child(parent, &self.element, order);
+        }
+
+        /// Test windows have no native view to place the Pane on screen, so tests place the
+        /// Pane's window bounds on screen unchanged.
+        #[cfg(all(test, feature = "native-tests"))]
+        pub(super) fn assume_on_screen(&mut self) {
+            self.assumed_on_screen = true;
+        }
+
+        #[cfg(all(test, feature = "native-tests"))]
+        pub(super) fn native_element(&self) -> Retained<AnyObject> {
+            Retained::clone(&self.element)
+                .into_super()
+                .into_super()
+                .into_super()
+        }
+
+        /// Gives the Pane its node and attaches the native text area while it is visible.
+        pub(crate) fn decorate(&self, pane: Stateful<Div>) -> Stateful<Div> {
+            if !self.state.presented {
+                return pane;
             }
+            let element = Rc::clone(&self.element);
+            // The Pane's node groups the text area the way an unlabeled scroll area groups
+            // Terminal's. Focus moves to the text area while the Pane holds Terminal Input Focus.
+            pane.role(Role::Group)
+                .a11y_synthetic_children(move |builder| {
+                    // Updates run while the Pane prepaints, before GPUI collects its children.
+                    if !state(&element).is_some_and(|state| state.visible) {
+                        return;
+                    }
+                    let pointer = NonNull::from(&***element).cast();
+                    // SAFETY: `owner` retains this NSAccessibility object while GPUI holds it.
+                    let native = unsafe { NativeAccessibilityElement::new(pointer, element) };
+                    builder.attach_native_children([native]);
+                })
         }
 
         pub(crate) fn update(
@@ -460,23 +521,16 @@ mod native {
                 notifications,
                 selection_sender,
                 demand_sender,
+                focus_sender,
             } = update;
             let was_focused = self.state.focused;
-            let parent = native_view(window);
-            if !same_parent(&parent, &self.state.parent) {
-                if self.state.registered {
-                    self.state.registered = false;
-                    if let Some(old_parent) = &self.state.parent {
-                        unregister_child(old_parent, &self.element);
-                    }
-                }
-                self.state.parent = parent;
-            }
+            self.state.view = native_view(window);
             if !self.state.model.shares_snapshot(model) {
                 self.state.model = model.clone();
             }
             self.state.selection_sender = selection_sender.filter(|_| self.state.presented);
             self.state.demand_sender = demand_sender.filter(|_| self.state.presented);
+            self.state.focus_sender = focus_sender.filter(|_| self.state.presented);
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
             let point_size = f32::from(font_size);
@@ -493,10 +547,19 @@ mod native {
                 self.state.font = resolve_font_metadata(font, point_size);
             }
             let bounds = bounds.and_then(|bounds| {
+                #[cfg(all(test, feature = "native-tests"))]
+                if self.assumed_on_screen {
+                    return Some(ScreenRect {
+                        x: f64::from(bounds.origin.x),
+                        y: f64::from(bounds.origin.y),
+                        width: f64::from(bounds.size.width),
+                        height: f64::from(bounds.size.height),
+                    });
+                }
                 self.state
-                    .parent
+                    .view
                     .as_deref()
-                    .and_then(|parent| screen_rect(parent, bounds))
+                    .and_then(|view| screen_rect(view, bounds))
             });
             self.state.visible = self.state.presented && bounds.is_some();
             self.state.focused = self.state.visible && focused;
@@ -507,18 +570,6 @@ mod native {
                 self.state.frame = ScreenRect::default();
                 self.state.grid = ScreenRect::default();
             }
-            if self.state.visible && !self.state.registered {
-                self.state.registered = true;
-                if let Some(parent) = &self.state.parent {
-                    register_child(parent, &self.element, self.state.order);
-                }
-            } else if !self.state.visible && self.state.registered {
-                self.state.registered = false;
-                if let Some(parent) = &self.state.parent {
-                    unregister_child(parent, &self.element);
-                }
-            }
-
             let focus_gained = !was_focused && self.state.focused;
             if self.state.visible {
                 let mut native_notifications =
@@ -540,21 +591,11 @@ mod native {
 
     impl Drop for MacosAccessibilityElement {
         fn drop(&mut self) {
-            if self.state.registered {
-                self.state.registered = false;
-                if let Some(parent) = &self.state.parent {
-                    unregister_child(parent, &self.element);
-                }
-            }
+            let attached = self.state.visible;
             self.element.ivars().state.set(std::ptr::null_mut());
-        }
-    }
-
-    fn same_parent(a: &Option<Retained<NSView>>, b: &Option<Retained<NSView>>) -> bool {
-        match (a, b) {
-            (Some(a), Some(b)) => std::ptr::eq(&**a, &**b),
-            (None, None) => true,
-            _ => false,
+            if attached {
+                post_native_notification(&self.element, ELEMENT_DESTROYED);
+            }
         }
     }
 
@@ -588,107 +629,6 @@ mod native {
         })
     }
 
-    fn register_child(parent: &NSView, child: &Retained<PaneAccessibilityElement>, order: usize) {
-        let identity = Retained::as_ptr(child) as usize;
-        let siblings = CHILDREN.with(|children| {
-            let mut children = children.borrow_mut();
-            let siblings = children
-                .entry(parent as *const NSView as usize)
-                .or_default();
-            if let Some(existing) = siblings.iter_mut().find(|entry| entry.identity == identity) {
-                existing.order = order;
-            } else {
-                siblings.push(Child {
-                    element: Weak::from_retained(child),
-                    identity,
-                    order,
-                });
-            }
-            siblings.sort_by_key(|entry| (entry.order, entry.identity));
-            siblings.clone()
-        });
-        reconcile_children(parent, &siblings);
-    }
-
-    fn unregister_child(parent: &NSView, child: &Retained<PaneAccessibilityElement>) {
-        let identity = Retained::as_ptr(child) as usize;
-        let siblings = CHILDREN.with(|children| {
-            let mut children = children.borrow_mut();
-            let key = parent as *const NSView as usize;
-            if let Some(siblings) = children.get_mut(&key) {
-                siblings.retain(|candidate| candidate.identity != identity);
-                let snapshot = siblings.clone();
-                if siblings.is_empty() {
-                    children.remove(&key);
-                }
-                snapshot
-            } else {
-                Vec::new()
-            }
-        });
-        reconcile_children(parent, &siblings);
-    }
-
-    fn unmanaged_children(source: Option<&NSArray<AnyObject>>) -> Vec<Retained<AnyObject>> {
-        let Some(source) = source else {
-            return Vec::new();
-        };
-        (0..source.count())
-            .map(|index| source.objectAtIndex(index))
-            .filter(|candidate| {
-                candidate
-                    .downcast_ref::<PaneAccessibilityElement>()
-                    .is_none()
-            })
-            .collect()
-    }
-
-    fn reconcile_children(parent: &NSView, children: &[Child]) {
-        // SAFETY: NSView implements these accessibility selectors. objc2 retains the returned arrays.
-        let current: Option<Retained<NSArray<AnyObject>>> =
-            unsafe { msg_send![parent, accessibilityChildren] };
-        let supports_navigation_order =
-            parent.respondsToSelector(sel!(setAccessibilityChildrenInNavigationOrder:));
-        let current_navigation: Option<Retained<NSArray<AnyObject>>> = if supports_navigation_order
-        {
-            // SAFETY: The selector is present on this NSView and returns an NSArray or nil.
-            unsafe { msg_send![parent, accessibilityChildrenInNavigationOrder] }
-        } else {
-            None
-        };
-        let mut reconciled = unmanaged_children(current.as_deref());
-        reconciled.extend(
-            children
-                .iter()
-                .filter_map(|child| child.element.load())
-                .map(|child| child.into_super().into_super().into_super()),
-        );
-        let navigation = if supports_navigation_order {
-            let source = current_navigation.as_deref().or(current.as_deref());
-            let mut navigation = unmanaged_children(source);
-            navigation.extend(
-                children
-                    .iter()
-                    .filter_map(|child| child.element.load())
-                    .map(|child| child.into_super().into_super().into_super()),
-            );
-            Some(navigation)
-        } else {
-            None
-        };
-        let children_array = NSArray::from_retained_slice(&reconciled);
-        // SAFETY: NSView accepts this array of live accessibility child objects.
-        let _: () = unsafe { msg_send![parent, setAccessibilityChildren: &*children_array] };
-        if let Some(navigation) = navigation {
-            let navigation_array = NSArray::from_retained_slice(&navigation);
-            // SAFETY: The selector is present and accepts this array of live child objects.
-            let _: () = unsafe {
-                msg_send![parent, setAccessibilityChildrenInNavigationOrder: &*navigation_array]
-            };
-        }
-        post_native_notification(parent, LAYOUT_CHANGED);
-    }
-
     fn post_native_notification(element: &AnyObject, name: &str) {
         let name = NSString::from_str(name);
         // SAFETY: This is a live AppKit accessibility element and a valid notification name.
@@ -705,15 +645,29 @@ mod native {
     }
 
     fn state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
-        // SAFETY: The owner keeps its Box stable until it unregisters the element and clears the
-        // pointer in Drop. Native callbacks use it only during that registered lifetime.
+        // SAFETY: The owner keeps its Box stable until Drop clears the pointer, and native
+        // callbacks run on the main thread that owns both.
         unsafe { this.ivars().state.get().as_ref() }
+    }
+
+    /// Resolves the window that contains a presented text area through its accessibility
+    /// parent, as AccessKit resolves it for GPUI's nodes, or else through the GPUI view.
+    fn containing_element(
+        this: &PaneAccessibilityElement,
+        resolve: impl FnOnce(&AnyObject) -> Option<Retained<AnyObject>>,
+    ) -> Option<Retained<AnyObject>> {
+        let state = state(this).filter(|state| state.presented)?;
+        // SAFETY: NSAccessibilityElement stores the parent that AccessKit assigns.
+        let parent: Option<Retained<AnyObject>> = unsafe { msg_send![this, accessibilityParent] };
+        match parent {
+            Some(parent) => resolve(&parent),
+            None => resolve(state.view.as_deref()?),
+        }
     }
 
     fn semantic_state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
         let state = state(this)?;
         if state.visible
-            && state.registered
             && let Some(sender) = &state.demand_sender
         {
             sender.request();
@@ -894,13 +848,16 @@ impl TerminalAccessibilityAdapterFactory for MacosTerminalAccessibilityAdapterFa
     }
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), feature = "native-tests"))]
 impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
-    fn set_hierarchy(&mut self, presented: bool, order: usize) {
-        self.set_hierarchy(presented, order);
+    fn set_hierarchy(&mut self, presented: bool) {
+        self.set_hierarchy(presented);
     }
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
         self.update(update)
+    }
+    fn decorate(&self, pane: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+        self.decorate(pane)
     }
 }
 
@@ -1011,6 +968,11 @@ pub(crate) mod tests {
             line_height: 20.0,
             focused: true,
             visible: true,
+            presented: true,
+            selection_sender: None,
+            demand_sender: None,
+            focus_sender: None,
+            view: None,
         }
     }
 
@@ -1093,5 +1055,216 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(TEXT_AREA_ROLE, "AXTextArea");
+    }
+
+    /// Builds native text areas that the test window places on screen, and keeps each one so
+    /// tests can call it the way an accessibility client does.
+    #[derive(Default)]
+    struct OnScreenAccessibilityFactory {
+        elements: std::cell::RefCell<Vec<objc2::rc::Retained<objc2::runtime::AnyObject>>>,
+    }
+
+    impl TerminalAccessibilityAdapterFactory for OnScreenAccessibilityFactory {
+        fn create(
+            &self,
+            window: &Window,
+            model: TerminalAccessibilityModel,
+            font: &crate::appearance::ResolvedFontDescriptor,
+            font_size: Pixels,
+        ) -> Box<dyn TerminalAccessibilityAdapter> {
+            let mut element =
+                native::MacosAccessibilityElement::new(window, model, font, font_size);
+            element.assume_on_screen();
+            self.elements.borrow_mut().push(element.native_element());
+            Box::new(element)
+        }
+    }
+
+    fn terminal_pane(
+        factory: &OnScreenAccessibilityFactory,
+        window: &mut Window,
+        cx: &mut gpui::Context<crate::ui::TerminalPane>,
+    ) -> crate::ui::TerminalPane {
+        let session_factory = crate::terminal::WorkspaceTerminalSessionFactory::new_local(
+            std::rc::Rc::new(
+                crate::terminal::testing::TestTerminalSessionFactory::new(
+                    crate::terminal::testing::TestTerminalSessionRecords::default(),
+                )
+                .with_start_failure("terminal session unavailable in accessibility test"),
+            ),
+            crate::terminal::testing::test_local_directory(std::path::PathBuf::from(
+                "/tmp/spaceterm-accessibility-test",
+            )),
+        );
+        crate::ui::TerminalPane::new_with_prepared_launch(
+            session_factory.clone(),
+            session_factory.prepare_child_launch().unwrap(),
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            factory,
+            crate::terminal::native_services::testing::adapters(),
+            crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+            window,
+            cx,
+        )
+    }
+
+    fn native_children(cx: &mut gpui::VisualTestContext) -> Vec<(String, u64)> {
+        cx.run_until_parked();
+        let tree: serde_json::Value = cx.update(|window, _| {
+            serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap()
+        });
+        tree["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|node| {
+                Some((
+                    node["aria"]["role"].as_str()?.to_owned(),
+                    node["native_children"].as_u64()?,
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn presented_pane_attaches_its_text_area_to_the_pane_node(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let factory = OnScreenAccessibilityFactory::default();
+        let (pane, cx) = cx.add_window_view(|window, cx| terminal_pane(&factory, window, cx));
+        cx.activate_accessibility();
+        assert!(native_children(cx).is_empty());
+
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true);
+            cx.notify();
+        });
+        assert_eq!(native_children(cx), [("Group".to_owned(), 1)]);
+
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(false);
+            cx.notify();
+        });
+        assert!(native_children(cx).is_empty());
+
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true);
+            cx.notify();
+        });
+        assert_eq!(native_children(cx), [("Group".to_owned(), 1)]);
+    }
+
+    struct SplitPanes([gpui::Entity<crate::ui::TerminalPane>; 2]);
+
+    impl gpui::Render for SplitPanes {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            gpui::div().flex().size_full().children(
+                self.0
+                    .iter()
+                    .map(|pane| gpui::div().flex_1().h_full().child(pane.clone())),
+            )
+        }
+    }
+
+    pub(crate) fn text_area_focus_request_focuses_its_pane(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use objc2::{msg_send, sel};
+
+        cx.update(crate::ui::init).unwrap();
+        let factory = OnScreenAccessibilityFactory::default();
+        let (split, cx) = cx.add_window_view(|window, cx| {
+            SplitPanes([0, 1].map(|_| cx.new(|cx| terminal_pane(&factory, window, cx))))
+        });
+        let panes = split.read_with(cx, |split, _| split.0.clone());
+        let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|window, cx| {
+            for (index, pane) in panes.iter().enumerate() {
+                let requests = std::rc::Rc::clone(&requests);
+                cx.subscribe(pane, move |_, event, _| {
+                    if *event == crate::ui::TerminalPaneEvent::FocusRequested {
+                        requests.borrow_mut().push(index);
+                    }
+                })
+                .detach();
+                pane.update(cx, |pane, cx| {
+                    pane.set_accessibility_hierarchy(true);
+                    cx.notify();
+                });
+            }
+            panes[0].update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        let second = factory.elements.borrow()[1].clone();
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                panes
+                    .each_ref()
+                    .map(|pane| pane.read(cx).is_focused(window))
+            })
+        };
+        assert_eq!(focused(cx), [true, false]);
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let allowed: bool = unsafe {
+            msg_send![&*second, isAccessibilitySelectorAllowed: sel!(setAccessibilityFocused:)]
+        };
+        assert!(allowed);
+
+        let window = objc2_app_kit::NSAccessibilityElement::new();
+        let parent = objc2_app_kit::NSAccessibilityElement::new();
+        let first = factory.elements.borrow()[0].clone();
+        // SAFETY: The selectors are part of NSAccessibility and every element is live.
+        unsafe {
+            let _: () = msg_send![&*parent, setAccessibilityWindow: &*window];
+            let _: () = msg_send![&*parent, setAccessibilityTopLevelUIElement: &*window];
+            for element in [&first, &second] {
+                let _: () = msg_send![&**element, setAccessibilityParent: &*parent];
+            }
+        }
+        let containment = |element: &objc2::runtime::AnyObject| {
+            // SAFETY: The selectors are part of NSAccessibility and the element is live.
+            unsafe {
+                let enabled: bool = msg_send![element, isAccessibilityEnabled];
+                let window: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    msg_send![element, accessibilityWindow];
+                let top_level: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    msg_send![element, accessibilityTopLevelUIElement];
+                (
+                    enabled,
+                    window.map(|window| objc2::rc::Retained::as_ptr(&window)),
+                    top_level.map(|top_level| objc2::rc::Retained::as_ptr(&top_level)),
+                )
+            }
+        };
+        let window_pointer = Some(objc2::rc::Retained::as_ptr(&window).cast());
+        assert_eq!(containment(&second), (true, window_pointer, window_pointer));
+
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*second, setAccessibilityFocused: false] };
+        cx.run_until_parked();
+        assert!(requests.borrow().is_empty());
+        assert_eq!(focused(cx), [true, false]);
+
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*second, setAccessibilityFocused: true] };
+        cx.run_until_parked();
+        assert_eq!(*requests.borrow(), [1]);
+        assert_eq!(focused(cx), [false, true]);
+
+        panes[0].update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(containment(&first), (false, None, None));
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*first, setAccessibilityFocused: true] };
+        cx.run_until_parked();
+        assert_eq!(*requests.borrow(), [1]);
+        assert_eq!(focused(cx), [false, true]);
     }
 }

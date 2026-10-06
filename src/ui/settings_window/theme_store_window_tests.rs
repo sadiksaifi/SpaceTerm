@@ -166,3 +166,54 @@ fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
     click("settings-theme-store-retry", cx);
     assert_eq!(transport.requests().len(), 2);
 }
+
+#[gpui::test]
+fn get_more_themes_publishes_named_extensions_and_reports_the_install(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _harness, cx) = open_settings_with_registry(cx, sample_registry());
+    select_section(SettingsSectionId::Themes, cx);
+    open_theme_store(&window, cx);
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Zed theme extensions");
+    assert_eq!(list["aria"]["role"], "List");
+    let sample = tree.node("Sample Themes");
+    assert_eq!(sample["aria"]["role"], "ListItem");
+    assert!(
+        sample["aria"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("downloads")
+    );
+    let get = tree
+        .children(sample)
+        .into_iter()
+        .find(|node| node["aria"]["role"] == "Button")
+        .expect("the extension offers Get");
+    assert_eq!(get["aria"]["label"], "Get");
+
+    perform(cx, get, Action::Click);
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    let text = tree
+        .with_role("Label")
+        .into_iter()
+        .filter_map(|label| label["aria"]["value"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        text.contains(&"Installed 2 themes from Sample Themes."),
+        "{text:?}"
+    );
+    let actions = tree
+        .children(tree.node("Sample Themes"))
+        .into_iter()
+        .map(|node| {
+            node["aria"]["label"]
+                .as_str()
+                .or_else(|| node["aria"]["value"].as_str())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["Installed", "Remove"]);
+}

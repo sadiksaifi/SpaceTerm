@@ -8,8 +8,8 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FocusHandle, Global, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px, rgba,
+    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, accesskit,
+    div, prelude::FluentBuilder as _, px, rgba,
 };
 
 use crate::{
@@ -35,6 +35,8 @@ pub enum SegmentedActivationSource {
     Arrow,
     /// Home or End moved the selection to the first or last enabled option.
     Boundary,
+    /// An assistive technology press on one option, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// A controlled selection change request.
@@ -621,7 +623,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);
         });
-        let focused = focus_handle.is_focused(window) && state.read(cx).focus_visible;
+        let holds_focus = focus_handle.is_focused(window);
+        let focused = holds_focus && state.read(cx).focus_visible;
         #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
         let selector = self
@@ -665,6 +668,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             }
         };
 
+        let option_count = self.options.len();
         let segments = self
             .options
             .iter()
@@ -723,9 +727,32 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 };
                 let pointer_state = state.clone();
                 let activate = request.clone();
+                let accessibility_activate = request.clone();
                 let value = option.value.clone();
+                let accessibility_value = option.value.clone();
                 div()
                     .id(SharedString::from(format!("{option_selector}-state")))
+                    .role(accesskit::Role::RadioButton)
+                    .aria_label(option.label.clone())
+                    .aria_toggled(accesskit::Toggled::from(selected))
+                    .aria_disabled(!option_enabled)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(option_count)
+                    // While the track holds keyboard focus, arrows move the selection, so the
+                    // selected option is the focused one.
+                    .when(selected && holds_focus, |segment| {
+                        segment.aria_active_descendant()
+                    })
+                    .when(option_enabled, |segment| {
+                        segment.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                            accessibility_activate(
+                                accessibility_value.clone(),
+                                SegmentedActivationSource::Accessibility,
+                                window,
+                                cx,
+                            );
+                        })
+                    })
                     .debug_selector({
                         let option_selector = option_selector.clone();
                         move || option_selector
@@ -846,6 +873,9 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 })
             })
             .id(self.id)
+            .role(accesskit::Role::RadioGroup)
+            .aria_label(self.accessibility_name.clone())
+            .aria_disabled(!enabled)
             .debug_selector({
                 let selector = selector.clone();
                 move || selector

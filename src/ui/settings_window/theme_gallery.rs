@@ -2,8 +2,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Window,
-    div, px, relative,
+    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Text,
+    Window, accesskit, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, HoverFade, Icon, IconName, ModalAction, ModalActionEmphasis,
@@ -200,6 +200,9 @@ impl SettingsWindow {
             .gap(appearance.spacing(12.0))
             .child(
                 div()
+                    .id("settings-theme-slots")
+                    .role(accesskit::Role::RadioGroup)
+                    .aria_label("Current theme")
                     .flex()
                     .flex_row()
                     .justify_center()
@@ -212,10 +215,13 @@ impl SettingsWindow {
                     .chrome_text(appearance.typography.style(TextRole::Secondary))
                     .text_color(gpui_color(colors.text_secondary))
                     .whitespace_normal()
-                    .child(
-                        "Terminal panes follow the system appearance. Select Light or Dark, then \
-                         choose its theme below.",
-                    ),
+                    .child(Text::new(
+                        "settings-theme-slots-guidance".into(),
+                        SharedString::from(
+                            "Terminal panes follow the system appearance. Select Light or Dark, \
+                             then choose its theme below.",
+                        ),
+                    )),
             )
             .into_any_element()
     }
@@ -242,8 +248,21 @@ impl SettingsWindow {
         let hover = HoverFade::new(SharedString::from(format!("{selector}-hover")), window, cx);
         let hover_level = hover.level(window, cx);
         let focused = focus.is_focused(window) && window.last_input_was_keyboard();
+        let description = name.clone();
+        let selecting = cx.weak_entity();
         div()
             .id(SharedString::from(selector.clone()))
+            .role(accesskit::Role::RadioButton)
+            .aria_label(label)
+            .when(!description.is_empty(), |card| {
+                card.aria_description(description)
+            })
+            .aria_toggled(accesskit::Toggled::from(selected))
+            .aria_position_in_set(usize::from(slot == Appearance::Dark) + 1)
+            .aria_size_of_set(2)
+            .on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                let _ = selecting.update(cx, |settings, cx| settings.select_auto_slot(slot, cx));
+            })
             .debug_selector(move || selector.clone())
             .track_focus(focus)
             .flex()
@@ -385,10 +404,21 @@ impl SettingsWindow {
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
                         .text_color(gpui_color(colors.text_secondary))
                         .whitespace_normal()
-                        .child(SharedString::from(format!("No themes match “{query}”."))),
+                        .child(Text::new(
+                            "settings-theme-gallery-no-results".into(),
+                            SharedString::from(format!("No themes match “{query}”.")),
+                        )),
                 )
             })
-            .child(div().flex().flex_col().children(rows))
+            .child(
+                div()
+                    .id("settings-installed-theme-list")
+                    .role(accesskit::Role::List)
+                    .aria_label(self.installed_themes_title(cx))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
             .into_any_element()
     }
 
@@ -421,7 +451,10 @@ impl SettingsWindow {
                     appearance.icons.metrics(IconRole::Caption).glyph_size,
                     gpui_color(colors.text_secondary),
                 ))
-                .child("In Use")
+                .child(Text::new(
+                    SharedString::from(format!("{selector}-in-use")).into(),
+                    SharedString::from("In Use"),
+                ))
                 .into_any_element()
         } else {
             let owner = cx.weak_entity();
@@ -475,6 +508,10 @@ impl SettingsWindow {
             })
         });
         div()
+            .id(SharedString::from(selector.clone()))
+            .role(accesskit::Role::ListItem)
+            .aria_label(summary.name.clone())
+            .aria_description(theme_origin(summary))
             .debug_selector({
                 let selector = selector.clone();
                 move || selector
@@ -678,6 +715,9 @@ fn current_theme_details(
 ) -> impl IntoElement {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     div()
+        .id("settings-current-theme-details")
+        .role(accesskit::Role::Group)
+        .aria_label("Current theme")
         .flex()
         .flex_row()
         .items_center()
@@ -701,14 +741,20 @@ fn current_theme_details(
                         .truncate()
                         .chrome_text(appearance.typography.style(TextRole::Section))
                         .text_color(gpui_color(colors.text))
-                        .child(preview_name(preview)),
+                        .child(Text::new(
+                            "settings-current-theme-name".into(),
+                            preview_name(preview),
+                        )),
                 )
                 .child(
                     div()
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
                         .text_color(gpui_color(colors.text_secondary))
                         .whitespace_normal()
-                        .child(preview_origin(preview)),
+                        .child(Text::new(
+                            "settings-current-theme-origin".into(),
+                            preview_origin(preview),
+                        )),
                 )
                 .child(
                     div()

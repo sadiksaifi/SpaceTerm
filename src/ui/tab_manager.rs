@@ -73,12 +73,12 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, Task, Window, div, px, relative,
+    ScrollHandle, Task, Window, accesskit, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, CustomIconName,
-    HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction,
-    ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
+    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, ContextMenuTarget,
+    CustomIconName, HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize,
+    ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
@@ -1344,6 +1344,7 @@ impl TabManager {
                 active_tab_id,
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
+                let tab_focused = payload.read(cx).tab_focus().contains_focused(window, cx);
                 payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
@@ -1352,6 +1353,10 @@ impl TabManager {
                     } else {
                         active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
+                } else if tab_focused {
+                    // Focus on the closed Tab or its Close Tab button leaves with it, so the
+                    // Active Tab takes it.
+                    self.focus(window, cx);
                 }
                 self.tab_selector_pressed = None;
                 if self.tab_menu == Some(tab_id) {
@@ -1788,6 +1793,8 @@ impl TabManager {
         let owner = manager.entity_id();
         let mut items = div()
             .id("tab-items")
+            .role(accesskit::Role::TabList)
+            .aria_label("Tabs")
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
@@ -1846,6 +1853,7 @@ impl TabManager {
                 )
             });
             let identity = view.read(cx).tab_identity();
+            let tab_focus = view.read(cx).tab_focus().clone();
             let title = if identity.activity.is_empty() {
                 "Terminal"
             } else {
@@ -1856,6 +1864,17 @@ impl TabManager {
             } else {
                 format!("Tab actions for {title} in {}", identity.place)
             };
+            let press_manager = manager.clone();
+            let mut target = ContextMenuTarget::new(accesskit::Role::Tab, title.to_owned())
+                .selected(active)
+                .on_press(move |window, cx| {
+                    let _ = press_manager.update(cx, |manager, cx| {
+                        manager.activate_tab(tab_id, window, cx);
+                    });
+                });
+            if !identity.place.is_empty() {
+                target = target.description(identity.place.clone());
+            }
             let face = self
                 .render_tab_item(
                     tab_id,
@@ -1891,6 +1910,8 @@ impl TabManager {
                 .size(MenuSize::Wide)
                 .fill_parent_height()
                 .preserve_trigger_cursor()
+                .keyboard_trigger(&tab_focus)
+                .target(target)
                 .debug_selector(format!("tab-context-menu-{}", tab_id.get()))
                 .on_open_request(move |_, _, cx| {
                     open_manager
@@ -4123,6 +4144,129 @@ mod tests {
             cx,
             spaceterm_ui::TextDirection::RightToLeft,
         );
+    }
+
+    #[gpui::test]
+    fn tabs_publish_a_tab_list_that_selects_on_press(cx: &mut TestAppContext) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (manager, _records, cx) = tab_manager(cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+
+        let tree = A11yTree::read(cx);
+        let list = tree.node("Tabs");
+        assert_eq!(list["aria"]["role"], "TabList");
+        let tabs = tree.children(list);
+        let tabs = tabs
+            .iter()
+            .filter(|node| node["aria"]["role"] == "Tab")
+            .collect::<Vec<_>>();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs.iter().all(|tab| tab["aria"]["label"] == "Terminal"));
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab["aria"]["selected"] == true)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+
+        perform(cx, tabs[0], Action::Click);
+        let (first, active) = manager.read_with(cx, |manager, _| {
+            let first = manager.tabs.iter().next().map(|(tab_id, _)| tab_id);
+            (first, manager.tabs.active_tab_id())
+        });
+        assert_eq!(first, Some(active));
+        let tree = A11yTree::read(cx);
+        let selected = tree
+            .with_role("Tab")
+            .iter()
+            .map(|tab| tab["aria"]["selected"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(selected, [true, false]);
+
+        perform(cx, tree.with_role("Tab")[1], Action::ShowContextMenu);
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+    }
+
+    /// Chooses an item of the open menu, which may share its name with a Tab bar control.
+    fn perform_menu_item(cx: &mut VisualTestContext, label: &str) {
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let tree = A11yTree::read(cx);
+        let menu = tree.with_role("Menu")[0];
+        let item = tree
+            .children(menu)
+            .into_iter()
+            .find(|item| item["aria"]["label"] == label)
+            .unwrap_or_else(|| panic!("the open menu has no {label:?} item"));
+        perform(cx, item, gpui::accesskit::Action::Click);
+    }
+
+    #[gpui::test]
+    fn a_focused_tab_opens_its_menu_from_the_keyboard_and_takes_focus_back(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform, supports};
+
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let tree = A11yTree::read(cx);
+        let first = tree.with_role("Tab")[0];
+        assert!(supports(first, Action::Focus));
+        let tab = node_id(first);
+        perform(cx, first, Action::Focus);
+        assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(tab));
+
+        cx.simulate_keystrokes("shift-f10");
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("Menu").is_empty());
+        assert_eq!(tree.focused().map(node_id), Some(tab));
+
+        // Moving the Tab keeps focus on it in its new place.
+        cx.simulate_keystrokes("shift-f10");
+        perform_menu_item(cx, "Move Tab Right");
+        assert_eq!(tab_order(&manager, cx), vec![2, 1]);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().map(node_id), Some(tab));
+        assert_eq!(node_id(tree.with_role("Tab")[1]), tab);
+
+        // New Tab moves focus to the new Tab's terminal on purpose.
+        cx.simulate_keystrokes("shift-f10");
+        perform_menu_item(cx, "New Tab");
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn closing_a_focused_inactive_tab_returns_focus_to_the_active_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.with_role("Tab")[0], Action::Focus);
+        cx.simulate_keystrokes("shift-f10");
+        perform_menu_item(cx, "Close Tab");
+
+        assert_eq!(tab_order(&manager, cx), vec![2]);
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
     }
 
     #[gpui::test]

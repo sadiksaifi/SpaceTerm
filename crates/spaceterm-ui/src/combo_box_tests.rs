@@ -3712,3 +3712,57 @@ fn shortcut_refresh_should_preserve_keyboard_selection_and_cancel_a_stale_pointe
         window_was_open: false,
     }));
 }
+
+#[gpui::test]
+fn combo_boxes_publish_a_pop_up_button_with_a_list_of_options(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    let tree = A11yTree::read(cx);
+    let trigger = tree.node("Workspace type");
+    assert_eq!(trigger["aria"]["role"], "ComboBox");
+    assert_eq!(trigger["aria"]["value"], "Local Workspace");
+    assert_eq!(trigger["aria"]["expanded"], false);
+    assert!(tree.with_role("ListBox").is_empty());
+
+    perform(cx, trigger, Action::Click);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Workspace type")["aria"]["expanded"], true);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+    let lists = tree.with_role("ListBox");
+    assert_eq!(lists.len(), 1);
+    let options = tree
+        .children(lists[0])
+        .into_iter()
+        .map(|option| {
+            (
+                option["aria"]["role"].as_str().unwrap(),
+                option["aria"]["label"].as_str().unwrap(),
+                option["aria"]["disabled"] == true,
+                option["aria"]["selected"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        options,
+        [
+            ("ListBoxOption", "Local Workspace", false, true),
+            ("ListBoxOption", "Unavailable Workspace", true, false),
+            ("ListBoxOption", "Remote Workspace", false, false),
+            ("ListBoxOption", "Zellij Session", false, false),
+        ]
+    );
+    assert!(!supports(tree.node("Unavailable Workspace"), Action::Click));
+
+    perform(cx, tree.node("Remote Workspace"), Action::Click);
+    assert!(A11yTree::read(cx).with_role("ListBox").is_empty());
+    assert_eq!(
+        events.borrow().last(),
+        Some(&RecordedEvent::Accepted {
+            item_id: 3,
+            source: ComboBoxActivationSource::Accessibility,
+            window_was_open: false,
+        })
+    );
+}

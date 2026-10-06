@@ -48,6 +48,7 @@ mod dialog;
 mod policy;
 mod progress_dialog;
 mod render;
+mod underlay;
 mod window_chrome;
 
 use std::{error::Error, fmt, time::Duration};
@@ -78,6 +79,7 @@ pub use render::{
     ModalKeybindingProfile, ModalLayer, install_modal_keybindings,
     install_portable_modal_keybindings,
 };
+pub(crate) use underlay::present_modal_transient;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ModalParentToken {
@@ -329,6 +331,8 @@ pub enum ModalActivationSource {
     Escape,
     /// Command-Period reached the modal after the focused child declined it.
     CommandPeriod,
+    /// Assistive technology pressed the action's button.
+    Accessibility,
     /// The owner explicitly requested the semantic action.
     Programmatic,
 }

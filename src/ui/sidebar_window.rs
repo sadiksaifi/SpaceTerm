@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
-    Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    Window, WindowBounds, WindowKind, WindowOptions, accesskit, div, px,
 };
 use spaceterm_ui::{
     Button, ButtonMetrics, ButtonPaint, ButtonVariantStyle, ClientWindowControls, HoverFade, Icon,
@@ -604,16 +604,7 @@ pub(crate) fn render_footer_action(
         .font_size(text.size)
         .line_heights(line_height, line_height);
     let glyph_size = appearance.icons.metrics(IconRole::Row).glyph_size;
-    let activated = action.boxed_clone();
-    // The shared button publishes no accessibility node of its own, so the row names it, the way
-    // client-drawn Window Controls do.
     div()
-        .id(SharedString::from(format!("{selector}-accessible")))
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
-            window.dispatch_action(action.boxed_clone(), cx)
-        })
         .w_full()
         .child(
             Button::new(SharedString::from(selector.clone()), label)
@@ -627,9 +618,7 @@ pub(crate) fn render_footer_action(
                 .tab_stop(true)
                 .debug_selector(selector)
                 .leading(move |color| Icon::new(icon, glyph_size, color).into_any_element())
-                .on_activate(move |_, window, cx| {
-                    window.dispatch_action(activated.boxed_clone(), cx)
-                }),
+                .on_activate(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)),
         )
         .into_any_element()
 }
@@ -655,6 +644,7 @@ fn render_navigation_list<T: SidebarOwner>(
     let navigation = owner.navigation();
     let list_focused = navigation.has_visible_focus(window);
     let list_focus = navigation.list_focus.clone();
+    let list_holds_focus = list_focus.is_focused(window);
     let any_available = entries.iter().any(|entry| entry.available);
     let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
     // AppKit source lists draw no focus ring. Keyboard focus emphasizes the selection in the
@@ -718,8 +708,25 @@ fn render_navigation_list<T: SidebarOwner>(
             let icon_color = icon_color.fade(hover_icon, f64::from(hover));
             let chip_selector = format!("{prefix}-navigation-chip-{selector}");
             let selecting = cx.weak_entity();
+            let pressing = cx.weak_entity();
             div()
                 .id(SharedString::from(format!("{prefix}-navigation-{title}")))
+                .role(accesskit::Role::ListBoxOption)
+                .aria_label(SharedString::from(title))
+                .aria_selected(selected)
+                .aria_disabled(!available)
+                // The list holds keyboard focus, so its selection is the focused option.
+                .when(selected && list_holds_focus, |row| {
+                    row.aria_active_descendant()
+                })
+                .when(available, |row| {
+                    row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                        let _ = pressing.update(cx, |owner, cx| {
+                            owner.navigation().release_to_window(window, cx);
+                            owner.select_section(section, cx);
+                        });
+                    })
+                })
                 .debug_selector(move || format!("{prefix}-navigation-{selector}"))
                 .relative()
                 .text_color(gpui_color(foreground))
@@ -764,6 +771,8 @@ fn render_navigation_list<T: SidebarOwner>(
         .collect::<Vec<_>>();
     div()
         .id(SharedString::from(format!("{prefix}-navigation")))
+        .role(accesskit::Role::ListBox)
+        .aria_label("Sections")
         .debug_selector(move || format!("{prefix}-navigation"))
         .when(any_available, |list| list.track_focus(&list_focus))
         // GPUI track_focus focuses on mouse-down. Suppress that before its bubble listener runs:

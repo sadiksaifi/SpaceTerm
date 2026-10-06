@@ -3267,6 +3267,8 @@ impl WorkspaceManager {
             .mount(
                 div()
                     .id("workspace-top-chrome")
+                    .role(gpui::accesskit::Role::Group)
+                    .a11y_synthetic_children(publish_children_in_place)
                     .debug_selector(|| "workspace-top-chrome".to_owned())
                     .absolute()
                     .top_0()
@@ -3408,8 +3410,20 @@ impl WorkspaceManager {
                     .typography
                     .style(TextRole::Body),
             )
+            .role(gpui::accesskit::Role::Group)
+            .a11y_synthetic_children(publish_in_layout_order)
             .child(Self::render_top_left_chrome_surface(chrome, window, cx))
-            .child(active_tab_manager)
+            .child(
+                div()
+                    .id("workspace-tab-manager")
+                    .role(gpui::accesskit::Role::Group)
+                    .a11y_synthetic_children(publish_children_in_place)
+                    .relative()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(active_tab_manager),
+            )
             .when(self.sidebar.read(cx).layout().visible, |root| {
                 root.child(self.sidebar.clone())
             })
@@ -3492,6 +3506,27 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
     }
+}
+
+/// Reads the main window in its presented layout: the top-left chrome, the sidebar and its resize
+/// handle, then the Tab manager. Paint order differs so the handle stays above the Tab manager and
+/// below the top-left chrome for pointer input.
+fn publish_in_layout_order(builder: &mut gpui::A11ySubtreeBuilder) {
+    let node = builder.parent_node();
+    let mut children = node.children().to_vec();
+    if let [tab_manager, .., top_left_chrome] = children.as_mut_slice() {
+        std::mem::swap(tab_manager, top_left_chrome);
+    }
+    node.set_children(children);
+    publish_children_in_place(builder);
+}
+
+/// Withdraws a layout container from the platform tree, which then presents its children in the
+/// container's place.
+fn publish_children_in_place(builder: &mut gpui::A11ySubtreeBuilder) {
+    builder
+        .parent_node()
+        .set_role(gpui::accesskit::Role::GenericContainer);
 }
 
 fn workspace_activation_shortcut(

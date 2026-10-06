@@ -1749,6 +1749,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn directories_publish_a_list_that_descends_and_opens_through_accessibility(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let identity = RemoteDirectoryIdentity::new("/home/tester/alpha".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(remote_rows(["alpha", "Projects"])), Ok(Vec::new())],
+            [
+                Ok(ExactPathState::ReadableDirectory),
+                Ok(ExactPathState::ReadableDirectory),
+            ],
+            [],
+            [Ok(identity)],
+        );
+        let (picker, events, cx) = directory_picker(provider, cx);
+        let tree = A11yTree::read(cx);
+        let dialogs = tree.with_role("Dialog");
+        assert_eq!(dialogs.len(), 1);
+        assert_eq!(dialogs[0]["aria"]["label"], "Pin to Directory");
+        assert_eq!(dialogs[0]["aria"]["modal"], true);
+        let options = |tree: &A11yTree| {
+            tree.with_role("ListBoxOption")
+                .iter()
+                .map(|option| option["aria"]["label"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(options(&tree), ["Go Back", "alpha", "Projects"]);
+
+        perform(cx, tree.node("alpha"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
+            "~/alpha/"
+        );
+        assert_eq!(options(&tree), ["Go Back"]);
+
+        perform(cx, tree.node("Open"), Action::Click);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
+        );
+    }
+
+    #[gpui::test]
     fn missing_remote_path_should_note_that_open_creates_it(cx: &mut TestAppContext) {
         let provider = scripted_provider([Ok(Vec::new())], [Ok(ExactPathState::Missing)], [], []);
         let (picker, _, cx) = directory_picker(provider, cx);

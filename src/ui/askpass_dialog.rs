@@ -2,7 +2,7 @@ use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 #[cfg(test)]
 use gpui::px;
-use gpui::{App, Context, Entity, Render, Window, div};
+use gpui::{App, Context, Entity, Render, Window, accesskit, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Dialog, DialogCloseDecision, DialogCompletion,
     DialogInitialFocus, DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId,
@@ -474,6 +474,9 @@ impl Render for AskPassSecretBody {
                     .when(self.required_error, |field| {
                         field.child(
                             div()
+                                .id("ssh-askpass-required-error")
+                                .role(accesskit::Role::Label)
+                                .aria_value(REQUIRED_SECRET_MESSAGE)
                                 .debug_selector(|| "ssh-askpass-required-error".to_owned())
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(colors.error))
@@ -634,6 +637,9 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(cx.debug_bounds("ssh-askpass-required-error").is_some());
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        assert!(tree.find(REQUIRED_SECRET_MESSAGE).is_none());
+        tree.text(REQUIRED_SECRET_MESSAGE);
         assert!(results.borrow().is_empty());
 
         cx.simulate_input("correct horse");
@@ -749,6 +755,67 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(results.borrow().as_slice(), [ObservedResult::Cancelled]);
         assert!(presenter.read_with(cx, |presenter, _| presenter.active.is_none()));
+    }
+
+    #[gpui::test]
+    fn secret_field_publishes_a_named_secure_field_without_the_secret(cx: &mut TestAppContext) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let (_, presenter, results, cx) = askpass_window(cx);
+        present(
+            1,
+            request("root@example.test's password:", AskPassPromptKind::Secret),
+            &presenter,
+            &results,
+            cx,
+        );
+        cx.simulate_input("correct horse");
+
+        let tree = A11yTree::read(cx);
+        let dialog = tree.node("SSH authentication response");
+        assert_eq!(dialog["aria"]["role"], "Dialog");
+        assert_eq!(dialog["aria"]["modal"], true);
+        let fields = tree.with_role("PasswordInput");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["aria"]["label"], "Password");
+        assert!(tree.with_role("TextInput").is_empty());
+        assert_eq!(tree.focused(), Some(fields[0]));
+        let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+        assert!(!published.contains("correct horse"));
+    }
+
+    #[gpui::test]
+    fn confirmation_publishes_an_alert_dialog_that_answers_through_its_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (_, presenter, results, cx) = askpass_window(cx);
+        let prompt = "Allow use of key /tmp/example-key?";
+        let presentation = request(prompt, AskPassPromptKind::Confirmation)
+            .confirmation_presentation()
+            .expect("a confirmation presentation");
+        present(
+            1,
+            request(prompt, AskPassPromptKind::Confirmation),
+            &presenter,
+            &results,
+            cx,
+        );
+
+        let tree = A11yTree::read(cx);
+        let alert = tree.node(presentation.title());
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(alert["aria"]["modal"], true);
+        assert_eq!(alert["aria"]["description"], presentation.message());
+        perform(cx, tree.node(presentation.affirmative()), Action::Click);
+        cx.run_until_parked();
+        assert_eq!(
+            results.borrow().as_slice(),
+            [ObservedResult::Confirmation(true)]
+        );
+        assert!(A11yTree::read(cx).find(presentation.title()).is_none());
     }
 
     #[test]

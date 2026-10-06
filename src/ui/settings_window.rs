@@ -431,7 +431,10 @@ impl SettingsWindow {
             },
         )
         .detach();
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("settings-scrollbar"));
+        let scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("settings-scrollbar")
+                .accessibility_name("Settings content")
+        });
         cx.subscribe(
             &scrollbar,
             |settings, _, event: &OverlayScrollbarEvent<f32>, cx| {
@@ -791,7 +794,10 @@ impl SettingsWindow {
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::clear_search));
+        // The surface holds the window's focus, so it publishes a node for focus to rest on.
         let content = super::sidebar_window::tab_traversal(surface, cx)
+            .id("settings-window-surface")
+            .role(gpui::accesskit::Role::Group)
             .size_full()
             .flex()
             .flex_row()
@@ -952,10 +958,13 @@ impl SettingsWindow {
                                         .debug_selector(|| "settings-no-results".to_owned())
                                         .px(row_horizontal_inset(appearance))
                                         .text_color(gpui_color(appearance.colors.text_muted))
-                                        .child(SharedString::from(format!(
-                                            "No settings match “{}”.",
-                                            self.query
-                                        ))),
+                                        .child(gpui::Text::new(
+                                            "settings-no-results".into(),
+                                            SharedString::from(format!(
+                                                "No settings match “{}”.",
+                                                self.query
+                                            )),
+                                        )),
                                 )
                             }),
                     )
@@ -1658,14 +1667,20 @@ impl SettingsWindow {
                         .child(
                             div()
                                 .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                                .child(status.message()),
+                                .child(gpui::Text::new(
+                                    "settings-banner-message".into(),
+                                    status.message().into(),
+                                )),
                         )
                         .child(
                             div()
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(pair.secondary))
                                 .whitespace_normal()
-                                .child(explanation),
+                                .child(gpui::Text::new(
+                                    "settings-banner-explanation".into(),
+                                    explanation.into(),
+                                )),
                         ),
                 )
                 .child(
@@ -1715,7 +1730,10 @@ impl SettingsWindow {
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 // The recovery banner owns semantic emphasis on its paired surface.
                 .text_color(gpui_color(appearance.colors.text_muted))
-                .child(self.editor.status().message()),
+                .child(gpui::Text::new(
+                    "settings-save-status".into(),
+                    self.editor.status().message().into(),
+                )),
         )
     }
 

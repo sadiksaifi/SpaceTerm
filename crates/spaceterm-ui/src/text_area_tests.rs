@@ -301,3 +301,219 @@ fn tab_in_read_only_text_moves_focus_instead_of_indenting(cx: &mut TestAppContex
     assert_eq!(value(&first, cx), "a");
     assert_eq!(value(&second, cx), "b");
 }
+
+#[gpui::test]
+fn text_areas_publish_a_multiline_field_with_its_value(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (area, cx) = area(cx, "first\nsecond", |area| area.placeholder("Notes"));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test area");
+    assert_eq!(field["aria"]["role"], "MultilineTextInput");
+    assert_eq!(field["aria"]["value"], "first\nsecond");
+    assert_eq!(field["aria"]["placeholder"], "Notes");
+    assert_eq!(tree.focused(), Some(field));
+
+    area.update(cx, |area, cx| area.set_editable(false, cx));
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["read_only"],
+        true
+    );
+}
+
+#[gpui::test]
+fn text_areas_publish_one_text_run_per_line_and_accept_selection_requests(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (area, cx) = area(cx, "first\nsecond", |area| area);
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test area");
+    let runs = tree.children(field);
+    let values = runs
+        .iter()
+        .map(|run| run["aria"]["value"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["first\n", "second"]);
+    assert_eq!(
+        field["aria"]["text_selection"]["focus"],
+        serde_json::json!({ "node": field["children"][0], "character_index": 0 })
+    );
+
+    let second = node_id(runs[1]);
+    let first = node_id(runs[0]);
+    perform_with(
+        cx,
+        field,
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: first,
+                character_index: 5,
+            },
+            focus: TextPosition {
+                node: second,
+                character_index: 3,
+            },
+        })),
+    );
+    assert_eq!(
+        cx.read(|cx| area.read(cx).buffer.selection.range.clone()),
+        5..9
+    );
+}
+
+#[gpui::test]
+fn accessibility_value_writes_replace_text_areas_as_one_user_edit(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (area, cx) = area(cx, "old", |area| area);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let recorded = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&area, move |_, event: &TextAreaEvent, _| {
+            recorded.borrow_mut().push(*event)
+        })
+        .detach();
+    });
+    cx.simulate_input("!");
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetValue,
+        Some(ActionData::Value("first\r\nsecond".into())),
+    );
+    assert_eq!(value(&area, cx), "first\nsecond");
+    assert_eq!(caret(&area, cx), 12);
+    assert_eq!(
+        *events.borrow(),
+        [
+            TextAreaEvent::ValueChanged { revision: 1 },
+            TextAreaEvent::ValueChanged { revision: 2 }
+        ]
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["value"],
+        "first\nsecond"
+    );
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(value(&area, cx), "!old");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(value(&area, cx), "old");
+}
+
+#[gpui::test]
+fn accessibility_value_writes_respect_text_area_editability_and_limits(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with, supports};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (area, cx) = area(cx, "old", |area| area.input_length_limit(Some(4)));
+    for data in [
+        None,
+        Some(ActionData::Value("too long".into())),
+        Some(ActionData::Value(
+            "x".repeat(CLIPBOARD_INSERTION_LIMIT + 1).into(),
+        )),
+    ] {
+        let tree = A11yTree::read(cx);
+        perform_with(cx, tree.node("Test area"), Action::SetValue, data);
+        assert_eq!(value(&area, cx), "old");
+        assert_eq!(caret(&area, cx), 0);
+        assert_eq!(area.read_with(cx, |area, _| area.revision()), 0);
+    }
+    area.update(cx, |area, cx| area.set_editable(false, cx));
+    let tree = A11yTree::read(cx);
+    assert!(!supports(tree.node("Test area"), Action::SetValue));
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetValue,
+        Some(ActionData::Value("new".into())),
+    );
+    assert_eq!(value(&area, cx), "old");
+}
+
+#[gpui::test]
+fn text_areas_reuse_accessibility_publication_until_the_value_changes(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use crate::accessible_text::testing::run_storage;
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (area, cx) = area(cx, "first\nsecond\n", |area| area);
+    assert!(
+        area.read_with(cx, |area, _| run_storage(&area.accessible_text))
+            .is_none()
+    );
+    let tree = A11yTree::read(cx);
+    let runs = tree.children(tree.node("Test area"));
+    let first = node_id(runs[0]);
+    let second = node_id(runs[1]);
+    let storage = area.read_with(cx, |area, _| run_storage(&area.accessible_text));
+    for _ in 0..3 {
+        cx.executor().advance_clock(CARET_BLINK_INTERVAL);
+        let tree = A11yTree::read(cx);
+        let runs = tree.children(tree.node("Test area"));
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0]["aria"]["value"], "first\n");
+        assert_eq!(runs[1]["aria"]["value"], "second\n");
+        assert_eq!(runs[2]["aria"]["value"], "");
+        assert_eq!(
+            area.read_with(cx, |area, _| run_storage(&area.accessible_text)),
+            storage
+        );
+    }
+
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: first,
+                character_index: 5,
+            },
+            focus: TextPosition {
+                node: second,
+                character_index: 3,
+            },
+        })),
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["text_selection"]["focus"]["character_index"],
+        3
+    );
+    assert_eq!(
+        area.read_with(cx, |area, _| run_storage(&area.accessible_text)),
+        storage
+    );
+
+    area.update(cx, |area, cx| {
+        area.set_value("one line", cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.children(tree.node("Test area")).len(), 1);
+    assert_eq!(tree.with_role("TextRun").len(), 1);
+    assert_eq!(
+        tree.children(tree.node("Test area"))[0]["aria"]["value"],
+        "one line"
+    );
+
+    cx.deactivate_accessibility();
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.children(tree.node("Test area"))[0]["aria"]["value"],
+        "one line"
+    );
+    cx.deactivate_accessibility();
+    area.update(cx, |area, cx| {
+        area.set_value("after\nreconnect", cx);
+    });
+    let tree = A11yTree::read(cx);
+    let runs = tree.children(tree.node("Test area"));
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0]["aria"]["value"], "after\n");
+    assert_eq!(runs[1]["aria"]["value"], "reconnect");
+}

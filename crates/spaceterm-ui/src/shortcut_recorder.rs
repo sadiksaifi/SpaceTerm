@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     App, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, SharedString, Subscription, Window, div,
+    Modifiers, ModifiersChangedEvent, SharedString, Subscription, Window, accesskit, div,
 };
 
 use crate::chord_capture::ChordRelease;
@@ -313,6 +313,7 @@ impl Render for ShortcutRecorder {
                 .is_some_and(|recording| recording.rejected),
         );
         let selector = self.debug_selector.clone();
+        let press_recorder = cx.entity().downgrade();
         crate::field_frame::themed_field_frame(
             field.frame,
             self.id.clone(),
@@ -320,6 +321,31 @@ impl Render for ShortcutRecorder {
             state,
             field.corner_radius,
         )
+        .role(accesskit::Role::Button)
+        .aria_label(self.accessibility_name.clone())
+        .aria_value(
+            self.value
+                .clone()
+                .unwrap_or_else(|| self.empty_label.clone()),
+        )
+        .aria_disabled(self.disabled)
+        .when(self.recording.is_some(), |frame| {
+            let announcement = SharedString::from(format!(
+                "Recording Shortcut. {}",
+                self.recording_placeholder
+            ));
+            frame
+                .aria_description(announcement.clone())
+                .a11y_synthetic_children(move |builder| {
+                    let mut status = accesskit::Node::new(accesskit::Role::Status);
+                    status.set_value(announcement.as_ref());
+                    status.set_live(accesskit::Live::Polite);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        status.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("recording-status"), status);
+                })
+        })
         .when_some(selector, |frame, selector| {
             frame.debug_selector(move || selector.to_string())
         })
@@ -337,6 +363,11 @@ impl Render for ShortcutRecorder {
         .when(!self.disabled, |frame| {
             frame
                 .cursor_pointer()
+                .on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    let _ = press_recorder.update(cx, |recorder, cx| {
+                        recorder.toggle_recording(window, cx);
+                    });
+                })
                 .on_click(cx.listener(|recorder, _, window, cx| {
                     recorder.toggle_recording(window, cx);
                 }))

@@ -18,6 +18,7 @@ ACCESSKIT_CRATES = {
     "accesskit": "common",
     "accesskit_consumer": "consumer",
     "accesskit_atspi_common": "platforms/atspi-common",
+    "accesskit_macos": "platforms/macos",
 }
 
 

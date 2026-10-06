@@ -1,11 +1,13 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Element, ElementId, Entity, FocusHandle,
     GlobalElementId, Hitbox, HitboxBehavior, ImageSource, InspectorElementId,
     InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, RenderOnce, Rgba, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, canvas, div, img,
-    prelude::FluentBuilder as _, px, relative, size,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, accesskit, actions, canvas,
+    div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -155,10 +157,12 @@ impl RenderOnce for ModalLayer {
                 root.chrome_frame.clone(),
             )
         });
-        if !super::window_modal_is_open(window, cx) {
+        let modal_open = super::window_modal_is_open(window, cx);
+        if !modal_open {
             chrome_frame.pointer.set(None);
         }
         register_root_scope(&owner, &root_focus, cx);
+        let transient_presented = Rc::new(Cell::new(false));
 
         super::window_chrome::ChromeScope {
             frame: chrome_frame,
@@ -169,8 +173,28 @@ impl RenderOnce for ModalLayer {
                     .relative()
                     .size_full()
                     .track_focus(&root_focus)
-                    .child(self.content)
-                    .children(self.transients)
+                    .child(
+                        // Assistive technology reaches only the active modal, so the content
+                        // beneath it leaves the tree while the modal is presented. A modal
+                        // transient hides only the ordinary content.
+                        div()
+                            .id("spaceterm-modal-underlay")
+                            .relative()
+                            .size_full()
+                            .when(modal_open, |underlay| {
+                                underlay.role(accesskit::Role::Group).aria_hidden(true)
+                            })
+                            .child(super::underlay::UnderlayContent {
+                                content: self.content,
+                                transient_presented: transient_presented.clone(),
+                            })
+                            .children(self.transients.into_iter().map(|content| {
+                                super::underlay::TransientScope {
+                                    content,
+                                    presented: transient_presented.clone(),
+                                }
+                            })),
+                    )
                     .child(ModalOwnerView { owner }),
             )
             .into_any_element(),
@@ -313,7 +337,6 @@ fn render_overlay(
     });
     let (
         scope,
-        surface_focus,
         leading,
         trailing,
         suppression_focus,
@@ -327,7 +350,6 @@ fn render_overlay(
         let state = focus_state.read(cx);
         (
             state.scope.clone(),
-            state.surface.clone(),
             state.leading.clone(),
             state.trailing.clone(),
             state.suppression.clone(),
@@ -395,8 +417,22 @@ fn render_overlay(
     let platform_cancel_owner = owner;
     let press_scope = scope.clone();
 
+    let description = match &snapshot.semantics {
+        PreparedModalSemantics::Alert { message, .. } => Some(message.clone()),
+        PreparedModalSemantics::Dialog { description, .. } => description.clone(),
+        PreparedModalSemantics::Progress { status, .. } => Some(status.clone()),
+    };
     let surface = div()
         .id(("modal-surface", presentation.value()))
+        .role(match snapshot.kind {
+            ModalKind::Alert => accesskit::Role::AlertDialog,
+            ModalKind::Dialog | ModalKind::Progress => accesskit::Role::Dialog,
+        })
+        .aria_label(snapshot.accessibility_title.clone())
+        .when_some(description, |surface, description| {
+            surface.aria_description(description)
+        })
+        .aria_modal(true)
         .debug_selector(move || format!("modal-surface-{}", presentation.value()))
         .absolute()
         .left(geometry.origin_x)
@@ -413,7 +449,7 @@ fn render_overlay(
         .font(typography.regular().clone())
         .track_focus(&scope)
         // Static content accepts no keyboard focus. A press that no control claims would
-        // otherwise focus the containment scope, which focus repair moves to the first tab stop.
+        // otherwise move focus from the focused control to the containment scope.
         .on_any_mouse_down(move |_, window, cx| {
             if press_scope.contains_focused(window, cx) {
                 window.prevent_default();
@@ -479,7 +515,6 @@ fn render_overlay(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .child(div().size_0().track_focus(&surface_focus))
         .child(div().size_0().track_focus(&leading))
         .child(header)
         .child(body)
@@ -674,6 +709,9 @@ fn render_header(
         .border_color(shell.divider())
         .child(
             div()
+                .id(("modal-header-title", snapshot.presentation.value()))
+                .role(accesskit::Role::Label)
+                .aria_value(title.clone())
                 .debug_selector(|| "modal-header-title".to_owned())
                 .min_w_0()
                 .text_size(metrics.title_size)
@@ -685,6 +723,9 @@ fn render_header(
         .when_some(description, |header, description| {
             header.child(
                 div()
+                    .id(("modal-header-description", snapshot.presentation.value()))
+                    .role(accesskit::Role::Label)
+                    .aria_value(description.clone())
                     .debug_selector(|| "modal-header-description".to_owned())
                     .min_w_0()
                     .mt(metrics.action_gap)
@@ -779,6 +820,9 @@ fn render_body(
                         .min_w_0()
                         .child(
                             div()
+                                .id(("modal-alert-message", snapshot.presentation.value()))
+                                .role(accesskit::Role::Label)
+                                .aria_value(message.clone())
                                 .debug_selector(|| "modal-alert-message".to_owned())
                                 .text_size(metrics.body_size)
                                 .whitespace_normal()
@@ -1117,12 +1161,22 @@ fn render_alert_suppression(
     let pressed_font = font.clone();
     let key_down_state = state.clone();
     let key_up_state = state;
-    let keyboard_owner = owner;
+    let keyboard_owner = owner.clone();
+    let accessibility_owner = owner;
     let keyboard_focus = focus.clone();
     let focus_anchor = focus_anchors.register(&focus);
     let scroll_anchor = focus_anchor.scroll_anchor();
     let control = div()
         .id(("modal-suppression", presentation.value()))
+        .role(accesskit::Role::CheckBox)
+        .aria_label(label.clone())
+        .aria_toggled(accesskit::Toggled::from(selected))
+        .aria_disabled(!enabled)
+        .when(enabled, |control| {
+            control.on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                toggle_alert_suppression(&accessibility_owner, presentation, cx);
+            })
+        })
         .debug_selector(|| "modal-alert-suppression".to_owned())
         .relative()
         .group(crate::toggle::INTERACTION_GROUP)
@@ -1527,6 +1581,9 @@ fn render_action(
                 crate::ButtonActivationSource::Pointer => ModalActivationSource::Pointer,
                 crate::ButtonActivationSource::Space => ModalActivationSource::Space,
                 crate::ButtonActivationSource::Return => ModalActivationSource::Return,
+                crate::ButtonActivationSource::Accessibility => {
+                    ModalActivationSource::Accessibility
+                }
             };
             request_action_from_renderer(&source_owner, presentation, index, source, cx);
         });
@@ -1561,8 +1618,8 @@ fn safe_cancel_action(index: Option<usize>, actions: &[ModalRenderAction]) -> Op
 }
 
 struct ModalFocusRing {
+    /// Contains modal focus. The Dialog itself takes focus when no control can.
     scope: FocusHandle,
-    surface: FocusHandle,
     leading: FocusHandle,
     trailing: FocusHandle,
     suppression: FocusHandle,
@@ -1583,12 +1640,14 @@ struct ModalFocusRing {
 impl ModalFocusRing {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scope = cx.focus_handle();
-        let surface = cx.focus_handle();
         let leading = cx.focus_handle().tab_stop(true);
         let trailing = cx.focus_handle().tab_stop(true);
         let suppression = cx.focus_handle();
         let body_scroll = ScrollHandle::new();
-        let body_scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("modal-body-scrollbar"));
+        let body_scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("modal-body-scrollbar")
+                .accessibility_name("Dialog content")
+        });
         cx.subscribe_in(
             &body_scrollbar,
             window,
@@ -1620,7 +1679,6 @@ impl ModalFocusRing {
         .detach();
         Self {
             scope,
-            surface,
             leading,
             trailing,
             suppression,
@@ -1692,13 +1750,13 @@ impl ModalFocusRing {
         self.leading.focus(window, cx);
         window.focus_next(cx);
         if self.trailing.is_focused(window) {
-            self.surface.focus(window, cx);
+            self.scope.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
 
     fn focus_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
+        if self.scope.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_first(window, cx);
         } else {
             window.focus_next(cx);
@@ -1707,7 +1765,7 @@ impl ModalFocusRing {
     }
 
     fn focus_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
+        if self.scope.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_last(window, cx);
         } else {
             window.focus_prev(cx);
@@ -1719,7 +1777,7 @@ impl ModalFocusRing {
         self.trailing.focus(window, cx);
         window.focus_prev(cx);
         if self.leading.is_focused(window) {
-            self.surface.focus(window, cx);
+            self.scope.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
@@ -1753,7 +1811,7 @@ impl ModalFocusRing {
             let requested = match &self.initial {
                 PreparedFocusIntent::Action(index) => self.action_focus.get(*index).cloned(),
                 PreparedFocusIntent::Body(body) => Some(body.clone()),
-                PreparedFocusIntent::Surface => Some(self.surface.clone()),
+                PreparedFocusIntent::Surface => Some(self.scope.clone()),
             };
             if let Some(requested) = requested
                 && self.scope.contains(&requested, window)
@@ -1775,7 +1833,7 @@ impl ModalFocusRing {
             let focused_tab_stop_is_invalid = focused_inside
                 && window
                     .focused(cx)
-                    .is_some_and(|focused| !focused.tab_stop && !self.surface.is_focused(window));
+                    .is_some_and(|focused| !focused.tab_stop && !self.scope.is_focused(window));
             if focused_tab_stop_is_invalid || (self.owned_focus_before_render && !focused_inside) {
                 self.focus_first(window, cx);
             }

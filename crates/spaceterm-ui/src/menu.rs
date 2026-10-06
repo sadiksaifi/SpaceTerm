@@ -11,7 +11,8 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, RenderOnce, Rgba, ScrollHandle, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Task, WeakEntity, WeakFocusHandle, Window,
-    WindowId, actions, anchored, canvas, div, point, prelude::FluentBuilder as _, px, size,
+    WindowId, accesskit, actions, anchored, canvas, div, point, prelude::FluentBuilder as _, px,
+    size,
 };
 
 pub use crate::anchored_placement::{
@@ -89,6 +90,8 @@ pub enum MenuActivationSource {
     Pointer,
     /// Keyboard navigation selected the entry.
     Keyboard,
+    /// An assistive technology press selected the entry, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// A typed semantic menu selection.
@@ -617,6 +620,7 @@ type InternalActivation = Rc<dyn Fn(MenuActivationSource, &mut Window, &mut App)
 type PickerChangeHandler<T> = Rc<dyn Fn(&PickerChange<T>, &mut Window, &mut App)>;
 type MenuLifecycleHandler = Rc<dyn Fn(&MenuLifecycleEvent, &mut App)>;
 type ContextOpenHandler = Rc<dyn Fn(&ContextMenuOpenRequest, &mut Window, &mut App) -> bool>;
+type TargetPressHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// One semantic entry in a menu tree.
 #[derive(Clone)]
@@ -871,6 +875,56 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
     }
 }
 
+/// What a context menu's content is to assistive technology.
+///
+/// A context menu with a target publishes its content as one node. That node takes the keyboard
+/// trigger's focus, answers a press, and opens the menu on an assistive technology request.
+pub struct ContextMenuTarget {
+    role: accesskit::Role,
+    label: SharedString,
+    description: Option<SharedString>,
+    selected: Option<bool>,
+    disabled: bool,
+    on_press: Option<TargetPressHandler>,
+}
+
+impl ContextMenuTarget {
+    pub fn new(role: accesskit::Role, label: impl Into<SharedString>) -> Self {
+        Self {
+            role,
+            label: label.into(),
+            description: None,
+            selected: None,
+            disabled: false,
+            on_press: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
+    /// Publishes the content as unavailable and withholds its press and menu actions.
+    ///
+    /// The caller disables the content's own pointer and keyboard paths to match.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Runs the same operation as a primary press on the content.
+    pub fn on_press(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_press = Some(Rc::new(handler));
+        self
+    }
+}
+
 /// A secondary-click menu attached to arbitrary trigger content.
 #[derive(IntoElement)]
 pub struct ContextMenu<T: IntoElement + 'static, A: Clone + 'static> {
@@ -914,8 +968,15 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
     ///
     /// The caller owns navigation to this focus handle. Opening uses the same request gate,
     /// menu entries, and lifecycle as a secondary click; dismissal restores displaced focus.
+    /// An assistive technology opening moves focus here first, so dismissal returns to the target.
     pub fn keyboard_trigger(mut self, focus: &FocusHandle) -> Self {
         self.core.context_focus = Some(focus.clone());
+        self
+    }
+
+    /// Publishes the content as the supplied target instead of leaving it to the content.
+    pub fn target(mut self, target: ContextMenuTarget) -> Self {
+        self.core.context_target = Some(target);
         self
     }
 
@@ -1113,6 +1174,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
                 },
             ) as Rc<dyn Fn(&MenuActivation<T>, &mut Window, &mut App)>
         });
+        self.core.accessibility_value = Some(self.selected_label.clone());
         let style = menu_style(self.core.size, cx);
         let enabled = self.core.is_enabled();
         let (foreground, disclosure_foreground) =
@@ -1442,6 +1504,9 @@ struct MenuControl<A> {
     on_lifecycle: Option<MenuLifecycleHandler>,
     on_context_open: Option<ContextOpenHandler>,
     context_focus: Option<FocusHandle>,
+    context_target: Option<ContextMenuTarget>,
+    /// The value a Picker trigger publishes to assistive technology.
+    accessibility_value: Option<SharedString>,
 }
 
 impl<A> MenuControl<A> {
@@ -1469,6 +1534,8 @@ impl<A> MenuControl<A> {
             on_lifecycle: None,
             on_context_open: None,
             context_focus: None,
+            context_target: None,
+            accessibility_value: None,
         }
     }
 
@@ -1486,7 +1553,9 @@ impl<A: Clone + 'static> MenuControl<A> {
         let lifecycle = self.on_lifecycle;
         let context_open = self.on_context_open;
         let key_context_open = context_open.clone();
+        let request_open = context_open.clone();
         let context_focus = self.context_focus;
+        let request_focus = context_focus.clone();
         let keyboard_context_enabled = context_focus.is_some();
         let entries = convert_entries(self.entries, &move |action: A, mark| {
             let handler = handler.clone();
@@ -1617,6 +1686,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         .inset_0();
 
         let key_state = state.downgrade();
+        let request_state = state.downgrade();
         let open_state = state.downgrade();
         let fill_parent_width = self.fill_parent_width;
         let fill_parent_height = self.fill_parent_height;
@@ -1628,8 +1698,61 @@ impl<A: Clone + 'static> MenuControl<A> {
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
         let ring_id = crate::focus_ring::ring_id(&self.id);
+        let press_state = state.downgrade();
         let mut trigger = div()
             .id(self.id)
+            // A context menu's content publishes its own semantics unless it names a target.
+            .when_some(self.context_target, |trigger, target| {
+                let available = !target.disabled;
+                trigger
+                    .role(target.role)
+                    .aria_label(target.label)
+                    .when_some(target.description, |trigger, description| {
+                        trigger.aria_description(description)
+                    })
+                    .when_some(target.selected, |trigger, selected| {
+                        trigger.aria_selected(selected)
+                    })
+                    .aria_disabled(target.disabled)
+                    .when_some(target.on_press.filter(|_| available), |trigger, press| {
+                        trigger.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                            press(window, cx)
+                        })
+                    })
+                    .when(enabled && available, |trigger| {
+                        trigger.on_a11y_action(
+                            accesskit::Action::ShowContextMenu,
+                            move |_, window, cx| {
+                                open_context_menu_below_trigger(
+                                    &request_state,
+                                    request_open.as_ref(),
+                                    request_focus.as_ref(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )
+                    })
+            })
+            .when(self.kind != TriggerKind::Context, |trigger| {
+                trigger
+                    .role(if self.kind == TriggerKind::Picker {
+                        accesskit::Role::ComboBox
+                    } else {
+                        accesskit::Role::Button
+                    })
+                    .aria_label(accessibility_name.clone())
+                    .when_some(self.accessibility_value, |trigger, value| {
+                        trigger.aria_value(value)
+                    })
+                    .aria_expanded(open)
+                    .aria_disabled(!enabled)
+                    .when(enabled, |trigger| {
+                        trigger.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                            toggle_menu(&press_state, None, window, cx);
+                        })
+                    })
+            })
             .debug_selector(move || {
                 debug_selector.unwrap_or_else(|| accessibility_name.to_string())
             })
@@ -1671,25 +1794,16 @@ impl<A: Clone + 'static> MenuControl<A> {
                 if !requested {
                     return;
                 }
-                let Some(position) = key_state
-                    .read_with(cx, |state, _| {
-                        state.trigger_bounds.map(|bounds| bounds.bottom_left())
-                    })
-                    .ok()
-                    .flatten()
-                else {
-                    return;
-                };
-                let request = ContextMenuOpenRequest { position };
-                if key_context_open
-                    .as_ref()
-                    .is_some_and(|handler| !handler(&request, window, cx))
-                {
-                    return;
+                if open_context_menu_below_trigger(
+                    &key_state,
+                    key_context_open.as_ref(),
+                    None,
+                    window,
+                    cx,
+                ) {
+                    window.prevent_default();
+                    cx.stop_propagation();
                 }
-                window.prevent_default();
-                open_menu(&key_state, Some(position), window, cx);
-                cx.stop_propagation();
             });
 
         // An open menu holds its trigger in the pressed paint, so hover shows only while closed.
@@ -2831,6 +2945,36 @@ fn toggle_menu(
     }
 }
 
+/// Opens a context menu below its trigger, as a keyboard or assistive technology request does.
+/// An admitted request first focuses `trigger_focus`, which dismissal then restores.
+/// Returns whether the request passed the caller's gate.
+fn open_context_menu_below_trigger(
+    state: &WeakEntity<MenuState>,
+    context_open: Option<&ContextOpenHandler>,
+    trigger_focus: Option<&FocusHandle>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(position) = state
+        .read_with(cx, |state, _| {
+            state.trigger_bounds.map(|bounds| bounds.bottom_left())
+        })
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let request = ContextMenuOpenRequest { position };
+    if context_open.is_some_and(|handler| !handler(&request, window, cx)) {
+        return false;
+    }
+    if let Some(focus) = trigger_focus {
+        focus.focus(window, cx);
+    }
+    open_menu(state, Some(position), window, cx);
+    true
+}
+
 fn open_menu(
     state: &WeakEntity<MenuState>,
     anchor: Option<Point<Pixels>>,
@@ -3093,7 +3237,11 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
     .absolute()
     .inset_0();
 
+    // The overlay holds focus for every open panel, so it needs a node for the highlighted
+    // row to report focus.
     let mut overlay = div()
+        .id("menu-overlay")
+        .role(accesskit::Role::Group)
         .relative()
         .w(window.viewport_size().width)
         .h(window.viewport_size().height)
@@ -3102,6 +3250,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         .track_focus(&state.read(cx).focus_handle)
         .child(outside_tracker);
     let collection_focused = state.read(cx).focus_handle.contains_focused(window, cx);
+    let deepest = panels.len() - 1;
     for (depth, bounds, entries, highlighted, scroll) in panels {
         overlay = overlay.child(render_panel(
             state.downgrade(),
@@ -3117,6 +3266,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             &typography,
             icon_offset,
             collection_focused,
+            depth == deepest,
         ));
     }
 
@@ -3216,11 +3366,13 @@ fn render_panel(
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
     collection_focused: bool,
+    deepest: bool,
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
     let panel = div()
         .id(panel_selector)
+        .role(accesskit::Role::Menu)
         .debug_selector(move || panel_debug_selector.to_string())
         .absolute()
         .left(bounds.left())
@@ -3304,6 +3456,7 @@ fn render_panel(
                     typography,
                     icon_offset,
                     collection_focused,
+                    deepest,
                 ));
             }
             InternalEntryKind::Submenu {
@@ -3335,6 +3488,7 @@ fn render_panel(
                     typography,
                     icon_offset,
                     collection_focused,
+                    deepest,
                 ));
             }
         }
@@ -3366,6 +3520,7 @@ fn render_row(
     typography: &crate::ControlTypography,
     icon_offset: Pixels,
     collection_focused: bool,
+    deepest: bool,
 ) -> AnyElement {
     let rows = if destructive {
         style.paint.destructive_rows
@@ -3387,14 +3542,53 @@ fn render_row(
     let secondary_foreground = row_paint.map_or(secondary_foreground, |paint| paint.secondary);
     let icon_foreground = row_paint.map_or(foreground, |paint| paint.icon);
     let hover_state = state.clone();
+    let press_state = state.clone();
     let pointer_state = state;
     let row_selector = debug_selector.unwrap_or_else(|| label.to_string());
+    let (role, toggled) = match mark {
+        EntryMark::None => (accesskit::Role::MenuItem, None),
+        EntryMark::Checkbox(checked) => (accesskit::Role::MenuItemCheckBox, Some(checked)),
+        EntryMark::Radio { selected, .. } => (accesskit::Role::MenuItemRadio, Some(selected)),
+    };
+    let press_activation = activation.clone();
     let label_selector = format!("{row_selector}-label");
     let mark_selector = format!("{row_selector}-mark");
     let icon_selector = format!("{row_selector}-icon");
     let shortcut_selector = format!("{row_selector}-shortcut");
     let mut row = div()
         .id(index)
+        .role(role)
+        .aria_label(label.clone())
+        .aria_disabled(disabled)
+        .when_some(toggled, |row, toggled| {
+            row.aria_toggled(accesskit::Toggled::from(toggled))
+        })
+        .when_some(shortcut.clone(), |row, shortcut| {
+            row.aria_keyshortcuts(shortcut)
+        })
+        // The overlay holds keyboard focus while arrows move the highlight between rows of the
+        // deepest open panel. Parent panels keep their highlight only to show the open path.
+        .when(highlighted && collection_focused && deepest, |row| {
+            row.aria_active_descendant()
+        })
+        .when(!disabled, |row| {
+            row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                if let Some(activation) = &press_activation {
+                    activate_menu(
+                        &press_state,
+                        activation,
+                        MenuActivationSource::Accessibility,
+                        window,
+                        cx,
+                    );
+                } else if submenu {
+                    let _ = press_state.update(cx, |state, cx| {
+                        state.invalidate_submenu_task();
+                        state.open_submenu_at(depth, index, cx);
+                    });
+                }
+            })
+        })
         .debug_selector(move || row_selector)
         .relative()
         .h(style.metrics.row_height)
@@ -4392,6 +4586,280 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    #[gpui::test]
+    fn menus_publish_a_button_that_opens_a_menu_of_items(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::Action;
+
+        let (_, events, cx) = menu_window(cx);
+        let tree = A11yTree::read(cx);
+        let trigger = tree.node("Actions");
+        assert_eq!(trigger["aria"]["role"], "Button");
+        assert_eq!(trigger["aria"]["expanded"], false);
+        assert!(tree.with_role("Menu").is_empty());
+
+        perform(cx, trigger, Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Actions")["aria"]["expanded"], true);
+        let menus = tree.with_role("Menu");
+        assert_eq!(menus.len(), 1);
+        let items = tree
+            .children(menus[0])
+            .into_iter()
+            .map(|item| {
+                (
+                    item["aria"]["role"].as_str().unwrap(),
+                    item["aria"]["label"].as_str().unwrap(),
+                    item["aria"]["disabled"] == true,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            items,
+            [
+                ("MenuItem", "Disabled", true),
+                ("MenuItem", "Open", false),
+                ("MenuItem", "Close", false),
+                ("MenuItem", "Inspect", false),
+            ]
+        );
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Open");
+        assert!(!supports(tree.node("Disabled"), Action::Click));
+
+        perform(cx, tree.node("Close"), Action::Click);
+        assert_eq!(
+            *events.borrow(),
+            [MenuActivation::Action {
+                action: "close",
+                source: MenuActivationSource::Accessibility,
+            }]
+        );
+        assert!(A11yTree::read(cx).with_role("Menu").is_empty());
+    }
+
+    #[gpui::test]
+    fn context_menus_publish_their_target_and_open_on_request(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            presses: Rc<Cell<usize>>,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let presses = self.presses.clone();
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action("Inspect", ())],
+                )
+                .keyboard_trigger(&self.focus)
+                .target(
+                    ContextMenuTarget::new(Role::ListBoxOption, "Row")
+                        .description("Detail")
+                        .selected(true)
+                        .on_press(move |_, _| presses.set(presses.get() + 1)),
+                )
+                .on_activate(|_, _, _| {})
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let presses = Rc::new(Cell::new(0));
+        let root_presses = presses.clone();
+        let (root, cx) = cx.add_window_view(move |_, cx| TargetRoot {
+            focus: cx.focus_handle(),
+            presses: root_presses,
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.read(cx).focus.clone().focus(window, cx);
+        });
+
+        let tree = A11yTree::read(cx);
+        let target = tree.node("Row");
+        assert_eq!(target["aria"]["role"], "ListBoxOption");
+        assert_eq!(target["aria"]["description"], "Detail");
+        assert_eq!(target["aria"]["selected"], true);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Row");
+        assert!(supports(target, Action::ShowContextMenu));
+
+        perform(cx, target, Action::Click);
+        assert_eq!(presses.get(), 1);
+
+        perform(cx, tree.node("Row"), Action::ShowContextMenu);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Menu").len(), 1);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Inspect");
+    }
+
+    #[gpui::test]
+    fn context_menus_return_focus_to_the_target_after_an_assistive_opening(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, node_id, perform};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            other: FocusHandle,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .child(
+                        div()
+                            .id("other")
+                            .role(Role::Button)
+                            .aria_label("Other")
+                            .track_focus(&self.other)
+                            .w(px(80.0))
+                            .h(px(40.0)),
+                    )
+                    .child(
+                        ContextMenu::new(
+                            "row-menu",
+                            "Row actions",
+                            div().w(px(80.0)).h(px(40.0)),
+                            vec![MenuEntry::action("Inspect", ())],
+                        )
+                        .keyboard_trigger(&self.focus)
+                        .target(ContextMenuTarget::new(Role::ListBoxOption, "Row"))
+                        .debug_selector("row-menu")
+                        .on_activate(|_, _, _| {}),
+                    )
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (root, cx) = cx.add_window_view(|_, cx| TargetRoot {
+            focus: cx.focus_handle(),
+            other: cx.focus_handle(),
+        });
+        let focus_other = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| root.read(cx).other.clone().focus(window, cx));
+        };
+        cx.update(|window, _| window.activate_window());
+        focus_other(cx);
+        let tree = A11yTree::read(cx);
+        let (row, other) = (node_id(tree.node("Row")), node_id(tree.node("Other")));
+
+        perform(cx, tree.node("Row"), Action::ShowContextMenu);
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("Menu").is_empty());
+        assert_eq!(tree.focused().map(node_id), Some(row));
+
+        cx.simulate_keystrokes("shift-f10");
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(row));
+
+        focus_other(cx);
+        let position = cx.debug_bounds("row-menu").unwrap().center();
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(other));
+    }
+
+    #[gpui::test]
+    fn a_disabled_context_menu_target_publishes_its_state_and_refuses_actions(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, supports};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot;
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action("Inspect", ())],
+                )
+                .target(
+                    ContextMenuTarget::new(Role::ListBoxOption, "Row")
+                        .disabled(true)
+                        .on_press(|_, _| {}),
+                )
+                .on_activate(|_, _, _| {})
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| TargetRoot);
+        let tree = A11yTree::read(cx);
+        let target = tree.node("Row");
+        assert_eq!(target["aria"]["disabled"], true);
+        assert!(!supports(target, Action::Click));
+        assert!(!supports(target, Action::ShowContextMenu));
+    }
+
+    #[gpui::test]
+    fn pickers_publish_a_pop_up_button_with_checked_options(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        struct PickerRoot;
+        impl Render for PickerRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(
+                    Picker::new(
+                        "picker",
+                        "Cursor",
+                        2,
+                        vec![PickerOption::new(1, "Block"), PickerOption::new(2, "Bar")],
+                    )
+                    .unwrap()
+                    .on_change(|_, _, _| {}),
+                )
+            }
+        }
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| PickerRoot);
+        let tree = A11yTree::read(cx);
+        let picker = tree.node("Cursor");
+        assert_eq!(picker["aria"]["role"], "ComboBox");
+        assert_eq!(picker["aria"]["value"], "Bar");
+
+        perform(cx, picker, Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Block")["aria"]["role"], "MenuItemRadio");
+        assert_eq!(tree.node("Block")["aria"]["toggled"], "False");
+        assert_eq!(tree.node("Bar")["aria"]["toggled"], "True");
+    }
+
+    #[gpui::test]
+    fn submenus_report_only_their_highlighted_row_as_focused(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        let (_, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::action("New Tab", "new-tab"),
+                MenuEntry::submenu("Move To", vec![MenuEntry::action("Window", "window")]),
+            ],
+        );
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "New Tab");
+
+        perform(cx, tree.node("Move To"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Menu").len(), 2);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Window");
     }
 
     #[gpui::test]

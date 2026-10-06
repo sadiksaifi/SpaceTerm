@@ -207,4 +207,48 @@ mod tests {
         assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
         assert!(!cx.update(|window, _| window.has_active_prompt()));
     }
+
+    #[gpui::test]
+    fn application_prompt_publishes_an_alert_dialog_that_answers_through_its_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        cx.update(crate::ui::init).unwrap();
+        cx.update(install);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            window.activate_window();
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            PromptWindow { focus }
+        });
+        cx.run_until_parked();
+        let mut result = cx.update(|window, cx| {
+            window.prompt(
+                PromptLevel::Critical,
+                "Quit SpaceTerm?",
+                Some("Running commands will stop."),
+                &[
+                    PromptButton::ok("Quit SpaceTerm"),
+                    PromptButton::cancel("Cancel"),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let tree = A11yTree::read(cx);
+        let alert = tree.node("Quit SpaceTerm?");
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(alert["aria"]["modal"], true);
+        assert_eq!(alert["aria"]["description"], "Running commands will stop.");
+        assert_eq!(tree.node("Quit SpaceTerm")["aria"]["role"], "Button");
+
+        perform(cx, tree.node("Quit SpaceTerm"), Action::Click);
+        cx.run_until_parked();
+        assert_eq!(result.try_recv().unwrap(), Some(0));
+        assert!(A11yTree::read(cx).find("Quit SpaceTerm?").is_none());
+        assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
+    }
 }

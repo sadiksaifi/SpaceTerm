@@ -9,8 +9,8 @@ use gpui::{
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     Pixels, RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, actions,
-    canvas, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, accesskit,
+    actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -44,6 +44,8 @@ pub enum ButtonActivationSource {
     Space,
     /// An unmodified Return or Enter key press while the button had keyboard focus.
     Return,
+    /// An assistive technology press, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// Information supplied to a button activation callback.
@@ -887,6 +889,18 @@ pub struct Button {
 }
 
 impl Button {
+    /// Publishes the caller-owned toggle state of a button that switches a mode.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.core.toggled = Some(toggled);
+        self
+    }
+
+    /// Supplies guidance or status separately from the button's name.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.core.accessibility_description = Some(description.into());
+        self
+    }
+
     /// Pins only presentation for the development acceptance gallery.
     #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
@@ -1174,6 +1188,18 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    /// Publishes the caller-owned toggle state of a button that switches a mode.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.core.toggled = Some(toggled);
+        self
+    }
+
+    /// Supplies guidance or status separately from the button's name.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.core.accessibility_description = Some(description.into());
+        self
+    }
+
     /// Pins only presentation for the development acceptance gallery.
     #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
@@ -1320,6 +1346,8 @@ struct ButtonLayout {
 struct ButtonCore {
     id: ElementId,
     accessibility_name: SharedString,
+    accessibility_description: Option<SharedString>,
+    toggled: Option<bool>,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1353,6 +1381,8 @@ impl ButtonCore {
         Self {
             id,
             accessibility_name,
+            accessibility_description: None,
+            toggled: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
@@ -1575,10 +1605,33 @@ impl ButtonCore {
         let ring_id = crate::focus_ring::ring_id(&self.id);
         let corner_radii = self.joined_edge.corner_radii(style.corner_radius);
         let visual_inset = self.visual_inset;
+        let accessibility_name = self.accessibility_name.clone();
+        let on_accessibility_activate = self.on_activate.clone().filter(|_| enabled);
         let button = div()
             .id(self.id)
+            .role(accesskit::Role::Button)
+            .aria_label(self.accessibility_name.clone())
+            .when_some(self.accessibility_description, |button, description| {
+                button.aria_description(description)
+            })
+            .when_some(self.toggled, |button, toggled| {
+                button.aria_toggled(accesskit::Toggled::from(toggled))
+            })
+            .aria_disabled(!enabled)
+            .when_some(on_accessibility_activate, |button, handler| {
+                button.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    handler(
+                        &ButtonActivation {
+                            source: ButtonActivationSource::Accessibility,
+                            role,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
             .debug_selector(move || {
-                debug_selector.unwrap_or_else(|| self.accessibility_name.to_string())
+                debug_selector.unwrap_or_else(|| accessibility_name.to_string())
             })
             .relative()
             .flex()
@@ -2188,6 +2241,170 @@ mod tests {
                 "disabled {button} refuses hover"
             );
         }
+    }
+
+    #[gpui::test]
+    fn buttons_publish_descriptions_and_refresh_them(cx: &mut TestAppContext) {
+        use crate::a11y_testing::A11yTree;
+
+        struct DescriptionRoot(Option<&'static str>);
+        impl Render for DescriptionRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .child(
+                        Button::new("download", "Download").when_some(self.0, |button, text| {
+                            button.accessibility_description(text)
+                        }),
+                    )
+                    .child(
+                        IconButton::new("help", "Help", |_| div().into_any_element())
+                            .when_some(self.0, |button, text| {
+                                button.accessibility_description(text)
+                            }),
+                    )
+                    .child(Button::new("cancel", "Cancel"))
+            }
+        }
+
+        cx.set_global(test_theme());
+        let (root, cx) =
+            cx.add_window_view(|_, _| DescriptionRoot(Some("Download SpaceTerm 0.4.2")));
+        for description in [
+            Some("Download SpaceTerm 0.4.2"),
+            Some("Downloading SpaceTerm 0.4.2, 37%"),
+            None,
+        ] {
+            root.update(cx, |root, cx| {
+                root.0 = description;
+                cx.notify();
+            });
+            let tree = A11yTree::read(cx);
+            for name in ["Download", "Help"] {
+                assert_eq!(tree.node(name)["aria"]["role"], "Button");
+                assert_eq!(tree.node(name)["aria"]["description"].as_str(), description);
+            }
+            assert!(tree.node("Cancel")["aria"]["description"].is_null());
+        }
+    }
+
+    #[gpui::test]
+    fn buttons_publish_toggle_state_that_follows_activation(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        struct ToggleButtonsRoot {
+            text_on: bool,
+            icon_on: bool,
+            sources: Vec<ButtonActivationSource>,
+        }
+        impl Render for ToggleButtonsRoot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .child(
+                        Button::new("case", "Match case")
+                            .toggled(self.text_on)
+                            .on_activate(cx.listener(
+                                |root, activation: &ButtonActivation, _, cx| {
+                                    root.text_on = !root.text_on;
+                                    root.sources.push(activation.source());
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .child(
+                        IconButton::new("regex", "Regular expression", |_| {
+                            div().into_any_element()
+                        })
+                        .toggled(self.icon_on)
+                        .on_activate(cx.listener(
+                            |root, activation: &ButtonActivation, _, cx| {
+                                root.icon_on = !root.icon_on;
+                                root.sources.push(activation.source());
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(Button::new("search", "Search"))
+            }
+        }
+
+        cx.set_global(test_theme());
+        let (root, cx) = cx.add_window_view(|_, _| ToggleButtonsRoot {
+            text_on: false,
+            icon_on: false,
+            sources: Vec::new(),
+        });
+        let tree = A11yTree::read(cx);
+        for name in ["Match case", "Regular expression"] {
+            assert_eq!(tree.node(name)["aria"]["role"], "Button");
+            assert_eq!(tree.node(name)["aria"]["toggled"], "False");
+        }
+        for state in ["True", "False"] {
+            let tree = A11yTree::read(cx);
+            for name in ["Match case", "Regular expression"] {
+                perform(cx, tree.node(name), Action::Click);
+            }
+            let tree = A11yTree::read(cx);
+            for name in ["Match case", "Regular expression"] {
+                assert_eq!(tree.node(name)["aria"]["toggled"], state);
+            }
+            assert!(tree.node("Search")["aria"]["toggled"].is_null());
+        }
+        assert_eq!(
+            root.read_with(cx, |root, _| root.sources.clone()),
+            [ButtonActivationSource::Accessibility; 4]
+        );
+    }
+
+    #[gpui::test]
+    fn buttons_publish_native_roles_names_states_and_press(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::Action;
+
+        struct AccessibleButtonsRoot(Rc<RefCell<Vec<ButtonActivationSource>>>);
+        impl Render for AccessibleButtonsRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let activations = self.0.clone();
+                div()
+                    .flex()
+                    .child(
+                        Button::new("save", "Save").on_activate(move |activation, _, _| {
+                            activations.borrow_mut().push(activation.source());
+                        }),
+                    )
+                    .child(
+                        IconButton::new("close", "Close Tab", |_| div().into_any_element())
+                            .on_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Button::new("delete", "Delete")
+                            .disabled(true)
+                            .on_activate(|_, _, _| {}),
+                    )
+            }
+        }
+
+        cx.set_global(test_theme());
+        let activations = Rc::new(RefCell::new(Vec::new()));
+        let root_activations = activations.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| AccessibleButtonsRoot(root_activations));
+        let tree = A11yTree::read(cx);
+        for name in ["Save", "Close Tab", "Delete"] {
+            assert_eq!(tree.node(name)["aria"]["role"], "Button", "{name}");
+        }
+        assert!(supports(tree.node("Save"), Action::Click));
+        assert!(supports(tree.node("Close Tab"), Action::Click));
+        assert_eq!(tree.node("Delete")["aria"]["disabled"], true);
+        assert!(!supports(tree.node("Delete"), Action::Click));
+        assert!(tree.node("Save")["aria"]["disabled"].is_null());
+
+        perform(cx, tree.node("Save"), Action::Click);
+        assert_eq!(
+            *activations.borrow(),
+            [ButtonActivationSource::Accessibility]
+        );
     }
 
     #[gpui::test]

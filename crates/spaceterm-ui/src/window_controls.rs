@@ -339,7 +339,6 @@ impl RenderOnce for ClientWindowControls {
                 WindowButton::Maximize => window.zoom_window(),
                 WindowButton::Close => close(window, cx),
             });
-            let accessible_activate = activate.clone();
             let icon_size =
                 if facts.icons[index].is_none() && facts.style == DesktopWindowStyle::Breeze {
                     20.0
@@ -356,11 +355,6 @@ impl RenderOnce for ClientWindowControls {
             controls = controls.child(
                 div()
                     .id(format!("{id}-accessible"))
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
-                        accessible_activate(window, cx)
-                    })
                     .block_mouse_except_scroll()
                     .child(
                         IconButton::new(id, label, move |color| {
@@ -537,5 +531,58 @@ mod tests {
         );
         assert_ne!(active.normal(), active.hovered());
         assert_ne!(active.hovered(), active.pressed());
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::{Context, Render, TestAppContext, TestWindowRequest, accesskit::Action};
+    use std::cell::Cell;
+
+    struct ControlsRoot(Rc<Cell<usize>>);
+
+    impl Render for ControlsRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let closed = self.0.clone();
+            div().child(ClientWindowControls::new(Rc::new(move |_, _| {
+                closed.set(closed.get() + 1);
+            })))
+        }
+    }
+
+    #[gpui::test]
+    fn window_controls_publish_one_node_per_operation_and_delegate_close(cx: &mut TestAppContext) {
+        cx.set_global(crate::catalog_tests::catalog(1).button);
+        let closed = Rc::new(Cell::new(0));
+        let observed = closed.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| ControlsRoot(observed));
+        cx.simulate_decorations(Decorations::Client {
+            tiling: Default::default(),
+        });
+        let tree = A11yTree::read(cx);
+        let buttons = tree.with_role("Button");
+        assert_eq!(buttons.len(), 3);
+        for name in ["Close", "Minimize", "Maximize"] {
+            assert!(supports(tree.node(name), Action::Click));
+        }
+        perform(cx, tree.node("Minimize"), Action::Click);
+        perform(cx, tree.node("Maximize"), Action::Click);
+        assert_eq!(
+            cx.window_requests(),
+            [TestWindowRequest::Minimize, TestWindowRequest::Zoom]
+        );
+        cx.update(|window, _| window.refresh());
+        let tree = A11yTree::read(cx);
+        assert!(tree.find("Maximize").is_none());
+        assert!(tree.find("Restore").is_some());
+        perform(cx, tree.node("Close"), Action::Click);
+        assert_eq!(closed.get(), 1);
+        cx.simulate_decorations(Decorations::Server);
+        cx.update(|window, _| window.refresh());
+        assert!(A11yTree::read(cx).with_role("Button").is_empty());
+        perform(cx, tree.node("Close"), Action::Click);
+        assert_eq!(closed.get(), 1);
     }
 }

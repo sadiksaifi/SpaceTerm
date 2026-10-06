@@ -99,7 +99,7 @@ struct KeyPropagationProbe {
     propagated_key_downs: Rc<Cell<usize>>,
 }
 
-struct PastePointerRoot(Entity<TerminalPane>);
+struct PastePointerRoot(Entity<TerminalPane>, Option<FocusHandle>);
 
 impl Render for PastePointerRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -111,7 +111,17 @@ impl Render for PastePointerRoot {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(self.0.clone()),
+                .child(self.0.clone())
+                .when_some(self.1.as_ref(), |root, background| {
+                    root.child(
+                        div()
+                            .id("background-focus")
+                            .role(gpui::accesskit::Role::Group)
+                            .aria_label("Background control")
+                            .track_focus(background)
+                            .h(px(20.0)),
+                    )
+                }),
         )
     }
 }
@@ -528,7 +538,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
         crate::terminal::testing::test_accessibility_viewport_models(
             crate::terminal::PresentationGeneration::test(12),
         );
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     records
         .last_accessibility_sender()
         .unwrap()
@@ -1605,7 +1615,7 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
     cx.update(|window, cx| {
         window.activate_window();
         pane.update(cx, |pane, cx| {
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
             pane.handle_accessibility(accessibility_model(42));
             pane.focus(window, cx);
             cx.notify();
@@ -1628,8 +1638,24 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
         .collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["aria"]["value"], "update-42x");
+    let focus_requests = Rc::new(Cell::new(0));
+    let observed_requests = focus_requests.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if matches!(event, TerminalPaneEvent::FocusRequested) {
+                observed_requests.set(observed_requests.get() + 1);
+            }
+        })
+        .detach();
+    });
+    cx.update(|window, cx| window.blur(cx));
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| pane.accessibility_focus_sender.request());
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "Terminal");
+    assert_eq!(focus_requests.get(), 1);
     pane.update(cx, |pane, cx| {
-        pane.set_accessibility_hierarchy(false, usize::MAX);
+        pane.set_accessibility_hierarchy(false);
         cx.notify();
     });
     cx.run_until_parked();
@@ -1686,7 +1712,7 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
             pane.cell_width = px(9.5);
             pane.line_height = 21.0;
             pane.handle_accessibility(Arc::clone(&model));
-            pane.set_accessibility_hierarchy(true, 7);
+            pane.set_accessibility_hierarchy(true);
             pane.sync_native_accessibility(window, true);
         })
     });
@@ -1696,10 +1722,10 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
         assert_eq!(record.bounds, Some(bounds));
         assert_eq!((record.cell_width, record.line_height), (px(9.5), px(21.0)));
         assert!(record.focused && record.visible);
-        assert_eq!(record.hierarchy, [(true, 7)]);
+        assert_eq!(record.hierarchy, [true]);
     }
     pane.update(cx, |pane, _| pane.close());
-    assert_eq!(record.borrow().hierarchy.last(), Some(&(false, usize::MAX)));
+    assert_eq!(record.borrow().hierarchy.last(), Some(&false));
     assert!(!record.borrow().visible && !record.borrow().focused);
     cx.update(|_, _| drop(pane));
     cx.run_until_parked();
@@ -1725,9 +1751,7 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
         std::slice::from_ref(&request)
     );
 
-    pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX)
-    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
     assert!(record.borrow().selection_sender.is_none());
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false))
@@ -1736,11 +1760,9 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
         record.borrow().selection_sender.is_none(),
         "hidden publication must not restore authority"
     );
-    pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX)
-    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
     assert!(record.borrow().selection_sender.is_none());
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     cx.update(|window, cx| pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true)));
     assert!(record.borrow().selection_sender.is_some());
 
@@ -1802,7 +1824,7 @@ fn prepare_accessibility_presentation(
     });
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| {
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
             pane.sync_native_accessibility(window, false);
         });
     });
@@ -1911,7 +1933,7 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
         });
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(hidden, cx);
-            pane.set_accessibility_hierarchy(false, usize::MAX);
+            pane.set_accessibility_hierarchy(false);
             for index in 0..4_096 {
                 pane.handle_accessibility(accessibility_model(index));
             }
@@ -1933,7 +1955,7 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
 
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(TerminalProductFocus::default(), cx);
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
         });
         cx.update(|window, cx| {
             pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
@@ -1983,7 +2005,7 @@ fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(cx: &mut 
     let (pane, cx) = terminal_pane(cx);
     let accessibility_record = prepare_accessibility_presentation(&pane, cx);
     pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX);
+        pane.set_accessibility_hierarchy(false);
         pane.apply_terminal_input_focus(false);
         pane.apply_terminal_input_focus(true);
     });
@@ -1996,7 +2018,7 @@ fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(cx: &mut 
             && accessibility_record.borrow().delivered.is_empty()
     }));
 
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true));
     });
@@ -2134,13 +2156,35 @@ fn terminal_pane_with_paste_response(
     &mut VisualTestContext,
     TestTerminalSessionRecords,
 ) {
+    cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let (pane, cx) = focused_pane(
-        cx,
-        TestTerminalSessionFactory::new(records.clone())
-            .with_paste_response(response)
-            .with_paste_resolution(resolution),
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(
+            TestTerminalSessionFactory::new(records.clone())
+                .with_paste_response(response)
+                .with_paste_resolution(resolution),
+        ),
+        test_local_directory(std::env::temp_dir()),
     );
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        TerminalPane::new_with_services(
+            session_factory, None,
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
+            crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(), window, cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| PastePointerRoot(pane.clone(), None));
+        window.activate_window();
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true);
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
     (pane, cx, records)
 }
 
@@ -4168,22 +4212,8 @@ fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestA
 }
 
 #[gpui::test]
-fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext) {
-    let confirmation = PasteConfirmation {
-        id: crate::terminal::PasteConfirmationId::new(21),
-        byte_len: 12,
-        line_count: 2,
-        risk: crate::terminal::PasteRisk {
-            multiline: true,
-            control_bytes: false,
-            closing_fence: false,
-        },
-    };
-    let (pane, cx, _) = terminal_pane_with_paste_response(
-        cx,
-        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
-        Ok(PasteResolution::Cancelled),
-    );
+fn pane_status_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
     let root_warning = Color::rgb(0xff2020);
     let floating_warning = Color::rgb(0x20ff20);
     let floating_warning_border = Color::rgb(0x2020ff);
@@ -4225,32 +4255,6 @@ fn pane_notice_intent_rails_use_floating_semantic_colors(cx: &mut TestAppContext
         "status rail must use the floating warning: {status_backgrounds:?}",
     );
     assert!(!status_backgrounds.contains(&gpui_color(root_warning).into()));
-
-    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
-    cx.dispatch_action(PasteClipboard);
-    cx.run_until_parked();
-    let paste_rail = cx
-        .debug_bounds("unsafe-paste-confirmation-warning")
-        .expect("unsafe paste should render its warning rail");
-    let paste_backgrounds = cx.update(|window, _| {
-        let paste_rail = paste_rail.scale(window.scale_factor());
-        window
-            .painted_quads()
-            .into_iter()
-            .filter(|quad| {
-                quad.bounds
-                    .intersect(&quad.content_mask.bounds)
-                    .intersects(&paste_rail)
-            })
-            .map(|quad| quad.background)
-            .collect::<Vec<_>>()
-    });
-    assert!(
-        paste_backgrounds.contains(&gpui_color(floating_warning_border).into()),
-        "paste rail must use the floating warning border: {paste_backgrounds:?}",
-    );
-    assert!(!paste_backgrounds.contains(&gpui_color(root_warning).into()));
-    assert!(!paste_backgrounds.contains(&gpui_color(floating_warning).into()));
 }
 
 #[gpui::test]
@@ -4274,12 +4278,12 @@ fn unsafe_paste_cancel_button_cancels_without_writing_terminal_input(cx: &mut Te
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
-    let cancel = cx.debug_bounds("cancel-unsafe-paste").unwrap();
+    let cancel = cx.debug_bounds("modal-action-cancel-unsafe-paste").unwrap();
     cx.simulate_click(cancel.center(), Modifiers::none());
     cx.run_until_parked();
 
     assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
-    assert!(cx.debug_bounds("unsafe-paste-confirmation").is_none());
+    assert!(cx.debug_bounds("modal-header").is_none());
     assert!(records.commands().iter().any(|call| {
         call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
@@ -4290,7 +4294,7 @@ fn unsafe_paste_cancel_button_cancels_without_writing_terminal_input(cx: &mut Te
 }
 
 #[gpui::test]
-fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut TestAppContext) {
+fn paste_confirmation_density_does_not_resize_terminal_grid(cx: &mut TestAppContext) {
     let confirmation = PasteConfirmation {
         id: crate::terminal::PasteConfirmationId::new(19),
         byte_len: 12,
@@ -4309,8 +4313,7 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
     cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
-    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
-    let compact = cx.debug_bounds("unsafe-paste-confirmation").unwrap();
+    let compact = cx.debug_bounds("modal-header").unwrap();
     let geometry = pane.read_with(cx, |pane, _| (pane.grid_bounds, pane.last_geometry));
 
     cx.update(|_, cx| {
@@ -4320,27 +4323,12 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
     });
     cx.run_until_parked();
 
-    let comfortable = cx.debug_bounds("unsafe-paste-confirmation").unwrap();
-    for (original, scaled) in [
-        (
-            compact.left() - pane_bounds.left(),
-            comfortable.left() - pane_bounds.left(),
-        ),
-        (
-            pane_bounds.right() - compact.right(),
-            pane_bounds.right() - comfortable.right(),
-        ),
-        (
-            pane_bounds.bottom() - compact.bottom(),
-            pane_bounds.bottom() - comfortable.bottom(),
-        ),
-    ] {
-        assert_eq!(scaled, original * 1.25);
-    }
+    let comfortable = cx.debug_bounds("modal-header").unwrap();
+    assert_ne!(comfortable, compact);
     assert_eq!(
         pane.read_with(cx, |pane, _| (pane.grid_bounds, pane.last_geometry)),
         geometry,
-        "Chrome notice spacing must not resize the terminal cell grid"
+        "Modal density must not resize the terminal cell grid"
     );
     assert_eq!(
         pane.read_with(cx, |pane, _| pane.pending_paste),
@@ -4367,9 +4355,6 @@ fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer
         Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
         Ok(PasteResolution::Cancelled),
     );
-    cx.update(|window, cx| {
-        window.replace_root(cx, |_, _| PastePointerRoot(pane.clone()));
-    });
     pane.update(cx, |pane, cx| {
         pane.set_product_focus(
             TerminalProductFocus {
@@ -4402,7 +4387,10 @@ fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer
     cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
-    let cancel = cx.debug_bounds("cancel-unsafe-paste").unwrap().center();
+    let cancel = cx
+        .debug_bounds("modal-action-cancel-unsafe-paste")
+        .unwrap()
+        .center();
     cx.simulate_mouse_move(cancel, None, Modifiers::none());
     cx.run_until_parked();
     cx.simulate_mouse_down(cancel, MouseButton::Left, Modifiers::none());
@@ -4419,7 +4407,7 @@ fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer
 }
 
 #[gpui::test]
-fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_ui(
+fn unsafe_paste_confirmation_blocks_terminal_input_and_keeps_only_metadata_in_ui(
     cx: &mut TestAppContext,
 ) {
     let confirmation = PasteConfirmation {
@@ -4447,7 +4435,7 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
         pane.read_with(cx, |pane, _| pane.pending_paste),
         Some(confirmation)
     );
-    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     assert!(
         records
             .commands()
@@ -4464,7 +4452,7 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
     assert!(!tree.contains("q9!w2") && !tree.contains("z7@r4x"));
 
     let confirm = cx
-        .debug_bounds("confirm-unsafe-paste")
+        .debug_bounds("modal-action-confirm-unsafe-paste")
         .expect("unsafe Paste should expose its confirmation button");
     cx.simulate_click(confirm.center(), Modifiers::none());
     cx.run_until_parked();
@@ -4475,9 +4463,7 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
 }
 
 #[gpui::test]
-fn unsafe_paste_prompt_enter_should_confirm_without_moving_responder_focus(
-    cx: &mut TestAppContext,
-) {
+fn unsafe_paste_prompt_enter_should_confirm_and_restore_responder_focus(cx: &mut TestAppContext) {
     let confirmation = PasteConfirmation {
         id: crate::terminal::PasteConfirmationId::new(6),
         byte_len: 12,
@@ -4497,7 +4483,13 @@ fn unsafe_paste_prompt_enter_should_confirm_without_moving_responder_focus(
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("enter");
+    let enter = Keystroke::parse("enter").unwrap();
+    cx.simulate_event(KeyDownEvent {
+        keystroke: enter.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    });
+    cx.simulate_event(KeyUpEvent { keystroke: enter });
     cx.run_until_parked();
 
     assert!(records.commands().iter().any(|call| {
@@ -4507,9 +4499,7 @@ fn unsafe_paste_prompt_enter_should_confirm_without_moving_responder_focus(
 }
 
 #[gpui::test]
-fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
-    cx: &mut TestAppContext,
-) {
+fn unsafe_paste_prompt_escape_should_cancel_and_restore_responder_focus(cx: &mut TestAppContext) {
     let confirmation = PasteConfirmation {
         id: crate::terminal::PasteConfirmationId::new(8),
         byte_len: 12,
@@ -4529,7 +4519,7 @@ fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
-    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     let command_start = records.commands().len();
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -6002,6 +5992,197 @@ fn context_menu_keys_never_reach_the_terminal_session(cx: &mut TestAppContext) {
             .iter()
             .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
+}
+
+#[gpui::test]
+fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.screen = context_action_screen(None, true);
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    let target = tree.node("Terminal context actions");
+    assert_eq!(target["aria"]["role"], "Group");
+    assert!(supports(target, Action::ShowContextMenu));
+    perform(cx, target, Action::ShowContextMenu);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    perform(cx, tree.node("Find"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Terminal Find query"
+    );
+    perform(cx, tree.node("Close Find"), Action::Click);
+    A11yTree::read(cx);
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert!(records.commands().iter().all(|call| !matches!(
+        call.command,
+        RecordedCommand::Pointer(_)
+            | RecordedCommand::PointerAndCopySelection(_)
+            | RecordedCommand::Key(_)
+    )));
+}
+
+#[gpui::test]
+fn terminal_scrollback_publishes_a_named_scroll_bar_that_requests_rows(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let screen = ScreenSnapshot::from_test_parts_at(
+        Arc::from([]),
+        ScrollbarSnapshot {
+            total_rows: 100,
+            visible_rows: 20,
+            offset_rows: 80,
+        },
+        "",
+        7,
+    );
+    let generation = screen.generation;
+    records
+        .last_event_sender()
+        .unwrap()
+        .try_send(TerminalSessionEvent::Screen(screen))
+        .unwrap();
+    let tree = A11yTree::read(cx);
+    let scrollbar = tree.node("Scrollback");
+    assert_eq!(scrollbar["aria"]["role"], "ScrollBar");
+    assert_eq!(scrollbar["aria"]["numeric_value"], 80.0);
+    perform(cx, scrollbar, Action::Decrement);
+    assert_eq!(
+        records.commands().last().map(|input| &input.command),
+        Some(&RecordedCommand::ScrollTo(60, generation))
+    );
+}
+
+#[gpui::test]
+fn terminal_context_menu_accessibility_request_ignores_program_mouse_tracking(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        let mut screen = context_action_screen(None, true);
+        Arc::make_mut(&mut screen).mouse_tracking = true;
+        pane.screen = screen;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    perform(
+        cx,
+        tree.node("Terminal context actions"),
+        Action::ShowContextMenu,
+    );
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
+    assert!(records.commands().iter().all(|call| !matches!(
+        call.command,
+        RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
+    )));
+}
+
+#[gpui::test]
+fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let directory =
+        std::env::temp_dir().join(format!("spaceterm-context-anchor-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("preview.txt"), b"preview").unwrap();
+    let link = crate::terminal::HyperlinkTarget::osc8(
+        "file:preview.txt",
+        &directory,
+        None,
+        TerminalLocalFileCapabilities::Enabled,
+    )
+    .unwrap();
+    pane.update(cx, |pane, cx| {
+        let mut screen = context_action_screen(Some(link), true);
+        let rows = pane.last_geometry.unwrap().grid().rows;
+        let bottom = screen.rows[0].clone();
+        let mut cells = vec![Arc::from([]); usize::from(rows)];
+        cells[usize::from(rows - 1)] = bottom;
+        Arc::make_mut(&mut screen).rows = cells.into();
+        pane.screen = screen;
+        pane.file_preview_available = true;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    perform(
+        cx,
+        tree.node("Terminal context actions"),
+        Action::ShowContextMenu,
+    );
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.node("Open Link")["aria"]["disabled"], true);
+    let preview_name = cx.update(|_, cx| {
+        crate::desktop_profile::DesktopPresentation::get(cx)
+            .wording()
+            .file_preview
+    });
+    assert_eq!(tree.node(preview_name)["aria"]["disabled"], true);
+    cx.simulate_keystrokes("escape");
+    A11yTree::read(cx);
+    let bottom_left = pane.read_with(cx, |pane, _| {
+        let bounds = pane.grid_bounds.unwrap();
+        let cell = pane.last_geometry.unwrap().logical_cell_size();
+        point(
+            bounds.left() + px(cell.width / 2.0),
+            bounds.bottom() - px(cell.height / 2.0),
+        )
+    });
+    cx.simulate_mouse_down(bottom_left, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(bottom_left, MouseButton::Right, Modifiers::none());
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_ne!(tree.node("Open Link")["aria"]["disabled"], true);
+    assert_ne!(tree.node(preview_name)["aria"]["disabled"], true);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
+fn terminal_notices_publish_bounded_status_classifications(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    for (intent, value) in [
+        (StatusIntent::Information, "Information"),
+        (StatusIntent::Success, "Success"),
+        (StatusIntent::Warning, "Warning"),
+        (StatusIntent::Error, "Error"),
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.status = Some("Terminal operation could not complete.".into());
+            pane.status_intent = intent;
+            cx.notify();
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Terminal status")["aria"]["role"], "Status");
+        assert_eq!(tree.node("Terminal status")["aria"]["value"], value);
+        assert_eq!(
+            tree.node("Terminal status")["aria"]["description"],
+            "Terminal operation could not complete."
+        );
+    }
 }
 
 #[gpui::test]
@@ -8466,4 +8647,334 @@ fn headless_pane() -> (
         .unwrap();
     cx.run_until_parked();
     (handle, cx, records, atlas)
+}
+
+fn accessible_paste_confirmation(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+    TestTerminalSessionRecords,
+    PasteConfirmation,
+) {
+    let confirmation = PasteConfirmation {
+        id: crate::terminal::PasteConfirmationId::new(427),
+        byte_len: 18,
+        line_count: 3,
+        risk: crate::terminal::PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let (pane, cx, records) = terminal_pane_with_paste_response(
+        cx,
+        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+        Ok(PasteResolution::Written),
+    );
+    cx.write_to_clipboard(ClipboardItem::new_string(
+        "private-one\nprivate-two\n".to_owned(),
+    ));
+    (pane, cx, records, confirmation)
+}
+
+#[gpui::test]
+fn paste_confirmation_publishes_dialog_text_and_contains_accessibility(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    A11yTree::read(cx);
+    cx.dispatch_action(PasteClipboard);
+    let tree = A11yTree::read(cx);
+    let title = "Paste 18 bytes across 3 lines?";
+    let message = "Pasting multiple lines may execute commands in your shell.";
+    let dialog = tree.node(title);
+    assert_eq!(dialog["aria"]["role"], "AlertDialog");
+    assert_eq!(dialog["aria"]["modal"], true);
+    let content = tree.descendants(dialog);
+    let position = |node: &serde_json::Value| {
+        content
+            .iter()
+            .position(|child| child["accesskit_id"] == node["accesskit_id"])
+            .expect("confirmation content belongs to the dialog")
+    };
+    assert!(position(tree.text(title)) < position(tree.text(message)));
+    for name in ["Cancel", "Paste"] {
+        assert!(position(tree.text(message)) < position(tree.node(name)));
+        assert!(tree.exposed(tree.node(name)));
+    }
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Paste");
+    assert!(
+        tree.find("Terminal context actions")
+            .is_none_or(|node| !tree.exposed(node))
+    );
+    assert!(!tree.exposed(tree.node("Terminal Pane")));
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.pending_paste),
+        Some(confirmation)
+    );
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::ResolvePaste(..)))
+    );
+    for node in tree.in_order() {
+        let published = node.to_string();
+        assert!(!published.contains("private-one") && !published.contains("private-two"));
+    }
+}
+
+#[gpui::test]
+fn paste_confirmation_restores_terminal_focus_after_escape_and_accessibility_cancel(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
+    for escape in [true, false] {
+        let before = records.commands().len();
+        cx.dispatch_action(PasteClipboard);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Paste");
+        if escape {
+            cx.simulate_keystrokes("escape");
+        } else {
+            perform(cx, tree.node("Cancel"), Action::Click);
+        }
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("AlertDialog").is_empty());
+        assert_eq!(tree.focused().unwrap()["accesskit_id"], original_focus);
+        assert!(tree.exposed(tree.focused().unwrap()));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+        assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+        assert_eq!(
+            records.commands()[before..]
+                .iter()
+                .filter_map(|call| {
+                    matches!(
+                        call.command,
+                        RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
+                    )
+                    .then_some(&call.command)
+                })
+                .collect::<Vec<_>>(),
+            [&RecordedCommand::ResolvePaste(
+                confirmation.id,
+                PasteDecision::Cancel
+            )]
+        );
+    }
+}
+
+#[gpui::test]
+fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_focus(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
+    cx.dispatch_action(PasteClipboard);
+    let tree = A11yTree::read(cx);
+    assert!(supports(tree.node("Paste"), Action::Click));
+    perform(cx, tree.node("Paste"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("AlertDialog").is_empty());
+    assert_eq!(tree.focused().unwrap()["accesskit_id"], original_focus);
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert_eq!(
+        records
+            .commands()
+            .iter()
+            .filter_map(|call| {
+                matches!(call.command, RecordedCommand::ResolvePaste(..)).then_some(&call.command)
+            })
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Confirm
+        )]
+    );
+}
+
+#[gpui::test]
+fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    cx.dispatch_action(PasteClipboard);
+    assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
+    pane.update(cx, |pane, _| pane.close());
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("AlertDialog").is_empty());
+    assert!(tree.find("Paste").is_none());
+    assert!(tree.find("Terminal context actions").is_none());
+    assert!(
+        tree.in_order()
+            .iter()
+            .all(|node| node["aria"]["hidden"] != true)
+    );
+    assert_eq!(
+        records
+            .commands()
+            .iter()
+            .filter_map(|call| {
+                matches!(call.command, RecordedCommand::ResolvePaste(..)).then_some(&call.command)
+            })
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
+}
+
+#[gpui::test]
+fn paste_confirmation_cancels_when_focus_leaves_its_pane_or_window(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    for other_window in [false, true] {
+        cx.dispatch_action(PasteClipboard);
+        assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
+        let before = records.commands().len();
+        if other_window {
+            cx.deactivate_window();
+        } else {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(
+                    TerminalProductFocus {
+                        focused_pane: false,
+                        ..TerminalProductFocus::default()
+                    },
+                    cx,
+                );
+                cx.notify();
+            });
+        }
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("AlertDialog").is_empty());
+        assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+        assert_eq!(
+            records.commands()[before..]
+                .iter()
+                .filter_map(|call| {
+                    matches!(call.command, RecordedCommand::ResolvePaste(..))
+                        .then_some(&call.command)
+                })
+                .collect::<Vec<_>>(),
+            [&RecordedCommand::ResolvePaste(
+                confirmation.id,
+                PasteDecision::Cancel
+            )]
+        );
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus::default(), cx);
+                pane.focus(window, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn paste_confirmation_keeps_authority_when_the_main_window_sets_its_modal_blocker(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    cx.dispatch_action(PasteClipboard);
+    assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                blocker: Some(TerminalFocusBlocker::Modal),
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("AlertDialog").len(), 1);
+    assert!(pane.read_with(cx, |pane, _| pane.pending_paste == Some(confirmation)));
+    perform(cx, tree.node("Paste"), Action::Click);
+    assert!(A11yTree::read(cx).with_role("AlertDialog").is_empty());
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
+        cx.notify();
+    });
+    A11yTree::read(cx);
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert_eq!(
+        records
+            .commands()
+            .iter()
+            .filter_map(|call| {
+                matches!(call.command, RecordedCommand::ResolvePaste(..)).then_some(&call.command)
+            })
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Confirm
+        )]
+    );
+}
+
+#[gpui::test]
+fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let background = cx.update(|window, cx| {
+        let background = cx.focus_handle();
+        window
+            .root::<PastePointerRoot>()
+            .unwrap()
+            .unwrap()
+            .update(cx, |root, cx| {
+                root.1 = Some(background.clone());
+                cx.notify();
+            });
+        background
+    });
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.focus(window, cx);
+            cx.notify();
+        })
+    });
+    A11yTree::read(cx);
+    cx.dispatch_action(PasteClipboard);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Paste");
+    cx.update(|window, cx| background.focus(window, cx));
+    perform(cx, tree.node("Paste"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("AlertDialog").is_empty());
+    assert_eq!(
+        records
+            .commands()
+            .iter()
+            .filter_map(|call| {
+                matches!(call.command, RecordedCommand::ResolvePaste(..)).then_some(&call.command)
+            })
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
 }

@@ -444,6 +444,7 @@ fn render_toggle(
     let button = IconButton::new(id, toggle.accessibility_name, move |foreground| {
         Icon::new(icon, metrics.icon_size, foreground).into_any_element()
     })
+    .toggled(toggle.on)
     .size(ButtonSize::Compact)
     .target_size(metrics.toggle_target_size())
     .corner_radius(metrics.toggle_corner_radius())
@@ -476,6 +477,89 @@ fn clear_mark(metrics: SearchFieldMetrics, fill: Rgba, glyph: Rgba) -> gpui::Any
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn search_field_toggle_publishes_its_mode_and_switches_on_press(cx: &mut gpui::TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use crate::{
+            ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariants, TextInputMetrics,
+            TextInputPaint, TextInputTheme, TextInputVariant, TextInputVariants, TooltipMetrics,
+            TooltipPaint, TooltipTheme,
+        };
+        use gpui::{Context, Render, accesskit::Action};
+        use std::time::Duration;
+
+        struct SearchRoot {
+            input: Entity<TextInput>,
+            on: bool,
+        }
+        impl Render for SearchRoot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let owner = cx.weak_entity();
+                div()
+                    .w(px(300.0))
+                    .child(SearchField::new("search", self.input.clone()).toggle(
+                        SearchFieldToggle::new(
+                            IconName::Search,
+                            "Search by Shortcut",
+                            self.on,
+                            move |_, cx| {
+                                let _ = owner.update(cx, |root, cx| {
+                                    root.on = !root.on;
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                    ))
+            }
+        }
+
+        let color = rgba(0x222222ff);
+        let paint = ButtonPaint::new(rgba(0), color, rgba(0));
+        let style = ButtonVariantStyle::new(paint, paint, paint, paint);
+        let metrics = ButtonMetrics::new(px(24.0));
+        cx.set_global(ButtonTheme::new(
+            ButtonVariants::new(style, style, style, style, style, style, style),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
+            color,
+        ));
+        cx.set_global(SearchFieldTheme::new(
+            FieldFrameTheme::transparent(),
+            SearchFieldPaint::new(color, style, color, style, style),
+            SearchFieldMetrics::new(px(28.0)),
+        ));
+        let input_paint = TextInputPaint::new(color, color, color, color, color, color);
+        cx.set_global(TextInputTheme::new(
+            TextInputVariants::new(input_paint, input_paint),
+            TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
+        ));
+        cx.set_global(TooltipTheme::new(
+            TooltipPaint::new(color, color, color),
+            TooltipMetrics::new(px(320.0)),
+        ));
+        cx.update(crate::text_input::init);
+        cx.update(crate::tooltip::init);
+        let (_, cx) = cx.add_window_view(|window, cx| SearchRoot {
+            input: cx.new(|cx| {
+                TextInput::new("query", "Search query", "", window, cx)
+                    .variant(TextInputVariant::Bare)
+                    .context_menu(false)
+            }),
+            on: false,
+        });
+
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Search by Shortcut")["aria"]["role"], "Button");
+        assert_eq!(tree.node("Search by Shortcut")["aria"]["toggled"], "False");
+        for state in ["True", "False"] {
+            let tree = A11yTree::read(cx);
+            perform(cx, tree.node("Search by Shortcut"), Action::Click);
+            assert_eq!(
+                A11yTree::read(cx).node("Search by Shortcut")["aria"]["toggled"],
+                state
+            );
+        }
+    }
 
     #[test]
     fn density_scales_field_bounds_but_not_radius() {

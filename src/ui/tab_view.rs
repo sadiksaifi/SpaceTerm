@@ -11,6 +11,7 @@ use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
@@ -52,8 +53,8 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    Point, Render, Window, div, px, relative,
+    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, FocusHandle,
+    MouseDownEvent, Pixels, Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName,
@@ -357,6 +358,8 @@ pub(crate) struct TabView {
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_tab_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
+    /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
+    tab_focus: FocusHandle,
 }
 
 impl TabView {
@@ -437,6 +440,7 @@ impl TabView {
             native_service_focus_signature: None,
             close_tab_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
+            tab_focus: cx.focus_handle(),
         }
     }
 
@@ -579,6 +583,10 @@ impl TabView {
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.session_factory.set_pinned_directory(directory);
+    }
+
+    pub(crate) fn tab_focus(&self) -> &FocusHandle {
+        &self.tab_focus
     }
 
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
@@ -1378,7 +1386,7 @@ impl TabView {
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 closed_pane.update(cx, |terminal, _| {
-                    terminal.set_accessibility_hierarchy(false, usize::MAX);
+                    terminal.set_accessibility_hierarchy(false);
                     terminal.close();
                 });
                 self.pane_bounds.remove(&pane_id);
@@ -1521,11 +1529,6 @@ impl TabView {
             ZoomState::Zoomed(pane_id) => vec![pane_id],
             ZoomState::Restored => panes.clone(),
         };
-        let presentation_order = presented_panes
-            .into_iter()
-            .enumerate()
-            .map(|(order, pane_id)| (pane_id, order))
-            .collect::<BTreeMap<_, _>>();
         for pane_id in panes {
             let Some(terminal) = self.tab.pane(pane_id) else {
                 continue;
@@ -1541,13 +1544,8 @@ impl TabView {
             terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
-                terminal.set_accessibility_hierarchy(
-                    self.active && presentation_order.contains_key(&pane_id),
-                    presentation_order
-                        .get(&pane_id)
-                        .copied()
-                        .unwrap_or(usize::MAX),
-                );
+                terminal
+                    .set_accessibility_hierarchy(self.active && presented_panes.contains(&pane_id));
                 if product_focus_changed {
                     cx.notify();
                 }
@@ -1891,11 +1889,17 @@ impl TabView {
         };
 
         let gap = pane_gap(cx);
-        let current_offset = self
-            .split_bounds
-            .get(&split_id)
-            .and_then(|bounds| split_content_extent(axis, *bounds, gap))
-            .map_or(0.0, |extent| extent * ratio);
+        let bounds = self.split_bounds.get(&split_id).copied();
+        let extent = bounds.and_then(|bounds| split_content_extent(axis, bounds, gap));
+        let current_offset = extent.map_or(0.0, |extent| extent * ratio);
+        // A ratio left outside the bounds by a smaller window stays inside the published range.
+        let offset_range = bounds.zip(extent).and_then(|(bounds, extent)| {
+            let range = self
+                .tab
+                .split_ratio_range(split_id, pane_size(bounds).ok()?, gap)
+                .ok()?;
+            Some(extent * range.start().min(ratio)..=extent * range.end().max(ratio))
+        });
 
         // The resize target paints after both Panes but before sibling popovers; a deferred target
         // would paint through command palettes.
@@ -1909,6 +1913,7 @@ impl TabView {
                 split_id,
                 axis,
                 current_offset,
+                offset_range,
                 view,
             ));
         let (spacer, resize_target) = match axis {
@@ -2432,10 +2437,24 @@ fn render_pane_caption_content(
             controls.child(button)
         };
     }
+    let caption_name = format!("Pane Caption, {}", text.name);
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+    let focus_pane = move |window: &mut Window, cx: &mut App| {
+        let _ = focus_view.update(cx, |view, cx| {
+            view.focus_pane(pane_id, cx);
+            view.focus(window, cx);
+        });
+    };
+    let accessibility_focus = focus_pane.clone();
     caption_row(appearance, color)
         .id(("pane-caption", pane_id.get()))
+        .role(gpui::accesskit::Role::Group)
+        .aria_label(caption_name)
+        .when(zoomed, |row| row.aria_description("Zoomed Pane"))
+        .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+            accessibility_focus(window, cx);
+        })
         .debug_selector(move || {
             format!(
                 "pane-caption-{}-{}",
@@ -2445,10 +2464,7 @@ fn render_pane_caption_content(
         })
         // The press focuses the Pane at once, since a press that starts a drag never clicks.
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            let _ = focus_view.update(cx, |view, cx| {
-                view.focus_pane(pane_id, cx);
-                view.focus(window, cx);
-            });
+            focus_pane(window, cx);
             cx.stop_propagation();
         })
         // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
@@ -2732,9 +2748,10 @@ fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
     current_offset: f32,
+    offset_range: Option<RangeInclusive<f32>>,
     view: gpui::WeakEntity<TabView>,
 ) -> AnyElement {
-    ResizeHandle::new(
+    let handle = ResizeHandle::new(
         ("split-resize", split_id.get()),
         "Resize Pane split",
         match axis {
@@ -2742,7 +2759,11 @@ fn render_split_resize_handle(
             SplitAxis::Vertical => ResizeAxis::Vertical,
         },
         current_offset,
-    )
+    );
+    match offset_range {
+        Some(range) => handle.range(range),
+        None => handle,
+    }
     .tab_stop(true)
     .reset_on_double_click(true)
     .paint_divider(false)
@@ -3727,6 +3748,76 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    fn pane_captions_publish_groups_that_focus_and_operate_their_pane(cx: &mut TestAppContext) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (_, view, records, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&PaneId::new(1)).unwrap().name = "Primary shell".into();
+            cx.notify();
+        });
+        let closes = Rc::new(RefCell::new(Vec::new()));
+        let requested_closes = closes.clone();
+        view.update(cx, |_, cx| {
+            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
+                if let TabViewEvent::UserClosePaneRequested { pane_id, .. } = event {
+                    requested_closes.borrow_mut().push(*pane_id);
+                }
+            })
+            .detach();
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(
+            tree.node("Pane Caption, Primary shell")["aria"]["role"],
+            "Group"
+        );
+        perform(cx, tree.node("Split Right"), Action::Click);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
+
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&PaneId::new(2)).unwrap().name = "Second shell".into();
+            cx.notify();
+        });
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.node("Pane Caption, Primary shell"), Action::Click);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(1)
+        );
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+        let tree = A11yTree::read(cx);
+        let controls = tree.children(tree.node("Pane Caption, Primary shell"));
+        let control = |name| {
+            controls
+                .iter()
+                .find(|node| node["aria"]["label"] == name)
+                .unwrap()
+        };
+        for name in ["Split Right", "Split Down", "Zoom Pane", "Close Pane"] {
+            assert_eq!(control(name)["aria"]["role"], "Button");
+        }
+        perform(cx, control("Zoom Pane"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert!(tree.find("Pane Caption, Second shell").is_none());
+        perform(cx, tree.node("Restore Panes"), Action::Click);
+        let tree = A11yTree::read(cx);
+        let close = tree
+            .children(tree.node("Pane Caption, Primary shell"))
+            .into_iter()
+            .find(|node| node["aria"]["label"] == "Close Pane")
+            .unwrap();
+        perform(cx, close, Action::Click);
+        assert_eq!(*closes.borrow(), [PaneId::new(1)]);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.pane_count()),
+            2,
+            "Close Confirmation owns authorization to remove the Pane"
+        );
+        assert_eq!(records.pointer_count(), 0);
+    }
+
     fn first_mouse_click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
         let control = cx
             .debug_bounds(selector)
@@ -3746,6 +3837,126 @@ mod tests {
             click_count: 1,
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn split_panes_publish_terminal_nodes_in_layout_order_and_follow_input_focus(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+        cx.update(crate::ui::init).unwrap();
+        let factory = test_session_factory();
+        let launch = factory.prepare_child_launch().unwrap();
+        let construction = PaneConstruction::new(
+            Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+            Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
+            crate::terminal::native_services::testing::adapters(),
+            crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+        );
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TabView::new_with_prepared_launch(
+                TabId::new(1),
+                factory,
+                launch,
+                construction,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.activate(window, cx));
+        });
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+
+        view.update(cx, |view, cx| {
+            for (pane, title) in [(1, "Left upper"), (2, "Right"), (3, "Left lower")] {
+                view.pane_captions.get_mut(&PaneId::new(pane)).unwrap().name = title.into();
+            }
+            cx.notify();
+        });
+        let tree = A11yTree::read(cx);
+        let panes = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| node["aria"]["role"] == "Terminal")
+            .collect::<Vec<_>>();
+        assert_eq!(panes.len(), 3);
+        assert_eq!(
+            panes
+                .iter()
+                .map(|pane| node_id(pane))
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        for pane in &panes {
+            let children = tree.children(pane);
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|child| node_id(child))
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                children.len()
+            );
+        }
+        let captions = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| {
+                node["aria"]["role"] == "Group"
+                    && node["aria"]["label"]
+                        .as_str()
+                        .is_some_and(|label| label.starts_with("Pane Caption, "))
+            })
+            .map(|node| node["aria"]["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captions,
+            [
+                "Pane Caption, Left upper",
+                "Pane Caption, Left lower",
+                "Pane Caption, Right"
+            ]
+        );
+        assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[1]));
+
+        perform(cx, panes[2], Action::Focus);
+        let tree = A11yTree::read(cx);
+        assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[2]));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+
+        cx.simulate_keystrokes("cmd-alt-left");
+        let tree = A11yTree::read(cx);
+        let focused = view.read_with(cx, |view, _| view.focused_pane_id());
+        assert_ne!(focused, PaneId::new(2));
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+        assert_ne!(node_id(tree.focused().unwrap()), node_id(panes[2]));
+
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 1);
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 3);
+        let removed_caption = view.read_with(cx, |view, _| {
+            format!("Pane Caption, {}", view.pane_captions[&focused].name)
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.close_pane_authorized(focused, window, cx)
+            })
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Terminal").len(), 2);
+        assert!(tree.find(&removed_caption).is_none());
     }
 
     #[gpui::test]
@@ -5710,5 +5921,178 @@ mod tests {
             vec![home, first.clone(), first, second]
         );
         assert!(records.dropped_session_ids().is_empty());
+    }
+
+    #[gpui::test]
+    fn split_resize_handles_move_to_the_offset_assistive_technology_sets(cx: &mut TestAppContext) {
+        use gpui::accesskit::{Action, ActionData};
+        use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+        let (view, cx) = split_gap_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let extent = view.read_with(cx, |view, cx| {
+            let bounds = view.split_bounds.values().next().copied().unwrap();
+            split_content_extent(SplitAxis::Horizontal, bounds, pane_gap(cx)).unwrap()
+        });
+        let set_offset = |offset: f64, cx: &mut VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            perform_with(
+                cx,
+                tree.node("Resize Pane split"),
+                Action::SetValue,
+                Some(ActionData::NumericValue(offset)),
+            );
+            cx.run_until_parked();
+        };
+        let published = |cx: &mut VisualTestContext| {
+            A11yTree::read(cx).node("Resize Pane split")["aria"]["numeric_value"]
+                .as_f64()
+                .unwrap()
+        };
+
+        set_offset(f64::from(extent * 0.25), cx);
+        assert_eq!(split_ratio(&view, cx), 0.25);
+        assert_eq!(published(cx), f64::from(extent * 0.25));
+
+        // The Tab keeps the second Pane at its minimum size, as it does for a drag.
+        set_offset(f64::from(extent * 10.0), cx);
+        let ratio = split_ratio(&view, cx);
+        assert!(ratio > 0.25 && ratio < 1.0, "{ratio}");
+        assert_eq!(published(cx), f64::from(extent * ratio));
+        assert_eq!(view.read_with(cx, |view, _| view.resizing_split_id), None);
+    }
+
+    /// Each Split's published value, minimum, and maximum, from the Tab's own bounds.
+    fn expected_split_ranges(
+        view: &Entity<TabView>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(&'static str, (f64, f64, f64))> {
+        fn collect(tree: PaneTreeRef<'_>, splits: &mut Vec<(SplitId, SplitAxis, f32)>) {
+            if let PaneNodeRef::Split {
+                split_id,
+                axis,
+                ratio,
+                first,
+                second,
+            } = tree.node()
+            {
+                splits.push((split_id, axis, ratio));
+                collect(first, splits);
+                collect(second, splits);
+            }
+        }
+
+        view.read_with(cx, |view, cx| {
+            let gap = pane_gap(cx);
+            let mut splits = Vec::new();
+            collect(view.tab.root(), &mut splits);
+            splits
+                .into_iter()
+                .map(|(split_id, axis, ratio)| {
+                    let bounds = view.split_bounds[&split_id];
+                    let extent = split_content_extent(axis, bounds, gap).unwrap();
+                    let range = view
+                        .tab
+                        .split_ratio_range(split_id, pane_size(bounds).unwrap(), gap)
+                        .unwrap();
+                    let orientation = match axis {
+                        SplitAxis::Horizontal => "Vertical",
+                        SplitAxis::Vertical => "Horizontal",
+                    };
+                    let offset = |ratio: f32| f64::from(extent * ratio);
+                    (
+                        orientation,
+                        (offset(ratio), offset(*range.start()), offset(*range.end())),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn pane_split_handle<'a>(
+        tree: &'a spaceterm_ui::a11y_testing::A11yTree,
+        orientation: &str,
+    ) -> &'a serde_json::Value {
+        tree.with_role("Splitter")
+            .into_iter()
+            .find(|node| {
+                node["aria"]["label"] == "Resize Pane split"
+                    && node["aria"]["orientation"] == orientation
+            })
+            .unwrap_or_else(|| panic!("no {orientation} Pane split handle"))
+    }
+
+    /// The published value, minimum, and maximum of the Pane split handle with `orientation`.
+    fn published_split_range(orientation: &str, cx: &mut VisualTestContext) -> (f64, f64, f64) {
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        let splitter = pane_split_handle(&tree, orientation);
+        let number = |key: &str| {
+            splitter["aria"][key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("the Pane split handle publishes no {key}"))
+        };
+        (
+            number("numeric_value"),
+            number("min_numeric_value"),
+            number("max_numeric_value"),
+        )
+    }
+
+    #[gpui::test]
+    fn split_resize_handles_publish_the_range_their_tab_resizes_within(cx: &mut TestAppContext) {
+        use gpui::accesskit::{Action, ActionData};
+        use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+        let (view, cx) = split_gap_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let expected = expected_split_ranges(&view, cx);
+        assert_eq!(expected.len(), 2);
+        for (orientation, range) in &expected {
+            assert!(
+                range.1 > 0.0 && range.1 < range.0 && range.0 < range.2,
+                "{range:?}"
+            );
+            assert_eq!(published_split_range(orientation, cx), *range);
+        }
+
+        for (orientation, _) in expected {
+            for requested in [-10_000.0, 10_000.0] {
+                let tree = A11yTree::read(cx);
+                perform_with(
+                    cx,
+                    pane_split_handle(&tree, orientation),
+                    Action::SetValue,
+                    Some(ActionData::NumericValue(requested)),
+                );
+                cx.run_until_parked();
+
+                let (value, minimum, maximum) = published_split_range(orientation, cx);
+                let bound = if requested < 0.0 { minimum } else { maximum };
+                assert_eq!(value, bound, "{orientation} handle after {requested}");
+                let current = expected_split_ranges(&view, cx)
+                    .into_iter()
+                    .find(|(candidate, _)| *candidate == orientation)
+                    .unwrap()
+                    .1;
+                assert_eq!((value, minimum, maximum), current);
+            }
+        }
     }
 }

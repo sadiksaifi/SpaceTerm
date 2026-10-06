@@ -159,6 +159,59 @@ pub(super) fn confirmation_alert() -> Alert<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, IntoElement, Render, Styled as _, TestAppContext, Window, div};
+    use spaceterm_ui::ModalLayer;
+
+    struct RecoveryWindow;
+
+    impl Render for RecoveryWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    #[gpui::test]
+    fn the_launch_offer_publishes_an_alert_dialog_that_answers_through_its_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.update(crate::ui::init).unwrap();
+        let (root, cx) = cx.add_window_view(|window, _| {
+            window.activate_window();
+            RecoveryWindow
+        });
+        let outcome = Rc::new(RefCell::new(None));
+        let recorded = Rc::clone(&outcome);
+        cx.update(|window, cx| {
+            root.update(cx, |_, cx| {
+                launch_alert()
+                    .present(window, cx, move |outcome, _| {
+                        if let AlertOutcome::Activated { action_id, .. } = outcome {
+                            *recorded.borrow_mut() = Some(action_id);
+                        }
+                    })
+                    .unwrap();
+            });
+        });
+
+        let tree = A11yTree::read(cx);
+        let alert = tree.node("SpaceTerm couldn't read your settings");
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(alert["aria"]["modal"], true);
+        assert_eq!(tree.node("Reset Settings")["aria"]["role"], "Button");
+        perform(cx, tree.node("Not Now"), Action::Click);
+        cx.run_until_parked();
+        assert_eq!(*outcome.borrow(), Some(RecoveryAction::NotNow));
+        assert!(
+            A11yTree::read(cx)
+                .find("SpaceTerm couldn't read your settings")
+                .is_none()
+        );
+    }
 
     #[test]
     fn every_recovery_prompt_should_satisfy_the_desktop_alert_policy() {

@@ -1106,14 +1106,14 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
             .borrow()
             .hierarchy
             .iter()
-            .any(|(presented, _)| !presented)
+            .any(|presented| !presented)
     );
     assert!(
         records[3]
             .borrow()
             .hierarchy
             .iter()
-            .any(|(presented, order)| *presented && *order == 0)
+            .any(|presented| *presented)
     );
 }
 
@@ -3335,6 +3335,8 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
             )
         })
     });
+    // A cancelled task drops its future only when the executor runs it.
+    cx.run_until_parked();
     drop(pending_sender);
     cx.run_until_parked();
     redraw(cx);
@@ -7481,6 +7483,19 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
     );
 }
 
+#[gpui::test]
+fn workspace_list_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Workspace list")["aria"]["role"], "ScrollBar");
+    assert_eq!(tree.with_role("ScrollBar").len(), 1);
+}
+
 fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> Vec<u64> {
     manager.read_with(cx, |manager, _| {
         manager
@@ -10243,5 +10258,558 @@ fn assert_rendered_text(
             lines.iter().any(|rendered| rendered == line),
             "the current mount must shape the exact expected text: {line:?}"
         );
+    }
+}
+
+#[gpui::test]
+fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Workspaces");
+    assert_eq!(list["aria"]["role"], "ListBox");
+    let rows = tree.with_role("ListBoxOption");
+    assert_eq!(rows.len(), 2);
+    let selected = |tree: &A11yTree| {
+        tree.with_role("ListBoxOption")
+            .iter()
+            .map(|row| row["aria"]["selected"] == true)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(selected(&tree), [false, true]);
+
+    perform(cx, rows[0], Action::Click);
+    let tree = A11yTree::read(cx);
+    assert_eq!(selected(&tree), [true, false]);
+
+    perform(
+        cx,
+        tree.with_role("ListBoxOption")[0],
+        Action::ShowContextMenu,
+    );
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+}
+
+/// The main window's controls a reader meets, keyed by the accessible name before any detail.
+fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    const CONTROLS: [&str; 11] = [
+        "Hide Sidebar",
+        "Show Sidebar",
+        "Switch Workspace",
+        "Workspaces",
+        "Settings",
+        "New Workspace",
+        "Resize Workspace sidebar",
+        "Tabs",
+        "Create Tab",
+        "Pane Caption",
+        "Terminal context actions",
+    ];
+    A11yTree::read(cx)
+        .in_order()
+        .into_iter()
+        .filter_map(|node| node["aria"]["label"].as_str()?.split(", ").next())
+        .filter(|name| CONTROLS.contains(name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The roles between the window and the first node with this accessible name.
+fn ancestor_roles(cx: &mut VisualTestContext, label: &str) -> Vec<String> {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    fn walk<'a>(
+        tree: &'a A11yTree,
+        node: &'a serde_json::Value,
+        label: &str,
+        path: &mut Vec<&'a serde_json::Value>,
+    ) -> bool {
+        if node["aria"]["label"] == label {
+            return true;
+        }
+        path.push(node);
+        if tree
+            .children(node)
+            .into_iter()
+            .any(|child| walk(tree, child, label, path))
+        {
+            return true;
+        }
+        path.pop();
+        false
+    }
+
+    let tree = A11yTree::read(cx);
+    let root = tree.in_order()[0];
+    let mut path = Vec::new();
+    assert!(
+        walk(&tree, root, label, &mut path),
+        "no node is named {label:?}"
+    );
+    path[1..]
+        .iter()
+        .map(|node| node["aria"]["role"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[gpui::test]
+fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+
+    // Assistive technology omits generic containers, so ordering adds no node a reader meets.
+    for label in ["Hide Sidebar", "Workspaces", "Tabs"] {
+        assert!(
+            ancestor_roles(cx, label)
+                .iter()
+                .all(|role| role == "GenericContainer"),
+            "{label}"
+        );
+    }
+
+    assert_eq!(
+        main_window_reading_order(cx),
+        [
+            "Hide Sidebar",
+            "Switch Workspace",
+            "Workspaces",
+            "Settings",
+            "New Workspace",
+            "Resize Workspace sidebar",
+            "Tabs",
+            "Create Tab",
+            "Pane Caption",
+            "Terminal context actions",
+        ]
+    );
+
+    cx.simulate_keystrokes("cmd-b");
+    assert_eq!(
+        main_window_reading_order(cx),
+        [
+            "Show Sidebar",
+            "Switch Workspace",
+            "Resize Workspace sidebar",
+            "Tabs",
+            "Create Tab",
+            "Pane Caption",
+            "Terminal context actions",
+        ]
+    );
+}
+
+/// The widest sidebar the window allows, the same limit a drag clamps to.
+fn sidebar_maximum_width(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|window, _| {
+        (spaceterm_ui::content_viewport(window).size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+            .min(px(SIDEBAR_MAXIMUM_WIDTH))
+            .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+    })
+}
+
+/// The sidebar Resize Handle's published value, minimum, and maximum.
+fn sidebar_splitter_range(cx: &mut VisualTestContext) -> (f64, f64, f64) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let tree = A11yTree::read(cx);
+    let splitter = tree.node("Resize Workspace sidebar");
+    let number = |key: &str| {
+        splitter["aria"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("the sidebar splitter publishes no {key}"))
+    };
+    (
+        number("numeric_value"),
+        number("min_numeric_value"),
+        number("max_numeric_value"),
+    )
+}
+
+#[gpui::test]
+fn sidebar_resize_handle_publishes_the_range_its_model_resizes_within(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let maximum = f64::from(f32::from(sidebar_maximum_width(cx)));
+
+    // Every width below the minimum collapses the sidebar, so the range reaches zero width.
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (f64::from(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), 0.0, maximum)
+    );
+
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    drag_to(
+        "workspace-sidebar-resize-handle",
+        root.origin.x + px(300.0),
+        cx,
+    );
+    let width = manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width);
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (f64::from(f32::from(width)), 0.0, maximum)
+    );
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let collapsed = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered")
+        .size
+        .width;
+    let collapsed = f64::from(f32::from(collapsed));
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (collapsed, 0.0, maximum.max(collapsed))
+    );
+}
+
+#[gpui::test]
+fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut TestAppContext) {
+    use gpui::accesskit::{Action, ActionData};
+    use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let maximum = sidebar_maximum_width(cx);
+    let set_width = |width: f64, cx: &mut VisualTestContext| {
+        let tree = A11yTree::read(cx);
+        perform_with(
+            cx,
+            tree.node("Resize Workspace sidebar"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(width)),
+        );
+        cx.run_until_parked();
+    };
+    let layout = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            let sidebar = manager.sidebar.read(cx);
+            (sidebar.layout().visible, sidebar.layout().width)
+        })
+    };
+
+    set_width(300.0, cx);
+    assert_eq!(layout(cx), (true, px(300.0)));
+    assert_eq!(sidebar_splitter_range(cx).0, 300.0);
+
+    set_width(10_000.0, cx);
+    assert_eq!(layout(cx), (true, maximum));
+    assert_eq!(sidebar_splitter_range(cx).0, f64::from(f32::from(maximum)));
+
+    set_width(-50.0, cx);
+    assert!(
+        !layout(cx).0,
+        "a width below the minimum collapses the sidebar"
+    );
+    assert!(manager.read_with(cx, |manager, cx| !manager.sidebar.read(cx).is_resizing()));
+}
+
+#[gpui::test]
+fn tab_menu_opened_by_assistive_technology_returns_focus_to_its_tab(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t");
+    // VoiceOver moves keyboard focus with its cursor, so focus rests on the last focusable
+    // control the cursor passed before it reached the Tab.
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Resize Workspace sidebar"), Action::Focus);
+    let tree = A11yTree::read(cx);
+    let tab = node_id(tree.with_role("Tab")[0]);
+    perform(cx, tree.with_role("Tab")[0], Action::ShowContextMenu);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+
+    cx.simulate_keystrokes("escape");
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(tab));
+}
+
+#[gpui::test]
+fn tab_menu_opened_by_the_pointer_returns_focus_to_where_it_was(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_keystrokes("cmd-t");
+    right_click("tab-item-1-inactive", cx);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+    cx.simulate_keystrokes("escape");
+    assert!(A11yTree::read(cx).with_role("Menu").is_empty());
+    assert!(active_terminal_has_input_focus(&manager, cx));
+
+    let tree = A11yTree::read(cx);
+    let handle = node_id(tree.node("Resize Workspace sidebar"));
+    perform(cx, tree.node("Resize Workspace sidebar"), Action::Focus);
+    right_click("tab-item-1-inactive", cx);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+    cx.simulate_keystrokes("escape");
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(handle));
+}
+
+/// Opens a Workspace whose Terminal Panes publish their accessibility nodes.
+fn workspace_manager_with_terminal_nodes(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
+    use crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory;
+
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+    let (manager, cx) = cx.add_window_view(|window, cx| {
+        WorkspaceManager::new_with_adapters(
+            session_factory,
+            std::env::temp_dir(),
+            WorkspaceManagerAdapters {
+                accessibility: Rc::new(AccessKitTerminalAccessibilityAdapterFactory),
+                ..workspace_adapters(test_remote_backend_factory())
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        manager.update(cx, |manager, cx| manager.focus(window, cx));
+    });
+    cx.run_until_parked();
+    (manager, records, cx)
+}
+
+/// Reports a shell prompt for one Terminal Session, so closing its Pane needs no confirmation.
+fn report_idle_prompt(
+    records: &TestTerminalSessionRecords,
+    session_id: usize,
+    cx: &mut VisualTestContext,
+) {
+    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        "/Users/test",
+        "zsh",
+        Default::default(),
+        Instant::now(),
+    );
+    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
+    let mut screen =
+        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+            .clone();
+    screen.metadata = metadata.snapshot();
+    records
+        .event_sender(session_id)
+        .expect("the Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+/// Returns the "Close Tab" button inside the Tab at this Tab bar position.
+fn tab_close_button(
+    tree: &spaceterm_ui::a11y_testing::A11yTree,
+    index: usize,
+) -> &serde_json::Value {
+    let mut pending = vec![tree.with_role("Tab")[index]];
+    while let Some(node) = pending.pop() {
+        if node["aria"]["label"] == "Close Tab" {
+            return node;
+        }
+        pending.extend(tree.children(node));
+    }
+    panic!("Tab {index} has no Close Tab button");
+}
+
+/// Asserts that the Active Tab's terminal holds focus and no node of a closed Tab remains.
+fn assert_closed_tab_left_focus_on_the_active_terminal(
+    manager: &Entity<WorkspaceManager>,
+    closed: &[gpui::accesskit::NodeId],
+    cx: &mut VisualTestContext,
+) {
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Tab").len(), 1);
+    let focused = tree.focused().expect("a node holds focus");
+    assert_eq!(focused["aria"]["role"], "Terminal");
+    assert!(active_terminal_has_input_focus(manager, cx));
+    let remaining = tree.in_order().into_iter().map(node_id).collect::<Vec<_>>();
+    for node in closed {
+        assert!(
+            !remaining.contains(node),
+            "a node of the closed Tab remains"
+        );
+    }
+}
+
+#[gpui::test]
+fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_focus(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    report_idle_prompt(&records, 1, cx);
+    // VoiceOver moves keyboard focus with its cursor onto the button it then presses.
+    let tree = A11yTree::read(cx);
+    let closed = [
+        node_id(tree.with_role("Tab")[0]),
+        node_id(tab_close_button(&tree, 0)),
+    ];
+    perform(cx, tab_close_button(&tree, 0), Action::Focus);
+    assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(closed[1]));
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 0), Action::Click);
+
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(records.dropped_session_ids(), vec![1]);
+    assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
+}
+
+#[gpui::test]
+fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_focus(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    report_idle_prompt(&records, 2, cx);
+    let tree = A11yTree::read(cx);
+    let closed = [
+        node_id(tree.with_role("Tab")[1]),
+        node_id(tab_close_button(&tree, 1)),
+    ];
+    perform(cx, tab_close_button(&tree, 1), Action::Focus);
+    assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(closed[1]));
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 1), Action::Click);
+
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(records.dropped_session_ids(), vec![2]);
+    assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
+}
+
+#[gpui::test]
+fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_button(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    let tree = A11yTree::read(cx);
+    let button = node_id(tab_close_button(&tree, 0));
+    perform(cx, tab_close_button(&tree, 0), Action::Focus);
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 0), Action::Click);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_some()
+    }));
+
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Cancel"), Action::Click);
+    redraw(cx);
+    let tree = A11yTree::read(cx);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(tree.with_role("Tab").len(), 2);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(button));
+}
+
+#[gpui::test]
+fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    A11yTree::read(cx);
+    click("tab-close-button-1", cx);
+    let tree = A11yTree::read(cx);
+    let dialog = tree.node("Close Tab?");
+    assert_eq!(dialog["aria"]["role"], "AlertDialog");
+    assert_eq!(dialog["aria"]["modal"], true);
+    let title = tree.text("Close Tab?");
+    let message = tree.text("Close 1 Pane? Running commands in these Panes will stop.");
+    let content = tree.descendants(dialog);
+    let position = |node: &serde_json::Value| {
+        content
+            .iter()
+            .position(|child| child["accesskit_id"] == node["accesskit_id"])
+            .expect("confirmation content belongs to the dialog")
+    };
+    assert!(position(title) < position(message));
+    for name in ["Cancel", "Close Tab"] {
+        let button = content
+            .iter()
+            .find(|node| node["aria"]["role"] == "Button" && node["aria"]["label"] == name)
+            .expect("a dialog action");
+        assert!(position(message) < position(button));
+        assert!(tree.exposed(button));
+    }
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+    for name in ["Tabs", "Workspaces", "Terminal context actions"] {
+        assert!(!tree.exposed(tree.node(name)), "{name}");
+    }
+}
+
+#[gpui::test]
+fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    for escape in [true, false] {
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.node("Close Tab"), Action::Focus);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
+        perform(cx, tree.node("Close Tab"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+        if escape {
+            cx.simulate_keystrokes("escape");
+        } else {
+            perform(cx, tree.node("Cancel"), Action::Click);
+        }
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("AlertDialog").is_empty());
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
+        assert!(tree.exposed(tree.focused().unwrap()));
+        assert!(tree.exposed(tree.node("Terminal context actions")));
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.close_confirmation.pending().is_none()
+        }));
+        assert!(records.dropped_session_ids().is_empty());
     }
 }

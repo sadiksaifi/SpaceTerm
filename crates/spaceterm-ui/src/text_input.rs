@@ -12,7 +12,7 @@ use gpui::{
     Focusable, Font, Global, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, Rgba, ShapedLine, SharedString, Style, Subscription, Task, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, point, px, relative, size,
+    UnderlineStyle, Window, accesskit, actions, div, fill, point, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -416,6 +416,7 @@ pub enum TextInputChangeSource {
     Keyboard,
     InputMethodComposition,
     Paste,
+    Accessibility,
     Cut,
     Undo,
     Redo,
@@ -614,6 +615,7 @@ pub struct TextInput {
     caret_task: Option<Task<()>>,
     context_menu_open: bool,
     paste_available: bool,
+    accessible_text: crate::accessible_text::AccessibleText,
     #[cfg(test)]
     shape_count: usize,
     #[cfg(test)]
@@ -691,6 +693,7 @@ impl TextInput {
             caret_task: None,
             context_menu_open: false,
             paste_available: false,
+            accessible_text: Default::default(),
             #[cfg(test)]
             shape_count: 0,
             #[cfg(test)]
@@ -746,6 +749,7 @@ impl TextInput {
         self.buffer
             .set_history_enabled(mode == TextInputContentMode::Plain);
         if mode == TextInputContentMode::Obscured {
+            self.accessible_text = Default::default();
             self.input_length_limit = self.input_length_limit.min(OBSCURED_VALUE_LIMIT);
             let value = truncate_grapheme(&self.buffer.text, self.input_length_limit).to_owned();
             if value != *self.buffer.text {
@@ -834,6 +838,7 @@ impl TextInput {
             self.buffer = TextBuffer::new(value);
             self.buffer
                 .set_history_enabled(self.content_mode == TextInputContentMode::Plain);
+            self.accessible_text = Default::default();
         }
         self
     }
@@ -998,8 +1003,34 @@ impl TextInput {
         self.restart_caret(cx);
     }
 
+    /// Applies an assistive technology selection, with its anchor and active end in bytes.
+    fn select_from_accessibility(&mut self, anchor: usize, focus: usize, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        self.commit_composition(cx);
+        self.buffer.select_from_anchor(anchor, focus);
+        self.restart_caret(cx);
+    }
+
     fn can_edit(&self) -> bool {
         self.enabled && self.editable
+    }
+
+    fn set_value_from_accessibility(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.can_edit()
+            || text.len() > CLIPBOARD_INSERTION_LIMIT
+            || normalized_single_line_len(text) > self.input_length_limit
+        {
+            return;
+        }
+        self.select_all(cx);
+        self.replace_selection_normalized(
+            text,
+            EditKind::Atomic,
+            TextInputChangeSource::Accessibility,
+            cx,
+        );
     }
 
     fn display_offset_for_source(&self, source_offset: usize) -> usize {
@@ -2102,6 +2133,48 @@ impl Render for TextInput {
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&self.focus_handle);
         let editor = div()
             .id(self.id.clone())
+            // An obscured value never leaves the input, so its field publishes no value.
+            .role(if exposes_content {
+                accesskit::Role::TextInput
+            } else {
+                accesskit::Role::PasswordInput
+            })
+            .aria_label(self.accessibility_name.clone())
+            .when(can_edit, |editor| {
+                let input = entity.downgrade();
+                editor.on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+                    if let Some(accesskit::ActionData::Value(value)) = data {
+                        let _ = input.update(cx, |input, cx| {
+                            input.set_value_from_accessibility(value, cx);
+                        });
+                    }
+                })
+            })
+            .when(exposes_content && window.is_a11y_active(), |editor| {
+                let value = self.accessible_text.value(&self.buffer.text, self.revision);
+                let published = self.accessible_text.clone();
+                let requested = self.accessible_text.clone();
+                let selection = &self.buffer.selection;
+                let (anchor, focus) = (selection.anchor(), selection.cursor());
+                let input = entity.downgrade();
+                editor
+                    .aria_value(value)
+                    .a11y_synthetic_children(move |builder| {
+                        published.publish(builder, anchor, focus);
+                    })
+                    .on_a11y_action(accesskit::Action::SetTextSelection, move |data, _, cx| {
+                        if let Some((anchor, focus)) = requested.requested_selection(data) {
+                            let _ = input.update(cx, |input, cx| {
+                                input.select_from_accessibility(anchor, focus, cx);
+                            });
+                        }
+                    })
+            })
+            .when(!self.placeholder.is_empty(), |editor| {
+                editor.aria_placeholder(self.placeholder.clone())
+            })
+            .aria_disabled(!self.enabled)
+            .aria_read_only(!self.editable)
             .debug_selector(move || selector.to_string())
             .size_full()
             .font(font)

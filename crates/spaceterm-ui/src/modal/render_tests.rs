@@ -2049,6 +2049,10 @@ fn constrained_scaled_dialog_reaches_long_header_body_and_every_action_verticall
         bounds_contains(body, thumb),
         "the body scrollbar escaped its viewport: {thumb:?} outside {body:?}"
     );
+    assert_eq!(
+        crate::a11y_testing::A11yTree::read(&mut cx).node("Dialog content")["aria"]["role"],
+        "ScrollBar"
+    );
 
     let action_selectors = [
         "modal-action-constrained-dialog-save",
@@ -8243,4 +8247,101 @@ fn modal_default_and_cancel_resolution_uses_semantics_not_position() {
     assert_eq!(safe_cancel_action(Some(0), &actions), None);
     actions[1].enabled = false;
     assert_eq!(enabled_action(Some(1), &actions), None);
+}
+
+#[gpui::test]
+fn modals_publish_a_modal_dialog_and_hide_the_underlay(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform};
+    use gpui::accesskit::Action;
+
+    let (root, _underlay, outcome, cx) = alert_window(cx);
+    let tree = A11yTree::read(cx);
+    let alert = tree.node("Render alert");
+    assert_eq!(alert["aria"]["role"], "AlertDialog");
+    assert_eq!(alert["aria"]["modal"], true);
+    assert_eq!(
+        alert["aria"]["description"],
+        "Choose whether to save the current changes."
+    );
+    assert!(tree.exposed(alert));
+    assert!(tree.exposed(tree.node("Save")));
+    assert!(!tree.exposed(tree.node("Underlay")));
+
+    perform(cx, tree.node("Cancel"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Render alert").is_none());
+    assert!(tree.exposed(tree.node("Underlay")));
+    assert!(outcome.borrow().is_some());
+    let invoker = root.read_with(cx, |root, _| root.invoker.clone());
+    assert!(cx.update(|window, _| invoker.is_focused(window)));
+}
+
+#[gpui::test]
+fn modals_without_a_focusable_control_report_the_dialog_as_focused(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|_, _| ProgressGeometryFixture { handle: None });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| {
+            root.handle = Some(
+                ProgressDialog::new(
+                    ModalId::new("programmatic-progress"),
+                    "Programmatic progress",
+                    "Updating Project",
+                    "Starting",
+                    ProgressState::Indeterminate,
+                    ProgressCancellation::<()>::programmatic_only(Duration::from_secs(30)),
+                )
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| ProgressCancelDecision::Deny,
+                    |_, _| {},
+                )
+                .expect("programmatic progress should present"),
+            );
+        });
+    });
+
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Programmatic progress"
+    );
+
+    cx.simulate_keystrokes("tab");
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Programmatic progress"
+    );
+}
+
+#[gpui::test]
+fn alert_suppression_publishes_a_checkbox_that_toggles_on_request(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (_, _, outcome, cx) = alert_window(cx);
+    let tree = A11yTree::read(cx);
+    let suppression = tree.node("Do not ask again");
+    assert_eq!(suppression["aria"]["role"], "CheckBox");
+    assert_eq!(suppression["aria"]["toggled"], "False");
+    assert!(supports(suppression, Action::Click));
+
+    perform(cx, suppression, Action::Click);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Do not ask again")["aria"]["toggled"], "True");
+
+    perform(cx, tree.node("Save"), Action::Click);
+    assert!(matches!(
+        outcome.borrow().as_ref(),
+        Some(AlertOutcome::Activated {
+            action_id: "save",
+            suppression_selected: Some(true),
+            ..
+        })
+    ));
 }

@@ -5,7 +5,10 @@ use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, div, px};
+use gpui::{
+    AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Text, Window, accesskit, div,
+    px,
+};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -173,6 +176,10 @@ impl FormGroup {
                 group.child(
                     div().px(row_inset + px(HAIRLINE)).child(
                         div()
+                            .id(SharedString::from(title_selector.clone()))
+                            .role(accesskit::Role::Heading)
+                            .aria_level(2)
+                            .aria_label(self.title)
                             .debug_selector(move || title_selector.clone())
                             .chrome_text(appearance.typography.style(TextRole::Section))
                             .text_color(gpui_color(appearance.colors.text))
@@ -336,7 +343,10 @@ impl FormRow {
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(caption_color))
                 .whitespace_normal()
-                .child(description)
+                .child(Text::new(
+                    SharedString::from(description_selector.clone()).into(),
+                    description,
+                ))
         };
         // Guidance stacks with the label so it stays anchored to the setting it explains.
         let label_basis = self
@@ -373,6 +383,9 @@ impl FormRow {
                         .gap(appearance.spacing(RESET_GAP))
                         .child(
                             div()
+                                .id(SharedString::from(label_selector.clone()))
+                                .role(accesskit::Role::Label)
+                                .aria_value(self.label)
                                 .debug_selector(move || label_selector.clone())
                                 .flex_basis(label_width)
                                 .flex_shrink(1.0)
@@ -479,6 +492,10 @@ pub(crate) fn section_heading(
         .gap(appearance.spacing(4.0))
         .child(
             div()
+                .id(SharedString::from(format!("{selector}-title")))
+                .role(accesskit::Role::Heading)
+                .aria_level(1)
+                .aria_label(title)
                 .debug_selector(move || format!("{selector}-title"))
                 .truncate()
                 .chrome_text(appearance.typography.style(TextRole::Title))
@@ -492,7 +509,10 @@ pub(crate) fn section_heading(
                 .chrome_text(appearance.typography.style(TextRole::Body))
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .whitespace_normal()
-                .child(description),
+                .child(Text::new(
+                    SharedString::from(format!("{selector}-description")).into(),
+                    description.into(),
+                )),
         )
 }
 
@@ -635,7 +655,34 @@ impl gpui::RenderOnce for StepperElement {
             })
         };
         let selector = control.selector;
+        let can_decrease = control.enabled && control.can_decrease;
+        let can_increase = control.enabled && control.can_increase;
+        // Assistive technology adjusts the value through the same steps the buttons request.
+        let adjust = |delta: i32, handler: Option<StepHandler>| {
+            move |_: Option<&accesskit::ActionData>, window: &mut Window, cx: &mut App| {
+                if let Some(handler) = &handler {
+                    handler(delta, window, cx);
+                }
+            }
+        };
         div()
+            .id(SharedString::from(format!("{selector}-accessible")))
+            .role(accesskit::Role::SpinButton)
+            .aria_label(accessibility_name)
+            .aria_value(control.value.clone())
+            .aria_disabled(!control.enabled)
+            .when(can_decrease, |stepper| {
+                stepper.on_a11y_action(
+                    accesskit::Action::Decrement,
+                    adjust(-1, control.on_step.clone()),
+                )
+            })
+            .when(can_increase, |stepper| {
+                stepper.on_a11y_action(
+                    accesskit::Action::Increment,
+                    adjust(1, control.on_step.clone()),
+                )
+            })
             .debug_selector(move || selector.to_owned())
             .flex()
             .flex_row()
@@ -677,7 +724,7 @@ impl gpui::RenderOnce for StepperElement {
                     "Decrease",
                     IconName::Minus,
                     -1,
-                    control.enabled && control.can_decrease,
+                    can_decrease,
                     control.on_step.clone(),
                 ))
                 .child(step(
@@ -685,7 +732,7 @@ impl gpui::RenderOnce for StepperElement {
                     "Increase",
                     IconName::Plus,
                     1,
-                    control.enabled && control.can_increase,
+                    can_increase,
                     control.on_step,
                 ))
                 .child(
@@ -703,7 +750,9 @@ impl gpui::RenderOnce for StepperElement {
 
 /// A short status a row carries, such as a theme being the one in use. The fill uses the raised
 /// element role because a theme may resolve the plain element background to the window background.
+/// The id names the status text published to assistive technology.
 pub(crate) fn badge(
+    id: &'static str,
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
@@ -718,7 +767,7 @@ pub(crate) fn badge(
         .bg(gpui_color(pair.background))
         .chrome_text(appearance.typography.style(TextRole::Badge))
         .text_color(gpui_color(pair.primary))
-        .child(label.into())
+        .child(Text::new(id.into(), label.into()))
 }
 
 /// A text button used by the interchange and diagnostics rows.

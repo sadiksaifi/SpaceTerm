@@ -12,7 +12,7 @@ use gpui::{
     Focusable, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun, UTF16Selection,
-    Window, actions, div, fill, point, px, relative, size,
+    Window, accesskit, actions, div, fill, point, px, relative, size,
 };
 use zeroize::Zeroizing;
 
@@ -263,6 +263,7 @@ pub struct TextArea {
     caret_task: Option<Task<()>>,
     context_menu_open: bool,
     paste_available: bool,
+    accessible_text: crate::accessible_text::AccessibleText,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -320,6 +321,7 @@ impl TextArea {
             caret_task: None,
             context_menu_open: false,
             paste_available: false,
+            accessible_text: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -353,6 +355,7 @@ impl TextArea {
             self.buffer = TextBuffer::new(value);
             self.buffer.move_to(0);
             self.lines = line_ranges(&self.buffer.text);
+            self.accessible_text = Default::default();
         }
         self
     }
@@ -424,8 +427,28 @@ impl TextArea {
         self.restart_caret(cx);
     }
 
+    /// Applies an assistive technology selection, with its anchor and active end in bytes.
+    fn select_from_accessibility(&mut self, anchor: usize, focus: usize, cx: &mut Context<Self>) {
+        self.commit_composition();
+        self.buffer.select_from_anchor(anchor, focus);
+        self.goal_x = None;
+        self.reveal_caret = true;
+        self.restart_caret(cx);
+    }
+
     fn can_edit(&self) -> bool {
         self.editable
+    }
+
+    fn set_value_from_accessibility(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.can_edit()
+            || text.len() > CLIPBOARD_INSERTION_LIMIT
+            || normalize_multiline(text).len() > self.input_length_limit
+        {
+            return;
+        }
+        self.select_all(cx);
+        self.replace_selection(text, EditKind::Atomic, cx);
     }
 
     fn is_visually_active(&self, window: &Window) -> bool {
@@ -1429,7 +1452,7 @@ impl EntityInputHandler for TextArea {
 }
 
 impl Render for TextArea {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let has_selection = !self.buffer.selection.is_empty();
         let can_edit = self.can_edit();
@@ -1448,6 +1471,44 @@ impl Render for TextArea {
         let selector = self.debug_selector.clone();
         let editor = div()
             .id(self.id.clone())
+            .role(accesskit::Role::MultilineTextInput)
+            .aria_label(self.accessibility_name.clone())
+            .when(can_edit, |editor| {
+                let area = entity.downgrade();
+                editor.on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+                    if let Some(accesskit::ActionData::Value(value)) = data {
+                        let _ = area.update(cx, |area, cx| {
+                            area.set_value_from_accessibility(value, cx);
+                        });
+                    }
+                })
+            })
+            .when(window.is_a11y_active(), |editor| {
+                let value = self.accessible_text.value(&self.buffer.text, self.revision);
+                let published = self.accessible_text.clone();
+                let selection = &self.buffer.selection;
+                let (anchor, focus) = (selection.anchor(), selection.cursor());
+                editor
+                    .aria_value(value)
+                    .a11y_synthetic_children(move |builder| {
+                        published.publish(builder, anchor, focus);
+                    })
+            })
+            .on_a11y_action(accesskit::Action::SetTextSelection, {
+                let requested = self.accessible_text.clone();
+                let area = entity.downgrade();
+                move |data, _, cx| {
+                    if let Some((anchor, focus)) = requested.requested_selection(data) {
+                        let _ = area.update(cx, |area, cx| {
+                            area.select_from_accessibility(anchor, focus, cx);
+                        });
+                    }
+                }
+            })
+            .when(!self.placeholder.is_empty(), |editor| {
+                editor.aria_placeholder(self.placeholder.clone())
+            })
+            .aria_read_only(!self.editable)
             .debug_selector(move || selector.to_string())
             .w_full()
             .min_w_0()
