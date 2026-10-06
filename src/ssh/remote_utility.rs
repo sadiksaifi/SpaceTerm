@@ -354,7 +354,7 @@ pub(crate) enum RemoteDirectoryProbe {
 /// Remote paths remain validated remote-domain strings and never reach local filesystem APIs.
 /// Each operation validates live control authority, request size, output size, UTF-8, frame
 /// version, field lengths, row counts, and operation kind. Raw output is never retained in errors.
-/// Session and request cancellation are linked before the runner receives process ownership.
+/// Control Connection and request cancellation are linked before the runner owns the process.
 /// Requests beyond [`MAXIMUM_REMOTE_UTILITY_SESSIONS`] wait for an earlier process to exit.
 pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
     command: PreparedSshRemoteUtilityCommand,
@@ -364,7 +364,7 @@ pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
-    /// Creates a client bound to one prepared command and session cancellation scope.
+    /// Creates a client bound to one prepared command and Control Connection cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,

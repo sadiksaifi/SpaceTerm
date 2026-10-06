@@ -1,7 +1,7 @@
 //! Owns launch authority and the complete process-plan to worker handoff.
 use super::*;
 
-enum SessionProcess {
+enum TerminalSessionProcess {
     Local {
         planner: ShellLaunchPlanner,
         directory: std::path::PathBuf,
@@ -12,7 +12,7 @@ enum SessionProcess {
     },
 }
 
-impl SessionProcess {
+impl TerminalSessionProcess {
     fn prepare(self) -> Result<PreparedShellLaunch, NativePtyStartupFailure> {
         match self {
             Self::Local { planner, directory } => Ok(planner.local(&directory)?),
@@ -21,13 +21,13 @@ impl SessionProcess {
     }
 }
 
-struct SessionLaunch {
+struct TerminalSessionLaunch {
     metadata: TerminalMetadataContext,
     fallback_title: String,
-    process: SessionProcess,
+    process: TerminalSessionProcess,
 }
 
-impl SessionLaunch {
+impl TerminalSessionLaunch {
     fn local(
         planner: ShellLaunchPlanner,
         directory: &Path,
@@ -41,19 +41,19 @@ impl SessionLaunch {
                 machine,
             ),
             fallback_title: planner.fallback_title(),
-            process: SessionProcess::Local {
+            process: TerminalSessionProcess::Local {
                 planner,
                 directory: directory.to_owned(),
             },
         }
     }
 
-    fn remote(remote: RemoteTerminalLaunchPlan) -> Result<Self, SessionError> {
-        let command = remote.pane_channel.take()?;
+    fn remote(remote: RemoteTerminalLaunchPlan) -> Result<Self, TerminalSessionError> {
+        let command = remote.terminal_session_channel.take()?;
         Ok(Self {
             metadata: TerminalMetadataContext::Remote(remote.metadata_context),
             fallback_title: remote.fallback_title,
-            process: SessionProcess::Remote {
+            process: TerminalSessionProcess::Remote {
                 home: remote.local_home.path().to_owned(),
                 command,
             },
@@ -71,7 +71,7 @@ pub(crate) struct LocalTerminalLaunchPlan {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-/// A Remote Terminal Session launch bound to one prepared OpenSSH Pane channel.
+/// A Remote Terminal Session launch bound to one prepared Terminal Session Channel.
 ///
 /// `local_home` is used only as the local SSH process working directory. Destination and Remote
 /// Starting Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
@@ -81,7 +81,7 @@ pub(crate) struct RemoteTerminalLaunchPlan {
     local_home: crate::domain::ValidatedLocalDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
-    pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
+    terminal_session_channel: crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
 }
 
 impl fmt::Debug for RemoteTerminalLaunchPlan {
@@ -97,13 +97,13 @@ impl RemoteTerminalLaunchPlan {
         local_home: crate::domain::ValidatedLocalDirectory,
         metadata_context: RemoteTerminalMetadataContext,
         fallback_title: String,
-        pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
+        terminal_session_channel: crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
     ) -> Self {
         Self {
             local_home,
             metadata_context,
             fallback_title,
-            pane_channel,
+            terminal_session_channel,
         }
     }
 
@@ -130,11 +130,13 @@ impl RemoteTerminalLaunchPlan {
     }
 
     #[cfg(test)]
-    pub(crate) fn take_pane_channel(
+    pub(crate) fn take_terminal_session_channel(
         &self,
-    ) -> Result<crate::ssh::command::SshCommandSpec, crate::ssh::command::PreparedSshPaneChannelError>
-    {
-        self.pane_channel.take()
+    ) -> Result<
+        crate::ssh::command::SshCommandSpec,
+        crate::ssh::command::PreparedSshTerminalSessionChannelError,
+    > {
+        self.terminal_session_channel.take()
     }
 }
 
@@ -151,7 +153,7 @@ impl LocalTerminalLaunchPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// The exhaustive Local or Remote launch authority consumed by a Terminal Session factory.
 ///
-/// Matching this enum is the boundary at which local path capabilities and remote channel
+/// Matching this enum is the boundary at which local path capabilities and Terminal Session Channel
 /// ownership diverge; callers must not reconstruct one variant from the other's directory data.
 pub(crate) enum TerminalLaunchPlan {
     Local(LocalTerminalLaunchPlan),
@@ -188,15 +190,15 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, SessionError> {
+    ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let launch = match launch_plan {
-            TerminalLaunchPlan::Local(local) => SessionLaunch::local(
+            TerminalLaunchPlan::Local(local) => TerminalSessionLaunch::local(
                 self.launch_planner.clone(),
                 local.working_directory().path(),
                 self.local_machine.clone(),
                 &self.local_filesystem,
             ),
-            TerminalLaunchPlan::Remote(remote) => SessionLaunch::remote(*remote)?,
+            TerminalLaunchPlan::Remote(remote) => TerminalSessionLaunch::remote(*remote)?,
         };
         let (session, events, accessibility) = TerminalSession::start_launch(
             Arc::clone(&self.native_pty_adapter_factory),
@@ -227,8 +229,8 @@ impl TerminalSession {
         working_directory: &Path,
         local_hostname: Option<&str>,
         local_filesystem: LocalFilesystemAuthority,
-    ) -> Result<StartedSession, SessionError> {
-        let launch = SessionLaunch::local(
+    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
+        let launch = TerminalSessionLaunch::local(
             launch_planner,
             working_directory,
             LocalMachine::new(None, local_hostname, None),
@@ -246,10 +248,10 @@ impl TerminalSession {
     fn start_launch(
         factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
-        launch: SessionLaunch,
+        launch: TerminalSessionLaunch,
         filesystem: LocalFilesystemAuthority,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedSession, SessionError> {
+    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
         Self::start_deferred_with_context(
             geometry,
             launch.metadata,
@@ -277,7 +279,7 @@ impl TerminalSession {
         ) -> Result<NativePtyOwner, NativePtyStartupFailure>
         + Send
         + 'static,
-    ) -> Result<StartedSession, SessionError> {
+    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
         let initial_directory = working_directory.to_string_lossy();
         let metadata_context = TerminalMetadataContext::local(
             crate::local_path::LocalPathSemantics::Posix,
@@ -311,7 +313,7 @@ impl TerminalSession {
             -> Result<(NativePtyOwner, &'static str), NativePtyStartupFailure>
         + Send
         + 'static,
-    ) -> Result<StartedSession, SessionError> {
+    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
@@ -319,9 +321,9 @@ impl TerminalSession {
             ReaderTransport::new(command_tx.clone(), Arc::clone(&clipboard_authority));
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
-        let metadata_state = SessionMetadataState::default();
+        let metadata_state = TerminalSessionMetadataState::default();
         let worker_metadata_state = metadata_state.clone();
-        let permission_request_state = SessionPermissionRequestState::default();
+        let permission_request_state = TerminalSessionPermissionRequestState::default();
         let worker_permission_request_state = permission_request_state.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
@@ -341,15 +343,15 @@ impl TerminalSession {
                     Ok(owner) => owner,
                     Err(error) => {
                         let stage = match error.stage() {
-                            NativePtyStartupStage::Adapter => SessionStartupStage::Pty,
-                            NativePtyStartupStage::Reader => SessionStartupStage::Reader,
+                            NativePtyStartupStage::Adapter => TerminalSessionStartupStage::Pty,
+                            NativePtyStartupStage::Reader => TerminalSessionStartupStage::Reader,
                             NativePtyStartupStage::ReaderThread => {
-                                SessionStartupStage::ReaderThread
+                                TerminalSessionStartupStage::ReaderThread
                             }
                         };
                         send_session_event(
                             &worker_events,
-                            SessionEvent::Failed(SessionFailure::Startup {
+                            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
                                 stage,
                                 message: error.to_string(),
                             }),
@@ -379,7 +381,7 @@ impl TerminalSession {
                     },
                 );
             })
-            .map_err(SessionError::from)?;
+            .map_err(TerminalSessionError::from)?;
 
         Ok((
             Self {

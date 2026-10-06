@@ -4,7 +4,7 @@ use super::terminal_focus::TerminalFocusBlocker;
 pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
 #[cfg(test)]
-use crate::terminal::RemoteChannelUnavailable;
+use crate::terminal::TerminalSessionChannelUnavailable;
 use crate::ui::appearance::gpui_color;
 use std::cell::Cell;
 use std::ops::Range;
@@ -64,9 +64,9 @@ use crate::terminal::{
     NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, PaneTerminalState,
     PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
     PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionEvent,
-    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
-    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
+    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, ShiftSelectionPolicy,
+    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
+    TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionEvent,
     TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
 };
@@ -299,7 +299,7 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-/// A move-only restart token bound to one Pane session epoch and successor generation.
+/// A move-only restart token bound to one Pane's Terminal Session epoch and successor generation.
 ///
 /// Preparation reserves a fresh channel but does not replace the current Terminal Session.
 pub(crate) struct PreparedRemotePaneRestart {
@@ -309,18 +309,18 @@ pub(crate) struct PreparedRemotePaneRestart {
 }
 
 #[derive(Clone, Copy)]
-enum PaneSessionStartFailure {
+enum PaneTerminalSessionStartFailure {
     Preparation,
     Worker,
     RemoteRestart,
 }
 
-impl PaneSessionStartFailure {
+impl PaneTerminalSessionStartFailure {
     fn terminal_failure(self) -> TerminalFailure {
         TerminalFailure::platform(match self {
-            Self::Preparation => "prepare-session-channel",
-            Self::Worker => "start-session-worker",
-            Self::RemoteRestart => "restart-remote-session",
+            Self::Preparation => "prepare-terminal-session-channel",
+            Self::Worker => "start-terminal-session-worker",
+            Self::RemoteRestart => "restart-remote-terminal-session",
         })
     }
 
@@ -330,7 +330,7 @@ impl PaneSessionStartFailure {
 }
 
 /// Owns a Pane's Terminal Session, launch authority and event task retirement.
-struct PaneSessionLifecycle {
+struct PaneTerminalSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
@@ -339,7 +339,7 @@ struct PaneSessionLifecycle {
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
-    /// The newest Terminal Metadata accepted from Screens or the Session's retained snapshot.
+    /// The newest Terminal Metadata from Screens or the Terminal Session's retained snapshot.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
@@ -350,7 +350,7 @@ struct PaneSessionLifecycle {
     _clipboard_task: Option<Task<()>>,
 }
 
-impl PaneSessionLifecycle {
+impl PaneTerminalSessionLifecycle {
     fn new(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
@@ -510,7 +510,8 @@ impl PaneSessionLifecycle {
         &mut self,
         geometry: TerminalGeometry,
         appearance: crate::terminal::TerminalAppearanceUpdate,
-    ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneSessionStartFailure>> {
+    ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneTerminalSessionStartFailure>>
+    {
         if self.session_start_attempted {
             return None;
         }
@@ -521,12 +522,12 @@ impl PaneSessionLifecycle {
                 .flatten()
         });
         let Some(prepared) = prepared else {
-            return Some(Err(PaneSessionStartFailure::Preparation));
+            return Some(Err(PaneTerminalSessionStartFailure::Preparation));
         };
         let operation = if self.remote_restart_start_pending {
-            PaneSessionStartFailure::RemoteRestart
+            PaneTerminalSessionStartFailure::RemoteRestart
         } else {
-            PaneSessionStartFailure::Worker
+            PaneTerminalSessionStartFailure::Worker
         };
         let result = self
             .session_factory
@@ -537,14 +538,14 @@ impl PaneSessionLifecycle {
     }
 }
 
-impl Drop for PaneSessionLifecycle {
+impl Drop for PaneTerminalSessionLifecycle {
     fn drop(&mut self) {
         self.close();
     }
 }
 
 pub(crate) struct TerminalPane {
-    terminal_session: PaneSessionLifecycle,
+    terminal_session: PaneTerminalSessionLifecycle,
     window_handle: gpui::AnyWindowHandle,
     text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
     native_service_focus_epoch: Cell<u64>,
@@ -838,7 +839,7 @@ impl TerminalPane {
         .detach();
 
         Self {
-            terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
+            terminal_session: PaneTerminalSessionLifecycle::new(session_factory, prepared_launch),
             window_handle: window.window_handle(),
             text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
@@ -1512,8 +1513,8 @@ impl TerminalPane {
     /// Suspends a Remote Pane for an authoritative Control Connection loss.
     ///
     /// The final screen, title, selection, and Find presentation remain owned by the Pane. Terminal
-    /// input is blocked, prior-session event tasks are retired, and repeated notification for the
-    /// same generation is idempotent. Stale generations and Local Panes are rejected unchanged.
+    /// input is blocked, prior Terminal Session event tasks are retired, and repeated notification
+    /// for one generation is idempotent. Stale generations and Local Panes are rejected unchanged.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -1546,11 +1547,11 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn suspend_if_remote_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
+    fn suspend_if_terminal_session_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .terminal_session
             .session_factory
-            .remote_channel_is_ready()
+            .terminal_session_channel_is_ready()
             != Some(false)
         {
             return false;
@@ -1561,8 +1562,8 @@ impl TerminalPane {
 
     /// Binds one prepared channel to this disconnected Pane without mutating its session.
     ///
-    /// The generation must advance and the token captures the current session epoch so delayed
-    /// preparation cannot replace a successor. Dropping the token abandons the reserved launch.
+    /// The generation must advance and the token captures the current Terminal Session epoch so
+    /// delayed preparation cannot replace a successor. Dropping the token abandons the launch.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -2142,10 +2143,10 @@ impl TerminalPane {
         presentation_changed || directory_changed
     }
 
-    fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
+    fn handle_event(&mut self, event: TerminalSessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
-            SessionEvent::MetadataChanged(wakeup) => drop(wakeup),
-            SessionEvent::Screen(screen) => {
+            TerminalSessionEvent::MetadataChanged(wakeup) => drop(wakeup),
+            TerminalSessionEvent::Screen(screen) => {
                 if screen.appearance_generation < self.requested_terminal_generation
                     || self
                         .terminal_session
@@ -2170,7 +2171,7 @@ impl TerminalPane {
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
-            SessionEvent::Attention(event) => {
+            TerminalSessionEvent::Attention(event) => {
                 let effects = self.attention.observe(
                     event,
                     AttentionFacts {
@@ -2189,15 +2190,15 @@ impl TerminalPane {
                 }
                 cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
             }
-            SessionEvent::HiddenInputChanged(hidden_input) => {
+            TerminalSessionEvent::HiddenInputChanged(hidden_input) => {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
             }
-            SessionEvent::PermissionRequested(request) => {
+            TerminalSessionEvent::PermissionRequested(request) => {
                 return self.offer_permission_setup(request.permissions(), cx);
             }
-            SessionEvent::Exited(status) => {
-                if self.suspend_if_remote_channel_unavailable(cx) {
+            TerminalSessionEvent::Exited(status) => {
+                if self.suspend_if_terminal_session_channel_unavailable(cx) {
                     return false;
                 }
                 self.context_menu = None;
@@ -2221,8 +2222,8 @@ impl TerminalPane {
                 self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
-            SessionEvent::Failed(failure) => {
-                if self.suspend_if_remote_channel_unavailable(cx) {
+            TerminalSessionEvent::Failed(failure) => {
+                if self.suspend_if_terminal_session_channel_unavailable(cx) {
                     return false;
                 }
                 let was_available = self.terminal_session_available();
@@ -2246,7 +2247,7 @@ impl TerminalPane {
     fn handle_session_event(
         &mut self,
         session_epoch: u64,
-        event: SessionEvent,
+        event: TerminalSessionEvent,
         cx: &mut Context<Self>,
     ) -> bool {
         self.terminal_session.session_epoch == session_epoch && self.handle_event(event, cx)
@@ -2725,7 +2726,7 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Motion with a button this Terminal never received pressed belongs to the element that
+        // Motion with a button this Pane never received pressed belongs to the element that
         // received the press, such as a Pane Caption starting a Pane drag, not to the program.
         if event.pressed_button.is_some()
             && self.pressed_button.is_none()
@@ -5028,8 +5029,8 @@ fn ime_candidate_bounds(
     )
 }
 
-/// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
-/// how far along it reports being.
+/// The identity one Pane caption presents: where its Terminal Session runs, where it is, what it
+/// runs, and how far along it reports being.
 ///
 /// This is the one presentation boundary between a Pane's sanitized Terminal Metadata and the
 /// chrome that describes it. The Pane Caption and the Tab item both read these facts, so neither
@@ -5038,7 +5039,7 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
-    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    /// The glyph the program reported for itself, replacing the Terminal Session's own.
     pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
     pub(crate) progress: super::terminal_status::TerminalProgress,

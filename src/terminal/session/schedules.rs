@@ -1,4 +1,4 @@
-//! Private Session scheduling, including deadline arbitration and bounded fairness.
+//! Private Terminal Session scheduling, including deadline arbitration and bounded fairness.
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
@@ -73,7 +73,7 @@ impl<Activity: Eq> CompressionSchedule<Activity> {
     }
 }
 
-/// The Session handle can enqueue coalesced work without accessing worker schedules.
+/// The Terminal Session handle can enqueue coalesced work without accessing worker schedules.
 #[derive(Clone, Default)]
 pub(super) struct ScheduleInput {
     resizes: ResizeMailbox,

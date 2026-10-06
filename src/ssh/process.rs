@@ -571,7 +571,7 @@ impl SshProcessEnvironment {
         (self.home.clone(), entries, askpass_capability)
     }
 
-    /// Builds the environment for an already-authorized pane channel.
+    /// Builds the environment for an already-authorized Terminal Session Channel.
     ///
     /// Pane commands must use their live control connection and never receive AskPass transport
     /// state. If that connection is unavailable, OpenSSH must fail instead of re-authenticating.

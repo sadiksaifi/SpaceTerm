@@ -10,8 +10,8 @@ use super::geometry::TerminalGeometry;
 use super::metadata::CurrentDirectory;
 use super::metadata::{RemoteTerminalMetadataContext, TerminalLocalFileCapabilities};
 use super::session::{
-    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, StartedTerminalSession,
-    TerminalLaunchPlan, TerminalSessionFactory,
+    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, StartedTerminalSession, TerminalLaunchPlan,
+    TerminalSessionError, TerminalSessionFactory,
 };
 use crate::domain::{
     PinnedDirectory, RemoteDirectory, RemoteDirectoryIdentity, ValidatedLocalDirectory,
@@ -19,7 +19,7 @@ use crate::domain::{
 use crate::platform::local_filesystem::{
     LocalFilesystemAuthority, LocalFilesystemError as LocalDirectoryError,
 };
-use crate::ssh::command::PreparedSshPaneChannelCommand;
+use crate::ssh::command::PreparedSshTerminalSessionChannelCommand;
 
 #[derive(Clone)]
 enum WorkspaceTerminalLaunchContext {
@@ -32,22 +32,22 @@ struct RemoteWorkspaceTerminalLaunchContext {
     local_home: ValidatedLocalDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
-    channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
+    channel_provider: Arc<dyn TerminalSessionChannelProvider>,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("the remote Terminal Session channel is unavailable")]
-/// A content-free failure to reserve one Remote Terminal Session channel.
+#[error("the Terminal Session Channel is unavailable")]
+/// A content-free failure to reserve one Terminal Session Channel.
 ///
 /// No hierarchy mutation may occur after this error and before a fresh revalidation succeeds.
-pub(crate) struct RemoteChannelUnavailable;
+pub(crate) struct TerminalSessionChannelUnavailable;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 /// A content-free reason that a Remote child launch could not be authorized.
 ///
 /// These errors intentionally carry no destination, path, socket, command, or authentication data.
-pub(crate) enum RemoteChannelRevalidationError {
-    #[error("the remote Terminal Session connection is unavailable")]
+pub(crate) enum TerminalSessionChannelRevalidationError {
+    #[error("the Control Connection is unavailable")]
     ConnectionUnavailable,
     #[error("the remote starting directory could not be revalidated")]
     DirectoryUnavailable,
@@ -55,14 +55,14 @@ pub(crate) enum RemoteChannelRevalidationError {
     IdentityChanged,
 }
 
-/// Workspace-owned authority for reserving single-use Remote Terminal Session channels.
+/// Workspace-owned authority for reserving single-use Terminal Session Channels.
 ///
 /// Each successful `revalidate` grants at most one immediately following `prepare`. The provider
 /// binds that grant to the current Control Connection generation and selected physical directory
 /// identity. Callers must revalidate before hierarchy mutation and treat cancellation or a stale
 /// grant as no mutation. Implementations must not reinterpret the remote directory as a local path.
-pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
-    /// Reports whether the owning Control Connection can currently accept child channels.
+pub(crate) trait TerminalSessionChannelProvider: Send + Sync {
+    /// Reports whether the owning Control Connection can accept Terminal Session Channels now.
     fn is_ready(&self) -> bool;
 
     /// Revalidates the selected remote directory and authorizes one subsequent preparation.
@@ -70,19 +70,21 @@ pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
         &self,
         directory: RemoteDirectory,
         expected_identity: Option<RemoteDirectoryIdentity>,
-    ) -> Task<Result<(), RemoteChannelRevalidationError>>;
+    ) -> Task<Result<(), TerminalSessionChannelRevalidationError>>;
 
     /// Consumes the current revalidation grant into one prepared OpenSSH channel command.
     fn prepare(
         &self,
         directory: &RemoteDirectory,
-    ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
+    ) -> Result<PreparedSshTerminalSessionChannelCommand, TerminalSessionChannelUnavailable>;
 }
 
 #[cfg(test)]
-impl<F> RemoteTerminalChannelProvider for F
+impl<F> TerminalSessionChannelProvider for F
 where
-    F: Fn() -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> + Send + Sync,
+    F: Fn() -> Result<PreparedSshTerminalSessionChannelCommand, TerminalSessionChannelUnavailable>
+        + Send
+        + Sync,
 {
     fn is_ready(&self) -> bool {
         true
@@ -92,14 +94,14 @@ where
         &self,
         _directory: RemoteDirectory,
         _expected_identity: Option<RemoteDirectoryIdentity>,
-    ) -> Task<Result<(), RemoteChannelRevalidationError>> {
+    ) -> Task<Result<(), TerminalSessionChannelRevalidationError>> {
         Task::ready(Ok(()))
     }
 
     fn prepare(
         &self,
         _directory: &RemoteDirectory,
-    ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+    ) -> Result<PreparedSshTerminalSessionChannelCommand, TerminalSessionChannelUnavailable> {
         self()
     }
 }
@@ -107,8 +109,8 @@ where
 #[derive(Debug)]
 /// A move-only child-launch reservation prepared before hierarchy mutation.
 ///
-/// A Remote token owns one single-use channel command. Passing it to `start` transfers that
-/// command to exactly one Pane; dropping it abandons the reservation without starting a session.
+/// A Remote token owns one Terminal Session Channel command. `start` transfers that command to
+/// one Pane; dropping the token abandons the reservation without starting a Terminal Session.
 pub(crate) struct PreparedWorkspaceTerminalLaunch {
     launch_plan: TerminalLaunchPlan,
 }
@@ -145,14 +147,16 @@ impl PreparedWorkspaceTerminalLaunch {
 
 #[cfg(test)]
 impl PreparedWorkspaceTerminalLaunch {
-    fn take_remote_channel(
+    fn take_terminal_session_channel(
         &self,
-    ) -> Result<crate::ssh::command::SshCommandSpec, crate::ssh::command::PreparedSshPaneChannelError>
-    {
+    ) -> Result<
+        crate::ssh::command::SshCommandSpec,
+        crate::ssh::command::PreparedSshTerminalSessionChannelError,
+    > {
         let TerminalLaunchPlan::Remote(plan) = &self.launch_plan else {
             panic!("the test launch must be remote")
         };
-        plan.take_pane_channel()
+        plan.take_terminal_session_channel()
     }
 }
 
@@ -206,7 +210,7 @@ impl WorkspaceTerminalSessionFactory {
         metadata_context: RemoteTerminalMetadataContext,
         initial_directory_identity: RemoteDirectoryIdentity,
         fallback_title: String,
-        channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
+        channel_provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> Self {
         Self {
             session_factory,
@@ -230,21 +234,21 @@ impl WorkspaceTerminalSessionFactory {
     /// grant and fail if readiness changed after revalidation.
     pub(crate) fn prepare_child_launch(
         &self,
-    ) -> Result<PreparedWorkspaceTerminalLaunch, RemoteChannelUnavailable> {
+    ) -> Result<PreparedWorkspaceTerminalLaunch, TerminalSessionChannelUnavailable> {
         let launch_plan = match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(plan) => TerminalLaunchPlan::Local(plan.clone()),
             WorkspaceTerminalLaunchContext::Remote(context) => {
                 if !context.channel_provider.is_ready() {
-                    return Err(RemoteChannelUnavailable);
+                    return Err(TerminalSessionChannelUnavailable);
                 }
-                let pane_channel = context
+                let terminal_session_channel = context
                     .channel_provider
                     .prepare(context.metadata_context.initial_directory())?;
                 TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     context.local_home.clone(),
                     context.metadata_context.clone(),
                     context.fallback_title.clone(),
-                    pane_channel,
+                    terminal_session_channel,
                 )))
             }
         };
@@ -258,7 +262,7 @@ impl WorkspaceTerminalSessionFactory {
     /// no hierarchy mutation; the grant must be consumed immediately after successful completion.
     pub(crate) fn revalidate_remote_child_launch(
         &self,
-    ) -> Option<Task<Result<(), RemoteChannelRevalidationError>>> {
+    ) -> Option<Task<Result<(), TerminalSessionChannelRevalidationError>>> {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(_) => None,
             WorkspaceTerminalLaunchContext::Remote(context) => {
@@ -276,7 +280,7 @@ impl WorkspaceTerminalSessionFactory {
         geometry: TerminalGeometry,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         initial_appearance: super::TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, SessionError> {
+    ) -> Result<StartedTerminalSession, TerminalSessionError> {
         self.session_factory
             .start(geometry, prepared_launch.launch_plan, initial_appearance)
     }
@@ -302,7 +306,7 @@ impl WorkspaceTerminalSessionFactory {
         )
     }
 
-    pub(crate) fn remote_channel_is_ready(&self) -> Option<bool> {
+    pub(crate) fn terminal_session_channel_is_ready(&self) -> Option<bool> {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(_) => None,
             WorkspaceTerminalLaunchContext::Remote(context) => {
@@ -416,20 +420,23 @@ mod tests {
     use crate::terminal::test_terminal_appearance_update;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
 
-    struct TestRemoteChannelProvider {
+    struct TestTerminalSessionChannelProvider {
         ready: AtomicBool,
         preparations: AtomicUsize,
         revalidations: Mutex<Vec<(RemoteDirectory, Option<RemoteDirectoryIdentity>)>>,
         owners: Mutex<Vec<SshConnectionFixture>>,
-        results: Mutex<VecDeque<Result<OwnedChannel, RemoteChannelUnavailable>>>,
+        results: Mutex<VecDeque<Result<OwnedChannel, TerminalSessionChannelUnavailable>>>,
     }
 
-    type OwnedChannel = (SshConnectionFixture, PreparedSshPaneChannelCommand);
+    type OwnedChannel = (
+        SshConnectionFixture,
+        PreparedSshTerminalSessionChannelCommand,
+    );
 
-    impl TestRemoteChannelProvider {
+    impl TestTerminalSessionChannelProvider {
         fn new(
             ready: bool,
-            results: impl IntoIterator<Item = Result<OwnedChannel, RemoteChannelUnavailable>>,
+            results: impl IntoIterator<Item = Result<OwnedChannel, TerminalSessionChannelUnavailable>>,
         ) -> Self {
             Self {
                 ready: AtomicBool::new(ready),
@@ -441,7 +448,7 @@ mod tests {
         }
     }
 
-    impl RemoteTerminalChannelProvider for TestRemoteChannelProvider {
+    impl TerminalSessionChannelProvider for TestTerminalSessionChannelProvider {
         fn is_ready(&self) -> bool {
             self.ready.load(Ordering::Acquire)
         }
@@ -450,7 +457,7 @@ mod tests {
             &self,
             directory: RemoteDirectory,
             expected_identity: Option<RemoteDirectoryIdentity>,
-        ) -> Task<Result<(), RemoteChannelRevalidationError>> {
+        ) -> Task<Result<(), TerminalSessionChannelRevalidationError>> {
             self.revalidations
                 .lock()
                 .unwrap()
@@ -458,20 +465,23 @@ mod tests {
             if self.is_ready() {
                 Task::ready(Ok(()))
             } else {
-                Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable))
+                Task::ready(Err(
+                    TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+                ))
             }
         }
 
         fn prepare(
             &self,
             _directory: &RemoteDirectory,
-        ) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+        ) -> Result<PreparedSshTerminalSessionChannelCommand, TerminalSessionChannelUnavailable>
+        {
             self.preparations.fetch_add(1, Ordering::AcqRel);
             self.results
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(Err(RemoteChannelUnavailable))
+                .unwrap_or(Err(TerminalSessionChannelUnavailable))
                 .map(|(owner, channel)| {
                     self.owners.lock().unwrap().push(owner);
                     channel
@@ -481,14 +491,15 @@ mod tests {
 
     fn prepared_channel(destination: &SshDestination, command: &str) -> OwnedChannel {
         let owner = SshConnectionFixture::new(destination.clone());
-        let channel = owner
-            .prepare_pane_channel(ValidatedRemoteShellCommand::new(command.to_owned()).unwrap());
+        let channel = owner.prepare_terminal_session_channel(
+            ValidatedRemoteShellCommand::new(command.to_owned()).unwrap(),
+        );
         (owner, channel)
     }
 
     fn remote_factory(
         records: TestTerminalSessionRecords,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
         let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
@@ -542,11 +553,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_factory_should_preserve_context_and_prepare_one_channel_per_child() {
+    fn remote_factory_should_preserve_context_and_prepare_one_terminal_session_channel_per_child() {
         let records = TestTerminalSessionRecords::default();
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
         let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
-        let provider = Arc::new(TestRemoteChannelProvider::new(
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(
             true,
             [
                 Ok(prepared_channel(&destination, "exec /bin/zsh -l")),
@@ -609,7 +620,7 @@ mod tests {
     fn remote_child_launches_should_preserve_machine_when_selecting_starting_directories() {
         let records = TestTerminalSessionRecords::default();
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(TestRemoteChannelProvider::new(
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(
             true,
             (0..3).map(|_| Ok(prepared_channel(&destination, "exec /bin/zsh -l"))),
         ));
@@ -654,12 +665,12 @@ mod tests {
     #[test]
     fn remote_factory_should_reject_launch_when_provider_is_not_ready() {
         let records = TestTerminalSessionRecords::default();
-        let provider = Arc::new(TestRemoteChannelProvider::new(false, []));
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(false, []));
         let factory = remote_factory(records.clone(), provider.clone());
 
         let error = factory.prepare_child_launch().unwrap_err();
 
-        assert_eq!(error, RemoteChannelUnavailable);
+        assert_eq!(error, TerminalSessionChannelUnavailable);
         assert_eq!(provider.preparations.load(Ordering::Acquire), 0);
         assert!(records.starts().is_empty());
     }
@@ -667,15 +678,15 @@ mod tests {
     #[test]
     fn remote_factory_propagates_provider_reservation_failure() {
         let records = TestTerminalSessionRecords::default();
-        let provider = Arc::new(TestRemoteChannelProvider::new(
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(
             true,
-            [Err(RemoteChannelUnavailable)],
+            [Err(TerminalSessionChannelUnavailable)],
         ));
         let factory = remote_factory(records.clone(), provider.clone());
 
         let error = factory.prepare_child_launch().unwrap_err();
 
-        assert_eq!(error, RemoteChannelUnavailable);
+        assert_eq!(error, TerminalSessionChannelUnavailable);
         assert_eq!(provider.preparations.load(Ordering::Acquire), 1);
         assert!(records.starts().is_empty());
     }
@@ -684,7 +695,7 @@ mod tests {
     fn prepared_remote_launches_should_be_distinct_and_single_use() {
         let records = TestTerminalSessionRecords::default();
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(TestRemoteChannelProvider::new(
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(
             true,
             [
                 Ok(prepared_channel(&destination, "exec first")),
@@ -695,9 +706,9 @@ mod tests {
         let first = factory.prepare_child_launch().unwrap();
         let second = factory.prepare_child_launch().unwrap();
 
-        let first_command = first.take_remote_channel().unwrap();
-        let second_command = second.take_remote_channel().unwrap();
-        let error = match first.take_remote_channel() {
+        let first_command = first.take_terminal_session_channel().unwrap();
+        let second_command = second.take_terminal_session_channel().unwrap();
+        let error = match first.take_terminal_session_channel() {
             Ok(_) => panic!("a prepared remote launch must be single-use"),
             Err(error) => error,
         };
@@ -705,7 +716,7 @@ mod tests {
         assert_ne!(first_command.arguments(), second_command.arguments());
         assert!(matches!(
             error,
-            crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
+            crate::ssh::command::PreparedSshTerminalSessionChannelError::AlreadyConsumed
         ));
     }
     #[test]
@@ -791,7 +802,7 @@ mod tests {
 
     #[test]
     fn remote_launch_policy_should_capture_directory_and_identity_without_local_authority() {
-        let provider = Arc::new(TestRemoteChannelProvider::new(true, []));
+        let provider = Arc::new(TestTerminalSessionChannelProvider::new(true, []));
         let mut factory = remote_factory(TestTerminalSessionRecords::default(), provider.clone());
         let source = RemoteDirectory::new("/srv/frontend".into()).unwrap();
         let pin = RemoteDirectory::new("/srv/pinned".into()).unwrap();

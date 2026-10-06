@@ -74,7 +74,7 @@ impl FakeRemoteUtilityServer {
         self.state.lock().unwrap().terminal_session_channels = count;
     }
 
-    /// Ends the Control Connection, which revokes the provider's session scope.
+    /// Ends the Control Connection, which revokes the provider's cancellation scope.
     pub(crate) fn end_connection(&self) {
         self.connection.cancel();
     }

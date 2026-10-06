@@ -28,7 +28,7 @@ use crate::ssh::live_connection::ControlConnectionObserver;
 use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::ssh::process::TransientSshErrorOutput;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
-use crate::terminal::RemoteTerminalChannelProvider;
+use crate::terminal::TerminalSessionChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
 const CONNECTION_PROGRESS_DETAIL: &str = "Authentication prompts open in a SpaceTerm dialog.";
@@ -188,7 +188,7 @@ fn connection_error_content(
 /// Opaque Workspace-lifetime authority that keeps one configured SSH alias immutable.
 ///
 /// This value is intentionally non-Clone and non-Debug. Dropping it releases exactly its own
-/// registry count without affecting the connected session's independent alias lease.
+/// registry count without affecting the Control Connection's independent alias lease.
 pub(crate) struct RemoteWorkspaceAliasPin {
     _owner: Box<dyn Send>,
 }
@@ -205,43 +205,43 @@ impl RemoteWorkspaceAliasPin {
 #[error("the configured SSH alias could not be pinned for Workspace ownership")]
 pub(crate) struct RemoteWorkspaceAliasPinError;
 
-/// The opaque lifetime owner for one connected SSH control path.
+/// The opaque lifetime owner for one Control Connection.
 ///
 /// This trait deliberately exposes no command or transport access to UI code. Implementations are
 /// non-clone owners and must make `close` idempotent and non-blocking for the calling GPUI thread.
 /// Retained background ownership remains responsible for bounded exact process, socket,
-/// authentication, cancellation, and per-session alias cleanup after `close` returns.
-pub(crate) trait RemoteWorkspaceSessionOwner: Send + 'static {
-    /// Acquires an independent Workspace-lifetime alias count without consuming session ownership.
+/// authentication, cancellation, and Control Connection alias cleanup after `close` returns.
+pub(crate) trait ControlConnectionOwner: Send + 'static {
+    /// Acquires an independent Workspace-lifetime alias count without consuming this owner.
     fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError>;
 
     /// Binds a fallible per-launch channel provider to this connected account.
-    fn bind_terminal_channels(
+    fn bind_terminal_session_channels(
         &self,
         login_shell: &ValidatedRemoteLoginShell,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
+    ) -> Result<Arc<dyn TerminalSessionChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
-    /// Transfers the content-free observer paired with this exact session at most once.
+    /// Transfers the content-free observer paired with this exact Control Connection at most once.
     fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver>;
 
-    /// Cancels and cleans up all session-owned resources exactly once.
+    /// Cancels and cleans up all Control Connection resources exactly once.
     fn close(&mut self);
 }
 
-/// A live connected session and its narrow directory-provider capability.
+/// A live Control Connection and its narrow directory-provider capability.
 ///
-/// This value is intentionally non-Clone. Dropping it closes the session exactly once.
-pub(crate) struct RemoteWorkspaceConnectedSession {
-    owner: Option<Box<dyn RemoteWorkspaceSessionOwner>>,
+/// This value is intentionally non-Clone. Dropping it closes the Control Connection exactly once.
+pub(crate) struct ConnectedControlConnection {
+    owner: Option<Box<dyn ControlConnectionOwner>>,
     provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
 }
 
-impl RemoteWorkspaceConnectedSession {
-    /// Creates a connected session from its singular owner and narrow utility provider.
+impl ConnectedControlConnection {
+    /// Creates a Control Connection from its singular owner and narrow utility provider.
     pub(crate) fn new(
-        owner: Box<dyn RemoteWorkspaceSessionOwner>,
+        owner: Box<dyn ControlConnectionOwner>,
         provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
     ) -> Self {
         Self {
@@ -255,17 +255,17 @@ impl RemoteWorkspaceConnectedSession {
     }
 
     /// Creates a provider that requires physical revalidation before every child reservation.
-    pub(crate) fn bind_terminal_channels(
+    pub(crate) fn bind_terminal_session_channels(
         &self,
         login_shell: &ValidatedRemoteLoginShell,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
+    ) -> Result<Arc<dyn TerminalSessionChannelProvider>, RemoteWorkspaceFlowBackendError> {
         self.owner
             .as_ref()
             .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
-            .bind_terminal_channels(login_shell)
+            .bind_terminal_session_channels(login_shell)
     }
 
-    /// Transfers the session-paired lifecycle observer at most once.
+    /// Transfers the Control Connection lifecycle observer at most once.
     pub(crate) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
         self.owner.as_mut()?.take_lifecycle_observer()
     }
@@ -280,7 +280,7 @@ impl RemoteWorkspaceConnectedSession {
     }
 }
 
-impl Drop for RemoteWorkspaceConnectedSession {
+impl Drop for ConnectedControlConnection {
     fn drop(&mut self) {
         if let Some(mut owner) = self.owner.take() {
             owner.close();
@@ -303,7 +303,7 @@ pub(crate) trait RemoteWorkspaceFlowBackend: Send + Sync {
         &self,
         destination: SshDestination,
         context: RemoteWorkspaceConnectContext,
-    ) -> Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>;
+    ) -> Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>;
 }
 
 /// Builds the window-bound backend once while its Workspace Manager is initialized.
@@ -341,15 +341,15 @@ impl ManagedHostFormBackend for FlowManagedHostBackend {
     }
 }
 
-/// A completed remote workspace creation. Its connected session is live and non-Clone.
+/// A completed remote workspace creation. Its Control Connection is live and non-Clone.
 pub(crate) struct RemoteWorkspaceFlowCompletion {
-    session: RemoteWorkspaceConnectedSession,
+    control_connection: ConnectedControlConnection,
     destination: SshDestination,
     initial_directory: RemoteDirectory,
     physical_directory: RemoteDirectoryIdentity,
     pinned: bool,
     account: RemoteWorkspaceAccount,
-    terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+    terminal_session_channels: Arc<dyn TerminalSessionChannelProvider>,
     lifecycle: ControlConnectionObserver,
 }
 
@@ -383,8 +383,8 @@ impl RemoteWorkspaceFlowCompletion {
         &self.account
     }
 
-    pub(crate) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
-        Arc::clone(&self.terminal_channels)
+    pub(crate) fn terminal_session_channels(&self) -> Arc<dyn TerminalSessionChannelProvider> {
+        Arc::clone(&self.terminal_session_channels)
     }
 
     /// Acquires the independent alias pin only when Workspace installation is ready to commit.
@@ -393,27 +393,27 @@ impl RemoteWorkspaceFlowCompletion {
     pub(crate) fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
-        self.session.acquire_workspace_alias_pin()
+        self.control_connection.acquire_workspace_alias_pin()
     }
 
     pub(crate) fn into_parts(
         self,
     ) -> (
-        RemoteWorkspaceConnectedSession,
+        ConnectedControlConnection,
         SshDestination,
         RemoteDirectory,
         RemoteDirectoryIdentity,
         RemoteWorkspaceAccount,
-        Arc<dyn RemoteTerminalChannelProvider>,
+        Arc<dyn TerminalSessionChannelProvider>,
         ControlConnectionObserver,
     ) {
         (
-            self.session,
+            self.control_connection,
             self.destination,
             self.initial_directory,
             self.physical_directory,
             self.account,
-            self.terminal_channels,
+            self.terminal_session_channels,
             self.lifecycle,
         )
     }
@@ -490,7 +490,7 @@ enum ConnectionErrorAction {
 
 struct ConnectedHost {
     destination: SshDestination,
-    session: RemoteWorkspaceConnectedSession,
+    control_connection: ConnectedControlConnection,
     retained_lifecycle: Option<ControlConnectionObserver>,
 }
 
@@ -521,7 +521,7 @@ struct PendingActivation {
 struct DirectoryChoice {
     connection: ConnectedHost,
     account: RemoteWorkspaceAccount,
-    terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+    terminal_session_channels: Arc<dyn TerminalSessionChannelProvider>,
     lifecycle: ControlConnectionObserver,
     picker: Entity<DirectoryPicker>,
 }
@@ -1008,7 +1008,7 @@ impl RemoteWorkspaceFlow {
     fn finish_connection(
         &mut self,
         generation: u64,
-        result: Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
+        result: Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1026,10 +1026,10 @@ impl RemoteWorkspaceFlow {
         let phase = attempt.phase;
         let progress = attempt.progress.take();
         self.state = match result {
-            Ok(session) => RemoteWorkspaceFlowState::ConnectionReady {
+            Ok(control_connection) => RemoteWorkspaceFlowState::ConnectionReady {
                 connection: ConnectedHost {
                     destination,
-                    session,
+                    control_connection,
                     retained_lifecycle: None,
                 },
                 phase,
@@ -1259,7 +1259,7 @@ impl RemoteWorkspaceFlow {
         };
         self.action_generation = self.action_generation.wrapping_add(1);
         let generation = self.action_generation;
-        let discovery = connection.session.provider().discover_account();
+        let discovery = connection.control_connection.provider().discover_account();
         self.host_picker
             .update(cx, |picker, cx| picker.dismiss(window, cx));
         self.state = RemoteWorkspaceFlowState::PreparingHome {
@@ -1349,9 +1349,9 @@ impl RemoteWorkspaceFlow {
         let RemoteWorkspaceFlowState::PreparingHome { connection, .. } = &mut self.state else {
             return;
         };
-        let terminal_channels = match connection
-            .session
-            .bind_terminal_channels(account.login_shell())
+        let terminal_session_channels = match connection
+            .control_connection
+            .bind_terminal_session_channels(account.login_shell())
         {
             Ok(provider) => provider,
             Err(_) => {
@@ -1366,7 +1366,7 @@ impl RemoteWorkspaceFlow {
         let lifecycle = connection
             .retained_lifecycle
             .take()
-            .or_else(|| connection.session.take_lifecycle_observer());
+            .or_else(|| connection.control_connection.take_lifecycle_observer());
         let Some(lifecycle) = lifecycle else {
             self.fail_home_preparation(
                 RemoteWorkspaceFlowBackendError::ConnectionFailed,
@@ -1388,7 +1388,7 @@ impl RemoteWorkspaceFlow {
             self.state = RemoteWorkspaceFlowState::ChoosingDirectory(Box::new(DirectoryChoice {
                 connection,
                 account,
-                terminal_channels,
+                terminal_session_channels,
                 lifecycle,
                 picker,
             }));
@@ -1410,13 +1410,13 @@ impl RemoteWorkspaceFlow {
         let physical_directory = account.home_identity().clone();
         self.complete(
             RemoteWorkspaceFlowCompletion {
-                session: connection.session,
+                control_connection: connection.control_connection,
                 destination: connection.destination,
                 initial_directory,
                 physical_directory,
                 pinned: false,
                 account,
-                terminal_channels,
+                terminal_session_channels,
                 lifecycle,
             },
             None,
@@ -1447,7 +1447,7 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) -> Entity<DirectoryPicker> {
         let source = std::rc::Rc::new(RemoteDirectorySource::new(
-            connection.session.provider(),
+            connection.control_connection.provider(),
             connection.destination.host(),
         ));
         let picker = cx.new(|cx| {
@@ -1514,19 +1514,19 @@ impl RemoteWorkspaceFlow {
                 let DirectoryChoice {
                     connection,
                     account,
-                    terminal_channels,
+                    terminal_session_channels,
                     lifecycle,
                     picker,
                 } = *choice;
                 self.complete(
                     RemoteWorkspaceFlowCompletion {
-                        session: connection.session,
+                        control_connection: connection.control_connection,
                         destination: connection.destination,
                         initial_directory: directory.clone(),
                         physical_directory: identity.clone(),
                         pinned: true,
                         account,
-                        terminal_channels,
+                        terminal_session_channels,
                         lifecycle,
                     },
                     Some(picker),
@@ -1580,16 +1580,23 @@ impl RemoteWorkspaceFlow {
             && let Some(picker) = pending.picker.take()
         {
             // The connection still works; offer another directory on it.
-            let (session, destination, _, _, account, terminal_channels, lifecycle) =
-                completion.into_parts();
+            let (
+                control_connection,
+                destination,
+                _,
+                _,
+                account,
+                terminal_session_channels,
+                lifecycle,
+            ) = completion.into_parts();
             self.state = RemoteWorkspaceFlowState::ChoosingDirectory(Box::new(DirectoryChoice {
                 connection: ConnectedHost {
                     destination,
-                    session,
+                    control_connection,
                     retained_lifecycle: None,
                 },
                 account,
-                terminal_channels,
+                terminal_session_channels,
                 lifecycle,
                 picker: picker.clone(),
             }));
@@ -1695,22 +1702,22 @@ mod tests {
     };
 
     pub(in crate::ui) fn completion(
-        session: RemoteWorkspaceConnectedSession,
+        control_connection: ConnectedControlConnection,
         destination: SshDestination,
         initial_directory: RemoteDirectory,
         physical_directory: RemoteDirectoryIdentity,
         account: RemoteWorkspaceAccount,
-        terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+        terminal_session_channels: Arc<dyn TerminalSessionChannelProvider>,
         lifecycle: ControlConnectionObserver,
     ) -> RemoteWorkspaceFlowCompletion {
         RemoteWorkspaceFlowCompletion {
-            session,
+            control_connection,
             destination,
             initial_directory,
             physical_directory,
             pinned: false,
             account,
-            terminal_channels,
+            terminal_session_channels,
             lifecycle,
         }
     }
@@ -1805,19 +1812,21 @@ mod tests {
         observer_takes: Option<Arc<AtomicUsize>>,
     }
 
-    impl RemoteWorkspaceSessionOwner for CountingOwner {
+    impl ControlConnectionOwner for CountingOwner {
         fn acquire_workspace_alias_pin(
             &self,
         ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
             Ok(None)
         }
 
-        fn bind_terminal_channels(
+        fn bind_terminal_session_channels(
             &self,
             _: &ValidatedRemoteLoginShell,
-        ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
+        ) -> Result<Arc<dyn TerminalSessionChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
-            Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
+            Ok(Arc::new(|| {
+                Err(crate::terminal::TerminalSessionChannelUnavailable)
+            }))
         }
 
         fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
@@ -1838,7 +1847,7 @@ mod tests {
         closes: Arc<AtomicUsize>,
     }
 
-    impl RemoteWorkspaceSessionOwner for AliasPinningOwner {
+    impl ControlConnectionOwner for AliasPinningOwner {
         fn acquire_workspace_alias_pin(
             &self,
         ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
@@ -1856,12 +1865,14 @@ mod tests {
                 .transpose()
         }
 
-        fn bind_terminal_channels(
+        fn bind_terminal_session_channels(
             &self,
             _: &ValidatedRemoteLoginShell,
-        ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
+        ) -> Result<Arc<dyn TerminalSessionChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
-            Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
+            Ok(Arc::new(|| {
+                Err(crate::terminal::TerminalSessionChannelUnavailable)
+            }))
         }
 
         fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
@@ -1882,9 +1893,8 @@ mod tests {
     }
 
     struct FakeBackendState {
-        connections: VecDeque<
-            Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>,
-        >,
+        connections:
+            VecDeque<Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>>,
         saves: VecDeque<Task<Result<(), ManagedHostFormBackendError>>>,
         save_records: Vec<ManagedSshHost>,
         connect_records: Vec<SshDestination>,
@@ -1898,9 +1908,7 @@ mod tests {
     impl FakeBackend {
         fn new(
             connections: impl IntoIterator<
-                Item = Task<
-                    Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
-                >,
+                Item = Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>,
             >,
         ) -> Arc<Self> {
             Arc::new(Self {
@@ -1945,8 +1953,7 @@ mod tests {
             &self,
             destination: SshDestination,
             context: RemoteWorkspaceConnectContext,
-        ) -> Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>
-        {
+        ) -> Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>> {
             context.report(RemoteWorkspaceConnectionProgress::CheckingCompatibility);
             context.report(RemoteWorkspaceConnectionProgress::Connecting);
             context.report(RemoteWorkspaceConnectionProgress::Authenticating);
@@ -2147,8 +2154,8 @@ mod tests {
         SshHostAlias::new(value.to_owned()).unwrap()
     }
 
-    fn session(closes: &Arc<AtomicUsize>) -> RemoteWorkspaceConnectedSession {
-        RemoteWorkspaceConnectedSession::new(
+    fn control_connection(closes: &Arc<AtomicUsize>) -> ConnectedControlConnection {
+        ConnectedControlConnection::new(
             Box::new(CountingOwner {
                 closes: Arc::clone(closes),
                 observer_takes: None,
@@ -2157,11 +2164,11 @@ mod tests {
         )
     }
 
-    fn session_with_observer_takes(
+    fn control_connection_with_observer_takes(
         closes: &Arc<AtomicUsize>,
         observer_takes: &Arc<AtomicUsize>,
-    ) -> RemoteWorkspaceConnectedSession {
-        RemoteWorkspaceConnectedSession::new(
+    ) -> ConnectedControlConnection {
+        ConnectedControlConnection::new(
             Box::new(CountingOwner {
                 closes: Arc::clone(closes),
                 observer_takes: Some(Arc::clone(observer_takes)),
@@ -2176,7 +2183,7 @@ mod tests {
         closes: &Arc<AtomicUsize>,
     ) -> RemoteWorkspaceFlowCompletion {
         completion(
-            RemoteWorkspaceConnectedSession::new(
+            ConnectedControlConnection::new(
                 Box::new(AliasPinningOwner {
                     alias,
                     acquisition_fails,
@@ -2188,7 +2195,7 @@ mod tests {
             RemoteDirectory::new("~/src".to_owned()).unwrap(),
             remote_identity("/home/tester/src"),
             remote_account(),
-            Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)),
+            Arc::new(|| Err(crate::terminal::TerminalSessionChannelUnavailable)),
             ControlConnectionObserver::closed(),
         )
     }
@@ -2371,7 +2378,7 @@ mod tests {
         );
         assert!(flow.read_with(cx, |flow, _| flow.state.progress().is_some()));
 
-        sender.try_send(Ok(session(&closes))).unwrap();
+        sender.try_send(Ok(control_connection(&closes))).unwrap();
         cx.run_until_parked();
 
         assert_eq!(
@@ -2583,7 +2590,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_completion_should_keep_a_workspace_alias_pin_after_session_drop() {
+    fn configured_completion_should_keep_a_workspace_alias_pin_after_control_connection_drop() {
         let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
         let alias = alias("work");
         let connection = registry.acquire(alias.clone()).unwrap();
@@ -2783,7 +2790,7 @@ mod tests {
         let closes = Arc::new(AtomicUsize::new(0));
         let backend = FakeBackend::new([
             Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),
-            Task::ready(Ok(session(&closes))),
+            Task::ready(Ok(control_connection(&closes))),
         ]);
         let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
 
@@ -2881,7 +2888,7 @@ mod tests {
             RemoteWorkspaceFlowStage::Cancelled
         );
 
-        sender.try_send(Ok(session(&closes))).unwrap();
+        sender.try_send(Ok(control_connection(&closes))).unwrap();
         cx.run_until_parked();
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
@@ -2936,7 +2943,7 @@ mod tests {
         );
         assert_eq!(events.borrow().cancelled, 1);
 
-        sender.try_send(Ok(session(&closes))).unwrap();
+        sender.try_send(Ok(control_connection(&closes))).unwrap();
         cx.run_until_parked();
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
@@ -2945,7 +2952,7 @@ mod tests {
     #[gpui::test]
     fn connection_should_create_at_home_without_directory_selection(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "deploy@work", cx);
         assert_eq!(
@@ -2979,7 +2986,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) =
             flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
         select_destination(&flow, "deploy@work", cx);
@@ -3017,7 +3024,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) =
             flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
         select_destination(&flow, "work", cx);
@@ -3060,7 +3067,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) =
             flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
         select_destination(&flow, "work", cx);
@@ -3106,7 +3113,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (harness, flow, events, cx) =
             flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
         select_destination(&flow, "work", cx);
@@ -3139,7 +3146,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) =
             flow_window_starting_at(backend, RemoteWorkspaceStart::ChosenDirectory, cx);
         select_destination(&flow, "work", cx);
@@ -3167,7 +3174,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "work", cx);
         let handle = events.borrow().completions[0].clone();
@@ -3193,16 +3200,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn failed_activation_should_close_session_and_offer_retry(cx: &mut TestAppContext) {
+    fn failed_activation_should_close_control_connection_and_offer_retry(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
         let first_observer_takes = Arc::new(AtomicUsize::new(0));
         let second_observer_takes = Arc::new(AtomicUsize::new(0));
         let backend = FakeBackend::new([
-            Task::ready(Ok(session_with_observer_takes(
+            Task::ready(Ok(control_connection_with_observer_takes(
                 &closes,
                 &first_observer_takes,
             ))),
-            Task::ready(Ok(session_with_observer_takes(
+            Task::ready(Ok(control_connection_with_observer_takes(
                 &closes,
                 &second_observer_takes,
             ))),
@@ -3228,9 +3235,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelling_pending_activation_should_close_session_once(cx: &mut TestAppContext) {
+    fn cancelling_pending_activation_should_close_control_connection_once(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
-        let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
+        let backend = FakeBackend::new([Task::ready(Ok(control_connection(&closes)))]);
         let (_, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "work", cx);
         cx.update(|window, cx| flow.update(cx, |flow, cx| flow.cancel_flow(window, cx)));
@@ -3244,9 +3251,9 @@ mod tests {
     }
 
     #[test]
-    fn connected_session_should_close_exactly_once_on_drop() {
+    fn connected_control_connection_should_close_exactly_once_on_drop() {
         let closes = Arc::new(AtomicUsize::new(0));
-        drop(session(&closes));
+        drop(control_connection(&closes));
         assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 }

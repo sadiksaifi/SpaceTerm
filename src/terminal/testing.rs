@@ -8,9 +8,9 @@ use super::geometry::TerminalGeometry;
 use super::{
     FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy, PasteConfirmationId,
     PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
-    ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionError, SessionEvent,
-    StartedTerminalSession, TerminalAccessibilityModel, TerminalAppearanceUpdate,
-    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalLaunchPlan,
+    ScrollbackMovement, SelectionCopy, SelectionCopyError, StartedTerminalSession,
+    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalKeyInputAdapter,
+    TerminalKeyInputAdapterFactory, TerminalLaunchPlan, TerminalSessionError, TerminalSessionEvent,
     TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
@@ -99,14 +99,14 @@ pub(crate) fn test_terminal_key_input_adapter() -> Box<dyn TerminalKeyInputAdapt
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordedSessionStart {
+pub(crate) struct RecordedStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
     launch_plan: TerminalLaunchPlan,
     pub(crate) initial_appearance: TerminalAppearanceUpdate,
 }
 
-impl RecordedSessionStart {
+impl RecordedStart {
     pub(crate) const fn launch_plan(&self) -> &TerminalLaunchPlan {
         &self.launch_plan
     }
@@ -132,7 +132,7 @@ impl RecordedSessionStart {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RecordedSessionCommand {
+pub(crate) enum RecordedCommand {
     Key(KeyInput),
     ClearScreenAndScrollback,
     Focus(bool),
@@ -155,18 +155,18 @@ pub(crate) enum RecordedSessionCommand {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordedSessionCall {
+pub(crate) struct RecordedCall {
     pub(crate) session_id: usize,
-    pub(crate) command: RecordedSessionCommand,
+    pub(crate) command: RecordedCommand,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct TestTerminalSessionRecords {
-    starts: Rc<RefCell<Vec<RecordedSessionStart>>>,
+    starts: Rc<RefCell<Vec<RecordedStart>>>,
     selection_copies: Rc<RefCell<VecDeque<Option<SelectionCopy>>>>,
     selection_receivers:
         Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
-    event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
+    event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<TerminalSessionEvent>>>>,
     metadata_snapshots:
         Rc<RefCell<BTreeMap<usize, Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>>>,
     permission_requests:
@@ -174,7 +174,7 @@ pub(crate) struct TestTerminalSessionRecords {
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    commands: Rc<RefCell<Vec<RecordedSessionCall>>>,
+    commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
@@ -221,7 +221,7 @@ impl TestTerminalSessionRecords {
         });
     }
 
-    /// Retains the next Terminal Metadata revision for one Session, as a hidden Session would.
+    /// Retains the next Terminal Metadata revision for one Terminal Session, as a hidden one would.
     pub(crate) fn report_metadata(
         &self,
         session_id: usize,
@@ -266,18 +266,18 @@ impl TestTerminalSessionRecords {
             .map_or_else(Vec::new, |receiver| receiver.drain())
     }
 
-    pub(crate) fn starts(&self) -> Vec<RecordedSessionStart> {
+    pub(crate) fn starts(&self) -> Vec<RecordedStart> {
         self.starts.borrow().clone()
     }
 
     pub(crate) fn event_sender(
         &self,
         session_id: usize,
-    ) -> Option<async_channel::Sender<SessionEvent>> {
+    ) -> Option<async_channel::Sender<TerminalSessionEvent>> {
         self.event_senders.borrow().get(&session_id).cloned()
     }
 
-    pub(crate) fn last_event_sender(&self) -> Option<async_channel::Sender<SessionEvent>> {
+    pub(crate) fn last_event_sender(&self) -> Option<async_channel::Sender<TerminalSessionEvent>> {
         self.event_senders
             .borrow()
             .last_key_value()
@@ -301,7 +301,7 @@ impl TestTerminalSessionRecords {
         self.dropped_session_ids.borrow().clone()
     }
 
-    pub(crate) fn commands(&self) -> Vec<RecordedSessionCall> {
+    pub(crate) fn commands(&self) -> Vec<RecordedCall> {
         self.commands.borrow().clone()
     }
 
@@ -312,8 +312,7 @@ impl TestTerminalSessionRecords {
             .filter(|input| {
                 matches!(
                     input.command,
-                    RecordedSessionCommand::Pointer(_)
-                        | RecordedSessionCommand::PointerAndCopySelection(_)
+                    RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
                 )
             })
             .count()
@@ -407,10 +406,10 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, SessionError> {
+    ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
-        self.records.starts.borrow_mut().push(RecordedSessionStart {
+        self.records.starts.borrow_mut().push(RecordedStart {
             session_id,
             geometry,
             launch_plan,
@@ -422,7 +421,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 .start_failure_session_id
                 .is_none_or(|failure_session_id| failure_session_id == session_id)
         {
-            return Err(SessionError::EmulatorStartup(message.clone()));
+            return Err(TerminalSessionError::EmulatorStartup(message.clone()));
         }
 
         let (event_sender, events) = async_channel::unbounded();
@@ -475,14 +474,11 @@ struct TestTerminalSessionHandle {
 }
 
 impl TestTerminalSessionHandle {
-    fn record(&self, command: RecordedSessionCommand) {
-        self.records
-            .commands
-            .borrow_mut()
-            .push(RecordedSessionCall {
-                session_id: self.session_id,
-                command,
-            });
+    fn record(&self, command: RecordedCommand) {
+        self.records.commands.borrow_mut().push(RecordedCall {
+            session_id: self.session_id,
+            command,
+        });
     }
 }
 
@@ -522,62 +518,62 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     }
 
     fn key(&self, input: KeyInput) {
-        self.record(RecordedSessionCommand::Key(input));
+        self.record(RecordedCommand::Key(input));
     }
 
     fn clear_screen_and_scrollback(&self) {
-        self.record(RecordedSessionCommand::ClearScreenAndScrollback);
+        self.record(RecordedCommand::ClearScreenAndScrollback);
     }
 
     fn focus(&self, focused: bool) {
-        self.record(RecordedSessionCommand::Focus(focused));
+        self.record(RecordedCommand::Focus(focused));
     }
 
     fn resize(&self, geometry: TerminalGeometry) {
-        self.record(RecordedSessionCommand::Resize(geometry));
+        self.record(RecordedCommand::Resize(geometry));
     }
 
     fn pointer(&self, input: PointerInput) {
-        self.record(RecordedSessionCommand::Pointer(input));
+        self.record(RecordedCommand::Pointer(input));
     }
 
     fn pointer_and_copy_selection(
         &self,
         input: PointerInput,
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.record(RecordedSessionCommand::PointerAndCopySelection(input));
+        self.record(RecordedCommand::PointerAndCopySelection(input));
         self.selection_response.clone()
     }
 
     fn wheel(&self, input: WheelInput) {
-        self.record(RecordedSessionCommand::Wheel(input));
+        self.record(RecordedCommand::Wheel(input));
     }
 
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
-        self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
+        self.record(RecordedCommand::ScrollTo(offset_rows, generation));
     }
 
     fn scroll_scrollback(&self, movement: ScrollbackMovement) {
-        self.record(RecordedSessionCommand::ScrollScrollback(movement));
+        self.record(RecordedCommand::ScrollScrollback(movement));
     }
 
     fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
-        self.record(RecordedSessionCommand::SetFindQuery(generation, query));
+        self.record(RecordedCommand::SetFindQuery(generation, query));
     }
 
     fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection) {
-        self.record(RecordedSessionCommand::NavigateFind(generation, direction));
+        self.record(RecordedCommand::NavigateFind(generation, direction));
     }
 
     fn end_find(&self, generation: FindQueryGeneration) {
-        self.record(RecordedSessionCommand::EndFind(generation));
+        self.record(RecordedCommand::EndFind(generation));
     }
 
     fn request_paste(
         &self,
         text: crate::terminal::native_services::PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
-        self.record(RecordedSessionCommand::RequestPaste(text.into_text()));
+        self.record(RecordedCommand::RequestPaste(text.into_text()));
         if let Some(receiver) = &self.pending_paste_response {
             return receiver.clone();
         }
@@ -591,14 +587,14 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         id: PasteConfirmationId,
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>> {
-        self.record(RecordedSessionCommand::ResolvePaste(id, decision));
+        self.record(RecordedCommand::ResolvePaste(id, decision));
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_resolution.clone());
         receiver
     }
 
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.record(RecordedSessionCommand::RequestSelectionCopy);
+        self.record(RecordedCommand::RequestSelectionCopy);
         self.records
             .selection_copies
             .borrow_mut()
@@ -610,7 +606,7 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         &self,
         modifiers: super::InputModifiers,
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.record(RecordedSessionCommand::CopyOrForward(modifiers));
+        self.record(RecordedCommand::CopyOrForward(modifiers));
         self.copy_selection()
     }
 
@@ -618,16 +614,16 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         &self,
         generation: PresentationGeneration,
     ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.record(RecordedSessionCommand::RequestSelectionCopyAt(generation));
+        self.record(RecordedCommand::RequestSelectionCopyAt(generation));
         self.selection_response.clone()
     }
 
     fn set_presentable(&self, presentable: bool) {
-        self.record(RecordedSessionCommand::SetPresentable(presentable));
+        self.record(RecordedCommand::SetPresentable(presentable));
     }
 
     fn update_appearance(&self, update: TerminalAppearanceUpdate) {
-        self.record(RecordedSessionCommand::UpdateAppearance(update));
+        self.record(RecordedCommand::UpdateAppearance(update));
     }
 }
 

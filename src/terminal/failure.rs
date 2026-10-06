@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
-use super::session::{SessionExit, SessionFailure, SessionStartupStage};
+use super::session::{TerminalSessionExit, TerminalSessionFailure, TerminalSessionStartupStage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailureClass {
@@ -85,17 +85,17 @@ impl TerminalFailure {
         }
     }
 
-    pub(crate) fn from_session(failure: &SessionFailure) -> Self {
+    pub(crate) fn from_session(failure: &TerminalSessionFailure) -> Self {
         match failure {
-            SessionFailure::Startup { stage, .. } => match stage {
-                SessionStartupStage::Pty
-                | SessionStartupStage::Reader
-                | SessionStartupStage::ReaderThread => Self::pty("session-startup"),
-                SessionStartupStage::Emulator => Self::emulator("session-startup"),
+            TerminalSessionFailure::Startup { stage, .. } => match stage {
+                TerminalSessionStartupStage::Pty
+                | TerminalSessionStartupStage::Reader
+                | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
+                TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),
             },
-            SessionFailure::Runtime(_) => Self::emulator("session-runtime"),
-            SessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
-            SessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
+            TerminalSessionFailure::Runtime(_) => Self::emulator("session-runtime"),
+            TerminalSessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
+            TerminalSessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
         }
     }
 
@@ -134,7 +134,7 @@ impl fmt::Display for TerminalFailure {
 pub(crate) enum PaneTerminalState {
     #[default]
     Running,
-    Exited(SessionExit),
+    Exited(TerminalSessionExit),
     Failed {
         failure: TerminalFailure,
         last_valid_frame: Option<PresentationGeneration>,
@@ -142,7 +142,7 @@ pub(crate) enum PaneTerminalState {
 }
 
 impl PaneTerminalState {
-    pub(crate) const fn exited(exit: SessionExit) -> Self {
+    pub(crate) const fn exited(exit: TerminalSessionExit) -> Self {
         Self::Exited(exit)
     }
 
@@ -295,12 +295,12 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::terminal::{PresentationGeneration, SessionFailure};
+    use crate::terminal::{PresentationGeneration, TerminalSessionFailure};
 
     #[test]
     fn normal_exit_and_every_failure_class_are_distinguishable() {
         let states = [
-            PaneTerminalState::exited(crate::terminal::SessionExit::Success),
+            PaneTerminalState::exited(crate::terminal::TerminalSessionExit::Success),
             PaneTerminalState::failed(TerminalFailure::pty("read"), None),
             PaneTerminalState::failed(TerminalFailure::emulator("feed"), None),
             PaneTerminalState::failed(TerminalFailure::presentation("prepare"), None),
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn session_mapping_redacts_raw_terminal_content_and_secrets() {
-        let failure = TerminalFailure::from_session(&SessionFailure::Runtime(
+        let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
             "password=hunter2 output=private terminal text".to_owned(),
         ));
         let rendered = failure.to_string();

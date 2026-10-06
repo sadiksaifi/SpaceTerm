@@ -25,7 +25,7 @@ use super::{
 #[derive(Debug, Error)]
 /// A typed rejection while coordinating Remote lifecycle across one Tab's Pane hierarchy.
 pub(crate) enum RemoteTabViewLifecycleError {
-    #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
+    #[error("Pane {pane_id} cannot change remote Terminal Session lifecycle: {source}")]
     Pane {
         pane_id: PaneId,
         #[source]
@@ -617,7 +617,7 @@ impl TabView {
             .map_or(TerminalProgress::None, |caption| caption.progress)
     }
 
-    /// Records unread attention for one Pane as its Terminal would report it.
+    /// Records unread attention for one Pane as its Terminal Session would report it.
     #[cfg(test)]
     pub(crate) fn set_test_attention(
         &mut self,
@@ -1738,8 +1738,8 @@ impl TabView {
         cx: &App,
     ) -> AnyElement {
         let Some(terminal) = self.tab.pane(pane_id).cloned() else {
-            // A Pane without its Terminal still occupies a Pane's place, so it keeps a Pane's
-            // material rather than punching an opaque block through a translucent window.
+            // A Pane without its Terminal Session still occupies a Pane's place, so it keeps a
+            // Pane's material rather than punching an opaque block through a translucent window.
             return div()
                 .size_full()
                 .bg(gpui_color(appearance.surface(
@@ -2075,21 +2075,21 @@ impl Render for TabView {
 
 /// What one Tab presents about the Terminal Session its Focused Pane runs.
 ///
-/// The Tab is a compact restatement of that Pane's own caption: what the Session is doing, then
-/// where it is. Every segment is a fact the Pane already resolved and sanitized for presentation; a
-/// Tab never composes a path, names its Workspace, or interprets a title, and leaves a segment
-/// empty rather than inventing one.
+/// The Tab is a compact restatement of that Pane's own caption: what the Terminal Session is doing,
+/// then where it is. Every segment is a fact the Pane already resolved and sanitized for
+/// presentation; a Tab never composes a path, names its Workspace, or interprets a title, and
+/// leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TabIdentity {
     /// Local or Remote, as the Terminal Session classified itself.
     pub(crate) remote: bool,
-    /// The OSC 9;4 status the Session last reported, independent of its title.
+    /// The OSC 9;4 status the Terminal Session last reported, independent of its title.
     pub(crate) progress: TerminalProgress,
-    /// What the Session is doing: its Terminal title or its running command.
+    /// What the Terminal Session is doing: its Terminal title or its running command.
     pub(crate) activity: gpui::SharedString,
-    /// The Current Directory leaf that places the Session, such as `~` or the project it sits in.
+    /// The Current Directory leaf that places the Terminal Session, such as `~` or its project.
     pub(crate) place: gpui::SharedString,
-    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    /// The glyph the program reported for itself, replacing the Terminal Session's own.
     pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
@@ -2097,8 +2097,8 @@ pub(crate) struct TabIdentity {
 
 impl TabIdentity {
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
-        // A caption without a label has no directory, and its `name` is already what the Session
-        // is doing. Otherwise `name` is the directory leaf and `label` the activity.
+        // A caption without a label has no directory, and its `name` is already what the Terminal
+        // Session is doing. Otherwise `name` is the directory leaf and `label` the activity.
         let (activity, place) = if caption.label.is_empty() {
             (caption.name, gpui::SharedString::default())
         } else {
@@ -2148,11 +2148,11 @@ impl TabIdentity {
 
 /// One Pane caption split into the segments the header renders and drops independently.
 ///
-/// `origin` is the account and machine the Terminal runs on, `directory` the leading path up to
-/// and including its last separator, `name` the directory leaf that identifies the Pane, and
+/// `origin` is the account and machine the Terminal Session runs on, `directory` the leading path
+/// up to and including its last separator, `name` the directory leaf that identifies the Pane, and
 /// `label` the Terminal title or running command. `has_directory` distinguishes a promoted label
 /// from a root directory with no leading path. `running` marks a label that is a live command, and
-/// `progress` the status the Session reported independently of its title.
+/// `progress` the status the Terminal Session reported independently of its title.
 #[derive(Clone, Default, Eq, PartialEq)]
 struct PaneCaptionText {
     origin: PaneOrigin,
@@ -2874,11 +2874,12 @@ mod tests {
     use crate::appearance::Color;
     use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
-        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        RemoteChannelRevalidationError, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
-        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
+        ScreenSnapshot, ScrollbarSnapshot, TerminalSessionChannelProvider,
+        TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
+        TerminalSessionEvent, TerminalSessionExit, TerminalSessionFactory,
     };
     use crate::ui::RemoteChildLaunchUnavailable;
 
@@ -2948,15 +2949,15 @@ mod tests {
         }
     }
 
-    struct RevalidatingRemoteChannelProvider {
+    struct RevalidatingTerminalSessionChannelProvider {
         grant: AtomicBool,
         revalidations: AtomicUsize,
         preparations: AtomicUsize,
-        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        revalidation_error: Mutex<Option<TerminalSessionChannelRevalidationError>>,
         command_context: crate::ssh::testing::SshConnectionFixture,
     }
 
-    impl RevalidatingRemoteChannelProvider {
+    impl RevalidatingTerminalSessionChannelProvider {
         fn new(destination: crate::domain::SshDestination) -> Self {
             Self {
                 grant: AtomicBool::new(true),
@@ -2967,12 +2968,12 @@ mod tests {
             }
         }
 
-        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+        fn fail_revalidation_with(&self, error: Option<TerminalSessionChannelRevalidationError>) {
             *self.revalidation_error.lock().unwrap() = error;
         }
     }
 
-    impl RemoteTerminalChannelProvider for RevalidatingRemoteChannelProvider {
+    impl TerminalSessionChannelProvider for RevalidatingTerminalSessionChannelProvider {
         fn is_ready(&self) -> bool {
             true
         }
@@ -2981,7 +2982,7 @@ mod tests {
             &self,
             _directory: crate::domain::RemoteDirectory,
             _expected_identity: Option<crate::domain::RemoteDirectoryIdentity>,
-        ) -> gpui::Task<Result<(), RemoteChannelRevalidationError>> {
+        ) -> gpui::Task<Result<(), TerminalSessionChannelRevalidationError>> {
             self.revalidations.fetch_add(1, Ordering::AcqRel);
             self.grant.store(false, Ordering::Release);
             let error = *self.revalidation_error.lock().unwrap();
@@ -2994,13 +2995,15 @@ mod tests {
         fn prepare(
             &self,
             _directory: &crate::domain::RemoteDirectory,
-        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
-        {
+        ) -> Result<
+            crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+            TerminalSessionChannelUnavailable,
+        > {
             if !self.grant.swap(false, Ordering::AcqRel) {
-                return Err(RemoteChannelUnavailable);
+                return Err(TerminalSessionChannelUnavailable);
             }
             self.preparations.fetch_add(1, Ordering::AcqRel);
-            Ok(self.command_context.prepare_pane_channel(
+            Ok(self.command_context.prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             ))
         }
@@ -3027,7 +3030,7 @@ mod tests {
             records,
             destination,
             Arc::new(move || {
-                Ok(command_context.prepare_pane_channel(
+                Ok(command_context.prepare_terminal_session_channel(
                     ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                 ))
             }),
@@ -3037,7 +3040,7 @@ mod tests {
     fn remote_test_session_factory_with_provider(
         records: TestTerminalSessionRecords,
         destination: crate::domain::SshDestination,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::new(TestTerminalSessionFactory::new(records)),
@@ -3105,11 +3108,13 @@ mod tests {
     ) {
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
+            destination.clone(),
+        ));
         let session_factory = remote_test_session_factory_with_provider(
             records.clone(),
             destination,
-            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
         );
         let (view, events, cx) = remote_view_with_events(session_factory, cx);
         let before = view.read_with(cx, |view, _| {
@@ -3121,9 +3126,9 @@ mod tests {
         });
 
         for error in [
-            RemoteChannelRevalidationError::ConnectionUnavailable,
-            RemoteChannelRevalidationError::DirectoryUnavailable,
-            RemoteChannelRevalidationError::IdentityChanged,
+            TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+            TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+            TerminalSessionChannelRevalidationError::IdentityChanged,
         ] {
             provider.fail_revalidation_with(Some(error));
             split_test_pane(&view, before.1, SplitAxis::Horizontal, cx);
@@ -3156,11 +3161,13 @@ mod tests {
     ) {
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
+            destination.clone(),
+        ));
         let session_factory = remote_test_session_factory_with_provider(
             records.clone(),
             destination,
-            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
         );
         let (view, events, cx) = remote_view_with_events(session_factory, cx);
         let before = view.read_with(cx, |view, _| {
@@ -3237,18 +3244,22 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
+            destination.clone(),
+        ));
         let session_factory = remote_test_session_factory_with_provider(
             records.clone(),
             destination,
-            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
         );
         let (view, cx) = cx
             .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
         let focused = view.read_with(cx, |view, _| view.focused_pane_id());
 
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
         split_test_pane(&view, focused, SplitAxis::Horizontal, cx);
 
         assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 1);
@@ -3270,7 +3281,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
+    fn remote_split_should_leave_hierarchy_unchanged_when_terminal_session_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init)
@@ -3285,11 +3296,11 @@ mod tests {
             let preparations = Arc::clone(&preparations);
             Arc::new(move || {
                 if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
-                    Ok(command_context.prepare_pane_channel(
+                    Ok(command_context.prepare_terminal_session_channel(
                         ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                     ))
                 } else {
-                    Err(RemoteChannelUnavailable)
+                    Err(TerminalSessionChannelUnavailable)
                 }
             })
         };
@@ -3804,8 +3815,9 @@ mod tests {
         );
         cx.simulate_keystrokes("a");
         assert!(
-            records.commands().iter().any(|call| call.session_id == 3
-                && matches!(&call.command, RecordedSessionCommand::Key(_)))
+            records.commands().iter().any(
+                |call| call.session_id == 3 && matches!(&call.command, RecordedCommand::Key(_))
+            )
         );
     }
 
@@ -3966,7 +3978,7 @@ mod tests {
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen.clone()))
+            .try_send(TerminalSessionEvent::Screen(screen.clone()))
             .unwrap();
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
@@ -3992,7 +4004,7 @@ mod tests {
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen))
+            .try_send(TerminalSessionEvent::Screen(screen))
             .unwrap();
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
@@ -4072,7 +4084,7 @@ mod tests {
             records
                 .event_sender(1)
                 .unwrap()
-                .try_send(SessionEvent::Screen(screen))
+                .try_send(TerminalSessionEvent::Screen(screen))
                 .unwrap();
             cx.run_until_parked();
 
@@ -4130,7 +4142,7 @@ mod tests {
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen))
+            .try_send(TerminalSessionEvent::Screen(screen))
             .unwrap();
         cx.run_until_parked();
 
@@ -4234,7 +4246,7 @@ mod tests {
                 records
                     .event_sender(pane_id)
                     .unwrap()
-                    .try_send(SessionEvent::Screen(screen))
+                    .try_send(TerminalSessionEvent::Screen(screen))
                     .unwrap();
             }
             cx.run_until_parked();
@@ -4568,7 +4580,7 @@ mod tests {
         assert!(!records.commands().iter().any(|call| {
             matches!(
                 call.command,
-                crate::terminal::testing::RecordedSessionCommand::RequestPaste(_)
+                crate::terminal::testing::RecordedCommand::RequestPaste(_)
             )
         }));
     }
@@ -4624,7 +4636,7 @@ mod tests {
         assert!(!records.commands().iter().any(|call| {
             matches!(
                 call.command,
-                crate::terminal::testing::RecordedSessionCommand::RequestPaste(_)
+                crate::terminal::testing::RecordedCommand::RequestPaste(_)
             )
         }));
     }
@@ -4675,7 +4687,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                crate::terminal::testing::RecordedSessionCommand::RequestPaste(text) => {
+                crate::terminal::testing::RecordedCommand::RequestPaste(text) => {
                     Some((call.session_id, text))
                 }
                 _ => None,
@@ -4712,17 +4724,19 @@ mod tests {
 
         let first_sender = records
             .event_sender(1)
-            .expect("the first Pane session was not started");
+            .expect("the first Pane's Terminal Session was not started");
         first_sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                ScrollbarSnapshot {
-                    total_rows: 100,
-                    visible_rows: 20,
-                    ..Default::default()
-                },
-                "",
-            )))
+            .try_send(TerminalSessionEvent::Screen(
+                ScreenSnapshot::from_test_parts(
+                    Arc::from([]),
+                    ScrollbarSnapshot {
+                        total_rows: 100,
+                        visible_rows: 20,
+                        ..Default::default()
+                    },
+                    "",
+                ),
+            ))
             .unwrap();
         cx.run_until_parked();
 
@@ -4857,13 +4871,11 @@ mod tests {
 
         let sender = records
             .last_event_sender()
-            .expect("the split Pane session was not started");
+            .expect("the split Pane's Terminal Session was not started");
         sender
-            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
-                Arc::from([]),
-                Default::default(),
-                "Claude Code",
-            )))
+            .try_send(TerminalSessionEvent::Screen(
+                ScreenSnapshot::from_test_parts(Arc::from([]), Default::default(), "Claude Code"),
+            ))
             .unwrap();
         cx.run_until_parked();
 
@@ -4898,9 +4910,9 @@ mod tests {
         cx.run_until_parked();
         let sender = records
             .event_sender(2)
-            .expect("the split Pane session was not started");
+            .expect("the split Pane's Terminal Session was not started");
         sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -4940,12 +4952,14 @@ mod tests {
 
         let sender = records
             .event_sender(1)
-            .expect("the initial Pane session was not started");
+            .expect("the initial Pane's Terminal Session was not started");
         sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         sender
-            .try_send(SessionEvent::Exited(SessionExit::ExitCode(1)))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(
+                1,
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -5591,7 +5605,7 @@ mod tests {
         records
             .event_sender(session)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen))
+            .try_send(TerminalSessionEvent::Screen(screen))
             .unwrap();
     }
 

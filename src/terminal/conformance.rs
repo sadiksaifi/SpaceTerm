@@ -36,7 +36,7 @@ use super::pointer_input::{
     WheelPhase,
 };
 use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
-use super::session::SessionFailure;
+use super::session::TerminalSessionFailure;
 use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
@@ -833,17 +833,17 @@ fn check_snapshot_isolation() -> Result<(), String> {
     let first_snapshot = first
         .snapshot()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "first Session published no snapshot".to_owned())?;
+        .ok_or_else(|| "first Terminal Session published no snapshot".to_owned())?;
     let second_snapshot = second
         .snapshot()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "second Session published no snapshot".to_owned())?;
+        .ok_or_else(|| "second Terminal Session published no snapshot".to_owned())?;
     require_eq("first-cell", first_snapshot.rows[0][0].text.as_str(), "a")?;
     require_eq("second-cell", second_snapshot.rows[0][0].text.as_str(), "b")?;
     require(
         !std::sync::Arc::ptr_eq(&first_snapshot.rows, &second_snapshot.rows),
         "snapshot-isolation",
-        "two Sessions shared row storage",
+        "two Terminal Sessions shared row storage",
     )?;
     require(
         first_snapshot.damage.content != super::emulator::ContentDamageSnapshot::Clean,
@@ -1699,7 +1699,7 @@ fn check_typed_failures() -> Result<(), String> {
         failure.recoverability(),
         Recoverability::Fatal,
     )?;
-    let redacted = TerminalFailure::from_session(&SessionFailure::Runtime(
+    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
         "private terminal content".to_owned(),
     ));
     require(

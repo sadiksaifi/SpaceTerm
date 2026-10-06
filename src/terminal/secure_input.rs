@@ -95,7 +95,7 @@ impl SecureInputPane {
         }
     }
 
-    /// Session completion and hierarchy removal permanently revoke this lease.
+    /// Terminal Session completion and hierarchy removal permanently revoke this lease.
     pub(crate) fn retire(&self) {
         if let Some(id) = self.id.take() {
             let mut coordinator = self.coordinator.0.borrow_mut();

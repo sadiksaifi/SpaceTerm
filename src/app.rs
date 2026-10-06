@@ -2189,7 +2189,9 @@ mod runtime_tests {
             records
                 .event_sender(session_id)
                 .unwrap()
-                .try_send(crate::terminal::SessionEvent::Screen(Arc::clone(&screen)))
+                .try_send(crate::terminal::TerminalSessionEvent::Screen(Arc::clone(
+                    &screen,
+                )))
                 .unwrap();
         }
         cx.run_until_parked();

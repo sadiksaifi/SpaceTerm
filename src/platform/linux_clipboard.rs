@@ -12,7 +12,7 @@ use gpui::{
 };
 use std::{path::PathBuf, rc::Rc};
 
-/// OSC 52 reaches the selected native text buffer after the Session checks focus and policy.
+/// OSC 52 reaches the selected native buffer after the Terminal Session checks focus and policy.
 pub(super) struct LinuxTextClipboard;
 
 impl TextClipboard for LinuxTextClipboard {

@@ -33,12 +33,12 @@ use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 /// A typed rejection while coordinating Remote lifecycle across the Workspace's Tab hierarchy.
 pub(crate) enum RemoteTabManagerLifecycleError {
     #[error(transparent)]
-    Revalidation(#[from] RemoteChannelRevalidationError),
+    Revalidation(#[from] TerminalSessionChannelRevalidationError),
     #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+    ChannelUnavailable(#[from] TerminalSessionChannelUnavailable),
     #[error("remote restart preparation was superseded")]
     PreparationSuperseded,
-    #[error("Tab {tab_id} cannot change remote session lifecycle: {source}")]
+    #[error("Tab {tab_id} cannot change remote Terminal Session lifecycle: {source}")]
     Tab {
         tab_id: TabId,
         #[source]
@@ -67,7 +67,8 @@ use crate::platform::window_movement::{
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    RemoteChannelRevalidationError, RemoteChannelUnavailable, WorkspaceTerminalSessionFactory,
+    TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
+    WorkspaceTerminalSessionFactory,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -468,7 +469,7 @@ impl TabManager {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<Self, RemoteChannelUnavailable> {
+    ) -> Result<Self, TerminalSessionChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(Self::new_with_prepared_initial_launch(
             session_factory,
@@ -715,7 +716,7 @@ impl TabManager {
         Ok(())
     }
 
-    /// Revalidates and reserves one fresh Remote channel for every preserved Pane.
+    /// Revalidates and reserves one fresh Terminal Session Channel for every preserved Pane.
     ///
     /// Reservation is asynchronous and completes before hierarchy mutation. Each channel requires
     /// its own current physical-identity grant. Cancellation, stale generation, directory change,
@@ -747,7 +748,7 @@ impl TabManager {
             Ok(factories) => factories,
             Err(_) => {
                 return Task::ready(Err(
-                    RemoteChannelRevalidationError::DirectoryUnavailable.into()
+                    TerminalSessionChannelRevalidationError::DirectoryUnavailable.into(),
                 ));
             }
         };
@@ -2934,11 +2935,11 @@ mod tests {
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
-        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        RemoteChannelUnavailable, RemoteTerminalChannelProvider, SessionEvent, SessionExit,
-        SessionFailure, TerminalSessionFactory,
+        TerminalSessionChannelProvider, TerminalSessionChannelUnavailable, TerminalSessionEvent,
+        TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
     };
     use crate::ui::TogglePaneZoom;
 
@@ -2963,18 +2964,18 @@ mod tests {
         }
     }
 
-    struct SequencedRemoteChannelProvider {
+    struct SequencedTerminalSessionChannelProvider {
         ready: AtomicBool,
         grant: AtomicBool,
         preparations: AtomicUsize,
         revalidations: AtomicUsize,
         fail_at: Mutex<Option<usize>>,
-        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        revalidation_error: Mutex<Option<TerminalSessionChannelRevalidationError>>,
         invalidate_grant_after_revalidation: AtomicBool,
         command_context: crate::ssh::testing::SshConnectionFixture,
     }
 
-    impl SequencedRemoteChannelProvider {
+    impl SequencedTerminalSessionChannelProvider {
         fn new(destination: crate::domain::SshDestination) -> Self {
             Self {
                 ready: AtomicBool::new(true),
@@ -3004,7 +3005,7 @@ mod tests {
             self.revalidations.load(Ordering::Acquire)
         }
 
-        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+        fn fail_revalidation_with(&self, error: Option<TerminalSessionChannelRevalidationError>) {
             *self.revalidation_error.lock().unwrap() = error;
         }
 
@@ -3014,7 +3015,7 @@ mod tests {
         }
     }
 
-    impl RemoteTerminalChannelProvider for SequencedRemoteChannelProvider {
+    impl TerminalSessionChannelProvider for SequencedTerminalSessionChannelProvider {
         fn is_ready(&self) -> bool {
             self.ready.load(Ordering::Acquire)
         }
@@ -3023,7 +3024,7 @@ mod tests {
             &self,
             _directory: crate::domain::RemoteDirectory,
             _expected_identity: Option<crate::domain::RemoteDirectoryIdentity>,
-        ) -> Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+        ) -> Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
             self.revalidations.fetch_add(1, Ordering::AcqRel);
             self.grant.store(false, Ordering::Release);
             let result = self.revalidation_error.lock().unwrap().map_or(Ok(()), Err);
@@ -3040,16 +3041,18 @@ mod tests {
         fn prepare(
             &self,
             _directory: &crate::domain::RemoteDirectory,
-        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
-        {
+        ) -> Result<
+            crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+            TerminalSessionChannelUnavailable,
+        > {
             if !self.grant.swap(false, Ordering::AcqRel) {
-                return Err(RemoteChannelUnavailable);
+                return Err(TerminalSessionChannelUnavailable);
             }
             let preparation = self.preparations.fetch_add(1, Ordering::AcqRel) + 1;
             if *self.fail_at.lock().unwrap() == Some(preparation) {
-                return Err(RemoteChannelUnavailable);
+                return Err(TerminalSessionChannelUnavailable);
             }
-            Ok(self.command_context.prepare_pane_channel(
+            Ok(self.command_context.prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             ))
         }
@@ -3057,7 +3060,7 @@ mod tests {
 
     fn remote_tab_manager_with_provider(
         cx: &mut TestAppContext,
-        provider: Arc<SequencedRemoteChannelProvider>,
+        provider: Arc<SequencedTerminalSessionChannelProvider>,
     ) -> (
         Entity<TabManager>,
         TestTerminalSessionRecords,
@@ -3081,7 +3084,7 @@ mod tests {
 
     fn remote_tab_manager_with_provider_and_events(
         cx: &mut TestAppContext,
-        provider: Arc<SequencedRemoteChannelProvider>,
+        provider: Arc<SequencedTerminalSessionChannelProvider>,
     ) -> (
         Entity<TabManager>,
         TestTerminalSessionRecords,
@@ -3249,7 +3252,7 @@ mod tests {
             records.clone(),
             destination,
             Arc::new(move || {
-                Ok(command_context.prepare_pane_channel(
+                Ok(command_context.prepare_terminal_session_channel(
                     ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                 ))
             }),
@@ -3267,7 +3270,7 @@ mod tests {
     fn remote_session_factory_with_provider(
         records: TestTerminalSessionRecords,
         destination: crate::domain::SshDestination,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         remote_session_factory_with_terminal_factory(
             Rc::new(TestTerminalSessionFactory::new(records)),
@@ -3279,7 +3282,7 @@ mod tests {
     fn remote_session_factory_with_terminal_factory(
         terminal_factory: Rc<dyn TerminalSessionFactory>,
         destination: crate::domain::SshDestination,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_remote(
             terminal_factory,
@@ -3865,7 +3868,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_tab_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
+    fn remote_tab_creation_should_leave_hierarchy_unchanged_when_terminal_session_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init)
@@ -3880,11 +3883,11 @@ mod tests {
             let preparations = Arc::clone(&preparations);
             Arc::new(move || {
                 if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
-                    Ok(command_context.prepare_pane_channel(
+                    Ok(command_context.prepare_terminal_session_channel(
                         ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                     ))
                 } else {
-                    Err(RemoteChannelUnavailable)
+                    Err(TerminalSessionChannelUnavailable)
                 }
             })
         };
@@ -3963,7 +3966,7 @@ mod tests {
             records
                 .commands()
                 .into_iter()
-                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
                 .count()
         };
         let before = key_inputs(&records);
@@ -4284,15 +4287,15 @@ mod tests {
         assert!(cx.debug_bounds("pane-status-1-attention").is_some());
     }
 
-    /// A program that draws its own glyph gets that glyph in the Session's slot, not beside it.
+    /// A program's own glyph takes the Terminal Session's slot rather than sitting beside it.
     #[gpui::test]
-    fn local_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+    fn local_reported_glyph_should_take_the_terminal_session_glyph(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         assert_reported_glyph(&manager, &records, false, cx);
     }
 
     #[gpui::test]
-    fn remote_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+    fn remote_reported_glyph_should_take_the_terminal_session_glyph(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
         assert_reported_glyph(&manager, &records, true, cx);
     }
@@ -4335,9 +4338,9 @@ mod tests {
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Failed(SessionFailure::Runtime(
-                "worker stopped".to_owned(),
-            )))
+            .try_send(TerminalSessionEvent::Failed(
+                TerminalSessionFailure::Runtime("worker stopped".to_owned()),
+            ))
             .unwrap();
         cx.run_until_parked();
 
@@ -4387,7 +4390,7 @@ mod tests {
             ),
             (remote, Some("\u{2733}"), "Claude Code")
         );
-        // The Tab carries one glyph, in the slot the Session's own glyph would have taken.
+        // The Tab carries one glyph, in the slot the Terminal Session's own glyph would have taken.
         let origin = if remote {
             "tab-origin-1-remote"
         } else {
@@ -4406,7 +4409,7 @@ mod tests {
             gpui::size(glyph, glyph)
         );
 
-        // A title without a glyph leaves the Session with its own.
+        // A title without a glyph leaves the Terminal Session with its own.
         report(records, 2, "cargo test", cx);
         let plain = identity(cx);
         assert_eq!(
@@ -4418,8 +4421,8 @@ mod tests {
         );
     }
 
-    /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane
-    /// Caption, independently of the title, and removing the status leaves no mark.
+    /// Local and Remote Terminal Sessions present every OSC 9;4 state the same way in the Tab and
+    /// the Pane Caption, independently of the title, and removing the status leaves no mark.
     #[gpui::test]
     fn local_progress_should_present_each_state_in_tab_and_caption(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
@@ -4615,7 +4618,7 @@ mod tests {
         assert_eq!(next.progress, TerminalProgress::None);
     }
 
-    /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.
+    /// A hidden Tab gets no Screens, yet its item tracks the Terminal Session's title and progress.
     #[gpui::test]
     fn background_tab_should_follow_retained_title_and_progress(cx: &mut TestAppContext) {
         use super::super::terminal_status::TerminalProgress;
@@ -5393,7 +5396,7 @@ mod tests {
             .into_iter()
             .skip(command_count)
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5446,7 +5449,7 @@ mod tests {
             .into_iter()
             .skip(command_count)
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5480,10 +5483,10 @@ mod tests {
         click("create-tab-button", cx);
         let first_sender = records
             .event_sender(1)
-            .expect("Tab 1 session must have started");
+            .expect("Tab 1 Terminal Session must have started");
 
         first_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5506,14 +5509,14 @@ mod tests {
         click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Tab 2 session must have started");
+            .expect("Tab 2 Terminal Session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
             window.blur(cx);
         });
 
         active_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5537,10 +5540,10 @@ mod tests {
         click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Tab 2 session must have started");
+            .expect("Tab 2 Terminal Session must have started");
 
         active_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5562,11 +5565,13 @@ mod tests {
     #[gpui::test]
     fn remote_create_tab_should_revalidate_before_mutating_the_hierarchy(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
@@ -5594,15 +5599,15 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
         for error in [
-            RemoteChannelRevalidationError::ConnectionUnavailable,
-            RemoteChannelRevalidationError::DirectoryUnavailable,
-            RemoteChannelRevalidationError::IdentityChanged,
+            TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+            TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+            TerminalSessionChannelRevalidationError::IdentityChanged,
         ] {
             provider.fail_revalidation_with(Some(error));
             cx.update(|window, cx| {
@@ -5629,7 +5634,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
@@ -5675,11 +5680,13 @@ mod tests {
     #[gpui::test]
     fn remote_split_failure_should_be_forwarded_once_by_tab_manager(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
 
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
@@ -5693,11 +5700,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_restart_reserves_all_channels_before_preserving_and_restarting_hierarchy(
+    fn remote_restart_reserves_all_terminal_session_channels_before_preserving_and_restarting_hierarchy(
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.dispatch_action(TogglePaneZoom);
@@ -5719,13 +5726,15 @@ mod tests {
         );
         let before = manager.read_with(cx, hierarchy_identity);
 
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
         let identity_changed = await_remote_restart_preparation(&manager, factory, 5, cx);
         assert!(matches!(
             identity_changed,
             Err(RemoteTabManagerLifecycleError::Revalidation(
-                RemoteChannelRevalidationError::IdentityChanged
+                TerminalSessionChannelRevalidationError::IdentityChanged
             ))
         ));
         assert_eq!(records.starts().len(), 3);
@@ -5775,7 +5784,7 @@ mod tests {
     #[gpui::test]
     fn dropping_unpolled_remote_restart_task_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         manager
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
@@ -5804,15 +5813,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unavailable_remote_channel_keeps_pane_and_blocks_new_children(cx: &mut TestAppContext) {
+    fn unavailable_terminal_session_channel_keeps_pane_and_blocks_new_children(
+        cx: &mut TestAppContext,
+    ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         provider.set_ready(false);
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Exited(SessionExit::ExitCode(255)))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(
+                255,
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -5839,7 +5852,9 @@ mod tests {
     #[gpui::test]
     fn post_commit_start_failure_is_scoped_to_the_failed_remote_pane(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination.clone()));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(
+            destination.clone(),
+        ));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
@@ -5875,7 +5890,11 @@ mod tests {
             states,
             vec![
                 (PaneId::new(1), true, None),
-                (PaneId::new(2), false, Some("restart-remote-session")),
+                (
+                    PaneId::new(2),
+                    false,
+                    Some("restart-remote-terminal-session")
+                ),
             ]
         );
         assert_eq!(records.starts().len(), 4);
@@ -5892,7 +5911,7 @@ mod tests {
         records
             .event_sender(2)
             .unwrap()
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -5904,7 +5923,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_a_multi_pane_tab_should_close_every_owned_session_exactly_once(
+    fn closing_a_multi_pane_tab_should_close_every_owned_terminal_session_exactly_once(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = tab_manager(cx);
@@ -6052,7 +6071,7 @@ mod tests {
         records
             .event_sender(session)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen))
+            .try_send(TerminalSessionEvent::Screen(screen))
             .unwrap();
     }
 

@@ -178,7 +178,7 @@ impl PreparedShellLaunch {
         validate_working_directory(local_home)?;
         let (executable, arguments, prepared_environment) = command
             .into_pane_launch_parts()
-            .map_err(|_| ShellLaunchFailure::RemoteChannelUnavailable)?;
+            .map_err(|_| ShellLaunchFailure::TerminalSessionChannelUnavailable)?;
         let (working_directory, mut environment) =
             prepared_environment.into_pane_launch_environment();
         environment.push(("TERM".into(), identity::TERM_FALLBACK.into()));
@@ -248,7 +248,7 @@ pub(crate) enum ShellLaunchFailure {
     #[error("Shell launch directory is unavailable; select an existing directory and retry")]
     DirectoryUnavailable,
     #[error("Remote Terminal Session Channel is unavailable; reconnect and retry")]
-    RemoteChannelUnavailable,
+    TerminalSessionChannelUnavailable,
 }
 
 fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure> {
@@ -265,7 +265,8 @@ mod tests {
     use crate::domain::{RemoteDirectory, SshDestination};
     use crate::platform::shell_integration::ShellKind;
     use crate::ssh::command::{
-        PreparedSshPaneChannelError, RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell,
+        PreparedSshTerminalSessionChannelError, RemotePaneShellCommandBuilder,
+        ValidatedRemoteLoginShell,
     };
 
     fn env_value<'a>(launch: &'a PreparedShellLaunch, key: &str) -> Option<&'a OsStr> {
@@ -490,13 +491,13 @@ mod tests {
         let command = RemotePaneShellCommandBuilder::new(&directory, &shell)
             .build()
             .unwrap();
-        let channel = context.prepare_pane_channel(command);
+        let channel = context.prepare_terminal_session_channel(command);
         let taken = channel.take().unwrap();
         let expected_arguments = taken.arguments().to_vec();
         let launch = PreparedShellLaunch::remote(&std::env::temp_dir(), taken).unwrap();
         assert!(matches!(
             channel.take(),
-            Err(PreparedSshPaneChannelError::AlreadyConsumed)
+            Err(PreparedSshTerminalSessionChannelError::AlreadyConsumed)
         ));
         assert_eq!(launch.executable(), "/test/ssh");
         assert_eq!(launch.arguments(), expected_arguments);

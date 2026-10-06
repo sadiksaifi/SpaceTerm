@@ -79,7 +79,7 @@ pub(crate) enum ProgressMetadata {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-/// The local account, machine, and home facts a Local Terminal presents as its origin.
+/// The local account, machine, and home facts a Local Terminal Session presents as its origin.
 ///
 /// Composition captures these once from the host. They are presentation identity only and carry
 /// no filesystem authority; `home` is a spelling used to abbreviate displayed directories.
@@ -116,7 +116,7 @@ impl LocalMachine {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-/// The remote account facts a Remote Terminal presents, captured when its account was discovered.
+/// The remote account facts a Remote Terminal Session presents, captured at account discovery.
 ///
 /// These are remote strings kept for presentation. They are never local filesystem authority, and
 /// `home` is used only to abbreviate a displayed remote directory.

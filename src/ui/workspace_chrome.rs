@@ -210,8 +210,8 @@ impl WorkspaceChromeStatusHosts {
 
 /// The one status the collapsed Workspace identity presents.
 ///
-/// An unavailable directory takes precedence over the Remote connection, because no Terminal can
-/// start in the Workspace until it is resolved.
+/// An unavailable directory takes precedence over the Remote connection, because no Terminal
+/// Session can start in the Workspace until it is resolved.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceChromeStatus {
     Unavailable,

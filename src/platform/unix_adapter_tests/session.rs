@@ -25,7 +25,7 @@ fn test_launch_planner(startup: &std::path::Path) -> ShellLaunchPlanner {
 // Wait for the shell integration's observed command-input boundary, not an arbitrary delay.
 fn wait_for_shell_prompt(
     session: &TerminalSession,
-    events: &async_channel::Receiver<SessionEvent>,
+    events: &async_channel::Receiver<TerminalSessionEvent>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -39,10 +39,10 @@ fn wait_for_shell_prompt(
             "shell did not publish its first input prompt"
         );
         match events.try_recv() {
-            Ok(SessionEvent::Failed(failure)) => {
+            Ok(TerminalSessionEvent::Failed(failure)) => {
                 panic!("terminal session failed before prompt: {failure}")
             }
-            Ok(SessionEvent::Exited(_)) | Err(async_channel::TryRecvError::Closed) => {
+            Ok(TerminalSessionEvent::Exited(_)) | Err(async_channel::TryRecvError::Closed) => {
                 panic!("shell ended before its first prompt")
             }
             Ok(_) => {}
@@ -102,19 +102,21 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     let mut saw_red_x = false;
     while Instant::now() < deadline && !saw_red_x {
         match events.try_recv() {
-            Ok(SessionEvent::Screen(screen)) => {
+            Ok(TerminalSessionEvent::Screen(screen)) => {
                 saw_red_x = screen.rows.iter().flat_map(|row| row.iter()).any(|cell| {
                     cell.text == "X"
                         && cell.foreground_source == crate::terminal::TerminalColor::Palette(1)
                 });
             }
-            Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
-            Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
+            Ok(TerminalSessionEvent::Failed(failure)) => {
+                panic!("terminal session failed: {failure}")
+            }
+            Ok(TerminalSessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
             Ok(
-                SessionEvent::HiddenInputChanged(_)
-                | SessionEvent::PermissionRequested(_)
-                | SessionEvent::MetadataChanged(_)
-                | SessionEvent::Attention(_),
+                TerminalSessionEvent::HiddenInputChanged(_)
+                | TerminalSessionEvent::PermissionRequested(_)
+                | TerminalSessionEvent::MetadataChanged(_)
+                | TerminalSessionEvent::Attention(_),
             ) => {}
             Err(async_channel::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));
@@ -157,14 +159,16 @@ fn real_shell_exit_command_emits_an_exited_event() {
     let mut exit_status = None;
     while Instant::now() < deadline && exit_status.is_none() {
         match events.try_recv() {
-            Ok(SessionEvent::Screen(_)) => {}
-            Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
-            Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
+            Ok(TerminalSessionEvent::Screen(_)) => {}
+            Ok(TerminalSessionEvent::Exited(status)) => exit_status = Some(status),
+            Ok(TerminalSessionEvent::Failed(failure)) => {
+                panic!("terminal session failed: {failure}")
+            }
             Ok(
-                SessionEvent::HiddenInputChanged(_)
-                | SessionEvent::PermissionRequested(_)
-                | SessionEvent::MetadataChanged(_)
-                | SessionEvent::Attention(_),
+                TerminalSessionEvent::HiddenInputChanged(_)
+                | TerminalSessionEvent::PermissionRequested(_)
+                | TerminalSessionEvent::MetadataChanged(_)
+                | TerminalSessionEvent::Attention(_),
             ) => {}
             Err(async_channel::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));
@@ -174,7 +178,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
     }
 
     drop(session);
-    assert_eq!(exit_status, Some(SessionExit::Success));
+    assert_eq!(exit_status, Some(TerminalSessionExit::Success));
 }
 
 struct JoinedRealPtySession(TerminalSession);

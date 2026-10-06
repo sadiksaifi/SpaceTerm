@@ -112,7 +112,7 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
     records
         .event_sender(1)
         .unwrap()
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
     let identity = manager.read_with(cx, |manager, _| {
@@ -214,7 +214,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     records
         .event_sender(2)
         .unwrap()
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
     let identity = manager.read_with(cx, |manager, _| {
@@ -492,25 +492,23 @@ use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::terminal::testing::{
-    RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
-use crate::terminal::{SessionEvent, SessionExit};
+use crate::terminal::{TerminalSessionEvent, TerminalSessionExit};
 use crate::ui::askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::directory_picker::{
     DirectoryListing, ExactPathState, RemoteDirectoryProvider, RemoteDirectoryProviderError,
 };
 use crate::ui::remote_workspace_flow::{
-    RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
-    RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
+    ControlConnectionOwner, RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError,
+    RemoteWorkspaceConnectContext, RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage,
 };
 use crate::ui::ssh_host_form::ManagedHostFormBackendError;
 
 #[derive(Default)]
 struct TestRemoteWorkspaceFlowBackend {
     connections: Mutex<
-        VecDeque<
-            gpui::Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>,
-        >,
+        VecDeque<gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>>,
     >,
     connect_calls: AtomicUsize,
 }
@@ -518,9 +516,7 @@ struct TestRemoteWorkspaceFlowBackend {
 impl TestRemoteWorkspaceFlowBackend {
     fn with_connections(
         connections: impl IntoIterator<
-            Item = gpui::Task<
-                Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
-            >,
+            Item = gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>,
         >,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -546,7 +542,7 @@ impl RemoteWorkspaceFlowBackend for TestRemoteWorkspaceFlowBackend {
         &self,
         _: crate::domain::SshDestination,
         _: RemoteWorkspaceConnectContext,
-    ) -> gpui::Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>> {
+    ) -> gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>> {
         self.connect_calls.fetch_add(1, Ordering::AcqRel);
         self.connections
             .lock()
@@ -750,16 +746,17 @@ fn test_remote_account() -> RemoteWorkspaceAccount {
     .unwrap()
 }
 
-struct TestRemoteChannelProvider {
+struct TestTerminalSessionChannelProvider {
     connection: crate::ssh::testing::SshConnectionFixture,
     preparations: Arc<AtomicUsize>,
     revalidations: Arc<AtomicUsize>,
-    revalidation_tasks:
-        Mutex<VecDeque<gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>>>,
+    revalidation_tasks: Mutex<
+        VecDeque<gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>>,
+    >,
     available: Arc<AtomicBool>,
 }
 
-impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvider {
+impl crate::terminal::TerminalSessionChannelProvider for TestTerminalSessionChannelProvider {
     fn is_ready(&self) -> bool {
         self.available.load(Ordering::Acquire)
     }
@@ -768,7 +765,7 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
         &self,
         _: RemoteDirectory,
         _: Option<crate::domain::RemoteDirectoryIdentity>,
-    ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+    ) -> gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
         self.revalidations.fetch_add(1, Ordering::AcqRel);
         self.revalidation_tasks
             .lock()
@@ -781,22 +778,22 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
         &self,
         _: &RemoteDirectory,
     ) -> Result<
-        crate::ssh::command::PreparedSshPaneChannelCommand,
-        crate::terminal::RemoteChannelUnavailable,
+        crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+        crate::terminal::TerminalSessionChannelUnavailable,
     > {
         self.preparations.fetch_add(1, Ordering::AcqRel);
         if !self.available.load(Ordering::Acquire) {
-            return Err(crate::terminal::RemoteChannelUnavailable);
+            return Err(crate::terminal::TerminalSessionChannelUnavailable);
         }
-        Ok(self.connection.prepare_pane_channel(
+        Ok(self.connection.prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         ))
     }
 }
 
-struct TestRemoteSessionOwner {
+struct TestControlConnectionOwner {
     closes: Arc<AtomicUsize>,
-    channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+    channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
     lifecycle: Option<crate::ssh::live_connection::ControlConnectionObserver>,
     _lifecycle_senders:
         Vec<async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>>,
@@ -804,7 +801,7 @@ struct TestRemoteSessionOwner {
     alias_pin_error: bool,
 }
 
-impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
+impl ControlConnectionOwner for TestControlConnectionOwner {
     fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
@@ -822,11 +819,11 @@ impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
             .transpose()
     }
 
-    fn bind_terminal_channels(
+    fn bind_terminal_session_channels(
         &self,
         _: &crate::ssh::command::ValidatedRemoteLoginShell,
     ) -> Result<
-        Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+        Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
         RemoteWorkspaceFlowBackendError,
     > {
         Ok(Arc::clone(&self.channels))
@@ -871,7 +868,7 @@ fn remote_completion_with_revalidation(
     directory: &str,
     physical: &str,
     available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
 ) -> RemoteCompletionFixture {
     remote_completion_with_provider(
         destination,
@@ -888,7 +885,7 @@ fn remote_completion_with_provider(
     directory: &str,
     physical: &str,
     available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
     provider: Arc<dyn RemoteDirectoryProvider>,
 ) -> RemoteCompletionFixture {
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
@@ -897,8 +894,8 @@ fn remote_completion_with_provider(
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
     let availability = Arc::new(AtomicBool::new(available));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
             connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
@@ -908,14 +905,17 @@ fn remote_completion_with_provider(
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (session_lifecycle_sender, session_lifecycle) =
+    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let session = RemoteWorkspaceConnectedSession::new(
-        Box::new(TestRemoteSessionOwner {
+    let control_connection = ConnectedControlConnection::new(
+        Box::new(TestControlConnectionOwner {
             closes: Arc::clone(&closes),
             channels: Arc::clone(&channels),
-            lifecycle: Some(session_lifecycle),
-            _lifecycle_senders: vec![runtime_lifecycle_sender.clone(), session_lifecycle_sender],
+            lifecycle: Some(control_connection_lifecycle),
+            _lifecycle_senders: vec![
+                runtime_lifecycle_sender.clone(),
+                control_connection_lifecycle_sender,
+            ],
             alias: None,
             alias_pin_error: false,
         }),
@@ -924,7 +924,7 @@ fn remote_completion_with_provider(
     let account = test_remote_account();
     (
         crate::ui::remote_workspace_flow::completion(
-            session,
+            control_connection,
             destination,
             directory,
             physical,
@@ -968,8 +968,8 @@ fn remote_completion_with_active_alias_pin_failure(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
             connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations,
             revalidations,
@@ -979,14 +979,17 @@ fn remote_completion_with_active_alias_pin_failure(
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (session_lifecycle_sender, session_lifecycle) =
+    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let session = RemoteWorkspaceConnectedSession::new(
-        Box::new(TestRemoteSessionOwner {
+    let control_connection = ConnectedControlConnection::new(
+        Box::new(TestControlConnectionOwner {
             closes: Arc::clone(&closes),
             channels: Arc::clone(&channels),
-            lifecycle: Some(session_lifecycle),
-            _lifecycle_senders: vec![runtime_lifecycle_sender.clone(), session_lifecycle_sender],
+            lifecycle: Some(control_connection_lifecycle),
+            _lifecycle_senders: vec![
+                runtime_lifecycle_sender.clone(),
+                control_connection_lifecycle_sender,
+            ],
             alias: Some(lease),
             alias_pin_error,
         }),
@@ -995,7 +998,7 @@ fn remote_completion_with_active_alias_pin_failure(
     let account = test_remote_account();
     (
         crate::ui::remote_workspace_flow::completion(
-            session,
+            control_connection,
             destination,
             directory,
             physical,
@@ -1241,44 +1244,48 @@ fn workspace_manager_with_remote_backend(
     (manager, records, cx)
 }
 
-fn reconnect_session(
+fn reconnect_control_connection(
     destination: &str,
     physical: &str,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 ) {
     let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    reconnect_session_with_provider(
+    reconnect_control_connection_with_provider(
         destination,
         Arc::new(TestRemoteProvider::connected(physical)),
     )
 }
 
-fn reconnect_session_with_provider(
+fn reconnect_control_connection_with_provider(
     destination: &str,
     provider: Arc<dyn RemoteDirectoryProvider>,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 ) {
-    reconnect_session_with_provider_and_revalidation(destination, provider, VecDeque::new())
+    reconnect_control_connection_with_provider_and_revalidation(
+        destination,
+        provider,
+        VecDeque::new(),
+    )
 }
 
-fn reconnect_session_with_provider_and_revalidation(
+fn reconnect_control_connection_with_provider_and_revalidation(
     destination: &str,
     provider: Arc<dyn RemoteDirectoryProvider>,
     revalidation_tasks: VecDeque<
-        gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+        gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
     >,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
@@ -1287,8 +1294,8 @@ fn reconnect_session_with_provider_and_revalidation(
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
             connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
@@ -1299,8 +1306,8 @@ fn reconnect_session_with_provider_and_revalidation(
     let (lifecycle_sender, lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
     (
-        RemoteWorkspaceConnectedSession::new(
-            Box::new(TestRemoteSessionOwner {
+        ConnectedControlConnection::new(
+            Box::new(TestControlConnectionOwner {
                 closes: Arc::clone(&closes),
                 channels,
                 lifecycle: Some(lifecycle),
@@ -1526,7 +1533,7 @@ fn install_remote_completion_directly(
                 .with_machine(remote_machine(completion.account())),
                 completion.physical_directory().clone(),
                 completion.account().login_shell().name().to_owned(),
-                completion.terminal_channels(),
+                completion.terminal_session_channels(),
             );
             let prepared = terminal_factory.prepare_child_launch().unwrap();
             manager
@@ -1759,7 +1766,7 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1918,7 +1925,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(first_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1927,7 +1934,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(second_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1977,7 +1984,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(second_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2369,7 +2376,7 @@ fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopeni
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_))),
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
         "the terminal must accept input after the replacement switcher closes"
     );
 
@@ -2396,9 +2403,11 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
         account_calls: Arc::new(AtomicUsize::new(0)),
         identity_calls: Arc::new(AtomicUsize::new(0)),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -2908,10 +2917,11 @@ fn reconnect_authentication_should_promote_queued_askpass_and_restore_progress_a
 
 #[gpui::test]
 fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut TestAppContext) {
-    let (new_session, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
-        reconnect_session("work", "/home/tester/src");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (new_control_connection, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
+        reconnect_control_connection("work", "/home/tester/src");
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, old_closes, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3001,13 +3011,14 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
 fn reconnect_should_consume_a_terminal_state_published_before_observer_installation(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, _, _, new_lifecycle) =
-        reconnect_session("work", "/home/tester/src");
+    let (new_control_connection, new_closes, _, _, new_lifecycle) =
+        reconnect_control_connection("work", "/home/tester/src");
     new_lifecycle
         .try_send(ControlConnectionTerminalState::Failed)
         .unwrap();
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3048,10 +3059,11 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
 ) {
     let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-    let (new_session, new_closes, new_preparations, new_revalidations, _) =
-        reconnect_session("work", "/home/tester/replaced");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (new_control_connection, new_closes, new_preparations, new_revalidations, _) =
+        reconnect_control_connection("work", "/home/tester/replaced");
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3126,12 +3138,13 @@ fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_al
 ) {
     let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-    let (new_session, new_closes, _, _, _) = reconnect_session_with_provider(
+    let (new_control_connection, new_closes, _, _, _) = reconnect_control_connection_with_provider(
         "work",
         Arc::new(TestRemoteProvider::directory_unavailable()),
     );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3212,7 +3225,8 @@ fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
 fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
     cx: &mut TestAppContext,
 ) {
-    let (mut new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (mut new_control_connection, new_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
     let (pending_sender, pending_receiver) = async_channel::bounded(1);
     let pending = cx.update(|cx| {
         cx.background_executor()
@@ -3256,10 +3270,10 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
     });
     cx.run_until_parked();
     let account = test_remote_account();
-    let channels = new_session
-        .bind_terminal_channels(account.login_shell())
+    let channels = new_control_connection
+        .bind_terminal_session_channels(account.login_shell())
         .unwrap();
-    let prepared_lifecycle = new_session.take_lifecycle_observer().unwrap();
+    let prepared_lifecycle = new_control_connection.take_lifecycle_observer().unwrap();
     let factory = manager.read_with(cx, |manager, _| {
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::clone(&manager.session_factory),
@@ -3313,7 +3327,7 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
                 workspace_id,
                 2,
                 Ok(PreparedRemoteWorkspaceReconnect {
-                    session: new_session,
+                    control_connection: new_control_connection,
                     lifecycle: prepared_lifecycle,
                     restart,
                     remote_user: account.remote_user().clone(),
@@ -3351,7 +3365,8 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
 fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resurrection(
     cx: &mut TestAppContext,
 ) {
-    let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (late_control_connection, late_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
     let (sender, receiver) = async_channel::bounded(1);
     let pending = cx.update(|cx| {
         cx.background_executor()
@@ -3405,7 +3420,7 @@ fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resur
         manager.remote_workspace_reconnect.is_none()
     }));
 
-    assert!(sender.try_send(Ok(late_session)).is_err());
+    assert!(sender.try_send(Ok(late_control_connection)).is_err());
     cx.run_until_parked();
     assert_eq!(late_closes.load(Ordering::Acquire), 1);
     assert_eq!(
@@ -3419,7 +3434,7 @@ fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resur
 }
 
 #[gpui::test]
-fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_immediately(
+fn cancelling_while_account_discovery_is_blocked_should_close_control_connection_immediately(
     cx: &mut TestAppContext,
 ) {
     let (account_sender, account_receiver) = async_channel::bounded(1);
@@ -3436,9 +3451,11 @@ fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_
         account_calls: Arc::clone(&account_calls),
         identity_calls: Arc::new(AtomicUsize::new(0)),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
 
@@ -3467,7 +3484,7 @@ fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_
 }
 
 #[gpui::test]
-fn closing_workspace_while_identity_validation_is_blocked_should_close_session_immediately(
+fn closing_workspace_while_identity_validation_is_blocked_should_close_control_connection_immediately(
     cx: &mut TestAppContext,
 ) {
     let (identity_sender, identity_receiver) = async_channel::bounded(1);
@@ -3482,9 +3499,11 @@ fn closing_workspace_while_identity_validation_is_blocked_should_close_session_i
         account_calls: Arc::new(AtomicUsize::new(0)),
         identity_calls: Arc::clone(&identity_calls),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
     cx.update(|window, cx| {
@@ -3511,7 +3530,7 @@ fn closing_workspace_while_identity_validation_is_blocked_should_close_session_i
 }
 
 #[gpui::test]
-fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_session(
+fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_control_connection(
     cx: &mut TestAppContext,
 ) {
     let (revalidation_sender, revalidation_receiver) = async_channel::bounded(1);
@@ -3522,13 +3541,15 @@ fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_clo
     let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
     ));
-    let (session, closes, _, revalidations, _) = reconnect_session_with_provider_and_revalidation(
-        "work",
-        provider,
-        VecDeque::from([revalidation_task]),
-    );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, revalidations, _) =
+        reconnect_control_connection_with_provider_and_revalidation(
+            "work",
+            provider,
+            VecDeque::from([revalidation_task]),
+        );
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
     cx.update(|window, cx| {
@@ -3648,10 +3669,11 @@ fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
 }
 
 #[gpui::test]
-fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resurrection(
+fn closing_workspace_during_reconnect_should_close_late_control_connection_and_prevent_resurrection(
     cx: &mut TestAppContext,
 ) {
-    let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (late_control_connection, late_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
     let (sender, receiver) = async_channel::bounded(1);
     let pending = cx.update(|cx| {
         cx.background_executor()
@@ -3684,7 +3706,7 @@ fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resu
         manager.workspaces.workspace(workspace_id).is_none()
     }));
 
-    assert!(sender.try_send(Ok(late_session)).is_err());
+    assert!(sender.try_send(Ok(late_control_connection)).is_err());
     cx.run_until_parked();
     assert_eq!(late_closes.load(Ordering::Acquire), 1);
     assert!(manager.read_with(cx, |manager, _| {
@@ -3773,9 +3795,9 @@ fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mu
     let (manager, records, cx) = workspace_manager(cx);
 
     for error in [
-        crate::terminal::RemoteChannelRevalidationError::ConnectionUnavailable,
-        crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
-        crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+        crate::terminal::TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+        crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+        crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
     ] {
         let flow = open_remote_workspace_flow(&manager, cx);
         let (completion, closes, preparations, revalidations, _, _) =
@@ -4095,7 +4117,7 @@ fn repeated_remote_runtime_cleanup_closes_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn unavailable_initial_remote_channel_should_close_completion_and_offer_retry(
+fn unavailable_initial_terminal_session_channel_should_close_completion_and_offer_retry(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -4487,15 +4509,17 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     let provider = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
     ));
-    let (session, closes, _, _, _) = reconnect_session_with_provider_and_revalidation(
-        "work",
-        provider,
-        VecDeque::from([gpui::Task::ready(Err(
-            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
-        ))]),
-    );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider_and_revalidation(
+            "work",
+            provider,
+            VecDeque::from([gpui::Task::ready(Err(
+                crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+            ))]),
+        );
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -4824,13 +4848,13 @@ fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn open_workspace_switcher_should_remove_a_workspace_after_its_final_session_exits(
+fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_session_exits(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
@@ -4847,7 +4871,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_session_exi
     assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
 
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -5085,8 +5109,7 @@ fn caption_close_should_confirm_its_owning_pane_and_restore_focus_after_cancel(
         records
             .commands()
             .iter()
-            .any(|call| call.session_id == 1
-                && matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| call.session_id == 1 && matches!(call.command, RecordedCommand::Key(_)))
     );
     click("pane-close-1", cx);
     redraw(cx);
@@ -5207,8 +5230,8 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
     screen.metadata = metadata.snapshot();
     records
         .event_sender(2)
-        .expect("the focused split Pane session was not started")
-        .try_send(SessionEvent::Screen(Arc::new(screen)))
+        .expect("the focused split Pane's Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
         .unwrap();
     cx.run_until_parked();
 
@@ -5235,8 +5258,8 @@ fn automatic_terminal_exit_should_bypass_close_confirmation(cx: &mut TestAppCont
 
     records
         .event_sender(2)
-        .expect("the focused split Pane session was not started")
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .expect("the focused split Pane's Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
 
@@ -5654,7 +5677,7 @@ fn workspace_top_chrome_should_restore_after_release_outside_its_hitbox(cx: &mut
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+            RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -7358,7 +7381,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
     manager.update(cx, |manager, cx| {
         manager
@@ -7371,7 +7394,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     click("toggle-sidebar-button", cx);
 
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
 
@@ -8316,12 +8339,12 @@ pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
         let calls = records.commands();
         let calls = calls[before..]
             .iter()
-            .filter(|call| !matches!(call.command, RecordedSessionCommand::Focus(_)))
+            .filter(|call| !matches!(call.command, RecordedCommand::Focus(_)))
             .map(|call| (call.session_id, &call.command))
             .collect::<Vec<_>>();
         assert_eq!(
             calls,
-            vec![(3, &RecordedSessionCommand::ScrollScrollback(movement))],
+            vec![(3, &RecordedCommand::ScrollScrollback(movement))],
             "{command:?} must move only the Active Tab's Focused Pane and send no terminal input"
         );
         assert!(cx.update(|window, cx| !manager.read(cx).sidebar.read(cx).is_focused(window)));
@@ -8742,13 +8765,13 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     cx.update(|window, _| window.activate_window());
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     assert!(active_terminal_has_input_focus(&manager, cx));
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
     assert_eq!(
@@ -8852,7 +8875,7 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
 }
 
 #[gpui::test]
-fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
+fn remote_pin_change_and_unpin_should_preserve_terminal_sessions_and_source_directory(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -9845,7 +9868,7 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
         !records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -9880,7 +9903,7 @@ fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut Test
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -9904,7 +9927,7 @@ fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -9947,7 +9970,7 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
         !records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 
     cx.simulate_keystrokes("enter");

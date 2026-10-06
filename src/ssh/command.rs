@@ -293,7 +293,10 @@ impl SshCommandContext {
         self.spec(arguments)
     }
 
-    pub(crate) fn pane_channel(&self, command: ValidatedRemoteShellCommand) -> SshCommandSpec {
+    pub(crate) fn terminal_session_channel(
+        &self,
+        command: ValidatedRemoteShellCommand,
+    ) -> SshCommandSpec {
         let mut arguments = self.child_arguments();
         push_option(&mut arguments, OsString::from("ClearAllForwardings=yes"));
         arguments.push(OsString::from("-tt"));
@@ -399,14 +402,17 @@ impl SshCommandSpec {
 
     pub(crate) fn into_pane_launch_parts(
         self,
-    ) -> Result<(PathBuf, Vec<OsString>, SshProcessEnvironment), PreparedSshPaneChannelError> {
+    ) -> Result<
+        (PathBuf, Vec<OsString>, SshProcessEnvironment),
+        PreparedSshTerminalSessionChannelError,
+    > {
         let execution = self
             .pane_execution
-            .ok_or(PreparedSshPaneChannelError::Unavailable)?;
+            .ok_or(PreparedSshTerminalSessionChannelError::Unavailable)?;
         execution
             .capability
             .authorize()
-            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
         Ok((
             self.executable.into_path(),
             self.arguments,
@@ -416,13 +422,13 @@ impl SshCommandSpec {
 }
 
 #[derive(Clone)]
-pub(crate) struct PreparedSshPaneChannelCommand {
+pub(crate) struct PreparedSshTerminalSessionChannelCommand {
     command: Arc<Mutex<Option<SshCommandSpec>>>,
     capability: LiveConnectionCapability,
     environment: SshProcessEnvironment,
 }
 
-impl PreparedSshPaneChannelCommand {
+impl PreparedSshTerminalSessionChannelCommand {
     pub(super) fn new(
         command: SshCommandSpec,
         capability: LiveConnectionCapability,
@@ -435,17 +441,17 @@ impl PreparedSshPaneChannelCommand {
         }
     }
 
-    pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshPaneChannelError> {
+    pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshTerminalSessionChannelError> {
         self.capability
             .authorize()
-            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
         let mut command = self
             .command
             .lock()
-            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
         let mut command = command
             .take()
-            .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)?;
+            .ok_or(PreparedSshTerminalSessionChannelError::AlreadyConsumed)?;
         command.pane_execution = Some(SshPaneExecution {
             capability: self.capability.clone(),
             environment: self.environment.clone(),
@@ -454,27 +460,27 @@ impl PreparedSshPaneChannelCommand {
     }
 }
 
-impl fmt::Debug for PreparedSshPaneChannelCommand {
+impl fmt::Debug for PreparedSshTerminalSessionChannelCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PreparedSshPaneChannelCommand")
+            .debug_struct("PreparedSshTerminalSessionChannelCommand")
             .finish_non_exhaustive()
     }
 }
 
-impl PartialEq for PreparedSshPaneChannelCommand {
+impl PartialEq for PreparedSshTerminalSessionChannelCommand {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.command, &other.command)
     }
 }
 
-impl Eq for PreparedSshPaneChannelCommand {}
+impl Eq for PreparedSshTerminalSessionChannelCommand {}
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum PreparedSshPaneChannelError {
-    #[error("the prepared SSH Pane channel command has already been consumed")]
+pub(crate) enum PreparedSshTerminalSessionChannelError {
+    #[error("the prepared SSH Terminal Session Channel command has already been consumed")]
     AlreadyConsumed,
-    #[error("the prepared SSH Pane channel command is unavailable")]
+    #[error("the prepared SSH Terminal Session Channel command is unavailable")]
     Unavailable,
 }
 
@@ -1217,7 +1223,7 @@ mod tests {
         let command = pane_command("/srv/project", "/bin/zsh").unwrap();
 
         let expected = command.argument.clone();
-        let spec = context().pane_channel(command);
+        let spec = context().terminal_session_channel(command);
 
         assert_eq!(
             arguments(&spec),
@@ -1403,8 +1409,8 @@ mod tests {
             OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
             &crate::ssh::startup_environment::StartupSshEnvironment::default(),
         );
-        let prepared =
-            connection.prepare_pane_channel(pane_command("/srv/project", "/bin/zsh").unwrap());
+        let prepared = connection
+            .prepare_terminal_session_channel(pane_command("/srv/project", "/bin/zsh").unwrap());
         let duplicate_owner = prepared.clone();
 
         let spec = prepared.take().unwrap();
@@ -1421,7 +1427,7 @@ mod tests {
         );
         assert_eq!(
             duplicate_owner.take().err(),
-            Some(PreparedSshPaneChannelError::AlreadyConsumed)
+            Some(PreparedSshTerminalSessionChannelError::AlreadyConsumed)
         );
     }
 
@@ -1433,13 +1439,13 @@ mod tests {
             OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
             &crate::ssh::startup_environment::StartupSshEnvironment::default(),
         );
-        let prepared = connection.prepare_pane_channel(
+        let prepared = connection.prepare_terminal_session_channel(
             pane_command("/srv/sensitive-project", "/sensitive/shell/zsh").unwrap(),
         );
 
         let debug = format!("{prepared:?}");
 
-        assert_eq!(debug, "PreparedSshPaneChannelCommand { .. }");
+        assert_eq!(debug, "PreparedSshTerminalSessionChannelCommand { .. }");
         assert!(!debug.contains("root@fedora@orb"));
         assert!(!debug.contains("sensitive"));
         assert!(!debug.contains("control.sock"));
@@ -1454,7 +1460,7 @@ mod tests {
             context.readiness_check(),
             context.graceful_exit(),
             context.remote_utility(),
-            context.pane_channel(command),
+            context.terminal_session_channel(command),
         ];
 
         assert!(

@@ -533,7 +533,7 @@ mod tests {
     #[gpui::test]
     fn native_window_facts_reach_the_pane_owned_terminal_session(cx: &mut gpui::TestAppContext) {
         use crate::terminal::testing::{
-            RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+            RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
             test_local_directory,
         };
         use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
@@ -580,7 +580,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|command| match command.command {
-                RecordedSessionCommand::Key(input) => Some(input),
+                RecordedCommand::Key(input) => Some(input),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -853,8 +853,8 @@ mod native_compose_tests {
     use super::*;
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::testing::{
-        RecordedSessionCommand, TerminalEmulator, TestTerminalSessionFactory,
-        TestTerminalSessionRecords, test_local_directory,
+        RecordedCommand, TerminalEmulator, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        test_local_directory,
     };
     use gpui::AppContext as _;
     use std::{path::PathBuf, rc::Rc, time::Duration};
@@ -1055,7 +1055,7 @@ mod native_compose_tests {
         emulator.feed(b"\x1b[>11u");
         let mut bytes = Vec::new();
         for command in records.commands().into_iter().skip(first_command.get()) {
-            if let RecordedSessionCommand::Key(input) = command.command {
+            if let RecordedCommand::Key(input) = command.command {
                 bytes.extend(emulator.key(input).unwrap().bytes);
             }
         }

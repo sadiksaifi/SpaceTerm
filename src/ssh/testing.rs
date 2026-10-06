@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use super::cancellation::SshCancellationToken;
 use super::command::{
-    OpenSshExecutable, PreparedSshPaneChannelCommand, SshCommandSpec, ValidatedRemoteShellCommand,
+    OpenSshExecutable, PreparedSshTerminalSessionChannelCommand, SshCommandSpec,
+    ValidatedRemoteShellCommand,
 };
 use super::control_connection::{ControlConnectionTiming, OpenSshControlConnection};
 use super::process::{
@@ -70,11 +71,13 @@ impl SshConnectionFixture {
         Self { connection }
     }
 
-    pub(crate) fn prepare_pane_channel(
+    pub(crate) fn prepare_terminal_session_channel(
         &self,
         command: ValidatedRemoteShellCommand,
-    ) -> PreparedSshPaneChannelCommand {
-        self.connection.prepare_pane_channel(command).unwrap()
+    ) -> PreparedSshTerminalSessionChannelCommand {
+        self.connection
+            .prepare_terminal_session_channel(command)
+            .unwrap()
     }
 }
 

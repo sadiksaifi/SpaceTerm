@@ -1,4 +1,4 @@
-//! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
+//! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal Session's title.
 //!
 //! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
 //! here once. The glyph slot carries the status: reported work with a known percentage keeps the
@@ -35,7 +35,7 @@ const BLINK_STEP: Duration = Duration::from_millis(500);
 /// Blinking draws the eye when attention arrives. The settled badge keeps unread state present
 /// without replacing the underlying work-state shape.
 const BLINKS: u32 = 4;
-/// Names the Session's reported work for the frame spinner.
+/// Names the Terminal Session's reported work for the frame spinner.
 ///
 /// The spinner never paints this, and it stays content-free: nothing a program reported reaches it.
 const PROGRESS_NAME: &str = "terminal progress";
@@ -45,7 +45,7 @@ const PROGRESS_NAME: &str = "terminal progress";
 ///
 /// Shape first so the text system chooses the same fallback run painting will use. Then ask the
 /// selected fonts for each base character; an unassigned or unsupported scalar has no glyph and
-/// leaves the Session's own icon in the slot.
+/// leaves the Terminal Session's own icon in the slot.
 pub(crate) fn reported_glyph_is_drawable(
     glyph: &str,
     font: &gpui::Font,
@@ -108,8 +108,8 @@ fn reported_glyph(glyph: &str, size: Pixels) -> AnyElement {
 
 /// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it.
 ///
-/// A Session whose metadata has gone stale reports nothing, so an exited program never leaves a
-/// loader behind in its Pane or Tab.
+/// A Terminal Session whose metadata has gone stale reports nothing, so an exited program never
+/// leaves a loader behind in its Pane or Tab.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum TerminalProgress {
     #[default]
@@ -224,8 +224,8 @@ impl StatusGlyph {
             progress,
             colors,
             differentiate_without_color,
-            // The animation hangs off this Session's own glyph identity, so one spinner never
-            // shares its frame state with another Session's.
+            // The animation hangs off this Terminal Session's own glyph identity, so one spinner
+            // never shares its frame state with another Terminal Session's.
             id: ElementId::NamedChild(std::sync::Arc::new(id.clone()), "progress".into()),
             selector: format!("{selector_prefix}-progress"),
         };
@@ -332,7 +332,7 @@ struct Mark {
 
 impl Mark {
     /// The mark for this status: the frame spinner, a distinct semantic shape, the program's
-    /// reported glyph, or the Session's own glyph, all within the same slot.
+    /// reported glyph, or the Terminal Session's own glyph, all within the same slot.
     fn render(self, blinked: bool) -> AnyElement {
         let Self {
             icon,
@@ -615,7 +615,7 @@ mod tests {
         assert!(cx.debug_bounds("shape-attention-badge").is_some());
     }
 
-    /// A program's own glyph leaves the title and takes the Session's glyph slot instead.
+    /// A program's own glyph leaves the title and takes the Terminal Session's glyph slot instead.
     #[test]
     fn a_title_should_give_up_the_glyph_the_program_draws_at_its_front() {
         for (reported, glyph, words) in [
@@ -639,7 +639,7 @@ mod tests {
                 "Claude Code",
             ),
             ("🇺🇸 build", Some("🇺🇸"), "build"),
-            // A Private-Use glyph would paint as a box, so the Session keeps its own.
+            // A Private-Use glyph would paint as a box, so the Terminal Session keeps its own.
             ("\u{f0316} nvim", None, "nvim"),
             // Structural candidates are retained until the active font's shaper decides whether
             // they occupy one glyph slot.
@@ -648,7 +648,7 @@ mod tests {
                 Some("\u{2726}\u{2726}"),
                 "two frames",
             ),
-            // Nothing a Session would be named after is a glyph.
+            // Nothing a Terminal Session would be named after is a glyph.
             ("zsh", None, "zsh"),
             ("~ zsh", None, "~ zsh"),
             ("~/Projects/api", None, "~/Projects/api"),

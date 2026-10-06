@@ -1,4 +1,4 @@
-use crate::terminal::RemoteChannelUnavailable;
+use crate::terminal::TerminalSessionChannelUnavailable;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,7 +168,7 @@ impl<T> RemoteRestartBatch<T> {
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 /// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
 ///
-/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
+/// Errors leave the Pane's Terminal Session epoch, presentation, and input state unchanged.
 pub(crate) enum RemotePaneLifecycleError {
     #[error("the Pane does not own a remote Terminal Session")]
     LocalPane,
@@ -176,10 +176,10 @@ pub(crate) enum RemotePaneLifecycleError {
     StaleGeneration { current: u64, received: u64 },
     #[error("the remote Pane is not disconnected")]
     NotDisconnected,
-    #[error("the prepared remote restart no longer matches the Pane session epoch")]
-    SessionChanged,
+    #[error("the prepared remote restart no longer matches the Pane's Terminal Session epoch")]
+    TerminalSessionChanged,
     #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+    ChannelUnavailable(#[from] TerminalSessionChannelUnavailable),
 }
 
 #[derive(Clone, Copy)]
@@ -246,7 +246,7 @@ impl RemoteRestartAuthority {
 
     pub(crate) fn validate(&self, facts: RemotePaneFacts) -> Result<(), RemotePaneLifecycleError> {
         if facts.epoch != self.expected_epoch {
-            return Err(RemotePaneLifecycleError::SessionChanged);
+            return Err(RemotePaneLifecycleError::TerminalSessionChanged);
         }
         facts.validate_successor(self.generation)
     }
@@ -261,7 +261,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_restart_authority_rechecks_session_epoch_and_disconnection() {
+    fn remote_restart_authority_rechecks_terminal_session_epoch_and_disconnection() {
         let facts = RemotePaneFacts {
             remote: true,
             generation: Some(7),
@@ -272,7 +272,7 @@ mod tests {
         assert!(authority.validate(facts).is_ok());
         assert_eq!(
             authority.validate(RemotePaneFacts { epoch: 3, ..facts }),
-            Err(RemotePaneLifecycleError::SessionChanged)
+            Err(RemotePaneLifecycleError::TerminalSessionChanged)
         );
         assert_eq!(
             authority.validate(RemotePaneFacts {
@@ -307,14 +307,14 @@ mod tests {
             &mut events,
             |child, _| {
                 if *child == 3 {
-                    Err("stale session")
+                    Err("stale Terminal Session")
                 } else {
                     Ok(())
                 }
             },
             |child, events| events.push(child),
         );
-        assert_eq!((result, events), (Err("stale session"), vec![]));
+        assert_eq!((result, events), (Err("stale Terminal Session"), vec![]));
     }
 
     #[test]

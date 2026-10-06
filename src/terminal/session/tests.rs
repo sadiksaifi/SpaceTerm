@@ -11,8 +11,8 @@ use crate::ssh::command::{
     RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell, ValidatedRemoteShellCommand,
 };
 
-pub(in crate::terminal) fn metadata_changed() -> SessionEvent {
-    SessionEvent::MetadataChanged(MetadataWakeup::new(Arc::new(AtomicBool::new(true))))
+pub(in crate::terminal) fn metadata_changed() -> TerminalSessionEvent {
+    TerminalSessionEvent::MetadataChanged(MetadataWakeup::new(Arc::new(AtomicBool::new(true))))
 }
 
 fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
@@ -42,7 +42,8 @@ fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels()
     let destination = SshDestination::new("user@remote".to_owned()).unwrap();
     let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
     let connection = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
-    let prepared = connection.prepare_pane_channel(remote_pane_command(&remote_directory));
+    let prepared =
+        connection.prepare_terminal_session_channel(remote_pane_command(&remote_directory));
     let plan = RemoteTerminalLaunchPlan::new(
         local_home.clone(),
         RemoteTerminalMetadataContext::new(destination.clone(), remote_directory.clone()),
@@ -72,8 +73,8 @@ fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels()
 
     assert!(matches!(
         error,
-        Some(SessionError::PreparedSshPaneChannel(
-            crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
+        Some(TerminalSessionError::PreparedSshTerminalSessionChannel(
+            crate::ssh::command::PreparedSshTerminalSessionChannelError::AlreadyConsumed
         ))
     ));
 }
@@ -147,7 +148,7 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
         &startup,
     );
     let expected_command = context
-        .prepare_pane_channel(remote_pane_command(&remote_directory))
+        .prepare_terminal_session_channel(remote_pane_command(&remote_directory))
         .take()
         .unwrap();
     let expected_executable = expected_command.executable().to_owned();
@@ -159,7 +160,7 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
         ),
         RemoteTerminalMetadataContext::new(destination, remote_directory.clone()),
         "project on remote".to_owned(),
-        context.prepare_pane_channel(remote_pane_command(&remote_directory)),
+        context.prepare_terminal_session_channel(remote_pane_command(&remote_directory)),
     )));
 
     let TerminalLaunchPlan::Remote(remote) = &plan else {
@@ -177,10 +178,10 @@ fn native_factory_routes_remote_launches_through_injected_factory() {
     let construction = constructions
         .recv_timeout(Duration::from_secs(1))
         .expect("Remote construction should reach the injected factory");
-    let SessionEvent::Screen(screen) = receive_event(
+    let TerminalSessionEvent::Screen(screen) = receive_event(
         &started.events,
         "the actual Remote Terminal Session Screen",
-        |event| matches!(event, SessionEvent::Screen(_)),
+        |event| matches!(event, TerminalSessionEvent::Screen(_)),
     ) else {
         unreachable!()
     };
@@ -686,7 +687,7 @@ impl NativePtyAdapterFactory for ScriptedSessionAdapterFactory {
     }
 }
 
-type ScriptedStart = Result<StartedSession, SessionFailure>;
+type ScriptedStart = Result<StartedTerminalSessionParts, TerminalSessionFailure>;
 
 fn start_scripted_session(
     options: ScriptedPtyOptions,
@@ -741,10 +742,15 @@ fn start_scripted_session(
     let startup = receive_event(
         &started.1,
         "the actual asynchronous startup report",
-        |event| matches!(event, SessionEvent::Screen(_) | SessionEvent::Failed(_)),
+        |event| {
+            matches!(
+                event,
+                TerminalSessionEvent::Screen(_) | TerminalSessionEvent::Failed(_)
+            )
+        },
     );
     let result = match startup {
-        SessionEvent::Screen(screen) => {
+        TerminalSessionEvent::Screen(screen) => {
             assert_eq!(
                 screen.metadata.current_directory(),
                 Some(crate::domain::CurrentDirectory::Local(std::env::temp_dir()))
@@ -756,7 +762,7 @@ fn start_scripted_session(
             records.update(|state| state.initial_screen = Some(screen));
             Ok(started)
         }
-        SessionEvent::Failed(failure) => {
+        TerminalSessionEvent::Failed(failure) => {
             drop(started);
             Err(failure)
         }
@@ -766,10 +772,10 @@ fn start_scripted_session(
 }
 
 fn receive_event(
-    events: &async_channel::Receiver<SessionEvent>,
+    events: &async_channel::Receiver<TerminalSessionEvent>,
     description: &str,
-    predicate: impl Fn(&SessionEvent) -> bool + Send + 'static,
-) -> SessionEvent {
+    predicate: impl Fn(&TerminalSessionEvent) -> bool + Send + 'static,
+) -> TerminalSessionEvent {
     let events = events.clone();
     let (matched, result) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
@@ -795,7 +801,7 @@ fn receive_event(
         }
         Ok(None) => {
             waiter.join().unwrap();
-            panic!("session events closed while waiting for {description}")
+            panic!("Terminal Session events closed while waiting for {description}")
         }
         Err(error) => {
             drop(waiter);
@@ -817,23 +823,23 @@ fn screen_text(screen: &ScreenSnapshot) -> String {
 fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
     assert_eq!(
         classify_native_pty_exit(NativePtyExit::Success),
-        SessionExit::Success
+        TerminalSessionExit::Success
     );
     assert_eq!(
         classify_native_pty_exit(NativePtyExit::ExitCode(17)),
-        SessionExit::ExitCode(17)
+        TerminalSessionExit::ExitCode(17)
     );
     assert_eq!(
         classify_native_pty_exit(NativePtyExit::Signal("Hangup".to_owned())),
-        SessionExit::Signal("Hangup".to_owned())
+        TerminalSessionExit::Signal("Hangup".to_owned())
     );
     assert_eq!(
         classify_native_pty_exit(NativePtyExit::GracefulShutdown),
-        SessionExit::GracefulShutdown
+        TerminalSessionExit::GracefulShutdown
     );
     assert_eq!(
         classify_native_pty_exit(NativePtyExit::ForcedShutdown),
-        SessionExit::ForcedShutdown
+        TerminalSessionExit::ForcedShutdown
     );
 }
 
@@ -868,11 +874,11 @@ fn permission_requests_survive_screen_and_lifecycle_event_replacement() {
     assert_eq!(events.len(), 2);
     assert!(matches!(
         events.try_recv().unwrap(),
-        SessionEvent::Screen(_)
+        TerminalSessionEvent::Screen(_)
     ));
     assert!(matches!(
         events.try_recv().unwrap(),
-        SessionEvent::Exited(_)
+        TerminalSessionEvent::Exited(_)
     ));
     assert_eq!(
         session
@@ -905,13 +911,13 @@ fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_e
     let first = events.try_recv().unwrap();
     let second = events.try_recv().unwrap();
     let result = match (first, second) {
-        (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => {
+        (TerminalSessionEvent::Screen(screen), TerminalSessionEvent::Exited(status)) => {
             let model = accessibility.try_recv().unwrap();
             assert!(model.text().contains("bounded line 31"));
             assert_eq!(model.generation(), screen.generation);
             (
                 screen_text(&screen).contains("bounded line 31"),
-                status == SessionExit::Success,
+                status == TerminalSessionExit::Success,
                 events.try_recv().is_err(),
             )
         }
@@ -940,9 +946,12 @@ fn shell_exit_should_flush_a_pending_synchronized_output_transaction() {
     let exited = events.try_recv().unwrap();
     assert!(matches!(
         screen,
-        SessionEvent::Screen(screen) if screen_text(&screen).contains("final output")
+        TerminalSessionEvent::Screen(screen) if screen_text(&screen).contains("final output")
     ));
-    assert!(matches!(exited, SessionEvent::Exited(SessionExit::Success)));
+    assert!(matches!(
+        exited,
+        TerminalSessionEvent::Exited(TerminalSessionExit::Success)
+    ));
     session.shutdown();
 }
 
@@ -957,7 +966,7 @@ fn session_snapshots_reuse_rows_unchanged_by_later_output() {
     let first = receive_event(
         &events,
         "the first row snapshot",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first row")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("first row")),
     );
     reader_steps
         .send(ReaderStep::Bytes(b"\r\nsecond row".to_vec()))
@@ -965,10 +974,12 @@ fn session_snapshots_reuse_rows_unchanged_by_later_output() {
     let second = receive_event(
         &events,
         "the second row snapshot",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("second row")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("second row")),
     );
 
-    let (SessionEvent::Screen(first), SessionEvent::Screen(second)) = (first, second) else {
+    let (TerminalSessionEvent::Screen(first), TerminalSessionEvent::Screen(second)) =
+        (first, second)
+    else {
         unreachable!("the event predicates accept only terminal screens")
     };
     assert!(Arc::ptr_eq(&first.rows[0], &second.rows[0]));
@@ -980,20 +991,20 @@ fn session_snapshots_reuse_rows_unchanged_by_later_output() {
 #[test]
 fn session_failure_display_should_explain_each_classification() {
     let failures = [
-        SessionFailure::Startup {
-            stage: SessionStartupStage::Pty,
+        TerminalSessionFailure::Startup {
+            stage: TerminalSessionStartupStage::Pty,
             message: "open unavailable".to_owned(),
         },
-        SessionFailure::Runtime("write unavailable".to_owned()),
-        SessionFailure::PtyRead {
+        TerminalSessionFailure::Runtime("write unavailable".to_owned()),
+        TerminalSessionFailure::PtyRead {
             read_error: "read unavailable".to_owned(),
             exit_status: "exit code 7".to_owned(),
         },
-        SessionFailure::ShellWait {
+        TerminalSessionFailure::ShellWait {
             read_error: Some("read unavailable".to_owned()),
             wait_error: "wait unavailable".to_owned(),
         },
-        SessionFailure::ShellWait {
+        TerminalSessionFailure::ShellWait {
             read_error: None,
             wait_error: "wait unavailable".to_owned(),
         },
@@ -1043,14 +1054,15 @@ fn deferred_start_should_return_before_pty_spawn_and_publish_a_typed_failure() {
     let event = receive_event(&events, "the deferred PTY spawn failure", |event| {
         matches!(
             event,
-            SessionEvent::Failed(SessionFailure::Startup {
-                stage: SessionStartupStage::Pty,
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
+                stage: TerminalSessionStartupStage::Pty,
                 ..
             })
         )
     });
 
-    let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::Startup { message, .. }) = event
+    else {
         unreachable!("the event predicate accepts only typed startup failures")
     };
     assert_eq!(message, "Native PTY resources could not be created");
@@ -1123,7 +1135,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
 }
 
 #[test]
-fn native_factory_reports_local_launch_directory_failure_through_session_events() {
+fn native_factory_reports_local_launch_directory_failure_through_terminal_session_events() {
     let resources = crate::terminal::testing::ShellResourcesFixture::new();
     let StartedTerminalSession {
         handle: session,
@@ -1146,14 +1158,15 @@ fn native_factory_reports_local_launch_directory_failure_through_session_events(
     let event = receive_event(&events, "the native PTY startup failure", |event| {
         matches!(
             event,
-            SessionEvent::Failed(SessionFailure::Startup {
-                stage: SessionStartupStage::Pty,
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
+                stage: TerminalSessionStartupStage::Pty,
                 ..
             })
         )
     });
 
-    let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::Startup { message, .. }) = event
+    else {
         unreachable!("the event predicate accepts only typed PTY startup failures")
     };
     assert_eq!(
@@ -1170,7 +1183,8 @@ fn remote_factory_rejects_missing_local_home_before_adapter_construction() {
     let destination = SshDestination::new("user@remote".to_owned()).unwrap();
     let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
     let connection = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
-    let prepared = connection.prepare_pane_channel(remote_pane_command(&remote_directory));
+    let prepared =
+        connection.prepare_terminal_session_channel(remote_pane_command(&remote_directory));
     let plan = RemoteTerminalLaunchPlan::new(
         crate::domain::ValidatedLocalDirectory::new(
             resources.path().join("missing-local-home"),
@@ -1196,14 +1210,15 @@ fn remote_factory_rejects_missing_local_home_before_adapter_construction() {
     let event = receive_event(&events, "the remote local HOME failure", |event| {
         matches!(
             event,
-            SessionEvent::Failed(SessionFailure::Startup {
-                stage: SessionStartupStage::Pty,
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
+                stage: TerminalSessionStartupStage::Pty,
                 ..
             })
         )
     });
 
-    let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::Startup { message, .. }) = event
+    else {
         unreachable!("the event predicate accepts only typed PTY startup failures")
     };
     assert_eq!(
@@ -1232,7 +1247,7 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
 
     assert!(matches!(
         error,
-        SessionFailure::Startup { stage: SessionStartupStage::Reader, message } if message == "Native PTY reader acquisition failed (Other)"
+        TerminalSessionFailure::Startup { stage: TerminalSessionStartupStage::Reader, message } if message == "Native PTY reader acquisition failed (Other)"
     ));
     assert_eq!(
         (
@@ -1256,18 +1271,19 @@ fn scripted_output_should_reach_the_terminal_screen() {
     let event = receive_event(
         &events,
         "scripted terminal output",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("scripted output")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("scripted output")),
     );
 
-    let SessionEvent::Screen(screen) = event else {
+    let TerminalSessionEvent::Screen(screen) = event else {
         unreachable!("the event predicate accepts only terminal screens")
     };
     assert!(screen_text(&screen).contains("scripted output"));
 
     session.shutdown();
-    let state = records.wait_for("the scripted session owners to be released", |state| {
-        state.pty_drops == 1 && state.reader_drops == 1
-    });
+    let state = records.wait_for(
+        "the scripted Terminal Session owners to be released",
+        |state| state.pty_drops == 1 && state.reader_drops == 1,
+    );
     assert_eq!(
         (
             state.terminations,
@@ -1286,7 +1302,7 @@ fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
     let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (attempted, attempts) = mpsc::channel();
     let (completed, completions) = mpsc::channel();
-    let output = SessionNativePtyOutputSink {
+    let output = TerminalSessionNativePtyOutputSink {
         clipboard_authority: Arc::default(),
         commands: command_tx.clone(),
         events: reader_events,
@@ -1459,10 +1475,10 @@ fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
     reader_steps
         .send(ReaderStep::Bytes(b"selected".to_vec()))
         .unwrap();
-    let SessionEvent::Screen(screen) = receive_event(
+    let TerminalSessionEvent::Screen(screen) = receive_event(
         &events,
         "the selectable terminal output after the held key press",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
     ) else {
         unreachable!()
     };
@@ -1527,8 +1543,8 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
         let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
-            metadata_state: SessionMetadataState::default(),
-            permission_request_state: SessionPermissionRequestState::default(),
+            metadata_state: TerminalSessionMetadataState::default(),
+            permission_request_state: TerminalSessionPermissionRequestState::default(),
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1568,8 +1584,8 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1597,7 +1613,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         Some(Command::PublishPendingScreen)
     ));
     assert!(worker.process_command(Command::PublishPendingScreen));
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("denied clipboard operations must only publish the ordinary screen");
     };
     assert!(screen_text(&screen).contains("before"));
@@ -1609,7 +1625,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         b"\x1b]52;c;\x07\x1b[0n\x1b[2;6R"
     );
     assert!(worker.publish_screen());
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("ordinary terminal output must continue after denied clipboard operations");
     };
     let text = screen_text(&screen);
@@ -1625,7 +1641,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
 /// does not read stay alive with the worker.
 struct PermissionRequestWorker {
     worker: TerminalWorker,
-    events: async_channel::Receiver<SessionEvent>,
+    events: async_channel::Receiver<TerminalSessionEvent>,
     records: ScriptedPtyRecords,
     _commands: mpsc::Sender<Command>,
     _reader: mpsc::SyncSender<NativePtyOutput>,
@@ -1639,8 +1655,8 @@ fn permission_request_worker() -> PermissionRequestWorker {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1680,7 +1696,7 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
         b"before\x1b]7701;permissions=screen-".to_vec(),
         b"recording\x07after".to_vec(),
     ]));
-    let Ok(SessionEvent::PermissionRequested(request)) = receiver.try_recv() else {
+    let Ok(TerminalSessionEvent::PermissionRequested(request)) = receiver.try_recv() else {
         panic!("a Permission Request must reach the Pane");
     };
     assert_eq!(
@@ -1688,7 +1704,7 @@ fn a_permission_request_is_reported_and_kept_off_the_screen() {
         [crate::platform::permission_access::SystemPermission::ScreenRecording]
     );
     assert!(worker.publish_screen());
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("terminal output must still publish a screen");
     };
     let text = screen_text(&screen);
@@ -1713,13 +1729,13 @@ fn the_permission_requests_in_one_read_become_one_event() {
 
     assert!(worker.feed_test_output(vec![flood]));
 
-    let Ok(SessionEvent::PermissionRequested(request)) = receiver.try_recv() else {
+    let Ok(TerminalSessionEvent::PermissionRequested(request)) = receiver.try_recv() else {
         panic!("the requests must reach the Pane");
     };
     assert_eq!(request.permissions(), [ScreenRecording, Accessibility]);
     assert!(
         !std::iter::from_fn(|| receiver.try_recv().ok())
-            .any(|event| matches!(event, SessionEvent::PermissionRequested(_)))
+            .any(|event| matches!(event, TerminalSessionEvent::PermissionRequested(_)))
     );
     worker.finish();
 }
@@ -1728,7 +1744,7 @@ fn the_permission_requests_in_one_read_become_one_event() {
 fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (command_tx, commands) = mpsc::channel();
     let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
-    let output = SessionNativePtyOutputSink {
+    let output = TerminalSessionNativePtyOutputSink {
         clipboard_authority: Arc::default(),
         commands: command_tx,
         events: reader_events,
@@ -1741,8 +1757,8 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1768,7 +1784,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         Some(Command::PublishPendingScreen)
     ));
     assert!(worker.process_command(Command::PublishPendingScreen));
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("coalesced output must publish a terminal screen")
     };
     assert!(screen_text(&screen).contains("first second"));
@@ -1789,8 +1805,8 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1823,7 +1839,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     assert!(accessibility_receiver.try_recv().is_err());
     assert!(worker.schedules.take_presentation_barrier());
     assert!(worker.publish_screen());
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("the coalesced presentation must publish one Screen")
     };
     assert!(screen_text(&screen).contains("line 63"));
@@ -1855,8 +1871,8 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
     let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1906,8 +1922,8 @@ fn queued_input_runs_before_due_scrollback_compression() {
     let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1951,8 +1967,8 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let schedule_input = ScheduleInput::default();
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -1988,7 +2004,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         Some(Command::PublishPendingScreen)
     ));
     assert!(worker.process_command(Command::PublishPendingScreen));
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("the visual presentation must precede its accessibility model")
     };
     assert!(matches!(
@@ -2020,8 +2036,8 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2049,7 +2065,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     assert!(accessibility_receiver.try_recv().is_err());
 
     assert!(worker.process_command(Command::SetPresentable(true)));
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("restoration must publish the latest hidden state")
     };
     assert!(screen_text(&screen).contains("hidden latest"));
@@ -2087,8 +2103,8 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     drop(accessibility_receiver);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2114,7 +2130,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
           \x1b_Ga=a,i=1,r=1,z=40,s=3\x1b\\",
     );
     assert!(worker.publish_screen());
-    let SessionEvent::Screen(first) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(first) = receiver.try_recv().unwrap() else {
         panic!("expected initial screen");
     };
     assert_eq!(first.graphics.images[0].rgba.as_ref(), &[1, 2, 3, 4]);
@@ -2122,7 +2138,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     let command = worker.receive_next_command().unwrap();
     assert!(matches!(command, Command::GraphicsAnimationTick));
     assert!(worker.process_command(command));
-    let SessionEvent::Screen(next) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(next) = receiver.try_recv().unwrap() else {
         panic!("expected animated screen");
     };
     assert_eq!(next.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
@@ -2143,8 +2159,8 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             let _ = command_tx.send(Command::GraphicsBudgetAvailable);
         });
         let mut worker = TerminalWorker {
-            metadata_state: SessionMetadataState::default(),
-            permission_request_state: SessionPermissionRequestState::default(),
+            metadata_state: TerminalSessionMetadataState::default(),
+            permission_request_state: TerminalSessionPermissionRequestState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator,
@@ -2177,7 +2193,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             .emulator
             .feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;BQYHCA==\x1b\\");
         assert!(worker.publish_screen());
-        let SessionEvent::Screen(deferred) = receiver.try_recv().unwrap() else {
+        let TerminalSessionEvent::Screen(deferred) = receiver.try_recv().unwrap() else {
             panic!("expected a screen releasing the superseded image");
         };
         assert!(deferred.graphics.images.is_empty());
@@ -2200,7 +2216,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             assert!(matches!(command, Command::PublishPendingScreen));
             assert!(worker.process_command(command));
         }
-        let SessionEvent::Screen(replacement) = receiver.try_recv().unwrap() else {
+        let TerminalSessionEvent::Screen(replacement) = receiver.try_recv().unwrap() else {
             panic!("expected the deferred image to be published");
         };
         assert_eq!(replacement.graphics.images[0].rgba.as_ref(), &[5, 6, 7, 8]);
@@ -2217,8 +2233,8 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2281,8 +2297,8 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2342,8 +2358,8 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
     let (events, receiver) = async_channel::bounded(1);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2378,8 +2394,8 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2415,7 +2431,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     assert!(
         worker.release_synchronized_output_if_due(progressed + MAX_SYNCHRONIZED_OUTPUT_DURATION)
     );
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("the synchronized-output deadline must publish a screen")
     };
     assert!(screen_text(&screen).contains("long remote redraw"));
@@ -2444,8 +2460,8 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             )
         };
         let mut worker = TerminalWorker {
-            metadata_state: SessionMetadataState::default(),
-            permission_request_state: SessionPermissionRequestState::default(),
+            metadata_state: TerminalSessionMetadataState::default(),
+            permission_request_state: TerminalSessionPermissionRequestState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new_with_metadata_context(
@@ -2476,11 +2492,11 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/alpha\x07".to_vec()]));
         assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/latest\x07".to_vec()]));
         // Overflow the production-sized queue before the UI can consume the directory wake.
-        assert!(worker.send_terminal_event(SessionEvent::HiddenInputChanged(true)));
-        assert!(worker.send_terminal_event(SessionEvent::HiddenInputChanged(false)));
+        assert!(worker.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(true)));
+        assert!(worker.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(false)));
         for expected in [true, false] {
             assert!(
-                matches!(receiver.try_recv().unwrap(), SessionEvent::HiddenInputChanged(actual) if actual == expected)
+                matches!(receiver.try_recv().unwrap(), TerminalSessionEvent::HiddenInputChanged(actual) if actual == expected)
             );
         }
         let expected = if remote {
@@ -2502,11 +2518,11 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         assert!(receiver.try_recv().is_err());
         assert!(worker.feed_test_output(vec![b"ordinary hidden output".to_vec()]));
         assert!(receiver.try_recv().is_err());
-        // A hidden Session's title and progress reach its Tab through the same retained facts.
+        // A hidden Terminal Session's title and progress reach its Tab through the retained facts.
         assert!(worker.feed_test_output(vec![b"\x1b]2;agent\x07\x1b]9;4;2\x07".to_vec()]));
         assert!(matches!(
             receiver.try_recv().unwrap(),
-            SessionEvent::MetadataChanged(_)
+            TerminalSessionEvent::MetadataChanged(_)
         ));
         let retained = worker.metadata_state.snapshot().unwrap();
         assert_eq!(retained.title.value.as_ref(), "agent");
@@ -2529,8 +2545,8 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
     let (events, receiver) = async_channel::bounded(2);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2556,11 +2572,11 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
     assert!(worker.process_command(Command::PublishPendingScreen));
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::Attention(_)
+        TerminalSessionEvent::Attention(_)
     ));
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::Screen(_)
+        TerminalSessionEvent::Screen(_)
     ));
     assert!(receiver.try_recv().is_err());
     worker.finish();
@@ -2573,8 +2589,8 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2600,7 +2616,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
     assert!(worker.process_command(Command::SetPresentable(false)));
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::MetadataChanged(_)
+        TerminalSessionEvent::MetadataChanged(_)
     ));
     assert_eq!(
         worker
@@ -2622,8 +2638,8 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
     let (events, receiver) = async_channel::bounded(2);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2647,11 +2663,11 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
 
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::Attention(_)
+        TerminalSessionEvent::Attention(_)
     ));
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::MetadataChanged(_)
+        TerminalSessionEvent::MetadataChanged(_)
     ));
     assert!(receiver.try_recv().is_err());
     assert_eq!(
@@ -2674,8 +2690,8 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2700,7 +2716,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
 
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionEvent::MetadataChanged(_)
+        TerminalSessionEvent::MetadataChanged(_)
     ));
     assert_eq!(
         worker.metadata_state.snapshot().unwrap().prompt_zone,
@@ -2717,8 +2733,8 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -2747,7 +2763,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
     assert!(receiver.try_recv().is_err());
 
     assert!(worker.process_command(Command::SetPresentable(true)));
-    let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("restoration must publish the completed synchronized redraw")
     };
     assert!(screen_text(&screen).contains("hidden redraw"));
@@ -2756,7 +2772,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
 }
 
 #[test]
-fn output_control_output_should_preserve_screen_order_through_the_session_interface() {
+fn output_control_output_should_preserve_screen_order_through_the_terminal_session_interface() {
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();
 
@@ -2766,7 +2782,7 @@ fn output_control_output_should_preserve_screen_order_through_the_session_interf
     let first = receive_event(
         &events,
         "the first output Screen",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("first")),
     );
     session.resize(test_geometry());
     records.wait_for("the control between output chunks", |state| {
@@ -2778,10 +2794,12 @@ fn output_control_output_should_preserve_screen_order_through_the_session_interf
     let second = receive_event(
         &events,
         "the second output Screen",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first second")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("first second")),
     );
 
-    let (SessionEvent::Screen(first), SessionEvent::Screen(second)) = (first, second) else {
+    let (TerminalSessionEvent::Screen(first), TerminalSessionEvent::Screen(second)) =
+        (first, second)
+    else {
         unreachable!("the event predicates accept only terminal screens")
     };
     assert_eq!(
@@ -2802,10 +2820,10 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
     reader_steps
         .send(ReaderStep::Bytes(b"selected".to_vec()))
         .unwrap();
-    let SessionEvent::Screen(screen) = receive_event(
+    let TerminalSessionEvent::Screen(screen) = receive_event(
         &events,
         "the selectable terminal output",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
     ) else {
         unreachable!()
     };
@@ -2829,7 +2847,7 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
     );
     let mut menu_generation = screen.generation;
     while let Ok(event) = events.try_recv() {
-        if let SessionEvent::Screen(screen) = event {
+        if let TerminalSessionEvent::Screen(screen) = event {
             menu_generation = screen.generation;
         }
     }
@@ -2855,10 +2873,10 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
         "selected"
     );
 
-    let SessionEvent::Screen(current) = receive_event(
+    let TerminalSessionEvent::Screen(current) = receive_event(
         &events,
         "the newer worker presentation",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("new")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("new")),
     ) else {
         unreachable!()
     };
@@ -2911,10 +2929,10 @@ fn application_mouse_release_should_not_return_a_selection_copy() {
             b"selected\x1b[?1000h\x1b[?1006h".to_vec(),
         ))
         .unwrap();
-    let SessionEvent::Screen(screen) = receive_event(
+    let TerminalSessionEvent::Screen(screen) = receive_event(
         &events,
         "the mouse-tracking terminal screen",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen.mouse_tracking),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.mouse_tracking),
     ) else {
         unreachable!()
     };
@@ -2998,9 +3016,9 @@ fn unchanged_pty_winsize_does_not_clear_the_idle_prompt() {
     let before = receive_event(
         &events,
         "the idle prompt",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("QA_RESIZE_MARKER") && screen_text(screen).contains("> ")),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("QA_RESIZE_MARKER") && screen_text(screen).contains("> ")),
     );
-    let SessionEvent::Screen(before) = before else {
+    let TerminalSessionEvent::Screen(before) = before else {
         unreachable!()
     };
 
@@ -3104,9 +3122,9 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
     let event = receive_event(
         &events,
         "the complete automatic icat image",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen.cursor.position.is_some_and(|position| position.row == 2) && !screen.graphics.images.is_empty()),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.cursor.position.is_some_and(|position| position.row == 2) && !screen.graphics.images.is_empty()),
     );
-    let SessionEvent::Screen(snapshot) = event else {
+    let TerminalSessionEvent::Screen(snapshot) = event else {
         unreachable!()
     };
     assert_eq!(snapshot.graphics.placements.len(), 2);
@@ -3125,8 +3143,8 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3161,8 +3179,8 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3193,8 +3211,8 @@ fn find_close_should_supersede_a_pending_query_update() {
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3220,7 +3238,7 @@ fn find_close_should_supersede_a_pending_query_update() {
 }
 
 #[test]
-fn pending_pty_responses_should_precede_later_input_through_the_session_interface() {
+fn pending_pty_responses_should_precede_later_input_through_the_terminal_session_interface() {
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();
     let resized = geometry(20, 4, 8.0, 18.0);
@@ -3231,7 +3249,7 @@ fn pending_pty_responses_should_precede_later_input_through_the_session_interfac
     receive_event(
         &events,
         "the mode-setting terminal output",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains('X')),
     );
     session.resize(resized);
     records.wait_for("the in-band terminal resize response", |state| {
@@ -3266,7 +3284,7 @@ fn bracketed_multiline_paste_is_written_without_confirmation() {
     receive_event(
         &events,
         "bracketed-paste mode activation",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains('X')),
     );
 
     assert_eq!(
@@ -3311,7 +3329,7 @@ fn bracketed_paste_with_a_closing_fence_still_requires_confirmation() {
     receive_event(
         &events,
         "bracketed-paste mode activation",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains('X')),
     );
 
     let outcome = session
@@ -3445,15 +3463,15 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
         .request_paste("input".to_owned().into())
         .recv_blocking();
     let event = receive_event(&events, "the PTY write failure", |event| {
-        matches!(event, SessionEvent::Failed(_))
+        matches!(event, TerminalSessionEvent::Failed(_))
     });
 
-    let SessionEvent::Failed(failure) = event else {
+    let TerminalSessionEvent::Failed(failure) = event else {
         unreachable!("the event predicate accepts only terminal failures")
     };
     assert_eq!(
         failure,
-        SessionFailure::Runtime("failed to write to the shell PTY".to_owned())
+        TerminalSessionFailure::Runtime("failed to write to the shell PTY".to_owned())
     );
     let state = records.wait_for("the failed PTY worker to release ownership", |state| {
         state.pty_drops == 1
@@ -3482,10 +3500,10 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
         ))
         .unwrap();
     let event = receive_event(&events, "the PTY read failure", |event| {
-        matches!(event, SessionEvent::Failed(_))
+        matches!(event, TerminalSessionEvent::Failed(_))
     });
 
-    let SessionEvent::Failed(SessionFailure::PtyRead {
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::PtyRead {
         read_error,
         exit_status,
     }) = event
@@ -3513,15 +3531,15 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
         ))
         .unwrap();
     let event = receive_event(&events, "the PTY read and wait failure", |event| {
-        matches!(event, SessionEvent::Failed(_))
+        matches!(event, TerminalSessionEvent::Failed(_))
     });
 
-    let SessionEvent::Failed(failure) = event else {
+    let TerminalSessionEvent::Failed(failure) = event else {
         unreachable!("the event predicate accepts only terminal failures")
     };
     assert_eq!(
         failure,
-        SessionFailure::ShellWait {
+        TerminalSessionFailure::ShellWait {
             read_error: Some("Native PTY read failed (Other)".to_owned()),
             wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
@@ -3541,15 +3559,15 @@ fn reader_eof_with_wait_failure_should_emit_a_shell_wait_failure() {
 
     reader_steps.send(ReaderStep::Eof).unwrap();
     let event = receive_event(&events, "the shell wait failure", |event| {
-        matches!(event, SessionEvent::Failed(_))
+        matches!(event, TerminalSessionEvent::Failed(_))
     });
 
-    let SessionEvent::Failed(failure) = event else {
+    let TerminalSessionEvent::Failed(failure) = event else {
         unreachable!("the event predicate accepts only terminal failures")
     };
     assert_eq!(
         failure,
-        SessionFailure::ShellWait {
+        TerminalSessionFailure::ShellWait {
             read_error: None,
             wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
@@ -3569,10 +3587,10 @@ fn child_wait_timeout_should_emit_a_shell_wait_failure() {
 
     reader_steps.send(ReaderStep::Eof).unwrap();
     let event = receive_event(&events, "the bounded shell wait failure", |event| {
-        matches!(event, SessionEvent::Failed(_))
+        matches!(event, TerminalSessionEvent::Failed(_))
     });
 
-    let SessionEvent::Failed(SessionFailure::ShellWait {
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::ShellWait {
         read_error,
         wait_error,
     }) = event
@@ -3606,12 +3624,12 @@ fn reader_eof_should_wait_for_the_child_and_emit_exit() {
 
     reader_steps.send(ReaderStep::Eof).unwrap();
     let event = receive_event(&events, "the scripted shell exit", |event| {
-        matches!(event, SessionEvent::Exited(_))
+        matches!(event, TerminalSessionEvent::Exited(_))
     });
 
     assert!(matches!(
         event,
-        SessionEvent::Exited(SessionExit::ExitCode(7))
+        TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(7))
     ));
     let state = records.wait_for("the exited PTY worker to release ownership", |state| {
         state.pty_drops == 1
@@ -3735,8 +3753,8 @@ fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
     let session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3793,8 +3811,8 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let (events, _event_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -3825,8 +3843,8 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     let (commands, receiver) = mpsc::channel();
     worker.commands = receiver;
     let session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
@@ -3881,10 +3899,10 @@ fn accessibility_selection_authority_is_inert_after_worker_shutdown() {
 }
 
 #[test]
-fn stopped_session_returns_an_error_for_selection_requests() {
+fn stopped_terminal_session_returns_an_error_for_selection_requests() {
     let session = TerminalSession {
-        metadata_state: SessionMetadataState::default(),
-        permission_request_state: SessionPermissionRequestState::default(),
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: None,
         worker: None,
         native_pty_close: None,
@@ -3913,8 +3931,8 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
             let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
             let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
             let mut worker = TerminalWorker {
-                metadata_state: SessionMetadataState::default(),
-                permission_request_state: SessionPermissionRequestState::default(),
+                metadata_state: TerminalSessionMetadataState::default(),
+                permission_request_state: TerminalSessionPermissionRequestState::default(),
                 native_pty: direct_native_pty(records.clone()),
                 input: PtyInput::default(),
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -4002,8 +4020,8 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let schedule_input = ScheduleInput::default();
         let mut worker = TerminalWorker {
-            metadata_state: SessionMetadataState::default(),
-            permission_request_state: SessionPermissionRequestState::default(),
+            metadata_state: TerminalSessionMetadataState::default(),
+            permission_request_state: TerminalSessionPermissionRequestState::default(),
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -4024,7 +4042,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             worker.emulator.feed(format!("row {row:02}\r\n").as_bytes());
         }
         assert!(worker.publish_screen());
-        let SessionEvent::Screen(bottom) = receiver.try_recv().unwrap() else {
+        let TerminalSessionEvent::Screen(bottom) = receiver.try_recv().unwrap() else {
             panic!("expected the initial screen");
         };
         let pointer = |phase, y, generation| PointerInput {
@@ -4053,7 +4071,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             assert!(worker.process_command(tick));
             let screen = std::iter::from_fn(|| receiver.try_recv().ok())
                 .filter_map(|event| match event {
-                    SessionEvent::Screen(screen) => Some(screen),
+                    TerminalSessionEvent::Screen(screen) => Some(screen),
                     _ => None,
                 })
                 .last()
@@ -4105,10 +4123,10 @@ fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
         output.extend_from_slice(format!("row {row:02}\r\n").as_bytes());
     }
     reader_steps.send(ReaderStep::Bytes(output)).unwrap();
-    let SessionEvent::Screen(bottom) = receive_event(
+    let TerminalSessionEvent::Screen(bottom) = receive_event(
         &events,
         "scrollback at the bottom",
-        |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.total_rows > screen.scrollbar.visible_rows),
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.scrollbar.total_rows > screen.scrollbar.visible_rows),
     ) else {
         unreachable!()
     };
@@ -4132,10 +4150,10 @@ fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
         bottom.generation,
     ));
 
-    let SessionEvent::Screen(autoscrolled) = receive_event(
+    let TerminalSessionEvent::Screen(autoscrolled) = receive_event(
         &events,
         "worker-driven selection autoscroll",
-        move |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.offset_rows < bottom_offset),
+        move |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.scrollbar.offset_rows < bottom_offset),
     ) else {
         unreachable!()
     };
@@ -4159,17 +4177,17 @@ fn hidden_input_transitions_are_reported_on_output_and_focus_during_idle_backoff
         .send(ReaderStep::Bytes(b"Password: ".to_vec()))
         .unwrap();
     receive_event(&events, "password prompt", |event| {
-        matches!(event, SessionEvent::HiddenInputChanged(true))
+        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
     });
     records.update(|state| state.hidden_input = false);
     session.focus(false);
     receive_event(&events, "focus transition", |event| {
-        matches!(event, SessionEvent::HiddenInputChanged(false))
+        matches!(event, TerminalSessionEvent::HiddenInputChanged(false))
     });
     records.update(|state| state.hidden_input = true);
     session.focus(true);
     receive_event(&events, "focus restoration", |event| {
-        matches!(event, SessionEvent::HiddenInputChanged(true))
+        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
     });
     session.shutdown_and_join();
 }
@@ -4190,8 +4208,8 @@ fn clipboard_worker() -> (
     clipboard.authority.focus(true);
     (
         TerminalWorker {
-            metadata_state: SessionMetadataState::default(),
-            permission_request_state: SessionPermissionRequestState::default(),
+            metadata_state: TerminalSessionMetadataState::default(),
+            permission_request_state: TerminalSessionPermissionRequestState::default(),
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
@@ -4543,7 +4561,7 @@ impl TerminalWorker {
 
 #[test]
 fn worker_spawn_failure_diagnostics_exclude_native_content() {
-    let error = SessionError::from(io::Error::new(
+    let error = TerminalSessionError::from(io::Error::new(
         ErrorKind::PermissionDenied,
         "native /private/work token=secret",
     ));

@@ -28,7 +28,7 @@ use super::directory_picker::{
     RemoteDirectorySource,
 };
 use super::remote_workspace_flow::{
-    RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection, RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
     RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
@@ -108,7 +108,7 @@ enum CloseConfirmationAction {
 
 struct RemoteWorkspaceRuntime {
     generation: u64,
-    session: Option<RemoteWorkspaceConnectedSession>,
+    control_connection: Option<ConnectedControlConnection>,
     lifecycle: Option<ControlConnectionObserver>,
     alias_pin: Option<RemoteWorkspaceAliasPin>,
 }
@@ -116,13 +116,13 @@ struct RemoteWorkspaceRuntime {
 impl RemoteWorkspaceRuntime {
     fn new(
         generation: u64,
-        session: RemoteWorkspaceConnectedSession,
+        control_connection: ConnectedControlConnection,
         lifecycle: ControlConnectionObserver,
         alias_pin: Option<RemoteWorkspaceAliasPin>,
     ) -> Self {
         Self {
             generation,
-            session: Some(session),
+            control_connection: Some(control_connection),
             lifecycle: Some(lifecycle),
             alias_pin,
         }
@@ -130,7 +130,7 @@ impl RemoteWorkspaceRuntime {
 
     fn close(&mut self) {
         self.lifecycle.take();
-        self.session.take();
+        self.control_connection.take();
         self.alias_pin.take();
     }
 }
@@ -153,7 +153,7 @@ struct RemoteWorkspaceReconnectProgressIdentity {
 }
 
 struct PreparedRemoteWorkspaceReconnect {
-    session: RemoteWorkspaceConnectedSession,
+    control_connection: ConnectedControlConnection,
     lifecycle: ControlConnectionObserver,
     restart: PreparedTabManagerRemoteRestart,
     remote_user: crate::domain::RemoteUser,
@@ -427,7 +427,7 @@ impl WorkspaceManager {
         creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<Entity<TabManager>, crate::terminal::RemoteChannelUnavailable> {
+    ) -> Result<Entity<TabManager>, crate::terminal::TerminalSessionChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(Self::create_tab_manager_with_prepared_launch(
             session_factory,
@@ -1131,13 +1131,16 @@ impl WorkspaceManager {
                 let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
                     return;
                 };
-                let Some(session) = runtime.session.as_ref() else {
+                let Some(control_connection) = runtime.control_connection.as_ref() else {
                     Self::show_pin_error(window, cx);
                     return;
                 };
                 let host = key.destination().host().to_owned();
                 (
-                    Rc::new(RemoteDirectorySource::new(session.provider(), &host)),
+                    Rc::new(RemoteDirectorySource::new(
+                        control_connection.provider(),
+                        &host,
+                    )),
                     Some(runtime.generation),
                 )
             }
@@ -1176,7 +1179,7 @@ impl WorkspaceManager {
                                     .get(workspace_id)
                                     .is_some_and(|runtime| {
                                         runtime.generation == generation
-                                            && runtime.session.is_some()
+                                            && runtime.control_connection.is_some()
                                     })
                             });
                         let application = match (current, pinned.clone(), target.clone()) {
@@ -1451,7 +1454,7 @@ impl WorkspaceManager {
             // A Remote Pane falls back to its login shell, exactly as a Local Pane does. The
             // The sidebar's machine label identifies the destination independently of its name.
             completion.account().login_shell().name().to_owned(),
-            completion.terminal_channels(),
+            completion.terminal_session_channels(),
         );
         terminal_factory.set_pinned_directory(completion.pinned_directory());
         let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
@@ -1482,7 +1485,7 @@ impl WorkspaceManager {
     fn finish_remote_workspace_activation(
         &mut self,
         activation: PendingRemoteActivation,
-        revalidation: Result<(), crate::terminal::RemoteChannelRevalidationError>,
+        revalidation: Result<(), crate::terminal::TerminalSessionChannelRevalidationError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1585,10 +1588,10 @@ impl WorkspaceManager {
         {
             Self::report_workspace_error("rename", error);
         }
-        let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
+        let (control_connection, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
             workspace_id,
-            RemoteWorkspaceRuntime::new(1, session, lifecycle, alias_pin),
+            RemoteWorkspaceRuntime::new(1, control_connection, lifecycle, alias_pin),
         );
         debug_assert!(
             replaced.is_none(),
@@ -1756,7 +1759,7 @@ impl WorkspaceManager {
             return;
         }
         if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
-            runtime.session.take();
+            runtime.control_connection.take();
         }
 
         cx.notify();
@@ -1845,7 +1848,7 @@ impl WorkspaceManager {
         let work_cancelled = Arc::clone(&cancelled);
         let work = cx.spawn_in(window, async move |manager, cx| {
             let result = async {
-                let mut session = connection.await.map_err(|error| {
+                let mut control_connection = connection.await.map_err(|error| {
                     if work_cancelled.load(Ordering::Acquire)
                         || matches!(
                             error,
@@ -1862,7 +1865,7 @@ impl WorkspaceManager {
                 if work_cancelled.load(Ordering::Acquire) {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
-                let provider = session.provider();
+                let provider = control_connection.provider();
                 let account = provider.discover_account().await.map_err(|_| {
                     RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
                 })?;
@@ -1876,12 +1879,12 @@ impl WorkspaceManager {
                 if actual_identity != expected_identity {
                     return Err(RemoteWorkspaceReconnectFailure::IdentityChanged);
                 }
-                let channels = session
-                    .bind_terminal_channels(account.login_shell())
+                let channels = control_connection
+                    .bind_terminal_session_channels(account.login_shell())
                     .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
                         detail: None,
                     })?;
-                let lifecycle = session
+                let lifecycle = control_connection
                     .take_lifecycle_observer()
                     .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
                 let mut factory = WorkspaceTerminalSessionFactory::new_remote(
@@ -1904,7 +1907,7 @@ impl WorkspaceManager {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
                 Ok(PreparedRemoteWorkspaceReconnect {
-                    session,
+                    control_connection,
                     lifecycle,
                     restart,
                     remote_user: account.remote_user().clone(),
@@ -2113,7 +2116,7 @@ impl WorkspaceManager {
                     workspace_id,
                     RemoteWorkspaceRuntime::new(
                         generation,
-                        prepared.session,
+                        prepared.control_connection,
                         prepared.lifecycle,
                         alias_pin,
                     ),
@@ -3522,10 +3525,10 @@ fn classify_remote_workspace_restart_failure(
 ) -> RemoteWorkspaceReconnectFailure {
     match error {
         RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
+            crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
         ) => RemoteWorkspaceReconnectFailure::DirectoryUnavailable,
         RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+            crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
         ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
         _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
     }

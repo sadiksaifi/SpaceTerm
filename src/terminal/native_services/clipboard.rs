@@ -38,7 +38,7 @@ pub(crate) enum TextClipboardTarget {
 /// deadline passes, without blocking the UI thread. Dropping it discards the result.
 pub(crate) type ClipboardRead<T> = Pin<Box<dyn Future<Output = Result<T, ClipboardError>>>>;
 
-/// Plain text only. Target resolution follows the Session's focus and Settings checks.
+/// Plain text only. Target resolution follows the Terminal Session's focus and Settings checks.
 /// This Interface carries no local file authority and never falls back to another selection.
 pub(crate) trait TextClipboard {
     fn resolve(&self, target: super::osc52::Osc52Target) -> TextClipboardTarget;

@@ -41,7 +41,7 @@ pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
-    /// Binds provider operations to one prepared live command and session cancellation scope.
+    /// Binds provider operations to one live command and Control Connection cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
