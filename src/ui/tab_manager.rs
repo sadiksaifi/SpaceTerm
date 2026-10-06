@@ -1344,6 +1344,7 @@ impl TabManager {
                 active_tab_id,
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
+                let tab_focused = payload.read(cx).tab_focus().is_focused(window);
                 payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
@@ -1352,6 +1353,9 @@ impl TabManager {
                     } else {
                         active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
+                } else if tab_focused {
+                    // The closed Tab's own focus leaves with it, so the Active Tab takes it.
+                    self.focus(window, cx);
                 }
                 self.tab_selector_pressed = None;
                 if self.tab_menu == Some(tab_id) {
@@ -4235,6 +4239,28 @@ mod tests {
         // New Tab moves focus to the new Tab's terminal on purpose.
         cx.simulate_keystrokes("shift-f10");
         perform_menu_item(cx, "New Tab");
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn closing_a_focused_inactive_tab_returns_focus_to_the_active_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.with_role("Tab")[0], Action::Focus);
+        cx.simulate_keystrokes("shift-f10");
+        perform_menu_item(cx, "Close Tab");
+
+        assert_eq!(tab_order(&manager, cx), vec![2]);
         assert!(cx.update(|window, cx| {
             manager
                 .read(cx)
