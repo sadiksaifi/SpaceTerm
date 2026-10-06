@@ -310,6 +310,7 @@ pub struct ResizeHandle {
     accessibility_name: SharedString,
     axis: ResizeAxis,
     current_value: f32,
+    accessibility_value: Option<f32>,
     range: Option<RangeInclusive<f32>>,
     disabled: bool,
     tab_stop: bool,
@@ -342,6 +343,7 @@ impl ResizeHandle {
             accessibility_name: accessibility_name.into(),
             axis,
             current_value: finite_or_zero(current_value),
+            accessibility_value: None,
             range: None,
             disabled: false,
             tab_stop: false,
@@ -351,6 +353,15 @@ impl ResizeHandle {
             debug_selector: None,
             on_event: None,
         }
+    }
+
+    /// Publishes `value` to assistive technology in place of the current value, for a divider whose
+    /// position differs from the size it controls, such as the edge of a collapsed region.
+    ///
+    /// Requests keep their position units; the caller applies its policy to them.
+    pub fn accessibility_value(mut self, value: f32) -> Self {
+        self.accessibility_value = Some(finite_or_zero(value));
+        self
     }
 
     /// Constrains requested logical values without transferring application policy to the control.
@@ -719,7 +730,9 @@ impl RenderOnce for ResizeHandle {
                 ResizeAxis::Horizontal => accesskit::Orientation::Vertical,
                 ResizeAxis::Vertical => accesskit::Orientation::Horizontal,
             })
-            .aria_numeric_value(f64::from(self.current_value))
+            .aria_numeric_value(f64::from(
+                self.accessibility_value.unwrap_or(self.current_value),
+            ))
             .when_some(self.range.clone(), |root, range| {
                 root.aria_min_numeric_value(f64::from(*range.start()))
                     .aria_max_numeric_value(f64::from(*range.end()))
@@ -1266,6 +1279,7 @@ mod tests {
         show: bool,
         tab_stop: bool,
         clamp: Option<(f32, f32)>,
+        accessibility_value: Option<f32>,
     }
 
     impl Render for TestRoot {
@@ -1273,9 +1287,13 @@ mod tests {
             let events = Rc::clone(&self.events);
             let root_entity = cx.entity().downgrade();
             let clamp = self.clamp;
+            let mut handle = ResizeHandle::new("test-resize", "Resize test", self.axis, self.value);
+            if let Some(value) = self.accessibility_value {
+                handle = handle.accessibility_value(value);
+            }
             div().relative().size_full().when(self.show, |root| {
                 root.child(
-                    ResizeHandle::new("test-resize", "Resize test", self.axis, self.value)
+                    handle
                         .range(0.0..=200.0)
                         .disabled(self.disabled)
                         .tab_stop(self.tab_stop)
@@ -1325,6 +1343,7 @@ mod tests {
             show: true,
             tab_stop: true,
             clamp: None,
+            accessibility_value: None,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -2105,6 +2124,43 @@ mod tests {
         assert_eq!(splitter["aria"]["disabled"], true);
         assert!(!supports(splitter, Action::Increment));
         assert!(!supports(splitter, Action::Decrement));
+    }
+
+    #[gpui::test]
+    fn resize_handles_publish_an_accessibility_value_in_place_of_their_position(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, perform_with};
+        use gpui::accesskit::{Action, ActionData};
+
+        let (root, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
+        root.update(cx, |root, cx| {
+            root.accessibility_value = Some(0.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Resize test")["aria"]["numeric_value"], 0.0);
+
+        perform_with(
+            cx,
+            tree.node("Resize test"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(1.0)),
+        );
+        let requests = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                ResizeHandleEvent::ResizeRequested {
+                    source,
+                    requested_value,
+                    ..
+                } => Some((*source, *requested_value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests, [(ResizeInputSource::Accessibility, 1.0)]);
     }
 
     #[gpui::test]
