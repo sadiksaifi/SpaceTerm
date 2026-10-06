@@ -5,7 +5,8 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::drag_and_drop::{MarkerSide, drag_release_observer, insertion_marker};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
-use spaceterm_ui::HoverFade;
+use gpui::accesskit;
+use spaceterm_ui::{ContextMenuTarget, HoverFade};
 
 /// Where the pointer stands over one row.
 pub(super) struct RowHover {
@@ -321,6 +322,8 @@ impl WorkspaceSidebar {
             .map(|color| {
                 under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors))
             });
+        let target_name = name.clone();
+        let target_detail = detail.clone();
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -496,6 +499,18 @@ impl WorkspaceSidebar {
                 .into_any_element();
         }
 
+        let press_sidebar = sidebar.clone();
+        let target = ContextMenuTarget::new(accesskit::Role::ListBoxOption, target_name)
+            .description(target_detail)
+            .selected(active)
+            .on_press(move |_, cx| {
+                let _ = press_sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::Activate {
+                        workspace_id,
+                        focus_pane: true,
+                    });
+                });
+            });
         let open_sidebar = sidebar.clone();
         let lifecycle_sidebar = sidebar.clone();
         let lifecycle_window = window.window_handle();
@@ -514,6 +529,7 @@ impl WorkspaceSidebar {
                 )
                 .size(MenuSize::Wide)
                 .when(active, |menu| menu.keyboard_trigger(&self.focus))
+                .target(target)
                 .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
                 .on_open_request(move |_, window, cx| {
                     open_sidebar
@@ -576,6 +592,8 @@ impl WorkspaceSidebar {
         let owner = sidebar.entity_id();
         let mut rows = div()
             .id("workspace-list")
+            .role(accesskit::Role::ListBox)
+            .aria_label("Workspaces")
             .debug_selector(|| "workspace-list".to_owned())
             .w_full()
             .min_h_0()

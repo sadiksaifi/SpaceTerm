@@ -10245,3 +10245,35 @@ fn assert_rendered_text(
         );
     }
 }
+
+#[gpui::test]
+fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Workspaces");
+    assert_eq!(list["aria"]["role"], "ListBox");
+    let rows = tree.with_role("ListBoxOption");
+    assert_eq!(rows.len(), 2);
+    let selected = |tree: &A11yTree| {
+        tree.with_role("ListBoxOption")
+            .iter()
+            .map(|row| row["aria"]["selected"] == true)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(selected(&tree), [false, true]);
+
+    perform(cx, rows[0], Action::Click);
+    let tree = A11yTree::read(cx);
+    assert_eq!(selected(&tree), [true, false]);
+
+    perform(cx, tree.with_role("ListBoxOption")[0], Action::ShowContextMenu);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+}
