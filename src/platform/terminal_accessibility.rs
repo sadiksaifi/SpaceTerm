@@ -12,7 +12,7 @@ pub(crate) trait TerminalAccessibilityAdapter {
     /// Publishes current facts and returns notifications that could not yet be delivered.
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications;
     /// Describes this Pane inside the Window's portable accessibility tree.
-    /// Adapters publishing native accessibility outside that tree keep the element unchanged.
+    /// Adapters whose native elements GPUI does not build attach them to this element's node.
     fn decorate(&self, pane: Stateful<Div>) -> Stateful<Div> {
         pane
     }

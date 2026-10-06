@@ -38,6 +38,9 @@ pub(crate) fn run() {
     native_test!(super::macos_keyboard_layout::tests::native_layouts_resolve_dispatch_and_system_reservations);
 
     native_test!(super::macos_accessibility::tests::bundled_font_metadata_does_not_require_system_installation);
+    gpui_test!(
+        super::macos_accessibility::tests::presented_pane_attaches_its_text_area_to_the_pane_node
+    );
 
     gpui_test!(
         macos_appearance::tests::forcing_native_chrome_does_not_change_the_system_preference
