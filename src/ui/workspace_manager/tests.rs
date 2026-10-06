@@ -10296,3 +10296,112 @@ fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) 
     );
     assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
 }
+
+/// The main window's controls a reader meets, keyed by the accessible name before any detail.
+fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    const CONTROLS: [&str; 11] = [
+        "Hide Sidebar",
+        "Show Sidebar",
+        "Switch Workspace",
+        "Workspaces",
+        "Settings",
+        "New Workspace",
+        "Resize Workspace sidebar",
+        "Tabs",
+        "Create Tab",
+        "Pane Caption",
+        "Terminal context actions",
+    ];
+    A11yTree::read(cx)
+        .in_order()
+        .into_iter()
+        .filter_map(|node| node["aria"]["label"].as_str()?.split(", ").next())
+        .filter(|name| CONTROLS.contains(name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The roles between the window and the first node with this accessible name.
+fn ancestor_roles(cx: &mut VisualTestContext, label: &str) -> Vec<String> {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    fn walk<'a>(
+        tree: &'a A11yTree,
+        node: &'a serde_json::Value,
+        label: &str,
+        path: &mut Vec<&'a serde_json::Value>,
+    ) -> bool {
+        if node["aria"]["label"] == label {
+            return true;
+        }
+        path.push(node);
+        if tree
+            .children(node)
+            .into_iter()
+            .any(|child| walk(tree, child, label, path))
+        {
+            return true;
+        }
+        path.pop();
+        false
+    }
+
+    let tree = A11yTree::read(cx);
+    let root = tree.in_order()[0];
+    let mut path = Vec::new();
+    assert!(
+        walk(&tree, root, label, &mut path),
+        "no node is named {label:?}"
+    );
+    path[1..]
+        .iter()
+        .map(|node| node["aria"]["role"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[gpui::test]
+fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+
+    // Assistive technology omits generic containers, so ordering adds no node a reader meets.
+    for label in ["Hide Sidebar", "Workspaces", "Tabs"] {
+        assert!(
+            ancestor_roles(cx, label)
+                .iter()
+                .all(|role| role == "GenericContainer"),
+            "{label}"
+        );
+    }
+
+    assert_eq!(
+        main_window_reading_order(cx),
+        [
+            "Hide Sidebar",
+            "Switch Workspace",
+            "Workspaces",
+            "Settings",
+            "New Workspace",
+            "Resize Workspace sidebar",
+            "Tabs",
+            "Create Tab",
+            "Pane Caption",
+            "Terminal context actions",
+        ]
+    );
+
+    cx.simulate_keystrokes("cmd-b");
+    assert_eq!(
+        main_window_reading_order(cx),
+        [
+            "Show Sidebar",
+            "Switch Workspace",
+            "Resize Workspace sidebar",
+            "Tabs",
+            "Create Tab",
+            "Pane Caption",
+            "Terminal context actions",
+        ]
+    );
+}
