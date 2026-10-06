@@ -709,6 +709,9 @@ fn render_header(
         .border_color(shell.divider())
         .child(
             div()
+                .id(("modal-header-title", snapshot.presentation.value()))
+                .role(accesskit::Role::Label)
+                .aria_value(title.clone())
                 .debug_selector(|| "modal-header-title".to_owned())
                 .min_w_0()
                 .text_size(metrics.title_size)
@@ -720,6 +723,9 @@ fn render_header(
         .when_some(description, |header, description| {
             header.child(
                 div()
+                    .id(("modal-header-description", snapshot.presentation.value()))
+                    .role(accesskit::Role::Label)
+                    .aria_value(description.clone())
                     .debug_selector(|| "modal-header-description".to_owned())
                     .min_w_0()
                     .mt(metrics.action_gap)
@@ -814,6 +820,9 @@ fn render_body(
                         .min_w_0()
                         .child(
                             div()
+                                .id(("modal-alert-message", snapshot.presentation.value()))
+                                .role(accesskit::Role::Label)
+                                .aria_value(message.clone())
                                 .debug_selector(|| "modal-alert-message".to_owned())
                                 .text_size(metrics.body_size)
                                 .whitespace_normal()

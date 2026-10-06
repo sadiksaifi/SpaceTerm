@@ -146,3 +146,16 @@ impl A11yTree {
             .unwrap_or_else(|| panic!("no Label publishes {text:?}"))
     }
 }
+
+impl A11yTree {
+    /// Returns a node's descendants in presented reading order.
+    pub fn descendants(&self, node: &Value) -> Vec<&Value> {
+        let mut pending = self.children(node).into_iter().rev().collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        while let Some(node) = pending.pop() {
+            pending.extend(self.children(node).into_iter().rev());
+            nodes.push(node);
+        }
+        nodes
+    }
+}
